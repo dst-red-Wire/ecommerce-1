@@ -1,0 +1,1382 @@
+# Initialisation et règles de développement du projet
+
+## 1. Objectif
+
+Ce document constitue l'instruction principale d'initialisation du repository pour Codex.
+
+Codex doit analyser le projet existant puis créer, compléter et maintenir une structure de développement :
+
+- fiable ;
+- sécurisée ;
+- maintenable ;
+- testable ;
+- reproductible ;
+- automatisée ;
+- observable ;
+- adaptée au CI/CD ;
+- compatible avec Codex Cloud.
+
+Principes prioritaires :
+
+- KISS ;
+- DRY ;
+- SOLID lorsque pertinent ;
+- séparation des responsabilités ;
+- faible couplage ;
+- configuration externalisée ;
+- Infrastructure as Code ;
+- automatisation des opérations répétitives ;
+- sécurité par défaut ;
+- absence de secrets dans Git.
+
+Ne pas introduire de complexité sans justification technique.
+
+---
+
+# 2. Structure cible
+
+Codex doit créer ou maintenir au minimum :
+
+```text
+.
+├── AGENTS.md
+├── README.md
+├── commandUsed.md
+├── .gitignore
+├── .env.example
+│
+├── instruction/
+│   ├── 01-architecture.md
+│   ├── 02-backend.md
+│   ├── 03-frontend.md
+│   ├── 04-database.md
+│   ├── 05-tests.md
+│   ├── 06-deployment.md
+│   └── 07-security.md
+│
+├── src/
+├── tests/
+│
+└── infrastructure/
+    ├── ansible/
+    │   ├── ansible.cfg
+    │   ├── inventories/
+    │   │   ├── dev/
+    │   │   ├── staging/
+    │   │   └── production/
+    │   ├── playbooks/
+    │   │   ├── bootstrap.yml
+    │   │   ├── dev.yml
+    │   │   └── deploy.yml
+    │   └── roles/
+    │
+    ├── terraform/
+    ├── docker/
+    └── kubernetes/
+```
+
+Ne créer que les composants réellement nécessaires.
+
+Les dossiers `terraform/`, `docker/`, `kubernetes/` ou certains inventaires Ansible peuvent rester absents tant que le projet ne les utilise pas.
+
+---
+
+# 3. Rôle de AGENTS.md
+
+Créer `AGENTS.md` à la racine.
+
+Il contient les règles permanentes que Codex doit suivre.
+
+Avant toute modification significative, Codex doit :
+
+1. lire `AGENTS.md` ;
+2. lire les fichiers pertinents de `instruction/` ;
+3. examiner le code existant ;
+4. identifier l'architecture existante ;
+5. identifier les technologies réellement utilisées ;
+6. identifier les tests concernés ;
+7. vérifier les contraintes de sécurité ;
+8. effectuer la modification minimale nécessaire.
+
+Codex ne doit pas remplacer une architecture fonctionnelle uniquement pour appliquer une préférence technique.
+
+---
+
+# 4. Dossier instruction/
+
+Le dossier :
+
+```text
+instruction/
+```
+
+contient les spécifications et instructions détaillées du projet.
+
+Créer initialement :
+
+```text
+instruction/
+├── 01-architecture.md
+├── 02-backend.md
+├── 03-frontend.md
+├── 04-database.md
+├── 05-tests.md
+├── 06-deployment.md
+└── 07-security.md
+```
+
+Ces fichiers doivent documenter les décisions et contraintes du projet.
+
+Ils ne doivent jamais contenir de secret.
+
+Le dossier `instruction/` doit être versionné pendant le développement afin d'être accessible à Codex Cloud.
+
+Ne pas ajouter :
+
+```gitignore
+/instruction/
+```
+
+dans `.gitignore`.
+
+---
+
+# 5. commandUsed.md
+
+Créer à la racine :
+
+```text
+commandUsed.md
+```
+
+Ce fichier constitue le journal technique des commandes validées.
+
+## Règle fondamentale
+
+N'enregistrer que les commandes :
+
+- réellement exécutées ;
+- ayant fonctionné ;
+- utiles ;
+- reproductibles ;
+- pertinentes pour le développement ;
+- pertinentes pour les tests ;
+- pertinentes pour le diagnostic ;
+- pertinentes pour Git ;
+- pertinentes pour l'infrastructure ;
+- pertinentes pour le CI/CD ;
+- pertinentes pour le déploiement.
+
+Une commande ayant échoué ne doit jamais être enregistrée comme commande validée.
+
+`commandUsed.md` ne doit pas devenir un historique complet du shell.
+
+---
+
+# 6. Format de commandUsed.md
+
+Organiser les commandes par domaine :
+
+```text
+Git
+GitHub
+WSL
+Application
+Tests
+Docker
+Ansible
+Terraform
+Kubernetes
+CI/CD
+Diagnostic
+```
+
+Pour chaque commande, indiquer :
+
+- la commande exacte ;
+- son objectif ;
+- une explication courte ;
+- son contexte d'exécution lorsque nécessaire.
+
+Exemple :
+
+````markdown
+## Docker
+
+### Démarrer les services
+
+```bash
+docker compose up -d
+```
+````
+
+Objectif : démarrer les services Docker en arrière-plan.
+
+Contexte : racine du repository.
+
+````
+
+---
+
+# 7. Commandes déjà validées
+
+Initialiser `commandUsed.md` avec les commandes réellement validées suivantes.
+
+## Git
+
+```bash
+git status
+````
+
+Affiche l'état du repository.
+
+```bash
+git remote -v
+```
+
+Affiche les repositories distants.
+
+```bash
+git branch --show-current
+```
+
+Affiche la branche courante.
+
+## GitHub
+
+```bash
+gh auth status
+```
+
+Vérifie l'authentification GitHub CLI.
+
+```bash
+ssh -T git@github.com
+```
+
+Teste l'authentification SSH GitHub.
+
+## WSL
+
+```bash
+whoami
+```
+
+Affiche l'utilisateur Linux actif.
+
+```bash
+echo $WSL_DISTRO_NAME
+```
+
+Affiche la distribution WSL active.
+
+L'environnement attendu est :
+
+```text
+Ubuntu-24.04
+```
+
+---
+
+# 8. Politique Shell / Bash / Ansible
+
+Codex ne doit pas remplacer systématiquement les commandes Shell par Ansible.
+
+Chaque outil doit être utilisé au niveau approprié.
+
+## Shell/Bash
+
+Utiliser les commandes natives pour les opérations ponctuelles de développement et de diagnostic.
+
+Exemples :
+
+```bash
+git status
+npm test
+npm run lint
+pytest
+docker compose ps
+terraform validate
+ansible-lint
+```
+
+Shell/Bash est approprié pour :
+
+- Git ;
+- diagnostic ponctuel ;
+- tests ;
+- lint ;
+- formatage ;
+- inspection de fichiers ;
+- commandes de développement ;
+- validation ;
+- exploration d'un environnement.
+
+## Ansible
+
+Privilégier Ansible pour toute opération système devant être :
+
+- répétée ;
+- automatisée ;
+- reproductible ;
+- idempotente ;
+- documentée comme infrastructure ;
+- appliquée sur plusieurs machines ou environnements.
+
+Exemples :
+
+- installation de paquets ;
+- configuration système ;
+- configuration de services ;
+- création d'utilisateurs système ;
+- installation de Docker ;
+- préparation d'un serveur ;
+- configuration Nginx ;
+- configuration applicative système ;
+- déploiement reproductible ;
+- configuration de plusieurs serveurs.
+
+---
+
+# 9. Règle de conversion Shell vers Ansible
+
+Lorsqu'une séquence Shell devient répétitive ou nécessaire au déploiement, Codex doit évaluer sa conversion en :
+
+- rôle Ansible ;
+- playbook Ansible ;
+- tâche Ansible réutilisable.
+
+Éviter par exemple de maintenir durablement :
+
+```bash
+sudo apt update
+sudo apt install nginx -y
+sudo systemctl enable nginx
+sudo systemctl start nginx
+```
+
+Préférer une implémentation Ansible idempotente :
+
+```yaml
+- name: Installer Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+
+- name: Activer Nginx
+  ansible.builtin.systemd_service:
+    name: nginx
+    enabled: true
+    state: started
+```
+
+Ne pas créer un playbook Ansible uniquement pour encapsuler une commande ponctuelle simple.
+
+---
+
+# 10. Architecture d'automatisation
+
+La séparation cible est :
+
+```text
+Codex
+  │
+  ├── Développement
+  │      └── Shell / commandes natives
+  │
+  ├── Tests / lint / validation
+  │      └── outils natifs du projet
+  │
+  ├── Provisionnement infrastructure
+  │      └── Terraform
+  │
+  ├── Configuration des machines
+  │      └── Ansible
+  │
+  ├── Conteneurs
+  │      └── Docker / Docker Compose
+  │
+  ├── Orchestration
+  │      └── Kubernetes / Helm si nécessaire
+  │
+  └── CI/CD
+         └── pipelines automatisés
+```
+
+Ne pas utiliser Terraform pour effectuer le travail d'Ansible.
+
+Ne pas utiliser Ansible pour remplacer inutilement Terraform.
+
+Ne pas utiliser Bash pour maintenir une configuration système complexe qui devrait être déclarative et idempotente.
+
+---
+
+# 11. Qualité Ansible
+
+Tout code Ansible créé doit privilégier :
+
+- modules `ansible.builtin` ;
+- idempotence ;
+- rôles réutilisables ;
+- handlers ;
+- variables clairement séparées ;
+- noms de tâches explicites ;
+- tags lorsque pertinents ;
+- vérification avec `ansible-lint` ;
+- mode `--check` lorsque pertinent.
+
+Éviter autant que possible :
+
+```yaml
+ansible.builtin.shell:
+```
+
+et :
+
+```yaml
+ansible.builtin.command:
+```
+
+lorsqu'un module Ansible spécialisé existe.
+
+Exemple : préférer `ansible.builtin.apt` à :
+
+```yaml
+ansible.builtin.shell: apt install ...
+```
+
+---
+
+# 12. Gestion centralisée des secrets
+
+Tous les secrets du projet doivent être centralisés dans un mécanisme explicitement prévu pour les secrets.
+
+Pour le développement local, utiliser prioritairement :
+
+```text
+.env
+```
+
+Si plusieurs environnements locaux sont nécessaires :
+
+```text
+.env.local
+.env.development
+.env.test
+.env.production
+```
+
+Ces fichiers sont sensibles.
+
+Ils ne doivent jamais être versionnés.
+
+---
+
+# 13. Secrets concernés
+
+Sont notamment considérés comme secrets :
+
+- mots de passe ;
+- clés API ;
+- tokens GitHub ;
+- Personal Access Tokens ;
+- secrets JWT ;
+- credentials de base de données ;
+- secrets OAuth ;
+- credentials SMTP ;
+- clés SSH privées ;
+- clés TLS privées ;
+- credentials cloud ;
+- credentials Docker Registry ;
+- secrets Kubernetes ;
+- secrets Terraform ;
+- secrets Ansible ;
+- credentials CI/CD ;
+- webhook secrets ;
+- chaînes de connexion contenant des credentials.
+
+---
+
+# 14. Interdictions concernant les secrets
+
+Un secret réel ne doit jamais être :
+
+- ajouté à l'index Git ;
+- inclus dans un commit ;
+- poussé sur GitHub ;
+- présent volontairement dans l'historique Git ;
+- écrit dans `README.md` ;
+- écrit dans `AGENTS.md` ;
+- écrit dans `instruction/` ;
+- écrit dans `commandUsed.md` ;
+- écrit dans `.env.example` ;
+- codé en dur dans le code ;
+- écrit dans un Dockerfile ;
+- écrit dans Terraform ;
+- écrit en clair dans Ansible ;
+- écrit dans Kubernetes ;
+- affiché volontairement dans les logs.
+
+---
+
+# 15. Politique stricte concernant Ansible Vault
+
+La politique du projet est :
+
+**aucun secret réel ne doit entrer dans Git, même sous forme chiffrée, sauf décision explicite ultérieure.**
+
+Par défaut, ne pas versionner de secrets avec Ansible Vault.
+
+Ansible doit récupérer les secrets depuis :
+
+- variables d'environnement ;
+- `.env` local lorsque approprié ;
+- variables CI/CD ;
+- gestionnaire de secrets externe ;
+- mécanisme sécurisé fourni par la plateforme de production.
+
+Les playbooks versionnés doivent uniquement référencer les variables.
+
+Exemple :
+
+```yaml
+db_password: "{{ lookup('env', 'DATABASE_PASSWORD') }}"
+```
+
+Aucune valeur réelle ne doit être placée dans le playbook.
+
+---
+
+# 16. .env.example
+
+Créer et versionner :
+
+```text
+.env.example
+```
+
+Il documente uniquement les variables nécessaires.
+
+Exemple :
+
+```dotenv
+DATABASE_URL=
+DATABASE_PASSWORD=
+JWT_SECRET=
+OPENAI_API_KEY=
+STRIPE_SECRET_KEY=
+SMTP_PASSWORD=
+```
+
+Aucune valeur réelle ne doit être copiée depuis `.env`.
+
+---
+
+# 17. .gitignore
+
+Créer ou compléter `.gitignore` avec au minimum :
+
+```gitignore
+# =========================================================
+# SECRETS
+# =========================================================
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+.ssh/
+
+# =========================================================
+# NODE
+# =========================================================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================================================
+# PYTHON
+# =========================================================
+
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# =========================================================
+# TERRAFORM
+# =========================================================
+
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# .terraform.lock.hcl doit normalement rester versionné.
+
+# =========================================================
+# ANSIBLE
+# =========================================================
+
+*.retry
+vault-password*
+*.vault-password
+
+# =========================================================
+# LOGS
+# =========================================================
+
+*.log
+logs/
+
+# =========================================================
+# BUILD
+# =========================================================
+
+dist/
+build/
+coverage/
+
+# =========================================================
+# IDE / OS
+# =========================================================
+
+.DS_Store
+Thumbs.db
+
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# =========================================================
+# TEMPORAIRES
+# =========================================================
+
+*.tmp
+*.temp
+*.bak
+*.swp
+```
+
+Ne jamais ajouter `instruction/` ou `commandUsed.md` à `.gitignore` pendant la phase où Codex Cloud doit y accéder.
+
+---
+
+# 18. Vérification obligatoire avant chaque commit
+
+Avant tout commit, Codex doit obligatoirement vérifier `.gitignore`.
+
+Exécuter :
+
+```bash
+cat .gitignore
+```
+
+Puis :
+
+```bash
+git status
+```
+
+Puis vérifier exactement les fichiers indexés :
+
+```bash
+git diff --cached --name-only
+```
+
+Aucun commit ne doit être effectué avant ces contrôles.
+
+---
+
+# 19. Vérification des fichiers secrets
+
+Vérifier que `.env` est ignoré :
+
+```bash
+git check-ignore -v .env
+```
+
+Lorsque présents :
+
+```bash
+git check-ignore -v .env.local
+git check-ignore -v .env.development
+git check-ignore -v .env.production
+```
+
+Codex doit adapter les contrôles aux fichiers réellement présents.
+
+---
+
+# 20. Vérification des secrets déjà suivis
+
+`.gitignore` ne protège pas un fichier déjà suivi par Git.
+
+Avant le commit, vérifier :
+
+```bash
+git ls-files | grep -E '(^|/)\.env($|\.)|\.pem$|\.key$|\.p12$|\.pfx$'
+```
+
+Analyser tout résultat avant de poursuivre.
+
+`.env.example` est autorisé uniquement s'il ne contient aucune valeur sensible.
+
+---
+
+# 21. Secret accidentellement indexé
+
+Si un fichier sensible a été ajouté à l'index mais n'est pas encore commité :
+
+**ne pas effectuer le commit.**
+
+Exemple :
+
+```bash
+git rm --cached .env
+```
+
+Puis :
+
+```bash
+git status
+```
+
+Le fichier local doit être conservé.
+
+---
+
+# 22. Secret déjà commité
+
+Ajouter un fichier à `.gitignore` ne supprime pas les anciennes versions de l'historique Git.
+
+Si un secret réel a déjà été commité :
+
+1. arrêter la publication si possible ;
+2. considérer le secret comme compromis ;
+3. révoquer ou effectuer immédiatement une rotation du secret ;
+4. retirer le fichier du suivi Git ;
+5. déterminer si une réécriture de l'historique est nécessaire ;
+6. contrôler de nouveau le repository ;
+7. ne reprendre la publication qu'après correction.
+
+La rotation du secret est prioritaire.
+
+---
+
+# 23. Protection de commandUsed.md
+
+`commandUsed.md` ne doit jamais contenir de valeur secrète.
+
+Interdit :
+
+```bash
+export API_KEY="secret-reel"
+```
+
+Autorisé :
+
+```bash
+export API_KEY="$API_KEY"
+```
+
+ou :
+
+```bash
+some-command --token "$API_TOKEN"
+```
+
+Les commandes documentées doivent utiliser des variables ou placeholders pour toute donnée sensible.
+
+---
+
+# 24. Git
+
+La branche principale cible est :
+
+```text
+main
+```
+
+Avant chaque commit :
+
+1. vérifier `.gitignore` ;
+2. vérifier `git status` ;
+3. vérifier les fichiers indexés ;
+4. vérifier l'absence de secrets ;
+5. formater ;
+6. linter ;
+7. tester ;
+8. vérifier les modifications ;
+9. mettre à jour `commandUsed.md` ;
+10. seulement ensuite committer.
+
+Ne jamais utiliser `git push --force` sur `main` sauf instruction explicite et justification technique.
+
+---
+
+# 25. GitHub
+
+Le repository distant du projet est :
+
+```text
+git@github.com:dst-red-Wire/ecommerce-1.git
+```
+
+Privilégier SSH pour Git.
+
+Vérification :
+
+```bash
+ssh -T git@github.com
+```
+
+GitHub CLI :
+
+```bash
+gh auth status
+```
+
+Ne jamais enregistrer de token GitHub dans le repository.
+
+---
+
+# 26. Environnement de développement
+
+L'environnement Linux principal est :
+
+```text
+Ubuntu-24.04
+```
+
+sous WSL2.
+
+Utilisateur de développement :
+
+```text
+dev
+```
+
+Vérification :
+
+```bash
+whoami
+echo $WSL_DISTRO_NAME
+```
+
+Résultat attendu :
+
+```text
+dev
+Ubuntu-24.04
+```
+
+---
+
+# 27. VS Code
+
+VS Code constitue l'environnement principal de développement.
+
+Le terminal intégré doit privilégier :
+
+```text
+Ubuntu-24.04
+```
+
+Les outils Linux doivent être exécutés depuis cet environnement lorsque pertinent :
+
+- Git ;
+- SSH ;
+- GitHub CLI ;
+- Ansible ;
+- Docker ;
+- Terraform ;
+- outils de développement.
+
+Éviter de mélanger inutilement les identités SSH/Git Windows et WSL.
+
+---
+
+# 28. Architecture logicielle
+
+Avant d'implémenter une fonctionnalité, Codex doit comprendre :
+
+- objectif ;
+- entrées ;
+- sorties ;
+- dépendances ;
+- erreurs possibles ;
+- implications de sécurité ;
+- tests nécessaires.
+
+Le code doit privilégier :
+
+- lisibilité ;
+- modularité ;
+- testabilité ;
+- séparation des responsabilités ;
+- faible couplage ;
+- fonctions simples ;
+- interfaces explicites ;
+- gestion structurée des erreurs.
+
+---
+
+# 29. Gestion des erreurs
+
+Ne pas masquer silencieusement les erreurs importantes.
+
+Les erreurs doivent être :
+
+- détectées ;
+- traitées au niveau approprié ;
+- journalisées lorsque pertinent ;
+- retournées proprement ;
+- testées pour les cas critiques.
+
+Les logs ne doivent jamais exposer de secrets.
+
+---
+
+# 30. Tests
+
+Toute fonctionnalité importante doit disposer des tests appropriés.
+
+Priorité :
+
+1. tests unitaires ;
+2. tests d'intégration lorsque nécessaires ;
+3. tests end-to-end pour les parcours critiques lorsque justifiés.
+
+Ne jamais déclarer qu'un test a réussi sans l'avoir réellement exécuté.
+
+---
+
+# 31. Formatage et lint
+
+Avant validation :
+
+1. formater le code ;
+2. exécuter le linter ;
+3. corriger les erreurs pertinentes ;
+4. exécuter les tests ;
+5. vérifier Git ;
+6. vérifier les secrets.
+
+Les commandes utiles réellement exécutées avec succès doivent être ajoutées à `commandUsed.md`.
+
+---
+
+# 32. Terraform
+
+Terraform doit être privilégié pour le provisionnement d'infrastructure.
+
+Exemples :
+
+- VM ;
+- réseau ;
+- DNS ;
+- volumes ;
+- ressources cloud ;
+- firewall lorsque géré par le provider ;
+- infrastructure déclarative.
+
+Ne jamais stocker de secret directement dans un `.tf` versionné.
+
+Ignorer :
+
+```text
+.terraform/
+*.tfstate
+*.tfstate.*
+```
+
+Conserver normalement :
+
+```text
+.terraform.lock.hcl
+```
+
+pour la reproductibilité des providers.
+
+---
+
+# 33. Ansible
+
+Ansible doit être privilégié après le provisionnement pour configurer les systèmes.
+
+Exemples :
+
+- installation des paquets ;
+- configuration des services ;
+- utilisateurs système ;
+- Docker ;
+- Nginx ;
+- configuration applicative ;
+- préparation des serveurs ;
+- déploiements reproductibles.
+
+Architecture recommandée :
+
+```text
+infrastructure/ansible/
+├── ansible.cfg
+├── inventories/
+│   ├── dev/
+│   ├── staging/
+│   └── production/
+├── playbooks/
+│   ├── bootstrap.yml
+│   ├── dev.yml
+│   └── deploy.yml
+└── roles/
+```
+
+Les playbooks doivent être idempotents.
+
+---
+
+# 34. Docker
+
+Docker et Docker Compose doivent être utilisés lorsque la conteneurisation apporte un bénéfice réel.
+
+Ne jamais placer de secret réel dans :
+
+- Dockerfile ;
+- image Docker ;
+- fichier Compose versionné ;
+- argument de build versionné ;
+- documentation Git.
+
+Les secrets doivent être injectés au runtime via le mécanisme approprié.
+
+---
+
+# 35. Kubernetes
+
+Kubernetes ne doit être introduit que si les besoins du projet le justifient.
+
+Ne jamais stocker un secret réel en clair dans un manifeste Kubernetes versionné.
+
+Les manifests doivent référencer les mécanismes de secrets appropriés à l'environnement cible.
+
+---
+
+# 36. CI/CD
+
+Les secrets CI/CD doivent utiliser le secret store de la plateforme.
+
+Architecture :
+
+```text
+Développement local
+        │
+        └── .env
+             │
+             └── ignoré par Git
+
+Repository
+        │
+        ├── code
+        ├── AGENTS.md
+        ├── instruction/
+        ├── commandUsed.md
+        └── .env.example
+
+Provisionnement
+        │
+        └── Terraform
+
+Configuration
+        │
+        └── Ansible
+
+CI/CD
+        │
+        └── Secret Store CI/CD
+
+Production
+        │
+        └── gestionnaire de secrets
+```
+
+---
+
+# 37. Observabilité
+
+Lorsque pertinent, prévoir :
+
+- logs structurés ;
+- niveaux de logs ;
+- health checks ;
+- métriques ;
+- traces ;
+- diagnostics exploitables.
+
+Aucun secret ne doit apparaître dans les données d'observabilité.
+
+---
+
+# 38. Documentation
+
+Répartition :
+
+```text
+README.md
+    → compréhension générale et initialisation
+
+AGENTS.md
+    → règles permanentes Codex
+
+instruction/
+    → spécifications détaillées
+
+commandUsed.md
+    → commandes réellement validées
+
+infrastructure/
+    → automatisation reproductible
+```
+
+Une modification importante de l'architecture doit être documentée.
+
+---
+
+# 39. Suppression future des instructions
+
+`instruction/` est versionné pendant le développement afin d'être accessible à Codex Cloud.
+
+À la fin du projet, il peut être retiré de la branche courante si demandé :
+
+```bash
+git rm -r instruction/
+```
+
+Puis commit et push.
+
+Cela ne supprime pas automatiquement les anciennes versions de l'historique Git.
+
+Par conséquent, aucun secret ne doit jamais être placé dans `instruction/`.
+
+---
+
+# 40. Ce que Codex ne doit pas faire
+
+Codex ne doit pas :
+
+- inventer qu'une commande a fonctionné ;
+- documenter une commande échouée comme validée ;
+- committer un secret ;
+- contourner `.gitignore` ;
+- exposer `.env` ;
+- écrire un secret dans Ansible ;
+- écrire un secret dans Terraform ;
+- écrire un secret dans Docker ;
+- écrire un secret dans Kubernetes ;
+- supprimer des tests pour faire passer une validation ;
+- masquer une erreur importante ;
+- introduire une dépendance inutile ;
+- créer une architecture excessivement complexe ;
+- transformer chaque commande Shell en playbook Ansible ;
+- maintenir en Bash une configuration système complexe qui devrait être automatisée ;
+- effectuer un force-push sur `main` sans instruction explicite.
+
+---
+
+# 41. Workflow obligatoire de Codex
+
+Pour chaque tâche significative :
+
+```text
+1. Lire AGENTS.md
+        ↓
+2. Lire instruction/
+        ↓
+3. Examiner le repository
+        ↓
+4. Identifier les technologies existantes
+        ↓
+5. Définir la modification minimale
+        ↓
+6. Déterminer l'outil approprié
+        │
+        ├── Shell → opération ponctuelle
+        ├── Ansible → configuration reproductible
+        ├── Terraform → provisionnement
+        ├── Docker → conteneurisation
+        └── Kubernetes → orchestration si nécessaire
+        ↓
+7. Implémenter
+        ↓
+8. Formater
+        ↓
+9. Linter
+        ↓
+10. Tester
+        ↓
+11. Vérifier les erreurs
+        ↓
+12. Vérifier .gitignore
+        ↓
+13. Vérifier les secrets
+        ↓
+14. Vérifier git status
+        ↓
+15. Vérifier les fichiers indexés
+        ↓
+16. Mettre à jour commandUsed.md
+        ↓
+17. Commit seulement si tout est valide
+```
+
+---
+
+# 42. Contrôle obligatoire avant commit
+
+Effectuer au minimum :
+
+```bash
+cat .gitignore
+```
+
+```bash
+git status
+```
+
+```bash
+git diff --cached --name-only
+```
+
+```bash
+git check-ignore -v .env
+```
+
+Vérifier les fichiers sensibles éventuellement suivis :
+
+```bash
+git ls-files | grep -E '(^|/)\.env($|\.)|\.pem$|\.key$|\.p12$|\.pfx$'
+```
+
+Adapter les contrôles au contexte.
+
+Si une anomalie de sécurité est détectée :
+
+**arrêter le commit et corriger le problème.**
+
+---
+
+# 43. Amélioration automatique de l'automatisation
+
+Lorsqu'une opération est réalisée plusieurs fois, Codex doit se demander :
+
+> Cette opération doit-elle devenir reproductible ?
+
+Si oui :
+
+- configuration système → Ansible ;
+- infrastructure → Terraform ;
+- environnement applicatif → Docker/Compose lorsque pertinent ;
+- validation répétitive → script ou tâche adaptée ;
+- pipeline répétitif → CI/CD.
+
+L'objectif est de réduire progressivement les opérations manuelles sans créer de sur-ingénierie.
+
+---
+
+# 44. Résultat attendu de l'initialisation
+
+Après traitement de ce README, le repository doit au minimum disposer de :
+
+```text
+.
+├── AGENTS.md
+├── README.md
+├── commandUsed.md
+├── .gitignore
+├── .env.example
+├── instruction/
+│   ├── 01-architecture.md
+│   ├── 02-backend.md
+│   ├── 03-frontend.md
+│   ├── 04-database.md
+│   ├── 05-tests.md
+│   ├── 06-deployment.md
+│   └── 07-security.md
+├── src/
+├── tests/
+└── infrastructure/
+    └── ansible/
+```
+
+Les autres composants d'infrastructure doivent être créés uniquement lorsqu'ils sont réellement nécessaires.
+
+Codex ne doit pas supprimer ou écraser inutilement les fichiers existants.
+
+Si un fichier existe :
+
+1. le lire ;
+2. comprendre son rôle ;
+3. préserver les informations utiles ;
+4. fusionner les nouvelles règles ;
+5. signaler les conflits importants.
+
+---
+
+# 45. Priorités
+
+En cas de conflit, respecter cet ordre :
+
+1. sécurité des secrets ;
+2. intégrité des données ;
+3. fonctionnement correct ;
+4. tests ;
+5. maintenabilité ;
+6. reproductibilité ;
+7. automatisation ;
+8. observabilité ;
+9. performance ;
+10. confort de développement.
+
+Aucun gain de rapidité ne justifie l'exposition d'un secret.
+
+---
+
+# 46. Instruction d'exécution initiale pour Codex
+
+Codex doit maintenant :
+
+1. analyser intégralement la structure actuelle du repository ;
+2. identifier les technologies déjà utilisées ;
+3. ne supprimer aucun fichier applicatif existant sans justification ;
+4. créer les fichiers et dossiers manquants définis par ce document ;
+5. générer `AGENTS.md` avec les règles permanentes ;
+6. créer ou compléter `.gitignore` ;
+7. créer `.env.example` sans secret ;
+8. créer `commandUsed.md` ;
+9. créer `instruction/` et les fichiers nécessaires ;
+10. créer la structure Ansible uniquement au niveau nécessaire ;
+11. examiner les opérations répétitives existantes et identifier celles qui devraient être automatisées avec Ansible ;
+12. conserver Shell/Bash pour les opérations ponctuelles ;
+13. utiliser Terraform pour le provisionnement lorsque nécessaire ;
+14. vérifier qu'aucun secret n'est actuellement suivi par Git ;
+15. signaler immédiatement tout secret potentiellement déjà versionné ;
+16. exécuter les validations pertinentes disponibles ;
+17. ajouter à `commandUsed.md` uniquement les commandes réellement exécutées avec succès ;
+18. ne jamais écrire de valeur secrète dans `commandUsed.md` ;
+19. vérifier `.gitignore` avant tout commit ;
+20. présenter un résumé des fichiers créés ou modifiés ;
+21. présenter les tests et validations réellement exécutés ;
+22. signaler clairement les éléments restant à configurer.
+
+Ne pas effectuer de commit ou de push tant que les contrôles de sécurité et les validations pertinentes ne sont pas terminés.
