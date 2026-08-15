@@ -1,0 +1,24 @@
+Analyse entièrement le repository avant toute modification.
+
+Lis le README et applique toutes ses instructions.
+
+Crée ou complète la structure demandée, notamment AGENTS.md, commandUsed.md, .gitignore, .env.example, instruction/ et infrastructure/.
+
+Ne supprime aucun fichier existant sans justification.
+
+Vérifie qu'aucun secret n'est suivi par Git avant toute modification ou commit.
+
+Utilise Shell/Bash pour les opérations ponctuelles et Ansible pour les opérations système répétitives, reproductibles et idempotentes.
+
+N'ajoute dans commandUsed.md que les commandes réellement exécutées avec succès, avec leur objectif et leur explication.
+
+Exécute les validations disponibles mais ne fais aucun push automatique.
+
+À la fin, fournis un rapport indiquant :
+
+les fichiers créés ;
+les fichiers modifiés ;
+les commandes exécutées avec succès ;
+les tests effectués ;
+les problèmes détectés ;
+les éléments restant à faire.
