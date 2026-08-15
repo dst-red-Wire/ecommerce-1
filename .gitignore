@@ -1,23 +1,427 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+# =============================================================================
+# E-Commerce Platform - .gitignore
+# Go + Next.js + Kubernetes + Terraform + Ansible + Tekton + FluxCD
+# Playwright + k6 + generated artifacts
+#
+# IMPORTANT:
+# - Contracts, migrations, GitOps manifests and lock files remain versioned.
+# - Never commit local secrets or credentials.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# OS / filesystem
+# -----------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Editors / IDE
+# -----------------------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+*.swp
+*.swo
+*.swn
+*~
+.project
+.classpath
+.settings/
+
+# -----------------------------------------------------------------------------
+# Local environment / secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+*.local
+*.secret
+*.secrets
+
+# Private keys / certificates generated locally
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+
+# Age / SOPS local keys
+age-key.txt
+age-keys.txt
+
+# Kubernetes / cloud credentials
+kubeconfig
+kubeconfig.*
+.kube/
+.aws/
+.azure/
+.gcp/
+.config/gcloud/
+
+# OpenBao / Vault local tokens
+.vault-token
+.openbao-token
+
+# -----------------------------------------------------------------------------
+# Go
+# -----------------------------------------------------------------------------
+bin/
+dist/
+build/
+out/
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go coverage / profiling
+coverage.out
+coverage.html
+*.cover
+*.cov
+*.prof
+cpu.prof
+mem.prof
+trace.out
+
+# Go workspace local state
+go.work.sum
+
+# Delve
+__debug_bin*
+debug.test
+
+# -----------------------------------------------------------------------------
+# Node.js / Next.js
+# -----------------------------------------------------------------------------
+node_modules/
+
+.next/
+out/
+dist/
+build/
+
+.turbo/
+.vercel/
+.swc/
+
+# Package manager caches
+.npm/
+.pnpm-store/
+.yarn/cache/
+.yarn/unplugged/
+.yarn/build-state.yml
+.yarn/install-state.gz
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# TypeScript incremental state
+*.tsbuildinfo
+next-env.d.ts
+
+# -----------------------------------------------------------------------------
+# Testing / coverage
+# -----------------------------------------------------------------------------
+coverage/
+.coverage/
+.nyc_output/
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# Cypress - if temporarily used
+cypress/screenshots/
+cypress/videos/
+cypress/downloads/
+
+# Generic test artifacts
+junit.xml
+junit-*.xml
+cucumber-report.*
+test-report/
+test-reports/
+
+# Keep intentionally versioned fixtures / snapshots
+!**/tests/fixtures/**
+!**/__snapshots__/**
+
+# -----------------------------------------------------------------------------
+# k6 / performance
+# -----------------------------------------------------------------------------
+k6-results/
+performance-results/
+*.k6.json
+
+# -----------------------------------------------------------------------------
+# Chaos / temporary experiment output
+# -----------------------------------------------------------------------------
+chaos-results/
+chaos-output/
+
+# -----------------------------------------------------------------------------
+# Terraform / OpenTofu
+# -----------------------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+crash.log
+crash.*.log
+
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+.terraformrc
+terraform.rc
+
+# Keep provider lock files versioned
+!**/.terraform.lock.hcl
+
+# -----------------------------------------------------------------------------
+# Terragrunt - if introduced later
+# -----------------------------------------------------------------------------
+.terragrunt-cache/
+
+# -----------------------------------------------------------------------------
+# Ansible / AWX
+# -----------------------------------------------------------------------------
+*.retry
+ansible.log
+.ansible/
+ansible_facts/
+fact_cache/
+
+# Local inventory overrides may contain secrets
+inventory.local
+inventory.local.*
+host_vars/*/local.yml
+group_vars/*/local.yml
+
+# -----------------------------------------------------------------------------
+# Kubernetes / Helm / Kustomize / Flux
+# -----------------------------------------------------------------------------
+# Rendered/generated manifests only.
+# Source manifests under platform/ remain versioned.
+.rendered/
+rendered/
+generated-manifests/
+helm-output/
+kustomize-output/
+
+# Helm local dependency cache / packaged charts
+**/charts/*.tgz
+
+# -----------------------------------------------------------------------------
+# Tekton / CI local outputs
+# -----------------------------------------------------------------------------
+tekton-results/
+pipeline-results/
+ci-results/
+
+# -----------------------------------------------------------------------------
+# Buf / Protobuf / gRPC
+# -----------------------------------------------------------------------------
+# Generated code belongs in ignored generated directories unless explicitly
+# promoted to source by an ADR.
+**/gen/
+**/generated/
+
+# Keep source contracts
+!contracts/**
+!**/*.proto
+!**/buf.yaml
+!**/buf.gen.yaml
+!**/buf.lock
+
+# -----------------------------------------------------------------------------
+# OpenAPI generated artifacts
+# -----------------------------------------------------------------------------
+openapi-generated/
+api-generated/
+
+# Keep source OpenAPI specifications
+!contracts/openapi/**
+!**/openapi.yaml
+!**/openapi.yml
+!**/openapi.json
+
+# -----------------------------------------------------------------------------
+# sqlc / database tooling
+# -----------------------------------------------------------------------------
+# Local database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Database dumps may contain production/customer data
+*.dump
+*.sql.gz
+*.backup
+
+# IMPORTANT: SQL migrations remain tracked.
+!**/migrations/**
+!**/migrations/**/*.sql
+
+# -----------------------------------------------------------------------------
+# Docker / containers
+# -----------------------------------------------------------------------------
+docker-data/
+.docker/
+
+# Local Compose overrides
+docker-compose.override.yml
+compose.override.yml
+
+# -----------------------------------------------------------------------------
+# MinIO / local object storage
+# -----------------------------------------------------------------------------
+.minio.sys/
+minio-data/
+data/minio/
+
+# -----------------------------------------------------------------------------
+# PostgreSQL / Redis / Kafka / RabbitMQ local data
+# -----------------------------------------------------------------------------
+postgres-data/
+pgdata/
+redis-data/
+kafka-data/
+zookeeper-data/
+rabbitmq-data/
+
+# -----------------------------------------------------------------------------
+# Observability local data
+# -----------------------------------------------------------------------------
+prometheus-data/
+grafana-data/
+loki-data/
+tempo-data/
+opensearch-data/
+
+# -----------------------------------------------------------------------------
+# Security scanners
+# -----------------------------------------------------------------------------
+.trivy/
+trivy-cache/
+security-results/
+
+# Scanner outputs generated by CI/local tooling
+trivy-results.*
+grype-results.*
+gosec-results.*
+govulncheck-results.*
+
+# -----------------------------------------------------------------------------
+# SBOM / signing local outputs
+# -----------------------------------------------------------------------------
+sbom-output/
+*.sbom.json
+*.sbom.spdx
+*.sbom.spdx.json
+*.sbom.cdx.json
+
+cosign.key
+cosign.pub
+
+# -----------------------------------------------------------------------------
+# Temporary files / caches
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+.cache/
+.cache-loader/
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# Local developer tooling
+# -----------------------------------------------------------------------------
+.direnv/
+.envrc.local
+mise.local.toml
+.tool-versions.local
+
+# -----------------------------------------------------------------------------
+# AI / local assistant scratch data
+# -----------------------------------------------------------------------------
+.codex/
+.claude/
+.cursor/
+.ai/
+.ai-cache/
+
+# -----------------------------------------------------------------------------
+# Archives / generated packages
+# -----------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# -----------------------------------------------------------------------------
+# Project rules - files that MUST remain versioned
+# -----------------------------------------------------------------------------
+!README.md
+!LICENSE
+!Makefile
+!go.work
+!.editorconfig
+!.gitattributes
+!CODEOWNERS
+!CONTRIBUTING.md
+!SECURITY.md
+
+# Contracts
+!contracts/**
+
+# Database migrations
+!services/*/migrations/**
+!services/*/migrations/**/*.sql
+
+# GitOps / infrastructure source
+!platform/**/*.yaml
+!platform/**/*.yml
+!platform/**/*.json
+!platform/**/*.tf
+!platform/**/*.hcl
+
+# Documentation
+!docs/**
