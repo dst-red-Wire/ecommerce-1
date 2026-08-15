@@ -1,0 +1,31 @@
+when:
+  event: [push, pull_request, manual]
+
+steps:
+  lint:
+    image: golang:1.24-alpine
+    commands:
+      - apk add --no-cache git make nodejs npm shellcheck
+      - make lint
+
+  test:
+    image: golang:1.24-alpine
+    commands:
+      - apk add --no-cache make nodejs npm
+      - make test
+
+  security:
+    image: zricethezav/gitleaks:v8.24.3
+    commands:
+      - ./scripts/ci-security.sh
+
+  terraform:
+    image: hashicorp/terraform:1.11
+    entrypoint: [""]
+    commands:
+      - ./scripts/ci-terraform.sh
+
+  ansible:
+    image: cytopia/ansible-lint:latest
+    commands:
+      - ./scripts/ci-ansible.sh

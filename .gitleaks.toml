@@ -1,0 +1,14 @@
+title = "E-Commerce repository gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore documentation placeholders and generated test fixtures"
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)vendor/''',
+  '''(^|/)test-results/''',
+  '''(^|/)tests/fixtures/''',
+]
