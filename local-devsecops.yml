@@ -1,0 +1,1192 @@
+---
+- name: Socle local DevSecOps e-commerce - Docker Desktop WSL2
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  gather_subset:
+    - min
+
+  vars:
+    dev_user: "{{ lookup('env', 'USER') }}"
+    dev_home: "{{ lookup('env', 'HOME') }}"
+    base_dir: "{{ dev_home }}/ecommerce-local-platform"
+    terraform_dir: "{{ base_dir }}/terraform"
+    kubeconfig_path: "{{ dev_home }}/.kube/ecommerce-local-config"
+    repository_root: >-
+      {{ lookup('env', 'REPO_ROOT') |
+         default((playbook_dir ~ '/../..')
+                 if (playbook_dir | basename) == 'bootstrap'
+                 else playbook_dir, true) }}
+    artifact_cache_dir: "{{ base_dir }}/cache"
+    download_cache_dir: "{{ artifact_cache_dir }}/downloads"
+    terraform_plugin_cache_dir: "{{ dev_home }}/.cache/terraform/plugin-cache"
+    terraform_plan_path: "{{ artifact_cache_dir }}/terraform/ecommerce-local.tfplan"
+    helm_state_dir: "{{ base_dir }}/state/helm"
+    kubectl_state_dir: "{{ base_dir }}/state/kubectl"
+
+    terraform_version: "{{ lookup('env', 'TERRAFORM_VERSION') | default('1.15.5', true) }}"
+    kubectl_version: "{{ lookup('env', 'KUBECTL_VERSION') | default('v1.33.4', true) }}"
+    helm_version: "{{ lookup('env', 'HELM_VERSION') | default('v3.18.4', true) }}"
+    kind_version: "{{ lookup('env', 'KIND_VERSION') | default('v0.32.0', true) }}"
+
+    kind_node_image: "{{ lookup('env', 'KIND_NODE_IMAGE') | default('kindest/node:v1.33.4@sha256:25a6018e48dfcaee478f4a59af81157a437f15e6e140bf103f85a2e7cd0cbbf2', true) }}"
+    cilium_version: "{{ lookup('env', 'CILIUM_CHART_VERSION') | default('1.20.0', true) }}"
+
+    gitea_http_port: 3000
+    gitea_ssh_port: 2222
+    registry_port: 5000
+
+    flux_operator_version: "{{ lookup('env', 'FLUX_OPERATOR_CHART_VERSION') | default('0.58.0', true) }}"
+    prometheus_stack_version: "{{ lookup('env', 'KUBE_PROMETHEUS_STACK_CHART_VERSION') | default('87.21.0', true) }}"
+    kyverno_version: "{{ lookup('env', 'KYVERNO_CHART_VERSION') | default('3.8.2', true) }}"
+    loki_version: "{{ lookup('env', 'LOKI_CHART_VERSION') | default('18.5.0', true) }}"
+    otel_collector_version: "{{ lookup('env', 'OPENTELEMETRY_COLLECTOR_CHART_VERSION') | default('0.170.0', true) }}"
+    tempo_version: "{{ lookup('env', 'TEMPO_CHART_VERSION') | default('2.2.4', true) }}"
+    tetragon_version: "{{ lookup('env', 'TETRAGON_CHART_VERSION') | default('1.7.0', true) }}"
+    tekton_version: "{{ lookup('env', 'TEKTON_PIPELINES_VERSION') | default('v1.15.1', true) }}"
+    flux_distribution_version: "{{ lookup('env', 'FLUX_DISTRIBUTION_VERSION') | default('v2.9.4', true) }}"
+
+    install_observability: true
+
+  pre_tasks:
+    - name: Vérifier Debian ou Ubuntu
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+        fail_msg: "Ce playbook est prévu pour Debian/Ubuntu/WSL2 Ubuntu."
+
+    - name: Détecter l'architecture
+      ansible.builtin.set_fact:
+        tool_arch: "{{ 'amd64' if ansible_architecture in ['x86_64', 'amd64'] else 'arm64' }}"
+
+    - name: Installer les dépendances système
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - gnupg
+          - jq
+          - make
+          - unzip
+          - python3
+          - python3-pip
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Ajouter l'utilisateur au groupe docker
+      ansible.builtin.user:
+        name: "{{ dev_user }}"
+        groups: docker
+        append: true
+
+    - name: Vérifier le socket Docker Desktop
+      ansible.builtin.stat:
+        path: /var/run/docker.sock
+      register: docker_socket
+
+    - name: Échouer si Docker Desktop n'est pas accessible
+      ansible.builtin.assert:
+        that:
+          - docker_socket.stat.exists
+          - docker_socket.stat.issock | default(false)
+        fail_msg: >-
+          Docker Desktop n'est pas accessible depuis WSL2. Démarre Docker Desktop,
+          active l'intégration WSL pour Ubuntu-24.04, puis relance le bootstrap.
+
+    - name: Vérifier le moteur Docker Desktop via son socket
+      ansible.builtin.command:
+        cmd: >-
+          curl --fail --silent --show-error --max-time 10
+          --unix-socket /var/run/docker.sock http://localhost/_ping
+      register: docker_ping
+      changed_when: false
+      failed_when: docker_ping.rc != 0 or (docker_ping.stdout | trim) != 'OK'
+
+    - name: Créer les répertoires
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0755"
+      loop:
+        - "{{ base_dir }}"
+        - "{{ terraform_dir }}"
+        - "{{ download_cache_dir }}"
+        - "{{ artifact_cache_dir }}/terraform"
+        - "{{ artifact_cache_dir }}/terraform/extracted/{{ terraform_version }}"
+        - "{{ artifact_cache_dir }}/helm/extracted"
+        - "{{ terraform_plugin_cache_dir }}"
+        - "{{ helm_state_dir }}"
+        - "{{ kubectl_state_dir }}"
+        - "{{ dev_home }}/.kube"
+
+    - name: Lire la version Terraform installée
+      ansible.builtin.command:
+        cmd: terraform version -json
+      register: terraform_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Terraform doit être installé
+      ansible.builtin.set_fact:
+        terraform_install_required: >-
+          {{ terraform_version_check.rc != 0 or
+             (terraform_version_check.stdout | from_json).terraform_version != terraform_version }}
+
+    - name: Télécharger Terraform si nécessaire
+      ansible.builtin.get_url:
+        url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_{{ tool_arch }}.zip"
+        dest: "{{ artifact_cache_dir }}/terraform/terraform-{{ terraform_version }}.zip"
+        checksum: "sha256:https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_SHA256SUMS"
+        mode: "0644"
+      when: terraform_install_required
+
+    - name: Extraire Terraform dans le cache si nécessaire
+      ansible.builtin.unarchive:
+        src: "{{ artifact_cache_dir }}/terraform/terraform-{{ terraform_version }}.zip"
+        dest: "{{ artifact_cache_dir }}/terraform/extracted/{{ terraform_version }}"
+        remote_src: true
+        mode: "0755"
+        creates: "{{ artifact_cache_dir }}/terraform/extracted/{{ terraform_version }}/terraform"
+      when: terraform_install_required
+
+    - name: Installer Terraform si nécessaire
+      ansible.builtin.copy:
+        src: "{{ artifact_cache_dir }}/terraform/extracted/{{ terraform_version }}/terraform"
+        dest: /usr/local/bin/terraform
+        remote_src: true
+        mode: "0755"
+      when: terraform_install_required
+
+    - name: Lire la version kubectl installée
+      ansible.builtin.command:
+        cmd: kubectl version --client --output=json
+      register: kubectl_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si kubectl doit être installé
+      ansible.builtin.set_fact:
+        kubectl_install_required: >-
+          {{ kubectl_version_check.rc != 0 or
+             (kubectl_version_check.stdout | from_json).clientVersion.gitVersion != kubectl_version }}
+
+    - name: Télécharger kubectl dans le cache si nécessaire
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ tool_arch }}/kubectl"
+        dest: "{{ download_cache_dir }}/kubectl-{{ kubectl_version }}-linux-{{ tool_arch }}"
+        checksum: "sha256:https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ tool_arch }}/kubectl.sha256"
+        mode: "0755"
+      when: kubectl_install_required
+
+    - name: Installer kubectl si nécessaire
+      ansible.builtin.copy:
+        src: "{{ download_cache_dir }}/kubectl-{{ kubectl_version }}-linux-{{ tool_arch }}"
+        dest: /usr/local/bin/kubectl
+        remote_src: true
+        mode: "0755"
+      when: kubectl_install_required
+
+    - name: Lire la version Helm installée
+      ansible.builtin.command:
+        cmd: helm version --short
+      register: helm_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Helm doit être installé
+      ansible.builtin.set_fact:
+        helm_install_required: >-
+          {{ helm_version_check.rc != 0 or helm_version not in helm_version_check.stdout }}
+
+    - name: Télécharger Helm si nécessaire
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ tool_arch }}.tar.gz"
+        dest: "{{ artifact_cache_dir }}/helm/helm-{{ helm_version }}.tar.gz"
+        checksum: "sha256:https://get.helm.sh/helm-{{ helm_version }}-linux-{{ tool_arch }}.tar.gz.sha256sum"
+        mode: "0644"
+      when: helm_install_required
+
+    - name: Extraire Helm si nécessaire
+      ansible.builtin.unarchive:
+        src: "{{ artifact_cache_dir }}/helm/helm-{{ helm_version }}.tar.gz"
+        dest: "{{ artifact_cache_dir }}/helm/extracted"
+        remote_src: true
+        creates: "{{ artifact_cache_dir }}/helm/extracted/linux-{{ tool_arch }}/helm"
+      when: helm_install_required
+
+    - name: Installer Helm si nécessaire
+      ansible.builtin.copy:
+        src: "{{ artifact_cache_dir }}/helm/extracted/linux-{{ tool_arch }}/helm"
+        dest: /usr/local/bin/helm
+        remote_src: true
+        mode: "0755"
+      when: helm_install_required
+
+    - name: Lire la version Kind installée
+      ansible.builtin.command:
+        cmd: kind version
+      register: kind_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Kind doit être installé
+      ansible.builtin.set_fact:
+        kind_install_required: >-
+          {{ kind_version_check.rc != 0 or kind_version not in kind_version_check.stdout }}
+
+    - name: Télécharger Kind dans le cache si nécessaire
+      ansible.builtin.get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ tool_arch }}"
+        dest: "{{ download_cache_dir }}/kind-{{ kind_version }}-linux-{{ tool_arch }}"
+        checksum: "sha256:https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ tool_arch }}.sha256sum"
+        mode: "0755"
+      when: kind_install_required
+
+    - name: Installer Kind si nécessaire
+      ansible.builtin.copy:
+        src: "{{ download_cache_dir }}/kind-{{ kind_version }}-linux-{{ tool_arch }}"
+        dest: /usr/local/bin/kind
+        remote_src: true
+        mode: "0755"
+      when: kind_install_required
+
+  tasks:
+    - name: Écrire la configuration Terraform complète
+      ansible.builtin.copy:
+        dest: "{{ terraform_dir }}/main.tf"
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+        content: |
+          terraform {
+            required_version = ">= 1.15.0"
+
+            required_providers {
+              docker = {
+                source  = "kreuzwerker/docker"
+                version = "~> 3.6"
+              }
+
+              kind = {
+                source  = "tehcyx/kind"
+                version = "~> 0.11"
+              }
+
+              random = {
+                source  = "hashicorp/random"
+                version = "~> 3.7"
+              }
+            }
+          }
+
+          provider "docker" {
+            host = "unix:///var/run/docker.sock"
+          }
+
+          provider "kind" {}
+
+          variable "kubeconfig_path" {
+            type    = string
+            default = "{{ kubeconfig_path }}"
+          }
+
+          variable "kind_node_image" {
+            type    = string
+            default = "{{ kind_node_image }}"
+          }
+
+          resource "random_password" "postgres" {
+            length  = 32
+            special = true
+          }
+
+          resource "docker_network" "platform" {
+            name = "ecommerce-local-platform"
+            ipv6 = true
+          }
+
+          resource "docker_volume" "postgres" {
+            name = "ecommerce-postgres-data"
+
+            lifecycle {
+              prevent_destroy = true
+            }
+          }
+
+          resource "docker_volume" "gitea" {
+            name = "ecommerce-gitea-data"
+
+            lifecycle {
+              prevent_destroy = true
+            }
+          }
+
+          resource "docker_volume" "registry" {
+            name = "ecommerce-registry-data"
+
+            lifecycle {
+              prevent_destroy = true
+            }
+          }
+
+          resource "docker_image" "postgres" {
+            name         = "postgres:17-alpine"
+            keep_locally = true
+          }
+
+          resource "docker_image" "gitea" {
+            name         = "docker.gitea.com/gitea:1.24"
+            keep_locally = true
+          }
+
+          resource "docker_image" "registry" {
+            name         = "registry:2"
+            keep_locally = true
+          }
+
+          resource "docker_container" "postgres" {
+            name    = "ecommerce-postgres"
+            image   = docker_image.postgres.image_id
+            restart = "unless-stopped"
+
+            env = [
+              "POSTGRES_DB=gitea",
+              "POSTGRES_USER=gitea",
+              "POSTGRES_PASSWORD=${random_password.postgres.result}",
+            ]
+
+            volumes {
+              volume_name    = docker_volume.postgres.name
+              container_path = "/var/lib/postgresql/data"
+            }
+
+            networks_advanced {
+              name = docker_network.platform.name
+            }
+
+            healthcheck {
+              test         = ["CMD-SHELL", "pg_isready -U gitea -d gitea"]
+              interval     = "5s"
+              timeout      = "3s"
+              retries      = 30
+              start_period = "5s"
+            }
+          }
+
+          resource "docker_container" "gitea" {
+            name    = "ecommerce-gitea"
+            image   = docker_image.gitea.image_id
+            restart = "unless-stopped"
+
+            env = [
+              "USER_UID=1000",
+              "USER_GID=1000",
+              "GITEA__database__DB_TYPE=postgres",
+              "GITEA__database__HOST=ecommerce-postgres:5432",
+              "GITEA__database__NAME=gitea",
+              "GITEA__database__USER=gitea",
+              "GITEA__database__PASSWD=${random_password.postgres.result}",
+              "GITEA__server__DOMAIN=localhost",
+              "GITEA__server__ROOT_URL=http://localhost:{{ gitea_http_port }}/",
+              "GITEA__server__SSH_DOMAIN=localhost",
+              "GITEA__server__SSH_PORT={{ gitea_ssh_port }}",
+              "GITEA__service__DISABLE_REGISTRATION=false",
+            ]
+
+            ports {
+              internal = 3000
+              external = {{ gitea_http_port }}
+            }
+
+            ports {
+              internal = 22
+              external = {{ gitea_ssh_port }}
+            }
+
+            volumes {
+              volume_name    = docker_volume.gitea.name
+              container_path = "/data"
+            }
+
+            networks_advanced {
+              name = docker_network.platform.name
+            }
+
+            depends_on = [docker_container.postgres]
+          }
+
+          resource "docker_container" "registry" {
+            name    = "ecommerce-registry"
+            image   = docker_image.registry.image_id
+            restart = "unless-stopped"
+
+            ports {
+              internal = 5000
+              external = {{ registry_port }}
+            }
+
+            volumes {
+              volume_name    = docker_volume.registry.name
+              container_path = "/var/lib/registry"
+            }
+
+            networks_advanced {
+              name = docker_network.platform.name
+            }
+          }
+
+          resource "kind_cluster" "local" {
+            name            = "ecommerce-local"
+            node_image      = var.kind_node_image
+            wait_for_ready  = false
+            kubeconfig_path = var.kubeconfig_path
+
+            lifecycle {
+              prevent_destroy = true
+            }
+
+            kind_config {
+              kind        = "Cluster"
+              api_version = "kind.x-k8s.io/v1alpha4"
+
+              networking {
+                disable_default_cni = true
+                pod_subnet          = "10.244.0.0/16"
+                service_subnet      = "10.96.0.0/16"
+              }
+
+
+
+              node {
+                role = "control-plane"
+
+                extra_port_mappings {
+                  container_port = 30080
+                  host_port      = 8080
+                  protocol       = "TCP"
+                }
+
+                extra_port_mappings {
+                  container_port = 30443
+                  host_port      = 8443
+                  protocol       = "TCP"
+                }
+              }
+
+              node {
+                role = "worker"
+              }
+
+              node {
+                role = "worker"
+              }
+            }
+          }
+
+          output "gitea_url" {
+            value = "http://localhost:{{ gitea_http_port }}"
+          }
+
+          output "gitea_ssh" {
+            value = "ssh://git@localhost:{{ gitea_ssh_port }}"
+          }
+
+          output "registry_url" {
+            value = "localhost:{{ registry_port }}"
+          }
+
+          output "kubeconfig" {
+            value = var.kubeconfig_path
+          }
+
+      register: terraform_config
+
+    - name: Initialiser Terraform
+      ansible.builtin.command:
+        cmd: terraform init -upgrade=false -input=false
+        chdir: "{{ terraform_dir }}"
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      register: terraform_init
+      changed_when: false
+
+    - name: Vérifier le format Terraform
+      ansible.builtin.command:
+        cmd: terraform fmt -check -diff
+        chdir: "{{ terraform_dir }}"
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      changed_when: false
+
+    - name: Valider Terraform
+      ansible.builtin.command:
+        cmd: terraform validate -no-color
+        chdir: "{{ terraform_dir }}"
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      changed_when: false
+
+    - name: Créer le plan Terraform sauvegardé
+      ansible.builtin.command:
+        cmd: >-
+          terraform plan -input=false -no-color -detailed-exitcode
+          -out={{ terraform_plan_path }}
+        chdir: "{{ terraform_dir }}"
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      register: terraform_plan
+      changed_when: terraform_plan.rc == 2
+      failed_when: terraform_plan.rc not in [0, 2]
+      no_log: true
+
+    - name: Vérifier que le plan ne détruit ni ne remplace aucune ressource
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          terraform show -json {{ terraform_plan_path | quote }} |
+          jq --exit-status
+          'all(.resource_changes[]?; (.change.actions | index("delete")) == null)'
+        chdir: "{{ terraform_dir }}"
+        executable: /bin/bash
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      register: terraform_safety_check
+      changed_when: false
+      failed_when: terraform_safety_check.rc != 0
+      when: terraform_plan.rc == 2
+      no_log: true
+
+    - name: Confirmer explicitement la protection du cluster Kind
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          terraform show -json {{ terraform_plan_path | quote }} |
+          jq --exit-status
+          'all(.resource_changes[]?;
+          .address != "kind_cluster.local" or
+          (.change.actions | index("delete")) == null)'
+        chdir: "{{ terraform_dir }}"
+        executable: /bin/bash
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      register: terraform_kind_safety_check
+      changed_when: false
+      failed_when: terraform_kind_safety_check.rc != 0
+      when: terraform_plan.rc == 2
+      no_log: true
+
+    - name: Ignorer Terraform apply lorsque le plan est vide
+      ansible.builtin.debug:
+        msg: "SKIP Terraform apply : aucun changement détecté."
+      when: terraform_plan.rc == 0
+
+    - name: Appliquer exactement le plan Terraform validé
+      ansible.builtin.command:
+        cmd: "terraform apply -input=false {{ terraform_plan_path }}"
+        chdir: "{{ terraform_dir }}"
+      environment:
+        HOME: "{{ dev_home }}"
+        TF_PLUGIN_CACHE_DIR: "{{ terraform_plugin_cache_dir }}"
+      register: terraform_apply
+      changed_when: true
+      when: terraform_plan.rc == 2
+      no_log: true
+
+    - name: Vérifier la présence du kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kubeconfig_path }}"
+      register: kubeconfig_file
+
+    - name: Échouer si le kubeconfig n'existe pas
+      ansible.builtin.assert:
+        that:
+          - kubeconfig_file.stat.exists
+        fail_msg: "Le kubeconfig Kind n'a pas été créé."
+
+    - name: Définir KUBECONFIG pour les étapes Kubernetes
+      ansible.builtin.set_fact:
+        kube_env:
+          KUBECONFIG: "{{ kubeconfig_path }}"
+          HOME: "{{ dev_home }}"
+
+    - name: Attendre que l'API Kubernetes soit réellement disponible
+      ansible.builtin.command:
+        cmd: "sh {{ repository_root }}/scripts/kubernetes-api-ready.sh"
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Définir les dépôts Helm requis
+      ansible.builtin.set_fact:
+        helm_repositories:
+          - name: cilium
+            url: https://helm.cilium.io/
+          - name: kyverno
+            url: https://kyverno.github.io/kyverno/
+          - name: prometheus-community
+            url: https://prometheus-community.github.io/helm-charts
+          - name: grafana-community
+            url: https://grafana-community.github.io/helm-charts
+          - name: open-telemetry
+            url: https://open-telemetry.github.io/opentelemetry-helm-charts
+        helm_repositories_fingerprint: >-
+          {{ [cilium_version, kyverno_version, prometheus_stack_version,
+              loki_version, tempo_version, otel_collector_version,
+              tetragon_version] | join('|') | hash('sha256') }}
+
+    - name: Lire les dépôts Helm configurés
+      ansible.builtin.command:
+        cmd: helm repo list --output json
+      environment: "{{ kube_env }}"
+      register: helm_repo_list_command
+      changed_when: false
+      failed_when: helm_repo_list_command.rc not in [0, 1]
+
+    - name: Décoder les dépôts Helm configurés
+      ansible.builtin.set_fact:
+        helm_repo_list: >-
+          {{ (helm_repo_list_command.stdout | from_json)
+             if helm_repo_list_command.rc == 0 and
+                (helm_repo_list_command.stdout | trim | length) > 0 else [] }}
+
+    - name: Ajouter uniquement les dépôts Helm absents ou différents
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ item.name }}"
+          - "{{ item.url }}"
+          - --force-update
+      environment: "{{ kube_env }}"
+      loop: "{{ helm_repositories }}"
+      register: helm_repo_add
+      when: >-
+        (helm_repo_list |
+         selectattr('name', 'equalto', item.name) |
+         selectattr('url', 'equalto', item.url) | list | length) == 0
+
+    - name: Lire l'empreinte des index Helm
+      ansible.builtin.stat:
+        path: "{{ helm_state_dir }}/repositories.sha256"
+      register: helm_repositories_state_file
+
+    - name: Charger l'empreinte des index Helm
+      ansible.builtin.slurp:
+        src: "{{ helm_state_dir }}/repositories.sha256"
+      register: helm_repositories_state_content
+      when: helm_repositories_state_file.stat.exists
+
+    - name: Mettre à jour les index Helm seulement si les versions changent
+      ansible.builtin.command:
+        cmd: helm repo update
+      environment: "{{ kube_env }}"
+      register: helm_repo_update
+      when: >-
+        not helm_repositories_state_file.stat.exists or
+        ((helm_repositories_state_content.content | default('') | b64decode | trim)
+         != helm_repositories_fingerprint)
+
+    - name: Mémoriser l'empreinte des index Helm
+      ansible.builtin.copy:
+        dest: "{{ helm_state_dir }}/repositories.sha256"
+        content: "{{ helm_repositories_fingerprint }}\n"
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+      when: helm_repo_update is changed
+
+    - name: Réconcilier Cilium et Hubble si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: cilium
+        helm_release_namespace: kube-system
+        helm_release_chart: oci://quay.io/cilium/charts/cilium
+        helm_release_version: "{{ cilium_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --set
+          - ipam.mode=kubernetes
+          - --set
+          - hubble.relay.enabled=true
+          - --set
+          - hubble.ui.enabled=true
+          - --set
+          - operator.replicas=1
+        helm_release_fingerprint: >-
+          {{ ['cilium', cilium_version, 'ipam=kubernetes', 'hubble=true',
+              'operator=1'] | join('|') | hash('sha256') }}
+
+    - name: Attendre que les nœuds Kubernetes soient prêts
+      ansible.builtin.command:
+        cmd: kubectl wait --for=condition=Ready nodes --all --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Stabiliser Cilium avant les contrôleurs suivants
+      ansible.builtin.command:
+        cmd: kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=cilium --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Attendre Cilium Operator
+      ansible.builtin.command:
+        cmd: kubectl -n kube-system rollout status deployment/cilium-operator --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Attendre Hubble Relay
+      ansible.builtin.command:
+        cmd: kubectl -n kube-system rollout status deployment/hubble-relay --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Attendre Hubble UI
+      ansible.builtin.command:
+        cmd: kubectl -n kube-system rollout status deployment/hubble-ui --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Vérifier à nouveau l'API après Cilium
+      ansible.builtin.command:
+        cmd: "sh {{ repository_root }}/scripts/kubernetes-api-ready.sh"
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Réconcilier Flux Operator si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: flux-operator
+        helm_release_namespace: flux-system
+        helm_release_chart: oci://quay.io/fluxoperatordev/charts/flux-operator
+        helm_release_version: "{{ flux_operator_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --set
+          - image.repository=quay.io/fluxoperatordev/flux-operator
+        helm_release_fingerprint: >-
+          {{ ['flux-operator', flux_operator_version,
+              'quay.io/fluxoperatordev/flux-operator'] |
+             join('|') | hash('sha256') }}
+
+    - name: Attendre Flux Operator
+      ansible.builtin.command:
+        cmd: kubectl -n flux-system rollout status deployment/flux-operator --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Écrire FluxInstance
+      ansible.builtin.copy:
+        dest: "{{ base_dir }}/flux-instance.yaml"
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+        content: |
+          apiVersion: fluxcd.controlplane.io/v1
+          kind: FluxInstance
+          metadata:
+            name: flux
+            namespace: flux-system
+          spec:
+            distribution:
+              version: "{{ flux_distribution_version }}"
+              registry: "quay.io/fluxoperatordev"
+            components:
+              - source-controller
+              - kustomize-controller
+              - helm-controller
+              - notification-controller
+              - image-reflector-controller
+              - image-automation-controller
+            cluster:
+              type: kubernetes
+
+    - name: Réconcilier FluxInstance
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ base_dir }}/flux-instance.yaml"
+      environment: "{{ kube_env }}"
+      register: flux_instance_apply
+      changed_when: "'created' in flux_instance_apply.stdout or 'configured' in flux_instance_apply.stdout"
+
+    - name: Attendre les contrôleurs Flux
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n flux-system wait --for=condition=Available deployment
+          --all --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      retries: 2
+      delay: 10
+      until: flux_deployments.rc == 0
+      register: flux_deployments
+
+    - name: Calculer l'empreinte du manifeste Tekton
+      ansible.builtin.set_fact:
+        tekton_manifest_fingerprint: >-
+          {{ lookup('file', repository_root ~ '/platform/tekton/vendor/pipeline-' ~
+                    tekton_version ~ '.yaml') | hash('sha256') }}
+
+    - name: Lire l'empreinte Tekton appliquée
+      ansible.builtin.stat:
+        path: "{{ kubectl_state_dir }}/tekton-pipelines.sha256"
+      register: tekton_state_file
+
+    - name: Charger l'empreinte Tekton appliquée
+      ansible.builtin.slurp:
+        src: "{{ kubectl_state_dir }}/tekton-pipelines.sha256"
+      register: tekton_state_content
+      when: tekton_state_file.stat.exists
+
+    - name: Vérifier la présence du contrôleur Tekton
+      ansible.builtin.command:
+        cmd: kubectl -n tekton-pipelines get deployment tekton-pipelines-controller
+      environment: "{{ kube_env }}"
+      register: tekton_controller_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Tekton doit être réconcilié
+      ansible.builtin.set_fact:
+        tekton_reconcile_required: >-
+          {{ tekton_controller_exists.rc != 0 or
+             not tekton_state_file.stat.exists or
+             ((tekton_state_content.content | default('') | b64decode | trim)
+              != tekton_manifest_fingerprint) }}
+
+    - name: Appliquer Tekton Pipelines si nécessaire
+      ansible.builtin.command:
+        cmd: >-
+          kubectl apply
+          --filename {{ repository_root }}/platform/tekton/vendor/pipeline-{{ tekton_version }}.yaml
+      environment: "{{ kube_env }}"
+      register: tekton_apply
+      changed_when: "'created' in tekton_apply.stdout or 'configured' in tekton_apply.stdout"
+      when: tekton_reconcile_required
+
+    - name: Afficher le SKIP Tekton
+      ansible.builtin.debug:
+        msg: "SKIP Tekton : version et manifeste déjà conformes."
+      when: not tekton_reconcile_required
+
+    - name: Mémoriser l'empreinte Tekton
+      ansible.builtin.copy:
+        dest: "{{ kubectl_state_dir }}/tekton-pipelines.sha256"
+        content: "{{ tekton_manifest_fingerprint }}\n"
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+      when: tekton_reconcile_required
+
+    - name: Attendre Tekton Pipelines
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n tekton-pipelines wait --for=condition=Available deployment
+          --all --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: tekton_deployments
+      retries: 2
+      delay: 10
+      until: tekton_deployments.rc == 0
+
+    - name: Réconcilier Kyverno si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: kyverno
+        helm_release_namespace: kyverno
+        helm_release_chart: kyverno/kyverno
+        helm_release_version: "{{ kyverno_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ repository_root }}/security/kyverno/values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['kyverno', kyverno_version,
+              lookup('file', repository_root ~ '/security/kyverno/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+
+    - name: Attendre les contrôleurs Kyverno
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n kyverno wait --for=condition=Available deployment
+          --all --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: kyverno_deployments
+      retries: 2
+      delay: 10
+      until: kyverno_deployments.rc == 0
+
+
+    - name: Réconcilier Tetragon si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: tetragon
+        helm_release_namespace: kube-system
+        helm_release_chart: cilium/tetragon
+        helm_release_version: "{{ tetragon_version }}"
+        helm_release_timeout: 15m
+        helm_release_args: []
+        helm_release_fingerprint: >-
+          {{ ['tetragon', tetragon_version] | join('|') | hash('sha256') }}
+
+    - name: Attendre Tetragon
+      ansible.builtin.command:
+        cmd: kubectl -n kube-system wait --for=condition=Ready pod -l app.kubernetes.io/name=tetragon --timeout=300s
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Réconcilier kube-prometheus-stack si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: kube-prometheus-stack
+        helm_release_namespace: monitoring
+        helm_release_chart: prometheus-community/kube-prometheus-stack
+        helm_release_version: "{{ prometheus_stack_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ repository_root }}/platform/observability/prometheus/values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['prometheus', prometheus_stack_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/prometheus/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: install_observability
+
+    - name: Attendre kube-prometheus-stack
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n monitoring wait --for=condition=Available deployment
+          --all --timeout=600s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: prometheus_deployments
+      retries: 2
+      delay: 10
+      until: prometheus_deployments.rc == 0
+      when: install_observability
+
+    - name: Attendre Prometheus et Grafana
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n monitoring wait --for=condition=Ready pod
+          -l {{ item }} --timeout=600s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      loop:
+        - app.kubernetes.io/name=prometheus
+        - app.kubernetes.io/name=grafana
+      when: install_observability
+
+    - name: Réconcilier Loki si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: loki
+        helm_release_namespace: observability
+        helm_release_chart: grafana-community/loki
+        helm_release_version: "{{ loki_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ repository_root }}/platform/observability/loki/values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['loki', loki_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/loki/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: install_observability
+
+    - name: Attendre Loki
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n observability wait --for=condition=Ready pod
+          -l app.kubernetes.io/name=loki --timeout=600s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: loki_deployment
+      retries: 2
+      delay: 10
+      until: loki_deployment.rc == 0
+      when: install_observability
+
+    - name: Réconcilier la datasource Loki dans Grafana
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ repository_root }}/platform/observability/grafana/loki-datasource.yaml"
+      environment: "{{ kube_env }}"
+      register: grafana_loki_datasource
+      changed_when: "'created' in grafana_loki_datasource.stdout or 'configured' in grafana_loki_datasource.stdout"
+      when: install_observability
+
+    - name: Réconcilier Tempo si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: tempo
+        helm_release_namespace: observability
+        helm_release_chart: grafana-community/tempo
+        helm_release_version: "{{ tempo_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ repository_root }}/platform/observability/tempo/values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['tempo', tempo_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/tempo/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: install_observability
+
+    - name: Attendre Tempo
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n observability wait --for=condition=Available deployment/tempo
+          --timeout=600s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: tempo_deployment
+      retries: 2
+      delay: 10
+      until: tempo_deployment.rc == 0
+      when: install_observability
+
+    - name: Réconcilier la datasource Tempo dans Grafana
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ repository_root }}/platform/observability/grafana/tempo-datasource.yaml"
+      environment: "{{ kube_env }}"
+      register: grafana_tempo_datasource
+      changed_when: "'created' in grafana_tempo_datasource.stdout or 'configured' in grafana_tempo_datasource.stdout"
+      when: install_observability
+
+    - name: Réconcilier OpenTelemetry Collector si nécessaire
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: opentelemetry-collector
+        helm_release_namespace: observability
+        helm_release_chart: open-telemetry/opentelemetry-collector
+        helm_release_version: "{{ otel_collector_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ repository_root }}/platform/observability/opentelemetry/values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['opentelemetry', otel_collector_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/opentelemetry/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: install_observability
+
+    - name: Attendre OpenTelemetry Collector
+      ansible.builtin.command:
+        cmd: >-
+          kubectl -n observability wait --for=condition=Ready pod
+          -l app.kubernetes.io/name=opentelemetry-collector --timeout=600s
+      environment: "{{ kube_env }}"
+      changed_when: false
+      register: otel_pods
+      retries: 2
+      delay: 10
+      until: otel_pods.rc == 0
+      when: install_observability
+
+    - name: Créer le namespace e-commerce
+      ansible.builtin.command:
+        cmd: kubectl create namespace ecommerce --dry-run=client -o yaml
+      environment: "{{ kube_env }}"
+      register: ecommerce_namespace_yaml
+      changed_when: false
+
+    - name: Réconcilier le namespace e-commerce
+      ansible.builtin.shell:
+        cmd: kubectl apply -f -
+        stdin: "{{ ecommerce_namespace_yaml.stdout }}"
+      environment: "{{ kube_env }}"
+      register: ecommerce_namespace_apply
+      changed_when: "'created' in ecommerce_namespace_apply.stdout or 'configured' in ecommerce_namespace_apply.stdout"
+
+    - name: Écrire les politiques de sécurité locales
+      ansible.builtin.copy:
+        dest: "{{ base_dir }}/security-policies.yaml"
+        owner: "{{ dev_user }}"
+        group: "{{ dev_user }}"
+        mode: "0644"
+        content: |
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: default-deny
+            namespace: ecommerce
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
+          ---
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          metadata:
+            name: disallow-privileged
+          spec:
+            validationFailureAction: Audit
+            background: true
+            rules:
+              - name: privileged-containers
+                match:
+                  any:
+                    - resources:
+                        kinds:
+                          - Pod
+                validate:
+                  message: "Les conteneurs privileged sont interdits."
+                  pattern:
+                    spec:
+                      containers:
+                        - securityContext:
+                            privileged: "false"
+
+    - name: Réconcilier les politiques de sécurité
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ base_dir }}/security-policies.yaml"
+      environment: "{{ kube_env }}"
+      register: security_apply
+      changed_when: "'created' in security_apply.stdout or 'configured' in security_apply.stdout"
+
+    - name: Collecter l'état final
+      ansible.builtin.command:
+        cmd: kubectl get pods -A
+      environment: "{{ kube_env }}"
+      register: cluster_status
+      changed_when: false
+
+    - name: Afficher l'état final
+      ansible.builtin.debug:
+        msg:
+          - "Gitea : http://localhost:{{ gitea_http_port }}"
+          - "Gitea SSH : ssh://git@localhost:{{ gitea_ssh_port }}"
+          - "Registry OCI : localhost:{{ registry_port }}"
+          - "Kubeconfig : {{ kubeconfig_path }}"
+          - "Cluster : ecommerce-local"
+          - "Flux : installé, prêt à être relié à Gitea"
+          - "Tekton : installé"
+          - "Cilium + Hubble : installés"
+          - "Kyverno : installé"
+          - "Tetragon : installé"
+          - "Observabilité : {{ 'installée' if install_observability else 'désactivée' }}"
+          - ""
+          - "{{ cluster_status.stdout }}"
+
+  post_tasks:
+    - name: Rappeler le prérequis Docker Desktop
+      ansible.builtin.debug:
+        msg: >-
+          Docker Desktop avec intégration WSL2 doit rester démarré pendant l'utilisation
+          de Terraform, Kind et du cluster Kubernetes local.

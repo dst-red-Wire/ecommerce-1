@@ -1,0 +1,8 @@
+all:
+  children:
+    staging:
+      hosts:
+        ecommerce-staging:
+          ansible_host: 178.104.138.200
+          ansible_user: root
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519

@@ -1,0 +1,47 @@
+# Kyverno 3.8.2 / appVersion 1.18.2
+# Local Kind tuning: keep the controller from creating API-server bursts and
+# avoid client-go WatchList on the Kubernetes 1.33 control plane.
+
+reportsController:
+  # Keep reporting enabled to match the validated live release.
+  enabled: true
+  replicas: 1
+  apiPriorityAndFairness: true
+  extraArgs:
+    clientRateLimitQPS: 20
+    clientRateLimitBurst: 40
+  extraEnvVars:
+    - name: KUBE_FEATURE_WatchListClient
+      value: "false"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+backgroundController:
+  extraArgs:
+    # Kyverno defaults these to 300, which is unnecessarily aggressive for
+    # a single-node/local Kind control plane and can starve lease renewals.
+    clientRateLimitQPS: 20
+    clientRateLimitBurst: 40
+  extraEnvVars:
+    # client-go feature-gate override. Kubernetes 1.33 keeps WatchListClient
+    # disabled by default; make the intended safe mode explicit for Kyverno.
+    - name: KUBE_FEATURE_WatchListClient
+      value: "false"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+features:
+  # Keep periodic scans disabled for the validated local profile while the
+  # reports controller remains enabled for admission/background results.
+  backgroundScan:
+    enabled: false

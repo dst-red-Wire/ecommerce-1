@@ -1,0 +1,104 @@
+---
+# Required variables:
+# helm_release_name, helm_release_namespace, helm_release_chart,
+# helm_release_version, helm_release_fingerprint.
+# Optional: helm_release_args, helm_release_timeout.
+
+- name: "Attendre l'API avant Helm {{ helm_release_name }}"
+  ansible.builtin.command:
+    cmd: >-
+      {{ kubernetes_api_ready_command | default(
+         'sh ' ~ repository_root ~ '/scripts/kubernetes-api-ready.sh') }}
+  environment: "{{ kube_env }}"
+  changed_when: false
+
+- name: "Lire l'état Helm {{ helm_release_name }}"
+  ansible.builtin.command:
+    argv:
+      - helm
+      - status
+      - "{{ helm_release_name }}"
+      - --namespace
+      - "{{ helm_release_namespace }}"
+      - --output
+      - json
+  environment: "{{ kube_env }}"
+  register: helm_release_status_command
+  changed_when: false
+  failed_when: false
+
+- name: "Décoder l'état Helm {{ helm_release_name }}"
+  ansible.builtin.set_fact:
+    helm_release_status_data: >-
+      {{ (helm_release_status_command.stdout | from_json)
+         if helm_release_status_command.rc == 0 else {} }}
+
+- name: "Lire l'empreinte Helm {{ helm_release_name }}"
+  ansible.builtin.stat:
+    path: "{{ helm_state_dir }}/{{ helm_release_name }}.sha256"
+  register: helm_release_state_file
+
+- name: "Charger l'empreinte Helm {{ helm_release_name }}"
+  ansible.builtin.slurp:
+    src: "{{ helm_state_dir }}/{{ helm_release_name }}.sha256"
+  register: helm_release_state_content
+  when: helm_release_state_file.stat.exists
+
+- name: "Décider la réconciliation Helm {{ helm_release_name }}"
+  ansible.builtin.set_fact:
+    helm_release_needs_reconcile: >-
+      {{ helm_release_status_command.rc != 0 or
+         helm_release_status_data.get('info', {}).get('status', '') != 'deployed' or
+         not helm_release_state_file.stat.exists or
+         ((helm_release_state_content.content | default('') | b64decode | trim) !=
+          (helm_release_fingerprint ~ '|' ~
+           (helm_release_status_data.get('version', '') | string))) }}
+
+- name: "Afficher le SKIP Helm {{ helm_release_name }}"
+  ansible.builtin.debug:
+    msg: >-
+      SKIP Helm {{ helm_release_name }} : release déployée, chart
+      {{ helm_release_version }} et empreinte déclarative conformes.
+  when: not helm_release_needs_reconcile
+
+- name: "Réconcilier Helm {{ helm_release_name }}"
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['helm', 'upgrade', '--install', helm_release_name, helm_release_chart,
+         '--version', helm_release_version,
+         '--namespace', helm_release_namespace,
+         '--create-namespace', '--history-max', '5']
+        + (helm_release_args | default([]))
+        + ['--wait', '--timeout', helm_release_timeout | default('15m')]
+      }}
+  environment: "{{ kube_env }}"
+  register: helm_release_reconcile
+  changed_when: true
+  when: helm_release_needs_reconcile
+
+- name: "Relire la révision Helm {{ helm_release_name }}"
+  ansible.builtin.command:
+    argv:
+      - helm
+      - status
+      - "{{ helm_release_name }}"
+      - --namespace
+      - "{{ helm_release_namespace }}"
+      - --output
+      - json
+  environment: "{{ kube_env }}"
+  register: helm_release_applied_status
+  changed_when: false
+  when: helm_release_needs_reconcile
+
+- name: "Mémoriser l'empreinte Helm {{ helm_release_name }}"
+  ansible.builtin.copy:
+    dest: "{{ helm_state_dir }}/{{ helm_release_name }}.sha256"
+    content: >-
+      {{ helm_release_fingerprint }}|{{
+         (helm_release_applied_status.stdout | from_json).version }}
+    owner: "{{ dev_user }}"
+    group: "{{ dev_user }}"
+    mode: "0644"
+  when: helm_release_needs_reconcile

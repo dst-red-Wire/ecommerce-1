@@ -1,0 +1,20 @@
+---
+# Host-local, non-secret state for the Hetzner staging bootstrap.
+
+staging_cluster_name: ecommerce-staging
+staging_root: /var/lib/ecommerce-staging
+staging_cache_dir: "{{ staging_root }}/cache"
+staging_download_cache_dir: "{{ staging_cache_dir }}/downloads"
+staging_state_dir: "{{ staging_root }}/state"
+staging_helm_state_dir: "{{ staging_state_dir }}/helm"
+staging_kubectl_state_dir: "{{ staging_state_dir }}/kubectl"
+staging_manifest_dir: "{{ staging_root }}/manifests"
+staging_kubeconfig_path: "{{ staging_root }}/kubeconfig"
+staging_remote_bin_dir: /usr/local/lib/ecommerce-staging
+staging_kind_config_path: "{{ staging_root }}/kind.yaml"
+
+staging_expected_kind_nodes: 3
+staging_install_observability: true
+
+docker_log_max_size: 50m
+docker_log_max_file: "3"

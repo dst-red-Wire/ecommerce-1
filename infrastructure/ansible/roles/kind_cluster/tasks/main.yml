@@ -1,0 +1,228 @@
+---
+- name: Créer les répertoires persistants staging
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ staging_root }}", mode: "0755"}
+    - {path: "{{ staging_cache_dir }}", mode: "0755"}
+    - {path: "{{ staging_download_cache_dir }}", mode: "0755"}
+    - {path: "{{ staging_cache_dir }}/helm/extracted", mode: "0755"}
+    - {path: "{{ staging_state_dir }}", mode: "0755"}
+    - {path: "{{ staging_helm_state_dir }}", mode: "0755"}
+    - {path: "{{ staging_kubectl_state_dir }}", mode: "0755"}
+    - {path: "{{ staging_manifest_dir }}", mode: "0755"}
+    - {path: "{{ staging_remote_bin_dir }}", mode: "0755"}
+
+- name: Installer kubectl depuis le cache vérifié si nécessaire
+  block:
+    - name: Lire la version kubectl installée
+      ansible.builtin.command:
+        cmd: kubectl version --client --output=json
+      register: kubectl_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer la version kubectl installée
+      ansible.builtin.set_fact:
+        kubectl_installed_version: >-
+          {{ (kubectl_version_check.stdout | from_json).clientVersion.gitVersion
+             if kubectl_version_check.rc == 0 else '' }}
+
+    - name: Déterminer si kubectl doit être installé
+      ansible.builtin.set_fact:
+        kubectl_install_required: "{{ kubectl_installed_version != kubectl_version }}"
+
+    - name: Télécharger kubectl avec checksum
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ tool_arch }}/kubectl"
+        dest: "{{ staging_download_cache_dir }}/kubectl-{{ kubectl_version }}-linux-{{ tool_arch }}"
+        checksum: "sha256:https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ tool_arch }}/kubectl.sha256"
+        owner: root
+        group: root
+        mode: "0755"
+      when: kubectl_install_required
+
+    - name: Installer kubectl
+      ansible.builtin.copy:
+        src: "{{ staging_download_cache_dir }}/kubectl-{{ kubectl_version }}-linux-{{ tool_arch }}"
+        dest: /usr/local/bin/kubectl
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: kubectl_install_required
+
+- name: Installer Helm depuis le cache vérifié si nécessaire
+  block:
+    - name: Lire la version Helm installée
+      ansible.builtin.command:
+        cmd: helm version --short
+      register: helm_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Helm doit être installé
+      ansible.builtin.set_fact:
+        helm_install_required: >-
+          {{ helm_version_check.rc != 0 or helm_version not in helm_version_check.stdout }}
+
+    - name: Télécharger Helm avec checksum
+      ansible.builtin.get_url:
+        url: "https://get.helm.sh/helm-{{ helm_version }}-linux-{{ tool_arch }}.tar.gz"
+        dest: "{{ staging_cache_dir }}/helm/helm-{{ helm_version }}.tar.gz"
+        checksum: "sha256:https://get.helm.sh/helm-{{ helm_version }}-linux-{{ tool_arch }}.tar.gz.sha256sum"
+        owner: root
+        group: root
+        mode: "0644"
+      when: helm_install_required
+
+    - name: Créer le répertoire d'extraction Helm versionné
+      ansible.builtin.file:
+        path: "{{ staging_cache_dir }}/helm/extracted/{{ helm_version }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: helm_install_required
+
+    - name: Extraire Helm dans un répertoire versionné
+      ansible.builtin.unarchive:
+        src: "{{ staging_cache_dir }}/helm/helm-{{ helm_version }}.tar.gz"
+        dest: "{{ staging_cache_dir }}/helm/extracted/{{ helm_version }}"
+        remote_src: true
+        creates: "{{ staging_cache_dir }}/helm/extracted/{{ helm_version }}/linux-{{ tool_arch }}/helm"
+      when: helm_install_required
+
+    - name: Installer Helm
+      ansible.builtin.copy:
+        src: "{{ staging_cache_dir }}/helm/extracted/{{ helm_version }}/linux-{{ tool_arch }}/helm"
+        dest: /usr/local/bin/helm
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: helm_install_required
+
+- name: Installer Kind depuis le cache vérifié si nécessaire
+  block:
+    - name: Lire la version Kind installée
+      ansible.builtin.command:
+        cmd: kind version
+      register: kind_version_check
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Kind doit être installé
+      ansible.builtin.set_fact:
+        kind_install_required: >-
+          {{ kind_version_check.rc != 0 or kind_version not in kind_version_check.stdout }}
+
+    - name: Télécharger Kind avec checksum
+      ansible.builtin.get_url:
+        url: "https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ tool_arch }}"
+        dest: "{{ staging_download_cache_dir }}/kind-{{ kind_version }}-linux-{{ tool_arch }}"
+        checksum: "sha256:https://kind.sigs.k8s.io/dl/{{ kind_version }}/kind-linux-{{ tool_arch }}.sha256sum"
+        owner: root
+        group: root
+        mode: "0755"
+      when: kind_install_required
+
+    - name: Installer Kind
+      ansible.builtin.copy:
+        src: "{{ staging_download_cache_dir }}/kind-{{ kind_version }}-linux-{{ tool_arch }}"
+        dest: /usr/local/bin/kind
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: kind_install_required
+
+- name: Publier le contrôle de readiness Kubernetes sur l'hôte
+  ansible.builtin.copy:
+    src: "{{ repository_root }}/scripts/kubernetes-api-ready.sh"
+    dest: "{{ staging_remote_bin_dir }}/kubernetes-api-ready.sh"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Publier la configuration Kind déclarative
+  ansible.builtin.template:
+    src: kind.yaml.j2
+    dest: "{{ staging_kind_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Vérifier si le cluster Kind staging existe déjà
+  ansible.builtin.command:
+    cmd: kind get clusters
+  register: kind_clusters
+  changed_when: false
+  failed_when: false
+
+- name: Déterminer si la création Kind est nécessaire
+  ansible.builtin.set_fact:
+    kind_cluster_exists: "{{ staging_cluster_name in kind_clusters.stdout_lines }}"
+
+- name: Lire les nœuds du cluster Kind existant
+  ansible.builtin.command:
+    cmd: "kind get nodes --name {{ staging_cluster_name }}"
+  register: existing_kind_nodes
+  changed_when: false
+  when: kind_cluster_exists
+
+- name: Refuser une topologie existante différente sans la détruire
+  ansible.builtin.assert:
+    that:
+      - existing_kind_nodes.stdout_lines | length == staging_expected_kind_nodes
+    fail_msg: >-
+      Le cluster Kind {{ staging_cluster_name }} existe avec
+      {{ existing_kind_nodes.stdout_lines | length }} nœud(s), alors que la topologie
+      attendue en staging en exige {{ staging_expected_kind_nodes }}. Aucune suppression
+      ou recréation automatique n'est effectuée.
+  when: kind_cluster_exists
+
+- name: Créer le cluster Kind avec l'image exacte pinée
+  ansible.builtin.command:
+    cmd: >-
+      kind create cluster
+      --name {{ staging_cluster_name }}
+      --image {{ kind_node_image }}
+      --config {{ staging_kind_config_path }}
+      --kubeconfig {{ staging_kubeconfig_path }}
+      --wait 0
+  register: kind_create
+  changed_when: true
+  when: not kind_cluster_exists
+
+- name: Vérifier la présence du kubeconfig staging
+  ansible.builtin.stat:
+    path: "{{ staging_kubeconfig_path }}"
+  register: staging_kubeconfig
+
+- name: Exporter le kubeconfig uniquement s'il est absent
+  ansible.builtin.command:
+    cmd: >-
+      kind export kubeconfig
+      --name {{ staging_cluster_name }}
+      --kubeconfig {{ staging_kubeconfig_path }}
+  when: kind_cluster_exists and not staging_kubeconfig.stat.exists
+  changed_when: true
+
+- name: Protéger le kubeconfig staging
+  ansible.builtin.file:
+    path: "{{ staging_kubeconfig_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+    state: file
+
+- name: Vérifier que l'API Kubernetes répond
+  ansible.builtin.command:
+    cmd: "{{ kubernetes_api_ready_command }}"
+  environment: "{{ kube_env }}"
+  changed_when: false

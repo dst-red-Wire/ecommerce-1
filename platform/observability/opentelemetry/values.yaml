@@ -1,0 +1,115 @@
+mode: daemonset
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+command:
+  name: otelcol-contrib
+
+presets:
+  logsCollection:
+    enabled: true
+    includeCollectorLogs: false
+  kubernetesAttributes:
+    enabled: true
+
+config:
+  exporters:
+    debug: null
+
+    otlp_grpc/tempo:
+      endpoint: tempo.observability.svc.cluster.local:4317
+      tls:
+        insecure: true
+
+    otlp_http/loki:
+      endpoint: http://loki-gateway.observability.svc.cluster.local/otlp
+
+    prometheus:
+      endpoint: ${env:MY_POD_IP}:8889
+
+  receivers:
+    jaeger: null
+    zipkin: null
+    prometheus: null
+
+  service:
+    pipelines:
+      logs:
+        receivers:
+          - otlp
+        processors:
+          - memory_limiter
+          - batch
+        exporters:
+          - otlp_http/loki
+
+      metrics:
+        receivers:
+          - otlp
+        processors:
+          - memory_limiter
+          - batch
+        exporters:
+          - prometheus
+
+      traces:
+        receivers:
+          - otlp
+        processors:
+          - memory_limiter
+          - batch
+        exporters:
+          - otlp_grpc/tempo
+
+ports:
+  otlp:
+    enabled: true
+    hostPort: null
+
+  otlp-http:
+    enabled: true
+    hostPort: null
+
+  jaeger-compact:
+    enabled: false
+
+  jaeger-thrift:
+    enabled: false
+
+  jaeger-grpc:
+    enabled: false
+
+  zipkin:
+    enabled: false
+
+  metrics:
+    enabled: true
+    containerPort: 8888
+    servicePort: 8888
+    protocol: TCP
+
+  prometheus:
+    enabled: true
+    containerPort: 8889
+    servicePort: 8889
+    protocol: TCP
+
+service:
+  enabled: true
+  type: ClusterIP
+
+podMonitor:
+  enabled: true
+  metricsEndpoints:
+    - port: prometheus
+  extraLabels:
+    release: kube-prometheus-stack
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

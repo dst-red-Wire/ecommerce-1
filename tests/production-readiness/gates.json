@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "policy": {
+    "critical": "block-production",
+    "high": "block-production-unless-formal-time-bounded-exception",
+    "promotion": "git-only",
+    "deploymentOwner": "flux",
+    "ciOwner": "tekton"
+  },
+  "gates": [
+    {
+      "id": "lint",
+      "order": 1,
+      "command": "make lint",
+      "requiredFor": ["pr", "staging", "production"],
+      "pass": "All formatting, lint and manifest checks exit successfully.",
+      "fail": "Any lint error or unverifiable required source.",
+      "artifact": "artifacts/gates/lint.json"
+    },
+    {
+      "id": "unit-tests",
+      "order": 2,
+      "command": "make test",
+      "requiredFor": ["pr", "staging", "production"],
+      "pass": "All discovered unit suites pass with no skipped mandatory suite.",
+      "fail": "Any unit failure or missing mandatory service suite.",
+      "artifact": "artifacts/gates/unit-tests.json"
+    },
+    {
+      "id": "integration-tests",
+      "order": 3,
+      "command": "make test-integration",
+      "requiredFor": ["staging", "production"],
+      "pass": "Service, database and messaging integrations pass with bounded retries.",
+      "fail": "Any failed integration, retry exhaustion or inconsistent outbox result.",
+      "artifact": "artifacts/gates/integration-tests.json"
+    },
+    {
+      "id": "api-tests",
+      "order": 4,
+      "command": "make test-api",
+      "requiredFor": ["pr", "staging", "production"],
+      "pass": "Contracts, schemas, auth, idempotency and API error semantics pass.",
+      "fail": "Any contract regression, unauthorized access or invalid API behavior.",
+      "artifact": "artifacts/gates/api-tests.json"
+    },
+    {
+      "id": "security-tests",
+      "order": 5,
+      "command": "make test-security",
+      "requiredFor": ["pr", "staging", "production"],
+      "pass": "No secret and no unaccepted CRITICAL/HIGH vulnerability or IaC finding.",
+      "fail": "Secret detected, signature invalid, or blocking security finding.",
+      "artifact": "artifacts/gates/security-tests.json"
+    },
+    {
+      "id": "identity-fraud-abuse",
+      "order": 6,
+      "command": "make test-identity test-fraud",
+      "requiredFor": ["staging", "production"],
+      "pass": "Authorized synthetic identity, fraud and abuse scenarios are blocked and audited.",
+      "fail": "Bypass, replay, cross-tenant access, missing audit or unsafe recovery flow.",
+      "artifact": "artifacts/gates/identity-fraud-abuse.json"
+    },
+    {
+      "id": "supply-chain",
+      "order": 7,
+      "command": "make test-supply-chain",
+      "requiredFor": ["pr", "staging", "production"],
+      "pass": "SBOM, provenance, immutable digest, Cosign signature and verification pass.",
+      "fail": "Mutable image, missing SBOM/provenance, invalid signature or untrusted registry.",
+      "artifact": "artifacts/gates/supply-chain.json"
+    },
+    {
+      "id": "performance",
+      "order": 8,
+      "command": "make test-performance",
+      "requiredFor": ["staging", "production"],
+      "pass": "Configured p95, p99, error-rate, throughput and saturation thresholds pass.",
+      "fail": "Any mandatory latency, error-rate, throughput or resource threshold fails.",
+      "artifact": "artifacts/gates/performance.json"
+    },
+    {
+      "id": "load",
+      "order": 9,
+      "command": "RUN_LOAD_TESTS=1 make test-load",
+      "requiredFor": ["staging", "production"],
+      "pass": "Authorized staging load profile completes within configured SLO thresholds.",
+      "fail": "Threshold failure, uncontrolled saturation or invalid test environment.",
+      "artifact": "artifacts/gates/load.json"
+    },
+    {
+      "id": "production-readiness",
+      "order": 10,
+      "command": "make validate-production-readiness",
+      "requiredFor": ["staging", "production"],
+      "pass": "Runbooks, rollback, observability, security and resilience evidence are complete.",
+      "fail": "Missing evidence, unowned risk, unavailable rollback or unresolved blocker.",
+      "artifact": "artifacts/gates/production-readiness.json"
+    },
+    {
+      "id": "promotion-validation",
+      "order": 11,
+      "command": "make test-production-readiness",
+      "requiredFor": ["production"],
+      "pass": "All prior immutable artifacts pass and the desired-state Git promotion is approved.",
+      "fail": "Any missing/failed artifact, digest mismatch or unapproved Git promotion.",
+      "artifact": "artifacts/gates/promotion-validation.json"
+    }
+  ]
+}

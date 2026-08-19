@@ -1,0 +1,10 @@
+---
+- name: "Readiness {{ readiness_name }}"
+  ansible.builtin.command:
+    cmd: "{{ readiness_command }}"
+  environment: "{{ kube_env }}"
+  register: readiness_result
+  changed_when: false
+  retries: "{{ readiness_retries | default(12) }}"
+  delay: "{{ readiness_delay | default(10) }}"
+  until: readiness_result.rc == 0

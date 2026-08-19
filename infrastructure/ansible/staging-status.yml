@@ -1,0 +1,158 @@
+---
+- name: État et mesures staging non mutatifs
+  hosts: staging
+  become: true
+  gather_facts: false
+  vars:
+    staging_cluster_name: ecommerce-staging
+    staging_kubeconfig_path: /var/lib/ecommerce-staging/kubeconfig
+    kube_env:
+      KUBECONFIG: "{{ staging_kubeconfig_path }}"
+      HOME: /root
+    prometheus_query_base: >-
+      /api/v1/namespaces/monitoring/services/http:kube-prometheus-stack-prometheus:9090/proxy/api/v1/query
+
+  tasks:
+    - name: Verrouiller les mesures sur l'hôte staging autorisé
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'ecommerce-staging'
+          - ansible_host | default('') == '178.104.138.200'
+        fail_msg: >-
+          Ces mesures ne peuvent cibler que ecommerce-staging (178.104.138.200) ;
+          cible reçue : {{ inventory_hostname }} / {{ ansible_host | default('inconnue') }}.
+
+    - name: État des conteneurs Kind et consommation hôte
+      ansible.builtin.command:
+        cmd: >-
+          docker stats --no-stream --no-trunc
+          --format 'table {{ "{{.Name}}" }}\t{{ "{{.CPUPerc}}" }}\t{{ "{{.MemUsage}}" }}\t{{ "{{.MemPerc}}" }}'
+      register: docker_stats
+      changed_when: false
+      failed_when: false
+
+    - name: Images et noms des conteneurs Kind
+      ansible.builtin.command:
+        cmd: >-
+          docker ps --filter name={{ staging_cluster_name }}
+          --format 'table {{ "{{.Names}}" }}\t{{ "{{.Image}}" }}'
+      register: kind_containers
+      changed_when: false
+      failed_when: false
+
+    - name: État des nœuds Kubernetes
+      ansible.builtin.command:
+        cmd: kubectl get nodes -o wide
+      environment: "{{ kube_env }}"
+      register: kubernetes_nodes
+      changed_when: false
+      failed_when: false
+
+    - name: Métriques Kubernetes si metrics-server est disponible
+      ansible.builtin.command:
+        cmd: kubectl top nodes
+      environment: "{{ kube_env }}"
+      register: kubernetes_top_nodes
+      changed_when: false
+      failed_when: false
+
+    - name: Métriques des pods si metrics-server est disponible
+      ansible.builtin.command:
+        cmd: kubectl top pods -A --containers --sort-by=cpu
+      environment: "{{ kube_env }}"
+      register: kubernetes_top_pods
+      changed_when: false
+      failed_when: false
+
+    - name: CPU des composants via Prometheus cAdvisor
+      ansible.builtin.shell: >-
+        kubectl get --raw
+        "{{ prometheus_query_base }}?query=sum%20by%20(namespace,pod)%20(rate(container_cpu_usage_seconds_total%7Bcontainer!%3D%22%22%2Ccontainer!%3D%22POD%22%7D%5B5m%5D))"
+        | jq -c '[.data.result[] |
+          select(.metric.pod | test("kube-apiserver|etcd-|prometheus-|loki-|cilium|tetragon|kyverno-|flux-|tekton-|grafana-|tempo-|opentelemetry-collector")) |
+          {namespace: .metric.namespace, pod: .metric.pod, cpu_cores: (.value[1] | tonumber)}]'
+      environment: "{{ kube_env }}"
+      register: prometheus_cpu
+      changed_when: false
+      failed_when: false
+
+    - name: Mémoire des composants via Prometheus cAdvisor
+      ansible.builtin.shell: >-
+        kubectl get --raw
+        "{{ prometheus_query_base }}?query=sum%20by%20(namespace,pod)%20(container_memory_working_set_bytes%7Bcontainer!%3D%22%22%2Ccontainer!%3D%22POD%22%7D)"
+        | jq -c '[.data.result[] |
+          select(.metric.pod | test("kube-apiserver|etcd-|prometheus-|loki-|cilium|tetragon|kyverno-|flux-|tekton-|grafana-|tempo-|opentelemetry-collector")) |
+          {namespace: .metric.namespace, pod: .metric.pod, memory_bytes: (.value[1] | tonumber)}]'
+      environment: "{{ kube_env }}"
+      register: prometheus_memory
+      changed_when: false
+      failed_when: false
+
+    - name: Santé détaillée de l'API Kubernetes
+      ansible.builtin.command:
+        cmd: kubectl get --raw=/readyz?verbose
+      environment: "{{ kube_env }}"
+      register: kubernetes_readyz
+      changed_when: false
+      failed_when: false
+
+    - name: Latence bornée de l'API Kubernetes
+      ansible.builtin.shell: |
+        set -u
+        i=1
+        while [ "$i" -le 5 ]; do
+          started=$(date +%s%N)
+          if kubectl --request-timeout=10s get --raw=/readyz >/dev/null 2>&1; then
+            ended=$(date +%s%N)
+            printf 'readyz[%s] %s ms\n' "$i" "$(( (ended - started) / 1000000 ))"
+          else
+            printf 'readyz[%s] FAILED\n' "$i"
+          fi
+          i=$((i + 1))
+        done
+      environment: "{{ kube_env }}"
+      register: kubernetes_api_latency
+      changed_when: false
+      failed_when: false
+
+    - name: Révisions Helm des composants
+      ansible.builtin.command:
+        cmd: helm list --all --all-namespaces
+      environment: "{{ kube_env }}"
+      register: helm_releases
+      changed_when: false
+      failed_when: false
+
+    - name: Pods et états de readiness
+      ansible.builtin.command:
+        cmd: kubectl get pods -A -o wide
+      environment: "{{ kube_env }}"
+      register: kubernetes_pods
+      changed_when: false
+      failed_when: false
+
+    - name: Afficher le rapport staging
+      ansible.builtin.debug:
+        msg:
+          - "=== Docker stats (control-plane / workers) ==="
+          - "{{ docker_stats.stdout }}"
+          - "=== Images Kind ==="
+          - "{{ kind_containers.stdout }}"
+          - "=== Nodes ==="
+          - "{{ kubernetes_nodes.stdout }}"
+          - "=== kubectl top nodes (optionnel) ==="
+          - "{{ kubernetes_top_nodes.stdout if kubernetes_top_nodes.rc == 0 else 'metrics-server indisponible' }}"
+          - "=== kubectl top pods (optionnel) ==="
+          - "{{ kubernetes_top_pods.stdout if kubernetes_top_pods.rc == 0 else 'metrics-server indisponible' }}"
+          - "=== CPU composants via Prometheus/cAdvisor (cores) ==="
+          - "{{ prometheus_cpu.stdout | default('Prometheus query indisponible') }}"
+          - "=== Mémoire composants via Prometheus/cAdvisor (bytes) ==="
+          - "{{ prometheus_memory.stdout | default('Prometheus query indisponible') }}"
+          - "=== /readyz?verbose ==="
+          - "{{ kubernetes_readyz.stdout }}"
+          - "=== Latence API ==="
+          - "{{ kubernetes_api_latency.stdout }}"
+          - "=== Helm ==="
+          - "{{ helm_releases.stdout }}"
+          - "=== Pods ==="
+          - "{{ kubernetes_pods.stdout }}"

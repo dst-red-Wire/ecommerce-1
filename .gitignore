@@ -160,6 +160,7 @@ cypress/videos/
 cypress/downloads/
 
 # Generic test artifacts
+artifacts/
 junit.xml
 junit-*.xml
 cucumber-report.*
@@ -427,3 +428,9 @@ mise.local.toml
 
 # Documentation
 !docs/**
+platform/local/.env
+platform/terraform/local/.terraform/
+platform/terraform/local/*.tfstate
+platform/terraform/local/*.tfstate.*
+platform/terraform/local/terraform.tfvars
+# Local DevSecOps

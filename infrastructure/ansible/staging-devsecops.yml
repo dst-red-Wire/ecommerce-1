@@ -1,0 +1,786 @@
+---
+- name: Bootstrap DevSecOps staging sur Linux natif Hetzner
+  hosts: staging
+  become: true
+  gather_facts: true
+  gather_subset:
+    - min
+    - distribution
+    - hardware
+
+  vars:
+    repository_root: "{{ playbook_dir }}/../.."
+    kube_env:
+      KUBECONFIG: "{{ staging_kubeconfig_path }}"
+      HOME: /root
+    dev_user: root
+    helm_state_dir: "{{ staging_helm_state_dir }}"
+    kubectl_state_dir: "{{ staging_kubectl_state_dir }}"
+    kubernetes_api_ready_command: >-
+      sh {{ staging_remote_bin_dir }}/kubernetes-api-ready.sh
+
+  pre_tasks:
+    - name: Verrouiller le bootstrap sur l'hôte staging autorisé
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'ecommerce-staging'
+          - ansible_host | default('') == '178.104.138.200'
+        fail_msg: >-
+          Ce playbook ne peut cibler que ecommerce-staging (178.104.138.200) ;
+          cible reçue : {{ inventory_hostname }} / {{ ansible_host | default('inconnue') }}.
+
+    - name: Vérifier Ubuntu 24.04 et l'architecture supportée
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == 'Debian'
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+          - ansible_facts.architecture in ['x86_64', 'amd64', 'aarch64', 'arm64']
+        fail_msg: >-
+          Le bootstrap staging attend Ubuntu 24.04 sur amd64 ou arm64 ;
+          détecté {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}
+          / {{ ansible_facts.architecture }}.
+
+    - name: Déterminer l'architecture des artefacts
+      ansible.builtin.set_fact:
+        tool_arch: "{{ 'amd64' if ansible_facts.architecture in ['x86_64', 'amd64'] else 'arm64' }}"
+
+    - name: Charger les versions depuis versions.mk
+      ansible.builtin.set_fact:
+        versions_mk_content: "{{ lookup('file', repository_root ~ '/versions.mk') }}"
+
+    - name: Extraire les versions source de vérité
+      ansible.builtin.set_fact:
+        kubectl_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^KUBECTL_VERSION\s*:=\s*(\S+)'))[0] }}
+        helm_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^HELM_VERSION\s*:=\s*(\S+)'))[0] }}
+        kind_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^KIND_VERSION\s*:=\s*(\S+)'))[0] }}
+        kind_node_image: >-
+          {{ (versions_mk_content | regex_findall('(?m)^KIND_NODE_IMAGE\s*:=\s*(\S+)'))[0] }}
+        cilium_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^CILIUM_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        flux_operator_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^FLUX_OPERATOR_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        prometheus_stack_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^KUBE_PROMETHEUS_STACK_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        kyverno_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^KYVERNO_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        loki_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^LOKI_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        otel_collector_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^OPENTELEMETRY_COLLECTOR_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        tempo_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^TEMPO_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        tetragon_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^TETRAGON_CHART_VERSION\s*:=\s*(\S+)'))[0] }}
+        tekton_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^TEKTON_PIPELINES_VERSION\s*:=\s*(\S+)'))[0] }}
+        flux_distribution_version: >-
+          {{ (versions_mk_content | regex_findall('(?m)^FLUX_DISTRIBUTION_VERSION\s*:=\s*(\S+)'))[0] }}
+
+    - name: Vérifier les artefacts nécessaires côté contrôleur
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      delegate_to: localhost
+      become: false
+      loop:
+        - "{{ repository_root }}/versions.mk"
+        - "{{ repository_root }}/scripts/kubernetes-api-ready.sh"
+        - "{{ repository_root }}/platform/tekton/vendor/pipeline-{{ tekton_version }}.yaml"
+        - "{{ repository_root }}/platform/observability/prometheus/values.yaml"
+        - "{{ repository_root }}/platform/observability/loki/values.yaml"
+        - "{{ repository_root }}/platform/observability/tempo/values.yaml"
+        - "{{ repository_root }}/platform/observability/opentelemetry/values.yaml"
+        - "{{ repository_root }}/platform/observability/grafana/loki-datasource.yaml"
+        - "{{ repository_root }}/platform/observability/grafana/tempo-datasource.yaml"
+        - "{{ repository_root }}/security/kyverno/values.yaml"
+      register: source_artifacts
+
+    - name: Refuser un dépôt incomplet
+      ansible.builtin.assert:
+        that: item.stat.exists
+        fail_msg: "Artefact staging absent : {{ item.item }}"
+      loop: "{{ source_artifacts.results }}"
+
+    - name: Démarrer la mesure de durée du bootstrap
+      ansible.builtin.command:
+        cmd: date +%s
+      register: bootstrap_started_at
+      changed_when: false
+
+  roles:
+    - role: docker_engine
+    - role: kind_cluster
+
+  tasks:
+    - name: Marquer la fin de la phase hôte et Kind
+      ansible.builtin.command:
+        cmd: date +%s
+      register: kind_phase_ended_at
+      changed_when: false
+
+    - name: Publier les valeurs et manifestes sur l'hôte staging
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ staging_manifest_dir }}/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - {src: "{{ repository_root }}/platform/observability/prometheus/values.yaml", dest: prometheus-values.yaml}
+        - {src: "{{ repository_root }}/platform/observability/loki/values.yaml", dest: loki-values.yaml}
+        - {src: "{{ repository_root }}/platform/observability/tempo/values.yaml", dest: tempo-values.yaml}
+        - {src: "{{ repository_root }}/platform/observability/opentelemetry/values.yaml", dest: opentelemetry-values.yaml}
+        - {src: "{{ repository_root }}/platform/observability/grafana/loki-datasource.yaml", dest: grafana-loki-datasource.yaml}
+        - {src: "{{ repository_root }}/platform/observability/grafana/tempo-datasource.yaml", dest: grafana-tempo-datasource.yaml}
+        - {src: "{{ repository_root }}/platform/tekton/vendor/pipeline-{{ tekton_version }}.yaml", dest: "pipeline-{{ tekton_version }}.yaml"}
+        - {src: "{{ repository_root }}/security/kyverno/values.yaml", dest: kyverno-values.yaml}
+
+    - name: Définir les dépôts Helm requis
+      ansible.builtin.set_fact:
+        helm_repositories:
+          - {name: cilium, url: https://helm.cilium.io/}
+          - {name: kyverno, url: https://kyverno.github.io/kyverno/}
+          - {name: prometheus-community, url: https://prometheus-community.github.io/helm-charts}
+          - {name: grafana-community, url: https://grafana-community.github.io/helm-charts}
+          - {name: open-telemetry, url: https://open-telemetry.github.io/opentelemetry-helm-charts}
+        helm_repositories_fingerprint: >-
+          {{ [cilium_version, flux_operator_version, prometheus_stack_version,
+              kyverno_version, loki_version, tempo_version,
+              otel_collector_version, tetragon_version] | join('|') | hash('sha256') }}
+
+    - name: Lire les dépôts Helm configurés
+      ansible.builtin.command:
+        cmd: helm repo list --output json
+      environment: "{{ kube_env }}"
+      register: helm_repo_list_command
+      changed_when: false
+      failed_when: helm_repo_list_command.rc not in [0, 1]
+
+    - name: Décoder les dépôts Helm configurés
+      ansible.builtin.set_fact:
+        helm_repo_list: >-
+          {{ (helm_repo_list_command.stdout | from_json)
+             if helm_repo_list_command.rc == 0 and
+                (helm_repo_list_command.stdout | trim | length) > 0 else [] }}
+
+    - name: Ajouter uniquement les dépôts Helm absents ou différents
+      ansible.builtin.command:
+        argv:
+          - helm
+          - repo
+          - add
+          - "{{ item.name }}"
+          - "{{ item.url }}"
+          - --force-update
+      environment: "{{ kube_env }}"
+      loop: "{{ helm_repositories }}"
+      register: helm_repo_add
+      changed_when: true
+      when: >-
+        (helm_repo_list |
+         selectattr('name', 'equalto', item.name) |
+         selectattr('url', 'equalto', item.url) | list | length) == 0
+
+    - name: Lire l'empreinte des index Helm
+      ansible.builtin.stat:
+        path: "{{ staging_helm_state_dir }}/repositories.sha256"
+      register: helm_repositories_state_file
+
+    - name: Charger l'empreinte des index Helm
+      ansible.builtin.slurp:
+        src: "{{ staging_helm_state_dir }}/repositories.sha256"
+      register: helm_repositories_state_content
+      when: helm_repositories_state_file.stat.exists
+
+    - name: Mettre à jour les index Helm seulement si nécessaire
+      ansible.builtin.command:
+        cmd: helm repo update
+      environment: "{{ kube_env }}"
+      register: helm_repo_update
+      changed_when: true
+      when: >-
+        not helm_repositories_state_file.stat.exists or
+        ((helm_repositories_state_content.content | default('') | b64decode | trim)
+         != helm_repositories_fingerprint)
+
+    - name: Mémoriser l'empreinte des index Helm
+      ansible.builtin.copy:
+        dest: "{{ staging_helm_state_dir }}/repositories.sha256"
+        content: "{{ helm_repositories_fingerprint }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: helm_repo_update is changed
+
+    - name: Marquer le début de la phase Cilium
+      ansible.builtin.command: {cmd: date +%s}
+      register: cilium_phase_started_at
+      changed_when: false
+
+    - name: Réconcilier Cilium et Hubble
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: cilium
+        helm_release_namespace: kube-system
+        helm_release_chart: oci://quay.io/cilium/charts/cilium
+        helm_release_version: "{{ cilium_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --set
+          - ipam.mode=kubernetes
+          - --set
+          - hubble.relay.enabled=true
+          - --set
+          - hubble.ui.enabled=true
+          - --set
+          - operator.replicas=1
+        helm_release_fingerprint: >-
+          {{ ['cilium', cilium_version, 'ipam=kubernetes', 'hubble=true',
+              'operator=1'] | join('|') | hash('sha256') }}
+
+    - name: Attendre les nœuds Kubernetes
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: nodes
+        readiness_command: kubectl wait --for=condition=Ready nodes --all --timeout=30s
+
+    - name: Attendre les agents Cilium
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: cilium-agents
+        readiness_command: >-
+          kubectl -n kube-system wait --for=condition=Ready pod
+          -l k8s-app=cilium --timeout=30s
+
+    - name: Attendre Cilium Operator
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: cilium-operator
+        readiness_command: kubectl -n kube-system rollout status deployment/cilium-operator --timeout=30s
+
+    - name: Attendre Hubble Relay
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: hubble-relay
+        readiness_command: kubectl -n kube-system rollout status deployment/hubble-relay --timeout=30s
+
+    - name: Attendre Hubble UI
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: hubble-ui
+        readiness_command: kubectl -n kube-system rollout status deployment/hubble-ui --timeout=30s
+
+    - name: Vérifier à nouveau l'API après Cilium
+      ansible.builtin.command:
+        cmd: "{{ kubernetes_api_ready_command }}"
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Marquer la fin de la phase Cilium
+      ansible.builtin.command: {cmd: date +%s}
+      register: cilium_phase_ended_at
+      changed_when: false
+
+    - name: Afficher la durée Cilium
+      ansible.builtin.debug:
+        msg: "PHASE cilium/hubble : {{ cilium_phase_ended_at.stdout | int - cilium_phase_started_at.stdout | int }} s"
+
+    - name: Marquer le début de la phase Flux
+      ansible.builtin.command: {cmd: date +%s}
+      register: flux_phase_started_at
+      changed_when: false
+
+    - name: Réconcilier Flux Operator
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: flux-operator
+        helm_release_namespace: flux-system
+        helm_release_chart: oci://quay.io/fluxoperatordev/charts/flux-operator
+        helm_release_version: "{{ flux_operator_version }}"
+        helm_release_timeout: 15m
+        helm_release_args: []
+        helm_release_fingerprint: >-
+          {{ ['flux-operator', flux_operator_version] | join('|') | hash('sha256') }}
+
+    - name: Attendre Flux Operator
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: flux-operator
+        readiness_command: kubectl -n flux-system rollout status deployment/flux-operator --timeout=30s
+
+    - name: Déclarer FluxInstance
+      ansible.builtin.copy:
+        dest: "{{ staging_manifest_dir }}/flux-instance.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: fluxcd.controlplane.io/v1
+          kind: FluxInstance
+          metadata:
+            name: flux
+            namespace: flux-system
+          spec:
+            distribution:
+              version: "{{ flux_distribution_version }}"
+              registry: quay.io/fluxoperatordev
+            components:
+              - source-controller
+              - kustomize-controller
+              - helm-controller
+              - notification-controller
+              - image-reflector-controller
+              - image-automation-controller
+            cluster:
+              type: kubernetes
+
+    - name: Réconcilier FluxInstance
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ staging_manifest_dir }}/flux-instance.yaml"
+      environment: "{{ kube_env }}"
+      register: flux_instance_apply
+      changed_when: >-
+        'created' in flux_instance_apply.stdout or
+        'configured' in flux_instance_apply.stdout
+
+    - name: Attendre les contrôleurs Flux
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: flux-controllers
+        readiness_command: >-
+          kubectl -n flux-system wait --for=condition=Available deployment
+          --all --timeout=30s
+
+    - name: Marquer la fin de la phase Flux
+      ansible.builtin.command: {cmd: date +%s}
+      register: flux_phase_ended_at
+      changed_when: false
+
+    - name: Afficher la durée Flux
+      ansible.builtin.debug:
+        msg: "PHASE flux : {{ flux_phase_ended_at.stdout | int - flux_phase_started_at.stdout | int }} s"
+
+    - name: Marquer le début de la phase Tekton
+      ansible.builtin.command: {cmd: date +%s}
+      register: tekton_phase_started_at
+      changed_when: false
+
+    - name: Calculer l'empreinte du manifeste Tekton vendorisé
+      ansible.builtin.set_fact:
+        tekton_manifest_fingerprint: >-
+          {{ lookup('file', repository_root ~ '/platform/tekton/vendor/pipeline-' ~
+                    tekton_version ~ '.yaml') | hash('sha256') }}
+
+    - name: Lire l'empreinte Tekton appliquée
+      ansible.builtin.stat:
+        path: "{{ staging_kubectl_state_dir }}/tekton-pipelines.sha256"
+      register: tekton_state_file
+
+    - name: Charger l'empreinte Tekton appliquée
+      ansible.builtin.slurp:
+        src: "{{ staging_kubectl_state_dir }}/tekton-pipelines.sha256"
+      register: tekton_state_content
+      when: tekton_state_file.stat.exists
+
+    - name: Vérifier la présence du contrôleur Tekton
+      ansible.builtin.command:
+        cmd: kubectl -n tekton-pipelines get deployment tekton-pipelines-controller
+      environment: "{{ kube_env }}"
+      register: tekton_controller_exists
+      changed_when: false
+      failed_when: false
+
+    - name: Déterminer si Tekton doit être réconcilié
+      ansible.builtin.set_fact:
+        tekton_reconcile_required: >-
+          {{ tekton_controller_exists.rc != 0 or
+             not tekton_state_file.stat.exists or
+             ((tekton_state_content.content | default('') | b64decode | trim)
+              != tekton_manifest_fingerprint) }}
+
+    - name: Appliquer Tekton depuis le vendor piné
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ staging_manifest_dir }}/pipeline-{{ tekton_version }}.yaml"
+      environment: "{{ kube_env }}"
+      register: tekton_apply
+      changed_when: >-
+        'created' in tekton_apply.stdout or
+        'configured' in tekton_apply.stdout
+      when: tekton_reconcile_required
+
+    - name: Afficher le SKIP Tekton
+      ansible.builtin.debug:
+        msg: "SKIP Tekton : manifeste v{{ tekton_version }} déjà conforme."
+      when: not tekton_reconcile_required
+
+    - name: Mémoriser l'empreinte Tekton
+      ansible.builtin.copy:
+        dest: "{{ staging_kubectl_state_dir }}/tekton-pipelines.sha256"
+        content: "{{ tekton_manifest_fingerprint }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+      when: tekton_reconcile_required
+
+    - name: Attendre Tekton Pipelines
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: tekton
+        readiness_command: >-
+          kubectl -n tekton-pipelines wait --for=condition=Available deployment
+          --all --timeout=30s
+
+    - name: Marquer la fin de la phase Tekton
+      ansible.builtin.command: {cmd: date +%s}
+      register: tekton_phase_ended_at
+      changed_when: false
+
+    - name: Afficher la durée Tekton
+      ansible.builtin.debug:
+        msg: "PHASE tekton : {{ tekton_phase_ended_at.stdout | int - tekton_phase_started_at.stdout | int }} s"
+
+    - name: Marquer le début de la phase Kyverno
+      ansible.builtin.command: {cmd: date +%s}
+      register: kyverno_phase_started_at
+      changed_when: false
+
+    - name: Réconcilier Kyverno
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: kyverno
+        helm_release_namespace: kyverno
+        helm_release_chart: kyverno/kyverno
+        helm_release_version: "{{ kyverno_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ staging_manifest_dir }}/kyverno-values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['kyverno', kyverno_version,
+              lookup('file', repository_root ~ '/security/kyverno/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+
+    - name: Attendre les contrôleurs Kyverno
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: kyverno
+        readiness_command: >-
+          kubectl -n kyverno wait --for=condition=Available deployment
+          --all --timeout=30s
+
+    - name: Marquer la fin de la phase Kyverno
+      ansible.builtin.command: {cmd: date +%s}
+      register: kyverno_phase_ended_at
+      changed_when: false
+
+    - name: Afficher la durée Kyverno
+      ansible.builtin.debug:
+        msg: "PHASE kyverno : {{ kyverno_phase_ended_at.stdout | int - kyverno_phase_started_at.stdout | int }} s"
+
+    - name: Marquer le début de la phase Tetragon
+      ansible.builtin.command: {cmd: date +%s}
+      register: tetragon_phase_started_at
+      changed_when: false
+
+    - name: Inspecter les valeurs du chart Tetragon sans les modifier
+      ansible.builtin.command:
+        cmd: helm show values cilium/tetragon --version "{{ tetragon_version }}"
+      environment: "{{ kube_env }}"
+      register: tetragon_default_values
+      changed_when: false
+
+    - name: Réconcilier Tetragon
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: tetragon
+        helm_release_namespace: kube-system
+        helm_release_chart: cilium/tetragon
+        helm_release_version: "{{ tetragon_version }}"
+        helm_release_timeout: 15m
+        helm_release_args: []
+        helm_release_fingerprint: >-
+          {{ ['tetragon', tetragon_version] | join('|') | hash('sha256') }}
+
+    - name: Attendre Tetragon
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: tetragon
+        readiness_command: >-
+          kubectl -n kube-system wait --for=condition=Ready pod
+          -l app.kubernetes.io/name=tetragon --timeout=30s
+
+    - name: Marquer la fin de la phase Tetragon
+      ansible.builtin.command: {cmd: date +%s}
+      register: tetragon_phase_ended_at
+      changed_when: false
+
+    - name: Afficher la durée Tetragon
+      ansible.builtin.debug:
+        msg: "PHASE tetragon : {{ tetragon_phase_ended_at.stdout | int - tetragon_phase_started_at.stdout | int }} s"
+
+    - name: Marquer le début de la phase observabilité
+      ansible.builtin.command: {cmd: date +%s}
+      register: observability_phase_started_at
+      changed_when: false
+      when: staging_install_observability | bool
+
+    - name: Réconcilier kube-prometheus-stack
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: kube-prometheus-stack
+        helm_release_namespace: monitoring
+        helm_release_chart: prometheus-community/kube-prometheus-stack
+        helm_release_version: "{{ prometheus_stack_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ staging_manifest_dir }}/prometheus-values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['prometheus', prometheus_stack_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/prometheus/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: staging_install_observability | bool
+
+    - name: Attendre kube-prometheus-stack
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: prometheus-stack
+        readiness_command: >-
+          kubectl -n monitoring wait --for=condition=Available deployment
+          --all --timeout=30s
+      when: staging_install_observability | bool
+
+    - name: Attendre Prometheus et Grafana
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: "{{ item }}"
+        readiness_command: >-
+          kubectl -n monitoring wait --for=condition=Ready pod
+          -l {{ item }} --timeout=30s
+      loop:
+        - app.kubernetes.io/name=prometheus
+        - app.kubernetes.io/name=grafana
+      when: staging_install_observability | bool
+
+    - name: Réconcilier Loki
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: loki
+        helm_release_namespace: observability
+        helm_release_chart: grafana-community/loki
+        helm_release_version: "{{ loki_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ staging_manifest_dir }}/loki-values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['loki', loki_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/loki/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: staging_install_observability | bool
+
+    - name: Attendre Loki
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: loki
+        readiness_command: >-
+          kubectl -n observability wait --for=condition=Ready pod
+          -l app.kubernetes.io/name=loki --timeout=30s
+      when: staging_install_observability | bool
+
+    - name: Réconcilier la datasource Loki Grafana
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ staging_manifest_dir }}/grafana-loki-datasource.yaml"
+      environment: "{{ kube_env }}"
+      register: grafana_loki_datasource
+      changed_when: >-
+        'created' in grafana_loki_datasource.stdout or
+        'configured' in grafana_loki_datasource.stdout
+      when: staging_install_observability | bool
+
+    - name: Réconcilier Tempo
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: tempo
+        helm_release_namespace: observability
+        helm_release_chart: grafana-community/tempo
+        helm_release_version: "{{ tempo_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ staging_manifest_dir }}/tempo-values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['tempo', tempo_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/tempo/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: staging_install_observability | bool
+
+    - name: Attendre Tempo
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: tempo
+        readiness_command: kubectl -n observability rollout status statefulset/tempo --timeout=30s
+      when: staging_install_observability | bool
+
+    - name: Réconcilier la datasource Tempo Grafana
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ staging_manifest_dir }}/grafana-tempo-datasource.yaml"
+      environment: "{{ kube_env }}"
+      register: grafana_tempo_datasource
+      changed_when: >-
+        'created' in grafana_tempo_datasource.stdout or
+        'configured' in grafana_tempo_datasource.stdout
+      when: staging_install_observability | bool
+
+    - name: Réconcilier OpenTelemetry Collector
+      ansible.builtin.include_tasks: "{{ repository_root }}/platform/ansible/tasks/helm-release.yml"
+      vars:
+        helm_release_name: opentelemetry-collector
+        helm_release_namespace: observability
+        helm_release_chart: open-telemetry/opentelemetry-collector
+        helm_release_version: "{{ otel_collector_version }}"
+        helm_release_timeout: 15m
+        helm_release_args:
+          - --values
+          - "{{ staging_manifest_dir }}/opentelemetry-values.yaml"
+        helm_release_fingerprint: >-
+          {{ ['opentelemetry', otel_collector_version,
+              lookup('file', repository_root ~
+                     '/platform/observability/opentelemetry/values.yaml') |
+              hash('sha256')] | join('|') | hash('sha256') }}
+      when: staging_install_observability | bool
+
+    - name: Attendre OpenTelemetry Collector
+      ansible.builtin.include_tasks: "{{ repository_root }}/infrastructure/ansible/tasks/readiness.yml"
+      vars:
+        readiness_name: opentelemetry
+        readiness_command: >-
+          kubectl -n observability wait --for=condition=Ready pod
+          -l app.kubernetes.io/name=opentelemetry-collector --timeout=30s
+      when: staging_install_observability | bool
+
+    - name: Marquer la fin de la phase observabilité
+      ansible.builtin.command: {cmd: date +%s}
+      register: observability_phase_ended_at
+      changed_when: false
+      when: staging_install_observability | bool
+
+    - name: Afficher la durée observabilité
+      ansible.builtin.debug:
+        msg: "PHASE observability : {{ observability_phase_ended_at.stdout | int - observability_phase_started_at.stdout | int }} s"
+      when: staging_install_observability | bool
+
+    - name: Créer le namespace ecommerce de manière déclarative
+      ansible.builtin.command:
+        cmd: kubectl create namespace ecommerce --dry-run=client -o yaml
+      environment: "{{ kube_env }}"
+      register: ecommerce_namespace_yaml
+      changed_when: false
+
+    - name: Réconcilier le namespace ecommerce
+      ansible.builtin.command:
+        cmd: kubectl diff -f -
+        stdin: "{{ ecommerce_namespace_yaml.stdout }}"
+      environment: "{{ kube_env }}"
+      register: ecommerce_namespace_diff
+      changed_when: false
+      failed_when: ecommerce_namespace_diff.rc not in [0, 1]
+
+    - name: Appliquer le namespace ecommerce si nécessaire
+      ansible.builtin.command:
+        cmd: kubectl apply -f -
+        stdin: "{{ ecommerce_namespace_yaml.stdout }}"
+      environment: "{{ kube_env }}"
+      register: ecommerce_namespace_apply
+      when: ecommerce_namespace_diff.rc == 1
+      changed_when: true
+
+    - name: Déclarer les politiques de sécurité staging
+      ansible.builtin.copy:
+        dest: "{{ staging_manifest_dir }}/security-policies.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: default-deny
+            namespace: ecommerce
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Ingress
+              - Egress
+          ---
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          metadata:
+            name: disallow-privileged
+          spec:
+            validationFailureAction: Audit
+            background: true
+            rules:
+              - name: privileged-containers
+                match:
+                  any:
+                    - resources:
+                        kinds:
+                          - Pod
+                validate:
+                  message: "Les conteneurs privileged sont interdits."
+                  pattern:
+                    spec:
+                      containers:
+                        - securityContext:
+                            privileged: "false"
+
+    - name: Réconcilier les politiques de sécurité
+      ansible.builtin.command:
+        cmd: kubectl diff -f "{{ staging_manifest_dir }}/security-policies.yaml"
+      environment: "{{ kube_env }}"
+      register: security_diff
+      changed_when: false
+      failed_when: security_diff.rc not in [0, 1]
+
+    - name: Appliquer les politiques de sécurité si nécessaire
+      ansible.builtin.command:
+        cmd: kubectl apply -f "{{ staging_manifest_dir }}/security-policies.yaml"
+      environment: "{{ kube_env }}"
+      register: security_apply
+      when: security_diff.rc == 1
+      changed_when: true
+
+    - name: Collecter l'état final Kubernetes
+      ansible.builtin.command:
+        cmd: kubectl get pods -A -o wide
+      environment: "{{ kube_env }}"
+      register: cluster_status
+      changed_when: false
+
+    - name: Afficher le résultat du bootstrap staging
+      ansible.builtin.debug:
+        msg:
+          - "Cluster : {{ staging_cluster_name }}"
+          - "Kubeconfig distant : {{ staging_kubeconfig_path }}"
+          - "Image Kind : {{ kind_node_image }}"
+          - "Observabilité : {{ 'installée' if staging_install_observability | bool else 'désactivée' }}"
+          - "Tetragon chart values inspectées : {{ tetragon_default_values.rc == 0 }}"
+          - "{{ cluster_status.stdout }}"
+
+  post_tasks:
+    - name: Mesurer la durée totale du bootstrap
+      ansible.builtin.command:
+        cmd: date +%s
+      register: bootstrap_ended_at
+      changed_when: false
+
+    - name: Afficher la durée totale du bootstrap
+      ansible.builtin.debug:
+        msg: "DURÉE totale bootstrap staging : {{ bootstrap_ended_at.stdout | int - bootstrap_started_at.stdout | int }} s"

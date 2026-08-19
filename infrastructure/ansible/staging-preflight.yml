@@ -1,0 +1,77 @@
+---
+- name: Préflight staging non mutatif
+  hosts: staging
+  become: true
+  gather_facts: true
+  gather_subset:
+    - min
+    - distribution
+
+  tasks:
+    - name: Verrouiller le préflight sur l'hôte staging autorisé
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'ecommerce-staging'
+          - ansible_host | default('') == '178.104.138.200'
+        fail_msg: >-
+          Ce préflight ne peut cibler que ecommerce-staging (178.104.138.200) ;
+          cible reçue : {{ inventory_hostname }} / {{ ansible_host | default('inconnue') }}.
+
+    - name: Vérifier la cible Ubuntu attendue
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Ubuntu'
+          - ansible_facts.distribution_major_version == '24'
+        fail_msg: >-
+          Cible inattendue : {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}.
+
+    - name: Vérifier cgroup v2
+      ansible.builtin.command:
+        cmd: stat -fc %T /sys/fs/cgroup
+      register: cgroup_filesystem
+      changed_when: false
+
+    - name: Refuser un hôte sans cgroup v2
+      ansible.builtin.assert:
+        that: cgroup_filesystem.stdout | trim == 'cgroup2fs'
+        fail_msg: "cgroup v2 requis ; détecté {{ cgroup_filesystem.stdout | trim }}."
+
+    - name: Vérifier l'espace disque disponible sans modifier l'hôte
+      ansible.builtin.command:
+        cmd: df -Pk /
+      register: root_disk
+      changed_when: false
+
+    - name: Lire les outils éventuellement déjà installés
+      ansible.builtin.command:
+        cmd: "{{ item }}"
+      loop:
+        - docker --version
+        - kubectl version --client --output=json
+        - helm version --short
+        - kind version
+      register: installed_tools
+      changed_when: false
+      failed_when: false
+
+    - name: Lire l'état Kind sans créer ni supprimer de cluster
+      ansible.builtin.command:
+        cmd: kind get clusters
+      register: kind_clusters
+      changed_when: false
+      failed_when: false
+
+    - name: Vérifier le kubeconfig staging existant sans le créer
+      ansible.builtin.stat:
+        path: /var/lib/ecommerce-staging/kubeconfig
+      register: staging_kubeconfig
+
+    - name: Afficher le rapport de préflight
+      ansible.builtin.debug:
+        msg:
+          - "cgroup : {{ cgroup_filesystem.stdout | trim }}"
+          - "disque racine : {{ root_disk.stdout_lines | last }}"
+          - "outils présents : {{ installed_tools.results | map(attribute='item') | list }}"
+          - "clusters Kind : {{ kind_clusters.stdout_lines | default([]) }}"
+          - "kubeconfig staging présent : {{ staging_kubeconfig.stat.exists }}"
