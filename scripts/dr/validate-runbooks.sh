@@ -30,15 +30,11 @@ validate_runbook() {
   [ -f "$file" ] || dr_fail "runbook file not found: $file"
   : >"$MISSING_FILE"
 
-  old_ifs=$IFS
-  IFS='
-'
-  for section in $required_sections; do
+  printf '%s\n' "$required_sections" | while IFS= read -r section; do
     if ! grep -F -q "$section" "$file"; then
-      printf '%s\n' "$section" >>"$MISSING_FILE"
+      printf '%s\n' "$section"
     fi
-  done
-  IFS=$old_ifs
+  done >"$MISSING_FILE"
 
   if [ -s "$MISSING_FILE" ]; then
     dr_warn "missing required sections in $file:"
