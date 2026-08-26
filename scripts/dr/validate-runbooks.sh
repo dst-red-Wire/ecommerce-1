@@ -21,30 +21,33 @@ Metrics to record
 Expected evidence
 Escalation when RTO is exceeded'
 
+MISSING_FILE=${TMPDIR:-/tmp}/dr-runbook-missing.$$
+trap 'rm -f "$MISSING_FILE"' EXIT HUP INT TERM
+
 validate_runbook() {
   file=$1
 
   [ -f "$file" ] || dr_fail "runbook file not found: $file"
+  : >"$MISSING_FILE"
 
-  missing=0
-  printf '%s\n' "$required_sections" | while IFS= read -r section; do
-    if grep -F -q "$section" "$file"; then
-      :
-    else
-      printf '%s\n' "$section"
+  old_ifs=$IFS
+  IFS='
+'
+  for section in $required_sections; do
+    if ! grep -F -q "$section" "$file"; then
+      printf '%s\n' "$section" >>"$MISSING_FILE"
     fi
-  done >"${TMPDIR:-/tmp}/dr-runbook-missing.$$"
+  done
+  IFS=$old_ifs
 
-  if [ -s "${TMPDIR:-/tmp}/dr-runbook-missing.$$" ]; then
+  if [ -s "$MISSING_FILE" ]; then
     dr_warn "missing required sections in $file:"
     while IFS= read -r section; do
       dr_warn "- $section"
-    done <"${TMPDIR:-/tmp}/dr-runbook-missing.$$"
-    missing=1
+    done <"$MISSING_FILE"
+    dr_fail "runbook validation failed: $file"
   fi
 
-  rm -f "${TMPDIR:-/tmp}/dr-runbook-missing.$$"
-  [ "$missing" -eq 0 ] || dr_fail "runbook validation failed: $file"
   pass "runbook structure valid: $file"
 }
 
