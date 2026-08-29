@@ -1,0 +1,359 @@
+---
+- name: Reproduire l'environnement frontend NOMA local
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    repository_root: "{{ playbook_dir }}/../.."
+    frontend_root: "{{ repository_root }}/frontend"
+
+    # Seul bootstrap pin défini ici.
+    # Node, pnpm et Playwright sont lus depuis les sources frontend.
+    nvm_version: v0.40.6
+
+    playwright_native_deps:
+      version: "1.62.1"
+      packages:
+        # Outils et fontes Playwright
+        - xvfb
+        - fonts-noto-color-emoji
+        - fonts-unifont
+        - libfontconfig1
+        - libfreetype6
+        - xfonts-cyrillic
+        - xfonts-scalable
+        - fonts-liberation
+        - fonts-ipafont-gothic
+        - fonts-wqy-zenhei
+        - fonts-tlwg-loma-otf
+        - fonts-freefont-ttf
+
+        # Dépendances Chromium Playwright 1.62.1 / Ubuntu 24.04 x64
+        - libasound2t64
+        - libatk-bridge2.0-0t64
+        - libatk1.0-0t64
+        - libatspi2.0-0t64
+        - libcairo2
+        - libcups2t64
+        - libdbus-1-3
+        - libdrm2
+        - libgbm1
+        - libglib2.0-0t64
+        - libnspr4
+        - libnss3
+        - libpango-1.0-0
+        - libx11-6
+        - libxcb1
+        - libxcomposite1
+        - libxdamage1
+        - libxext6
+        - libxfixes3
+        - libxkbcommon0
+        - libxrandr2
+
+        # Bootstrap
+        - ca-certificates
+        - curl
+        - git
+        - xz-utils
+  pre_tasks:
+    - name: Vérifier Ubuntu 24.04 x86_64
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+          - ansible_facts.distribution == "Ubuntu"
+          - ansible_facts.distribution_major_version == "24"
+          - ansible_facts.architecture in ["x86_64", "amd64"]
+        fail_msg: >-
+          Le bootstrap frontend est validé pour Ubuntu 24.04 x86_64.
+          Détecté : {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}
+          / {{ ansible_facts.architecture }}.
+
+    - name: Lire la version du noyau
+      ansible.builtin.command:
+        cmd: cat /proc/sys/kernel/osrelease
+      register: kernel_release
+      changed_when: false
+      check_mode: false
+
+    - name: Vérifier WSL2
+      ansible.builtin.assert:
+        that:
+          - "'microsoft' in (kernel_release.stdout | lower)"
+        fail_msg: "Ce playbook local doit être exécuté dans WSL2."
+
+    - name: Vérifier les sources frontend
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ frontend_root }}/package.json"
+        - "{{ frontend_root }}/pnpm-lock.yaml"
+        - "{{ frontend_root }}/.nvmrc"
+        - "{{ frontend_root }}/.node-version"
+      register: frontend_sources
+
+    - name: Refuser un frontend incomplet
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: "Source frontend absente : {{ item.item }}"
+      loop: "{{ frontend_sources.results }}"
+
+    - name: Charger package.json
+      ansible.builtin.set_fact:
+        frontend_package_json: >-
+          {{ lookup('file', frontend_root ~ '/package.json') | from_json }}
+
+    - name: Charger les versions depuis les sources de vérité
+      ansible.builtin.set_fact:
+        node_version: "{{ lookup('file', frontend_root ~ '/.nvmrc') | trim }}"
+        node_version_secondary: >-
+          {{ lookup('file', frontend_root ~ '/.node-version') | trim }}
+        pnpm_version: >-
+          {{ frontend_package_json['packageManager']
+             | regex_replace('^pnpm@', '') }}
+        playwright_version: >-
+          {{ frontend_package_json['devDependencies']['@playwright/test'] }}
+
+    - name: Vérifier la cohérence des pins
+      ansible.builtin.assert:
+        that:
+          - node_version | length > 0
+          - node_version == node_version_secondary
+          - frontend_package_json['packageManager'] is match('^pnpm@[0-9]')
+          - pnpm_version | length > 0
+          - playwright_version | length > 0
+          - playwright_version == playwright_native_deps.version
+        fail_msg: >-
+          Pins frontend incohérents :
+          .nvmrc={{ node_version }},
+          .node-version={{ node_version_secondary }},
+          packageManager={{ frontend_package_json['packageManager'] }}.
+
+    - name: Déterminer l'utilisateur de développement
+      ansible.builtin.set_fact:
+        frontend_user: >-
+          {{
+            lookup('env', 'SUDO_USER')
+            | default(lookup('env', 'USER'), true)
+          }}
+
+    - name: Charger le compte utilisateur
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ frontend_user }}"
+
+    - name: Définir les chemins utilisateur et runtime
+      ansible.builtin.set_fact:
+        frontend_home: "{{ getent_passwd[frontend_user][4] }}"
+        nvm_dir: "{{ getent_passwd[frontend_user][4] }}/.nvm"
+        node_bin: >-
+          {{ getent_passwd[frontend_user][4] }}/.nvm/versions/node/v{{ node_version }}/bin
+
+  tasks:
+    - name: Installer les dépendances Linux Chromium
+      become: true
+      ansible.builtin.apt:
+        name: "{{ playwright_native_deps.packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Installer ou réconcilier NVM
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.git:
+        repo: https://github.com/nvm-sh/nvm.git
+        dest: "{{ nvm_dir }}"
+        version: "{{ nvm_version }}"
+        depth: 1
+        update: true
+        force: false
+
+    - name: Vérifier si Node exact est présent
+      ansible.builtin.stat:
+        path: "{{ node_bin }}/node"
+      register: node_binary
+
+    - name: Installer Node depuis .nvmrc
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          export NVM_DIR="{{ nvm_dir }}"
+          . "$NVM_DIR/nvm.sh"
+          nvm install "{{ node_version }}"
+        executable: /bin/bash
+      environment:
+        HOME: "{{ frontend_home }}"
+      changed_when: true
+      when: not node_binary.stat.exists
+
+    - name: Configurer la version Node NVM par défaut
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.shell:
+        cmd: |
+          set -euo pipefail
+          export NVM_DIR="{{ nvm_dir }}"
+          . "$NVM_DIR/nvm.sh"
+
+          current_default="$(nvm alias default 2>/dev/null || true)"
+
+          if printf '%s\n' "$current_default" | grep -Fq "{{ node_version }}"; then
+            exit 0
+          fi
+
+          nvm alias default "{{ node_version }}"
+          printf 'CHANGED\n'
+        executable: /bin/bash
+      environment:
+        HOME: "{{ frontend_home }}"
+      register: nvm_default
+      changed_when: "'CHANGED' in nvm_default.stdout"
+
+    - name: Activer Corepack
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/corepack enable"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    - name: Lire la version pnpm active
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/pnpm --version"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      register: pnpm_current
+      changed_when: false
+      check_mode: false
+      failed_when: false
+
+    - name: Activer le pnpm déclaré dans package.json
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: >-
+          {{ node_bin }}/corepack prepare
+          pnpm@{{ pnpm_version }} --activate
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      changed_when: true
+      when: >-
+        pnpm_current.rc != 0 or
+        (pnpm_current.stdout | trim) != pnpm_version
+
+    - name: Installer les dépendances depuis le lockfile
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/pnpm install --frozen-lockfile"
+        chdir: "{{ frontend_root }}"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+        CI: "1"
+      register: pnpm_install
+      changed_when: "'Already up to date' not in pnpm_install.stdout"
+
+    - name: Installer Chromium correspondant à Playwright
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/pnpm exec playwright install chromium"
+        chdir: "{{ frontend_root }}"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      changed_when: false
+
+    - name: Vérifier Node
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/node --version"
+      register: node_check
+      changed_when: false
+      check_mode: false
+
+    - name: Vérifier pnpm
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/pnpm --version"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      register: pnpm_check
+      changed_when: false
+      check_mode: false
+
+    - name: Vérifier Playwright
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        cmd: "{{ node_bin }}/pnpm exec playwright --version"
+        chdir: "{{ frontend_root }}"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      register: playwright_check
+      changed_when: false
+      check_mode: false
+
+    - name: Vérifier réellement Chromium
+      become: true
+      become_user: "{{ frontend_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ node_bin }}/node"
+          - -e
+          - >-
+            const { chromium } = require('@playwright/test');
+            (async () => {
+              const browser = await chromium.launch({ headless: true });
+              await browser.close();
+              console.log('chromium-ok');
+            })().catch(error => {
+              console.error(error);
+              process.exit(1);
+            });
+        chdir: "{{ frontend_root }}"
+      environment:
+        HOME: "{{ frontend_home }}"
+        PATH: "{{ node_bin }}:{{ ansible_env.PATH }}"
+      register: chromium_check
+      changed_when: false
+      check_mode: false
+
+    - name: Refuser une toolchain différente des sources de vérité
+      ansible.builtin.assert:
+        that:
+          - (node_check.stdout | trim) == ('v' ~ node_version)
+          - (pnpm_check.stdout | trim) == pnpm_version
+          - >-
+            (playwright_check.stdout | trim) ==
+            ('Version ' ~ playwright_version)
+          - "'chromium-ok' in chromium_check.stdout"
+        fail_msg: >-
+          La toolchain locale installée ne correspond pas aux
+          sources de vérité du frontend.
+
+    - name: Afficher la toolchain reproductible
+      ansible.builtin.debug:
+        msg:
+          - "Node : {{ node_check.stdout | trim }}"
+          - "pnpm : {{ pnpm_check.stdout | trim }}"
+          - "Playwright : {{ playwright_check.stdout | trim }}"
+          - "Chromium : runtime PASS"
+          - "Frontend : {{ frontend_root }}"
