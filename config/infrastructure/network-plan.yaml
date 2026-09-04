@@ -1,0 +1,53 @@
+version: 2
+status: exact
+address_domains:
+  preprod: 10.240.0.0/16
+  prod-a: 10.241.0.0/16
+  prod-b: 10.242.0.0/16
+  mgmt: 10.243.0.0/16
+segments:
+  1: mgmt
+  2: k8s-nodes
+  3: storage
+  4: replication
+  5: backup
+  6: edge-dmz
+vlans:
+  preprod:
+    401: {name: mgmt, cidr: 10.240.1.0/24}
+    402: {name: k8s-nodes, cidr: 10.240.2.0/24}
+    403: {name: storage, cidr: 10.240.3.0/24}
+    404: {name: replication, cidr: 10.240.4.0/24}
+    405: {name: backup, cidr: 10.240.5.0/24}
+    406: {name: edge-dmz, cidr: 10.240.6.0/24}
+  prod-a:
+    401: {name: mgmt, cidr: 10.241.1.0/24}
+    402: {name: k8s-nodes, cidr: 10.241.2.0/24}
+    403: {name: storage, cidr: 10.241.3.0/24}
+    404: {name: replication, cidr: 10.241.4.0/24}
+    405: {name: backup, cidr: 10.241.5.0/24}
+    406: {name: edge-dmz, cidr: 10.241.6.0/24}
+  prod-b:
+    401: {name: mgmt, cidr: 10.242.1.0/24}
+    402: {name: k8s-nodes, cidr: 10.242.2.0/24}
+    403: {name: storage, cidr: 10.242.3.0/24}
+    404: {name: replication, cidr: 10.242.4.0/24}
+    405: {name: backup, cidr: 10.242.5.0/24}
+    406: {name: edge-dmz, cidr: 10.242.6.0/24}
+kubernetes:
+  preprod: {pod_cidr: 10.250.0.0/16, service_cidr: 10.251.0.0/16}
+  prod-a: {pod_cidr: 10.252.0.0/16, service_cidr: 10.253.0.0/16}
+  prod-b: {pod_cidr: 10.254.0.0/16, service_cidr: 10.255.0.0/16}
+allocation_policy:
+  gateway_and_vips: .1-.9
+  physical_hosts: .10-.39
+  infrastructure_vms: .40-.99
+  k8s_nodes_reserved: .100-.199
+  temporary_jit: .200-.239
+  future_reserved: .240-.254
+validation:
+  require_unique_ips: true
+  require_non_overlapping_cidrs: true
+  require_site_isolation: true
+  require_underlay_pod_service_separation: true
+  public_ips_runtime_injected_only: true
