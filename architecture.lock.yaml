@@ -66,12 +66,37 @@ supply_chain:
   immutable_images: true
   forbid_latest: true
 
+topology_contracts:
+  preprod: docs/architecture/PREPROD_TOPOLOGY_V2.md
+  prod: docs/architecture/PROD_TOPOLOGY_V2.md
+  network_ipam: docs/architecture/NETWORK_IPAM_CONTRACT.md
+  storage: docs/architecture/STORAGE_TOPOLOGY_V2.md
+  service_ownership: docs/architecture/SERVICE_OWNERSHIP_MATRIX.md
+  data_ownership: docs/architecture/DATA_OWNERSHIP_MATRIX.md
+  events: docs/architecture/EVENT_CONTRACT_MATRIX.md
+  security_zones: docs/architecture/SECURITY_TRUST_ZONES.md
+  deployment_dag: docs/architecture/DEPLOYMENT_DAG.md
+
+machine_contracts:
+  preprod_inventory: config/infrastructure/preprod-inventory.yaml
+  prod_inventory: config/infrastructure/prod-inventory.yaml
+  network_plan: config/infrastructure/network-plan.yaml
+
+prod_certified_topology:
+  physical_hosts_total: 6
+  physical_hosts_per_site: 3
+  control_planes_per_site: 3
+  workers_per_site: 5
+  data_workers_per_site: 3
+  general_workers_per_site: 2
+
 superseded:
   fluxcd: rancher-fleet
   flagger: argo-rollouts
   minio-community: seaweedfs-s3
   loki: opensearch-logs
   splunk: wazuh-opensearch
+  prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
 
 build_milestones:
   - M0-architecture-sync
