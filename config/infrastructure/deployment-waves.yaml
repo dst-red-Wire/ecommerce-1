@@ -1,0 +1,52 @@
+version: 2
+status: exact
+waves:
+  - id: 00-underlay
+    requires: []
+    components: [network, dns-prerequisites, time-sync, image-mirrors]
+  - id: 10-rke2
+    requires: [00-underlay]
+    components: [rke2-control-plane, rke2-workers]
+  - id: 20-network-security
+    requires: [10-rke2]
+    components: [cilium, hubble, pod-security, kyverno, tetragon]
+  - id: 30-gitops-identity
+    requires: [20-network-security]
+    components: [rancher-fleet, spire, istio]
+  - id: 40-secrets-registry-ci
+    requires: [30-gitops-identity]
+    components: [openbao, external-secrets, harbor, tekton]
+  - id: 50-observability
+    requires: [40-secrets-registry-ci]
+    components: [opentelemetry, prometheus, alertmanager, grafana, fluent-bit, data-prepper, opensearch-logs, wazuh]
+  - id: 60-stateful
+    requires: [40-secrets-registry-ci, 20-network-security]
+    parallel_groups:
+      - [cloudnativepg, strimzi-kafka, rabbitmq, redis, seaweedfs]
+      - [opensearch-business, apicurio]
+  - id: 70-iam-edge
+    requires: [60-stateful, 30-gitops-identity]
+    components: [keycloak, haproxy, caddy, coraza, kong, ats, istio-gateway, squid-egress]
+  - id: 80-golden-service
+    requires: [50-observability, 60-stateful, 70-iam-edge]
+    components: [product]
+  - id: 90-commerce
+    requires: [80-golden-service]
+    parallel_groups:
+      - [catalog, inventory, pricing, tax, search]
+      - [cart, fraud-risk]
+      - [shipping, tracking]
+      - [review, user-profile, notification]
+    serial_after_parallel: [order, payment, returns, billing]
+  - id: 100-frontends
+    requires: [90-commerce]
+    components: [storefront, admin]
+  - id: 110-qualification
+    requires: [100-frontends]
+    components: [smoke, security, contracts, integration, bdd, e2e, performance, chaos-dr]
+rules:
+  wait_only_on_declared_dependencies: true
+  fail_fast_on_blocking_gate: true
+  no_perf_before_prior_gates: true
+  no_chaos_dr_before_prior_gates: true
+  no_prod_promotion_from_test_state: true
