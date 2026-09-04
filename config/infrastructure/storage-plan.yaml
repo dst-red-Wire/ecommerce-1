@@ -1,0 +1,67 @@
+version: 2
+status: exact
+policies:
+  no_default_ceph: true
+  no_minio_ce: true
+  raw_data_devices: true
+  shared_rw_storage_default: false
+preprod:
+  worker-01:
+    nvme-1: localpv-a
+    nvme-2: localpv-b
+    nvme-3: conditional-rbd-rwx-campaign-only
+    nvme-4: seaweedfs-volume-1
+    nvme-5: seaweedfs-volume-2
+    nvme-6: spare
+  worker-02:
+    nvme-1: localpv-a
+    nvme-2: localpv-b
+    nvme-3: conditional-rbd-rwx-campaign-only
+    nvme-4: seaweedfs-volume-1
+    nvme-5: seaweedfs-volume-2
+    nvme-6: spare
+  worker-03:
+    nvme-1: localpv-a
+    nvme-2: localpv-b
+    nvme-3: conditional-rbd-rwx-campaign-only
+    nvme-4: seaweedfs-volume-1
+    nvme-5: seaweedfs-volume-2
+    nvme-6: spare
+prod:
+  per_data_host:
+    nvme-1: localpv-a
+    nvme-2: localpv-b
+    nvme-3: seaweedfs-volume-1
+    nvme-4: spare
+    nvme-5: seaweedfs-volume-2
+engines:
+  postgresql:
+    storage: localpv
+    replication: cloudnativepg
+    backup: barman-cloud-to-external-s3
+  kafka:
+    storage: localpv
+    replication: strimzi-kafka-native
+    inter_site: mirrormaker2
+  opensearch-business:
+    storage: localpv
+    authority: reconstructible
+  seaweedfs:
+    masters_per_site: 3
+    volume_servers_per_site: 3
+    volume_devices_per_server: 2
+    filers_min_per_site: 2
+    s3_gateways_min_per_site: 2
+    object_lock: required-by-class
+    versioning: required-by-class
+  redis:
+    topology: 3-primary-3-replica
+    authority: non-authoritative
+  rabbitmq:
+    nodes_per_site: 3
+    queue_type: quorum
+validation:
+  reject_device_reuse: true
+  reject_shared_stateful_device: true
+  reject_default_ceph: true
+  reject_minio_ce: true
