@@ -1,0 +1,86 @@
+version: 2
+status: locked-for-build
+project: ecommerce
+
+business:
+  services:
+    - catalog
+    - product
+    - inventory
+    - cart
+    - pricing
+    - tax
+    - order
+    - payment
+    - shipping
+    - tracking
+    - returns
+    - billing
+    - fraud-risk
+    - search
+    - review
+    - user-profile
+    - notification
+  frontends:
+    - storefront
+    - admin
+  forbidden_services:
+    - checkout
+
+platform:
+  kubernetes: rke2
+  node_os: rocky-linux-9
+  cni: cilium
+  mesh: istio
+  gitops: rancher-fleet
+  ci: tekton
+  progressive_delivery: argo-rollouts
+  registry: harbor
+  secrets: openbao
+  external_secrets: eso
+  workload_identity: spire
+  iam: keycloak
+
+stateful:
+  database: cloudnativepg-postgresql
+  events: strimzi-kafka-kraft
+  jobs: rabbitmq-quorum-queues
+  cache: redis-cluster
+  search: opensearch
+  object_storage: seaweedfs-s3
+
+observability:
+  telemetry: opentelemetry
+  metrics: prometheus
+  alerts: alertmanager
+  dashboards: grafana
+  log_shipper: fluent-bit
+  log_pipeline: data-prepper
+  logs: opensearch-logs
+  security: wazuh
+
+supply_chain:
+  scanner: trivy
+  sbom: syft
+  signing: cosign
+  immutable_images: true
+  forbid_latest: true
+
+superseded:
+  fluxcd: rancher-fleet
+  flagger: argo-rollouts
+  minio-community: seaweedfs-s3
+  loki: opensearch-logs
+  splunk: wazuh-opensearch
+
+build_milestones:
+  - M0-architecture-sync
+  - M1-monorepo-bootstrap
+  - M2-golden-service-product
+  - M3-preprod-infrastructure
+  - M4-platform-baseline
+  - M5-commerce-vertical-slice
+  - M6-full-application
+  - M7-qualification
+  - M8-preprod-certification
+  - M9-prod-ab
