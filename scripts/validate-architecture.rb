@@ -2,15 +2,53 @@
 # frozen_string_literal: true
 
 require "ipaddr"
+require "pathname"
 require "yaml"
 
 module ArchitectureValidator
+  class ContractLoadError < StandardError; end
+
   module_function
 
   def load_yaml(root, path)
     YAML.safe_load_file(File.join(root, path), aliases: false)
   rescue Psych::Exception => e
-    raise "#{path} is not valid YAML: #{e.message}"
+    raise ContractLoadError, "#{path} is not valid YAML: #{e.message}"
+  rescue SystemCallError => e
+    raise ContractLoadError, "#{path} cannot be loaded: #{e.message}"
+  end
+
+  def machine_contract_path(root, lock, key)
+    path = lock.fetch("machine_contracts", {}).fetch(key, nil)
+    label = "architecture.lock.yaml machine_contracts.#{key}"
+    unless path.is_a?(String) && !path.empty?
+      raise ContractLoadError, "#{label} must declare a non-empty relative path"
+    end
+    if Pathname.new(path).absolute?
+      raise ContractLoadError, "#{label} must declare a relative path: #{path.inspect}"
+    end
+
+    repository_root = File.expand_path(root)
+    resolved_path = File.expand_path(path, repository_root)
+    unless resolved_path.start_with?("#{repository_root}#{File::SEPARATOR}")
+      raise ContractLoadError, "#{label} must stay within the repository: #{path.inspect}"
+    end
+    unless File.file?(resolved_path)
+      raise ContractLoadError, "#{label} declared file does not exist: #{path}"
+    end
+
+    real_repository_root = File.realpath(repository_root)
+    real_path = File.realpath(resolved_path)
+    unless real_path.start_with?("#{real_repository_root}#{File::SEPARATOR}")
+      raise ContractLoadError, "#{label} resolves outside the repository: #{path.inspect}"
+    end
+
+    path
+  end
+
+  def load_machine_contract(root, lock, key)
+    path = machine_contract_path(root, lock, key)
+    [load_yaml(root, path), path]
   end
 
   def markdown_rows(root, path, header)
@@ -37,18 +75,22 @@ module ArchitectureValidator
 
   def validate(root)
     errors = []
-    lock = load_yaml(root, "architecture.lock.yaml")
-    ownership = load_yaml(root, "config/contracts/service-ownership.yaml")
-    events = load_yaml(root, "config/contracts/event-contracts.yaml")
-    dependencies = load_yaml(root, "config/contracts/dependency-map.yaml")
-    network = load_yaml(root, "config/infrastructure/network-plan.yaml")
-    prod = load_yaml(root, "config/infrastructure/prod-inventory.yaml")
+    begin
+      lock = load_yaml(root, "architecture.lock.yaml")
+      ownership, ownership_path = load_machine_contract(root, lock, "service_ownership")
+      events, events_path = load_machine_contract(root, lock, "event_contracts")
+      dependencies, dependencies_path = load_machine_contract(root, lock, "dependency_map")
+      network, = load_machine_contract(root, lock, "network_plan")
+      prod, = load_machine_contract(root, lock, "prod_inventory")
+    rescue ContractLoadError => e
+      return [e.message]
+    end
 
     service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
     service_sets = {
       "architecture.lock.yaml" => lock.dig("business", "services"),
-      "service-ownership.yaml" => ownership.fetch("services").keys,
-      "dependency-map.yaml" => dependencies.fetch("services").keys,
+      File.basename(ownership_path) => ownership.fetch("services").keys,
+      File.basename(dependencies_path) => dependencies.fetch("services").keys,
       "SERVICE_OWNERSHIP_MATRIX.md" => service_rows.map(&:first)
     }
     canonical_services = service_sets.values.first.sort
@@ -64,11 +106,30 @@ module ArchitectureValidator
       map = dependencies.fetch("services")[service]
       next unless map
 
-      mapped = map.fetch("sync", []) + map.fetch("sync_external", [])
-      check_equal(errors, "dependency map sync for #{service}", contract.fetch("sync_dependencies"), mapped)
+      expected_dependencies = contract.fetch("sync_dependencies")
+      expected_internal = expected_dependencies.select { |dependency| canonical_services.include?(dependency) }
+      expected_external = expected_dependencies.reject { |dependency| canonical_services.include?(dependency) }
+      check_equal(errors, "dependency map internal sync for #{service}", expected_internal, map.fetch("sync", []))
+      check_equal(errors, "dependency map external sync for #{service}", expected_external, map.fetch("sync_external", []))
     end
 
-    errors << "event-contracts.yaml status must be exact" unless events["status"] == "exact"
+    check_equal(errors, "#{File.basename(ownership_path)} forbidden.cross_database_reads", true,
+                ownership.dig("forbidden", "cross_database_reads"))
+    check_equal(errors, "#{File.basename(dependencies_path)} rules.no_cross_database_reads", true,
+                dependencies.dig("rules", "no_cross_database_reads"))
+
+    errors << "#{File.basename(events_path)} status must be exact" unless events["status"] == "exact"
+    {
+      "delivery" => "at-least-once",
+      "producer_pattern" => "transactional-outbox",
+      "consumer_idempotent" => true,
+      "global_ordering" => false,
+      "aggregate_key_ordering" => true,
+      "secrets_in_events" => "forbidden",
+      "unnecessary_pii_in_events" => "forbidden"
+    }.each do |field, expected|
+      check_equal(errors, "#{File.basename(events_path)} semantics.#{field}", expected, events.dig("semantics", field))
+    end
     event_rows = markdown_rows(root, "docs/architecture/EVENT_CONTRACT_MATRIX.md", "| Producer |")
     markdown_events = event_rows.to_h { |row| ["#{row[0]}.#{row[1]}", list(row[2])] }
     machine_events = events.fetch("events").transform_values { |entry| entry.fetch("consumers") }
@@ -120,6 +181,18 @@ module ArchitectureValidator
         allocations.each do |node, value|
           ip = IPAddr.new(value)
           errors << "#{site}/#{vlan}/#{node} is outside #{subnet}" unless subnet.include?(ip)
+          if subnet.ipv4? && ip == subnet.to_range.first
+            errors << "#{site}/#{vlan}/#{node} uses network address #{value}"
+          elsif subnet.ipv4? && ip == subnet.to_range.last
+            errors << "#{site}/#{vlan}/#{node} uses broadcast address #{value}"
+          end
+          %w[gateway_and_vips future_reserved].each do |policy|
+            range = network.fetch("allocation_policy").fetch(policy)
+            first, last = range.scan(/\d+/).map(&:to_i)
+            next unless first && last && (first..last).cover?(ip.to_i - subnet.to_range.first.to_i)
+
+            errors << "#{site}/#{vlan}/#{node} uses #{policy} reserved address #{value}"
+          end
           errors << "duplicate static IP #{value}" if seen_ips.key?(value)
           seen_ips[value] = "#{site}/#{vlan}/#{node}"
         end
@@ -142,14 +215,28 @@ module ArchitectureValidator
       end
     end
 
-    prod.fetch("sites").each do |site, spec|
-      check_equal(errors, "#{site} private block", network.fetch("address_domains").fetch(site), spec.fetch("private_block"))
-      errors << "#{site} must have 3 physical hosts" unless spec.fetch("physical_hosts").length == 3
-      errors << "#{site} must have 3 control planes" unless spec.fetch("control_planes").length == 3
-      errors << "#{site} must have 3 data workers" unless spec.fetch("data_workers").length == 3
-      errors << "#{site} must have 2 general workers" unless spec.fetch("general_workers").length == 2
-    end
     topology = lock.fetch("prod_certified_topology")
+    expected_prod_sites = network.fetch("address_domains").keys.grep(/^prod-/).sort
+    actual_prod_sites = prod.fetch("sites").keys.sort
+    check_equal(errors, "exact PROD sites", expected_prod_sites, actual_prod_sites)
+    expected_site_count = topology.fetch("physical_hosts_total") / topology.fetch("physical_hosts_per_site")
+    check_equal(errors, "exact PROD site count", expected_site_count, expected_prod_sites.length)
+
+    prod.fetch("sites").each do |site, spec|
+      next unless network.fetch("address_domains").key?(site)
+
+      check_equal(errors, "#{site} private block", network.fetch("address_domains").fetch(site), spec.fetch("private_block"))
+      check_equal(errors, "#{site} physical hosts", topology.fetch("physical_hosts_per_site"), spec.fetch("physical_hosts").length)
+      check_equal(errors, "#{site} control planes", topology.fetch("control_planes_per_site"), spec.fetch("control_planes").length)
+      check_equal(errors, "#{site} data workers", topology.fetch("data_workers_per_site"), spec.fetch("data_workers").length)
+      check_equal(errors, "#{site} general workers", topology.fetch("general_workers_per_site"), spec.fetch("general_workers").length)
+      check_equal(errors, "#{site} workers", topology.fetch("workers_per_site"),
+                  spec.fetch("data_workers").length + spec.fetch("general_workers").length)
+    end
+    total_physical_hosts = expected_prod_sites.sum do |site|
+      prod.fetch("sites").fetch(site, {}).fetch("physical_hosts", {}).length
+    end
+    check_equal(errors, "PROD total physical hosts", topology.fetch("physical_hosts_total"), total_physical_hosts)
     {
       "physical_hosts_total" => 6,
       "physical_hosts_per_site" => 3,
@@ -161,17 +248,34 @@ module ArchitectureValidator
       check_equal(errors, "prod_certified_topology.#{field}", expected, topology.fetch(field))
     end
 
-    active_contract_checks = [
-      ["platform.gitops", lock.dig("platform", "gitops"), "rancher-fleet"],
-      ["platform.progressive_delivery", lock.dig("platform", "progressive_delivery"), "argo-rollouts"],
-      ["stateful.object_storage", lock.dig("stateful", "object_storage"), "seaweedfs-s3"],
-      ["observability.logs", lock.dig("observability", "logs"), "opensearch-logs"],
-      ["observability.security", lock.dig("observability", "security"), "wazuh"],
-      ["supply_chain.immutable_images", lock.dig("supply_chain", "immutable_images"), true],
-      ["supply_chain.forbid_latest", lock.dig("supply_chain", "forbid_latest"), true]
-    ]
-    active_contract_checks.each do |path, actual, expected|
-      check_equal(errors, path, expected, actual)
+    active_contracts = {
+      "platform" => {
+        "kubernetes" => "rke2", "node_os" => "rocky-linux-9", "cni" => "cilium", "mesh" => "istio",
+        "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
+        "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
+        "workload_identity" => "spire", "iam" => "keycloak"
+      },
+      "stateful" => {
+        "database" => "cloudnativepg-postgresql", "events" => "strimzi-kafka-kraft",
+        "jobs" => "rabbitmq-quorum-queues", "cache" => "redis-cluster", "search" => "opensearch",
+        "object_storage" => "seaweedfs-s3"
+      },
+      "observability" => {
+        "telemetry" => "opentelemetry", "metrics" => "prometheus", "alerts" => "alertmanager",
+        "dashboards" => "grafana", "log_shipper" => "fluent-bit", "log_pipeline" => "data-prepper",
+        "logs" => "opensearch-logs", "security" => "wazuh"
+      },
+      "supply_chain" => {
+        "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",
+        "immutable_images" => true, "forbid_latest" => true
+      }
+    }
+    active_contracts.each do |section, expected_contract|
+      actual_contract = lock.fetch(section)
+      check_equal(errors, "#{section} active contract keys", expected_contract.keys.sort, actual_contract.keys.sort)
+      expected_contract.each do |field, expected|
+        check_equal(errors, "#{section}.#{field}", expected, actual_contract[field])
+      end
     end
 
     network_policy = network.fetch("validation")

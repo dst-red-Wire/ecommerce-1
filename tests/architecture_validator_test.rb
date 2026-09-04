@@ -76,7 +76,7 @@ class ArchitectureValidatorTest < Minitest::Test
   def test_dependency_contract_failures
     mutations = {
       "event inputs" => lambda { |data| data["services"]["notification"]["events_in"].delete("OrderFailed.v1") },
-      "dependency map sync" => lambda { |data| data["services"]["inventory"]["sync"] = ["order"] }
+      "dependency map internal sync" => lambda { |data| data["services"]["inventory"]["sync"] = ["order"] }
     }
     mutations.each do |message, mutation|
       with_contract_copy do |root|
@@ -103,6 +103,136 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_network_and_broadcast_static_addresses
+    {
+      "network address 10.240.1.0" => "10.240.1.0",
+      "broadcast address 10.240.1.255" => "10.240.1.255"
+    }.each do |message, address|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/network-plan.yaml") do |data|
+          data["static_allocations"]["preprod"][401]["pve-01"] = address
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
+    end
+  end
+
+  def test_rejects_reserved_static_address_ranges
+    {
+      "gateway_and_vips reserved address" => "10.240.1.1",
+      "future_reserved reserved address" => "10.240.1.240"
+    }.each do |message, address|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/network-plan.yaml") do |data|
+          data["static_allocations"]["preprod"][401]["pve-01"] = address
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
+    end
+  end
+
+  def test_rejects_missing_and_additional_prod_sites
+    {
+      "missing prod-b" => lambda { |sites| sites.delete("prod-b") },
+      "additional prod-c" => lambda { |sites| sites["prod-c"] = {} }
+    }.each do |message, mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") { |data| mutation.call(data["sites"]) }
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("exact PROD sites") }, message
+      end
+    end
+  end
+
+  def test_rejects_prod_inventory_inconsistent_with_certified_totals
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") do |data|
+        data["sites"]["prod-b"]["physical_hosts"].delete("b-host-03")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("prod-b physical hosts") }
+      assert errors.any? { |error| error.include?("PROD total physical hosts") }
+    end
+  end
+
+  def test_rejects_cross_database_read_policy_corruption
+    {
+      "service-ownership.yaml" => ["config/contracts/service-ownership.yaml", %w[forbidden cross_database_reads]],
+      "dependency-map.yaml" => ["config/contracts/dependency-map.yaml", %w[rules no_cross_database_reads]]
+    }.each do |contract, (path, keys)|
+      with_contract_copy do |root|
+        mutate_yaml(root, path) { |data| data.dig(*keys[0...-1])[keys.last] = false }
+        label = "#{contract} #{keys.join('.')}"
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(label) }, label
+      end
+    end
+  end
+
+  def test_rejects_event_safety_semantics_corruption
+    mutations = {
+      "delivery" => "at-most-once",
+      "producer_pattern" => "direct-publish",
+      "consumer_idempotent" => false,
+      "global_ordering" => true,
+      "aggregate_key_ordering" => false,
+      "secrets_in_events" => "allowed",
+      "unnecessary_pii_in_events" => "allowed"
+    }
+    mutations.each do |field, value|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/contracts/event-contracts.yaml") { |data| data["semantics"][field] = value }
+        label = "event-contracts.yaml semantics.#{field}"
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(label) }, label
+      end
+    end
+  end
+
+  def test_machine_contract_path_must_exist
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["machine_contracts"]["network_plan"] = "config/infrastructure/missing-network-plan.yaml"
+      end
+      assert_includes ArchitectureValidator.validate(root),
+                      "architecture.lock.yaml machine_contracts.network_plan declared file does not exist: " \
+                      "config/infrastructure/missing-network-plan.yaml"
+    end
+  end
+
+  def test_validator_consumes_declared_machine_contract_path
+    with_contract_copy do |root|
+      alternate = "config/infrastructure/alternate-network-plan.yaml"
+      FileUtils.cp(File.join(root, "config/infrastructure/network-plan.yaml"), File.join(root, alternate))
+      mutate_yaml(root, alternate) { |data| data["validation"]["require_unique_ips"] = false }
+      mutate_yaml(root, "architecture.lock.yaml") { |data| data["machine_contracts"]["network_plan"] = alternate }
+
+      assert ArchitectureValidator.validate(root).any? do |error|
+        error.include?("network-plan.validation.require_unique_ips")
+      end
+    end
+  end
+
+  def test_rejects_machine_contract_path_outside_repository
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["machine_contracts"]["network_plan"] = "../network-plan.yaml"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("must stay within the repository") }
+    end
+  end
+
+  def test_rejects_external_dependency_reclassified_as_internal
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/contracts/dependency-map.yaml") do |data|
+        payment = data["services"]["payment"]
+        payment["sync_external"].delete("stripe")
+        payment["sync"] << "stripe"
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("dependency map internal sync for payment") }
+      assert errors.any? { |error| error.include?("dependency map external sync for payment") }
+    end
+  end
+
   def test_lock_invariants_independently
     mutations = {
       %w[prod_certified_topology physical_hosts_total] => 5,
@@ -114,8 +244,12 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[supply_chain immutable_images] => false,
       %w[supply_chain forbid_latest] => false,
       %w[platform gitops] => "argo-rollouts",
+      %w[platform ci] => "github-actions",
       %w[platform progressive_delivery] => "flagger",
+      %w[platform registry] => "docker-hub",
       %w[stateful object_storage] => "minio-community",
+      %w[observability log_shipper] => "vector",
+      %w[observability log_pipeline] => "logstash",
       %w[observability logs] => "loki",
       %w[observability security] => "splunk"
     }
