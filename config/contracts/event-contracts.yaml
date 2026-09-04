@@ -26,21 +26,31 @@ events:
   product.ProductUpdated.v1: {consumers: [catalog, search]}
   product.SKUUpdated.v1: {consumers: [catalog, search, inventory]}
   catalog.CatalogPublished.v1: {consumers: [search]}
+  catalog.CatalogEntryChanged.v1: {consumers: [search]}
   pricing.PriceRuleChanged.v1: {consumers: [cart, order]}
+  pricing.PriceCalculated.v1: {consumers: []}
   inventory.StockReserved.v1: {consumers: [order]}
   inventory.StockReleased.v1: {consumers: [order]}
   inventory.StockAdjusted.v1: {consumers: [catalog, search]}
+  inventory.OutOfStock.v1: {consumers: [catalog, search, notification]}
+  cart.CartUpdated.v1: {consumers: []}
+  cart.CartExpired.v1: {consumers: [notification]}
+  tax.TaxCalculated.v1: {consumers: []}
+  tax.TaxRuleChanged.v1: {consumers: [pricing, order]}
   order.OrderCreated.v1: {consumers: [inventory, fraud-risk, notification]}
   fraud-risk.FraudApproved.v1: {consumers: [order]}
   fraud-risk.FraudRejected.v1: {consumers: [order, notification]}
   fraud-risk.FraudReviewRequired.v1: {consumers: [order, notification]}
+  search.SearchIndexUpdated.v1: {consumers: []}
   payment.PaymentAuthorized.v1: {consumers: [order, billing]}
   payment.PaymentFailed.v1: {consumers: [order, notification]}
   payment.PaymentCaptured.v1: {consumers: [order, billing, notification]}
   order.OrderConfirmed.v1: {consumers: [shipping, billing, notification]}
   order.OrderCancelled.v1: {consumers: [inventory, payment, notification]}
+  order.OrderFailed.v1: {consumers: [notification]}
   shipping.ShipmentCreated.v1: {consumers: [tracking, notification]}
   shipping.ShipmentDispatched.v1: {consumers: [tracking, notification]}
+  shipping.DeliveryException.v1: {consumers: [order, notification]}
   tracking.TrackingUpdated.v1: {consumers: [notification]}
   tracking.Delivered.v1: {consumers: [order, notification, returns]}
   returns.ReturnRequested.v1: {consumers: [notification]}
@@ -50,6 +60,12 @@ events:
   payment.RefundCompleted.v1: {consumers: [returns, billing, notification]}
   billing.InvoiceIssued.v1: {consumers: [notification]}
   billing.CreditNoteIssued.v1: {consumers: [notification]}
+  billing.EInvoiceSubmitted.v1: {consumers: [notification]}
   review.ReviewSubmitted.v1: {consumers: []}
   review.ReviewPublished.v1: {consumers: [catalog, search]}
+  review.ReviewRejected.v1: {consumers: [notification]}
   user-profile.ProfileUpdated.v1: {consumers: [notification]}
+  user-profile.PrivacyRequestRecorded.v1: {consumers: [notification]}
+  notification.NotificationQueued.v1: {consumers: []}
+  notification.NotificationDelivered.v1: {consumers: []}
+  notification.NotificationFailed.v1: {consumers: []}

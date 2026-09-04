@@ -36,43 +36,59 @@ Every durable event includes at minimum:
 
 No secret, credential, access token or unnecessary PII in events.
 
-## Core event matrix
+## Active event matrix
+
+This is the complete active durable-event catalogue. `config/contracts/event-contracts.yaml` is the machine-canonical source; this table is its review-oriented representation and must match it exactly. `none` means that no cross-service consumer is currently declared, not that the event is omitted from the contract.
 
 | Producer | Event | Primary consumers | Idempotency key |
 |---|---|---|---|
 | product | ProductCreated.v1 | catalog, search, review | event_id |
 | product | ProductUpdated.v1 | catalog, search | event_id |
 | product | SKUUpdated.v1 | catalog, search, inventory | event_id |
-| catalog | CatalogPublished.v1 | search, storefront projections | event_id |
-| pricing | PriceRuleChanged.v1 | cart, order cache invalidation/projections | event_id |
+| catalog | CatalogPublished.v1 | search | event_id |
+| catalog | CatalogEntryChanged.v1 | search | event_id |
+| pricing | PriceRuleChanged.v1 | cart, order | event_id |
+| pricing | PriceCalculated.v1 | none | event_id/calculation_id |
 | inventory | StockReserved.v1 | order | event_id/reservation_id |
 | inventory | StockReleased.v1 | order | event_id/reservation_id |
-| inventory | StockAdjusted.v1 | catalog/search projections | event_id |
-| cart | CartUpdated.v1 | analytics/notification where approved | event_id |
+| inventory | StockAdjusted.v1 | catalog, search | event_id |
+| inventory | OutOfStock.v1 | catalog, search, notification | event_id/sku_id |
+| cart | CartUpdated.v1 | none | event_id/cart_id |
+| cart | CartExpired.v1 | notification | event_id/cart_id |
+| tax | TaxCalculated.v1 | none | event_id/calculation_id |
+| tax | TaxRuleChanged.v1 | pricing, order | event_id |
 | order | OrderCreated.v1 | inventory, fraud-risk, notification | event_id/order_id |
 | fraud-risk | FraudApproved.v1 | order | event_id/order_id |
 | fraud-risk | FraudRejected.v1 | order, notification | event_id/order_id |
-| fraud-risk | FraudReviewRequired.v1 | order, notification/admin workflow | event_id/order_id |
+| fraud-risk | FraudReviewRequired.v1 | order, notification | event_id/order_id |
+| search | SearchIndexUpdated.v1 | none | event_id |
 | payment | PaymentAuthorized.v1 | order, billing | event_id/payment_id |
 | payment | PaymentFailed.v1 | order, notification | event_id/payment_id |
 | payment | PaymentCaptured.v1 | order, billing, notification | event_id/payment_id |
 | order | OrderConfirmed.v1 | shipping, billing, notification | event_id/order_id |
 | order | OrderCancelled.v1 | inventory, payment, notification | event_id/order_id |
+| order | OrderFailed.v1 | notification | event_id/order_id |
 | shipping | ShipmentCreated.v1 | tracking, notification | event_id/shipment_id |
 | shipping | ShipmentDispatched.v1 | tracking, notification | event_id/shipment_id |
-| tracking | TrackingUpdated.v1 | notification, storefront projection | event_id/tracking_id |
-| tracking | Delivered.v1 | order, notification, returns eligibility projection | event_id/tracking_id |
-| returns | ReturnRequested.v1 | notification, admin workflow | event_id/return_id |
+| shipping | DeliveryException.v1 | order, notification | event_id/shipment_id |
+| tracking | TrackingUpdated.v1 | notification | event_id/tracking_id |
+| tracking | Delivered.v1 | order, notification, returns | event_id/tracking_id |
+| returns | ReturnRequested.v1 | notification | event_id/return_id |
 | returns | ReturnApproved.v1 | shipping, notification | event_id/return_id |
 | returns | ReturnReceived.v1 | inventory, payment, notification | event_id/return_id |
 | returns | RefundRequested.v1 | payment | event_id/return_id |
 | payment | RefundCompleted.v1 | returns, billing, notification | event_id/refund_id |
-| billing | InvoiceIssued.v1 | notification, accounting adapter | event_id/invoice_id |
-| billing | CreditNoteIssued.v1 | notification, accounting adapter | event_id/credit_note_id |
-| review | ReviewSubmitted.v1 | moderation/admin | event_id/review_id |
-| review | ReviewPublished.v1 | catalog/search projection | event_id/review_id |
-| user-profile | ProfileUpdated.v1 | notification/preferences projections only | event_id/profile_id |
-| notification | NotificationDelivered.v1 | observability/audit projection | event_id/notification_id |
+| billing | InvoiceIssued.v1 | notification | event_id/invoice_id |
+| billing | CreditNoteIssued.v1 | notification | event_id/credit_note_id |
+| billing | EInvoiceSubmitted.v1 | notification | event_id/invoice_id |
+| review | ReviewSubmitted.v1 | none | event_id/review_id |
+| review | ReviewPublished.v1 | catalog, search | event_id/review_id |
+| review | ReviewRejected.v1 | notification | event_id/review_id |
+| user-profile | ProfileUpdated.v1 | notification | event_id/profile_id |
+| user-profile | PrivacyRequestRecorded.v1 | notification | event_id/request_id |
+| notification | NotificationQueued.v1 | none | event_id/notification_id |
+| notification | NotificationDelivered.v1 | none | event_id/notification_id |
+| notification | NotificationFailed.v1 | none | event_id/notification_id |
 
 ## Ordering
 

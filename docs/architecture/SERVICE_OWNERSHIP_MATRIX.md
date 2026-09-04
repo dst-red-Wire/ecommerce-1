@@ -4,25 +4,25 @@ Status: `EXACT`
 
 No service may read another service's database directly. Cross-domain access uses versioned REST/gRPC contracts or durable events. `order` owns checkout orchestration; no `checkout` service exists.
 
-| Service | Owns | Authoritative store | Main synchronous dependencies | Core emitted events |
-|---|---|---|---|---|
-| catalog | category/navigation presentation, product assortment projection | catalog-db + rebuildable OpenSearch projection | product, pricing, inventory | CatalogPublished, CatalogEntryChanged |
-| product | SKU/product attributes, base commercial product data | product-db | none required for authority | ProductCreated, ProductUpdated, SKUUpdated |
-| inventory | available/reserved stock, reservations | inventory-db | order for reservation correlation only via contract | StockReserved, StockReleased, StockAdjusted, OutOfStock |
-| cart | active cart state and persisted cart intent | cart-db; Redis may accelerate only | pricing, inventory, product | CartUpdated, CartExpired |
-| pricing | computed prices, promotions/rules/version | pricing-db | product, tax context as contract input | PriceRuleChanged, PriceCalculated |
-| tax | tax rules/calculation result/version | tax-db/config | none authoritative | TaxCalculated, TaxRuleChanged |
-| order | checkout orchestration, Saga state, immutable order snapshot, order lifecycle | order-db | pricing, tax, inventory, fraud-risk, payment, shipping | OrderCreated, OrderConfirmed, OrderCancelled, OrderFailed |
-| payment | PSP authorization/capture/refund state | payment-db | Stripe external PSP; order callback contract | PaymentAuthorized, PaymentCaptured, PaymentFailed, RefundCompleted |
-| shipping | shipment creation/options/carrier handoff | shipping-db | order, inventory; external carrier adapters | ShipmentCreated, ShipmentDispatched, DeliveryException |
-| tracking | shipment tracking timeline/projection | tracking-db + rebuildable projection | shipping/external carrier feeds | TrackingUpdated, Delivered |
-| returns | return request/RMA lifecycle | returns-db | order, shipping, payment, inventory | ReturnRequested, ReturnApproved, ReturnReceived, RefundRequested |
-| billing | invoices, credit notes, e-invoicing adapter state | billing-db + immutable document/object refs | order, payment; Qonto PA adapter | InvoiceIssued, CreditNoteIssued, EInvoiceSubmitted |
-| fraud-risk | risk assessment and manual review queue/state | fraud-db | order/payment context | FraudApproved, FraudRejected, FraudReviewRequired |
-| search | search index/read model only | OpenSearch index; configuration in Git | product/catalog events | SearchIndexUpdated |
-| review | customer product reviews/moderation state | review-db | product, user-profile identity reference | ReviewSubmitted, ReviewPublished, ReviewRejected |
-| user-profile | minimal customer profile/preferences and privacy state | user-profile-db | Keycloak identity reference only | ProfileUpdated, PrivacyRequestRecorded |
-| notification | notification intent/delivery status/templates references | notification-db + RabbitMQ jobs | events from business services; external channels | NotificationQueued, NotificationDelivered, NotificationFailed |
+| Service | Owns | Authoritative store | Outbound synchronous dependencies | Event/context relationships | Durable events emitted |
+|---|---|---|---|---|---|
+| catalog | category/navigation presentation, product assortment projection | catalog-db + rebuildable OpenSearch projection | product, pricing, inventory | consumes product/inventory/review events | CatalogPublished, CatalogEntryChanged |
+| product | SKU/product attributes, base commercial product data | product-db | none | none | ProductCreated, ProductUpdated, SKUUpdated |
+| inventory | available/reserved stock, reservations | inventory-db | none | consumes order/return events; reservation correlation is received through contracts | StockReserved, StockReleased, StockAdjusted, OutOfStock |
+| cart | active cart state and persisted cart intent | cart-db; Redis may accelerate only | pricing, inventory, product | consumes price-rule changes | CartUpdated, CartExpired |
+| pricing | computed prices, promotions/rules/version | pricing-db | product | tax context is request input, not an outbound call | PriceRuleChanged, PriceCalculated |
+| tax | tax rules/calculation result/version | tax-db/config | none | calculation context is received from callers | TaxCalculated, TaxRuleChanged |
+| order | checkout orchestration, Saga state, immutable order snapshot, order lifecycle | order-db | pricing, tax, inventory, fraud-risk, payment, shipping | consumes reservation, risk, payment and delivery events | OrderCreated, OrderConfirmed, OrderCancelled, OrderFailed |
+| payment | PSP authorization/capture/refund state | payment-db | stripe | order callback/correlation is inbound; consumes order/return events | PaymentAuthorized, PaymentCaptured, PaymentFailed, RefundCompleted |
+| shipping | shipment creation/options/carrier handoff | shipping-db | order, inventory, carrier-adapters | consumes order/return events | ShipmentCreated, ShipmentDispatched, DeliveryException |
+| tracking | shipment tracking timeline/projection | tracking-db + rebuildable projection | shipping | consumes shipment events and inbound carrier updates | TrackingUpdated, Delivered |
+| returns | return request/RMA lifecycle | returns-db | order, shipping | inventory/payment actions are event-driven; consumes delivery/refund events | ReturnRequested, ReturnApproved, ReturnReceived, RefundRequested |
+| billing | invoices, credit notes, e-invoicing adapter state | billing-db + immutable document/object refs | order, payment, qonto-pa | consumes order/payment/refund events | InvoiceIssued, CreditNoteIssued, EInvoiceSubmitted |
+| fraud-risk | risk assessment and manual review queue/state | fraud-db | none | order/payment context is received or event-driven | FraudApproved, FraudRejected, FraudReviewRequired |
+| search | search index/read model only | OpenSearch index; configuration in Git | none | projection consumes product/catalog/inventory/review events | SearchIndexUpdated |
+| review | customer product reviews/moderation state | review-db | product, user-profile | moderation is internal; consumes product events | ReviewSubmitted, ReviewPublished, ReviewRejected |
+| user-profile | minimal customer profile/preferences and privacy state | user-profile-db | keycloak-reference | identity reference only; no Keycloak data ownership | ProfileUpdated, PrivacyRequestRecorded |
+| notification | notification intent/delivery status/templates references | notification-db + RabbitMQ jobs | none | consumes business events; channel delivery is an operational adapter/job | NotificationQueued, NotificationDelivered, NotificationFailed |
 
 ## Ownership constraints
 
@@ -62,4 +62,6 @@ No service may read another service's database directly. Cross-domain access use
 
 ## Contract rule
 
-Every synchronous dependency listed above must have an OpenAPI or gRPC contract and timeout/retry/idempotency semantics. Every emitted durable event must have a versioned Protobuf schema and compatibility test before producer/consumer deployment.
+`sync_dependencies` means only a service or external system to which the row service initiates a synchronous REST/gRPC/API call during business operation. Event producers/consumers, inbound request context, projections, and correlations initiated by another service are not synchronous dependencies. The machine-exact list is `config/contracts/service-ownership.yaml`.
+
+Every outbound synchronous dependency listed above must have an OpenAPI or gRPC contract and timeout/retry/idempotency semantics. Every emitted durable event must have a versioned Protobuf schema and compatibility test before producer/consumer deployment.

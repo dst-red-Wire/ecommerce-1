@@ -3,6 +3,9 @@ set -eu
 . "$(dirname "$0")/lib.sh"
 cd "$(repo_root)"
 
+require ruby
+ruby -Itest tests/architecture_validator_test.rb
+
 modules=$(find . -name go.mod -not -path './vendor/*' -print 2>/dev/null || true)
 if [ -n "$modules" ]; then
   require go

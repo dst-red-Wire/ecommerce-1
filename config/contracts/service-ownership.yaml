@@ -36,7 +36,7 @@ services:
   shipping:
     db: shipping-db
     owns: [shipment-creation, carrier-handoff]
-    sync_dependencies: [order, inventory]
+    sync_dependencies: [order, inventory, carrier-adapters]
   tracking:
     db: tracking-db
     owns: [tracking-timeline]
