@@ -11,17 +11,71 @@ module ArchitectureValidator
   module_function
 
   def load_yaml(root, path)
-    YAML.safe_load_file(File.join(root, path), aliases: false)
+    contents = File.read(File.join(root, path))
+    document = Psych.parse_stream(contents, filename: path)
+    reject_duplicate_yaml_keys(document, path)
+    YAML.safe_load(contents, aliases: false, filename: path)
   rescue Psych::Exception => e
     raise ContractLoadError, "#{path} is not valid YAML: #{e.message}"
   rescue SystemCallError => e
     raise ContractLoadError, "#{path} cannot be loaded: #{e.message}"
   end
 
-  def machine_contract_path(root, lock, key)
-    path = lock.fetch("machine_contracts", {}).fetch(key, nil)
+  def reject_duplicate_yaml_keys(node, path, context = [])
+    case node
+    when Psych::Nodes::Mapping
+      seen = {}
+      node.children.each_slice(2) do |key_node, value_node|
+        key = yaml_key_identity(key_node)
+        key_name = yaml_key_name(key_node)
+        key_context = context + [key_name]
+        if seen.key?(key)
+          raise ContractLoadError,
+                "#{path} contains duplicate YAML key #{key_context.join('.').inspect} " \
+                "at line #{key_node.start_line + 1}"
+        end
+
+        seen[key] = true
+        reject_duplicate_yaml_keys(key_node, path, context)
+        reject_duplicate_yaml_keys(value_node, path, key_context)
+      end
+    when Psych::Nodes::Sequence
+      node.children.each_with_index do |child, index|
+        reject_duplicate_yaml_keys(child, path, context + ["[#{index}]"])
+      end
+    when Psych::Nodes::Stream, Psych::Nodes::Document
+      node.children.each { |child| reject_duplicate_yaml_keys(child, path, context) }
+    end
+  end
+
+  def yaml_key_identity(node)
+    return [node.class.name, node.tag, node.quoted, node.value] if node.is_a?(Psych::Nodes::Scalar)
+    return [node.class.name, node.anchor] if node.is_a?(Psych::Nodes::Alias)
+
+    [node.class.name, node.children.map { |child| yaml_key_identity(child) }]
+  end
+
+  def yaml_key_name(node)
+    return node.value if node.is_a?(Psych::Nodes::Scalar)
+
+    "<complex-key>"
+  end
+
+  def expect_mapping(value, label)
+    return value if value.is_a?(Hash)
+
+    raise ContractLoadError, "#{label} must be a mapping"
+  end
+
+  def expect_array(value, label)
+    return value if value.is_a?(Array)
+
+    raise ContractLoadError, "#{label} must be an array"
+  end
+
+  def machine_contract_path(root, key, path)
     label = "architecture.lock.yaml machine_contracts.#{key}"
-    unless path.is_a?(String) && !path.empty?
+    unless path.is_a?(String) && !path.strip.empty?
       raise ContractLoadError, "#{label} must declare a non-empty relative path"
     end
     if Pathname.new(path).absolute?
@@ -46,9 +100,23 @@ module ArchitectureValidator
     path
   end
 
-  def load_machine_contract(root, lock, key)
-    path = machine_contract_path(root, lock, key)
-    [load_yaml(root, path), path]
+  def load_machine_contracts(root, lock)
+    declared = expect_mapping(lock["machine_contracts"], "architecture.lock.yaml machine_contracts")
+    declared.each_with_object({}) do |(key, path), contracts|
+      unless key.is_a?(String) && !key.strip.empty?
+        raise ContractLoadError, "architecture.lock.yaml machine_contracts keys must be non-empty strings"
+      end
+
+      validated_path = machine_contract_path(root, key, path)
+      contract = load_yaml(root, validated_path)
+      contracts[key] = [expect_mapping(contract, validated_path), validated_path]
+    end
+  end
+
+  def required_machine_contract(contracts, key)
+    contracts.fetch(key) do
+      raise ContractLoadError, "architecture.lock.yaml machine_contracts.#{key} must be declared"
+    end
   end
 
   def markdown_rows(root, path, header)
@@ -75,16 +143,13 @@ module ArchitectureValidator
 
   def validate(root)
     errors = []
-    begin
-      lock = load_yaml(root, "architecture.lock.yaml")
-      ownership, ownership_path = load_machine_contract(root, lock, "service_ownership")
-      events, events_path = load_machine_contract(root, lock, "event_contracts")
-      dependencies, dependencies_path = load_machine_contract(root, lock, "dependency_map")
-      network, = load_machine_contract(root, lock, "network_plan")
-      prod, = load_machine_contract(root, lock, "prod_inventory")
-    rescue ContractLoadError => e
-      return [e.message]
-    end
+    lock = expect_mapping(load_yaml(root, "architecture.lock.yaml"), "architecture.lock.yaml")
+    contracts = load_machine_contracts(root, lock)
+    ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
+    events, events_path = required_machine_contract(contracts, "event_contracts")
+    dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
+    network, = required_machine_contract(contracts, "network_plan")
+    prod, = required_machine_contract(contracts, "prod_inventory")
 
     service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
     service_sets = {
@@ -119,6 +184,7 @@ module ArchitectureValidator
                 dependencies.dig("rules", "no_cross_database_reads"))
 
     errors << "#{File.basename(events_path)} status must be exact" unless events["status"] == "exact"
+    semantics = expect_mapping(events["semantics"], "#{events_path} semantics")
     {
       "delivery" => "at-least-once",
       "producer_pattern" => "transactional-outbox",
@@ -128,7 +194,7 @@ module ArchitectureValidator
       "secrets_in_events" => "forbidden",
       "unnecessary_pii_in_events" => "forbidden"
     }.each do |field, expected|
-      check_equal(errors, "#{File.basename(events_path)} semantics.#{field}", expected, events.dig("semantics", field))
+      check_equal(errors, "#{File.basename(events_path)} semantics.#{field}", expected, semantics[field])
     end
     event_rows = markdown_rows(root, "docs/architecture/EVENT_CONTRACT_MATRIX.md", "| Producer |")
     markdown_events = event_rows.to_h { |row| ["#{row[0]}.#{row[1]}", list(row[2])] }
@@ -175,7 +241,8 @@ module ArchitectureValidator
     end
 
     seen_ips = {}
-    network.fetch("static_allocations").each do |site, vlans|
+    static_allocations = expect_mapping(network["static_allocations"], "network-plan.yaml static_allocations")
+    static_allocations.each do |site, vlans|
       vlans.each do |vlan, allocations|
         subnet = IPAddr.new(network.fetch("vlans").fetch(site).fetch(vlan).fetch("cidr"))
         allocations.each do |node, value|
@@ -215,17 +282,28 @@ module ArchitectureValidator
       end
     end
 
-    topology = lock.fetch("prod_certified_topology")
-    expected_prod_sites = network.fetch("address_domains").keys.grep(/^prod-/).sort
-    actual_prod_sites = prod.fetch("sites").keys.sort
+    topology = expect_mapping(lock["prod_certified_topology"], "architecture.lock.yaml prod_certified_topology")
+    topology_sites = expect_mapping(topology["sites"], "architecture.lock.yaml prod_certified_topology.sites")
+    address_domains = expect_mapping(network["address_domains"], "network-plan.yaml address_domains")
+    prod_sites = expect_mapping(prod["sites"], "prod-inventory.yaml sites")
+    expected_prod_sites = topology_sites.keys.sort
+    network_prod_sites = address_domains.keys.grep(/^prod-/).sort
+    actual_prod_sites = prod_sites.keys.sort
+    check_equal(errors, "exact PROD network sites", expected_prod_sites, network_prod_sites)
     check_equal(errors, "exact PROD sites", expected_prod_sites, actual_prod_sites)
     expected_site_count = topology.fetch("physical_hosts_total") / topology.fetch("physical_hosts_per_site")
     check_equal(errors, "exact PROD site count", expected_site_count, expected_prod_sites.length)
 
-    prod.fetch("sites").each do |site, spec|
-      next unless network.fetch("address_domains").key?(site)
+    topology_sites.each do |site, canonical_spec|
+      canonical_spec = expect_mapping(canonical_spec, "prod_certified_topology.sites.#{site}")
+      canonical_hosts = expect_array(canonical_spec["physical_hosts"],
+                                     "prod_certified_topology.sites.#{site}.physical_hosts")
+      check_equal(errors, "#{site} network private block", canonical_spec.fetch("private_block"), address_domains[site])
+      spec = prod_sites[site]
+      next unless spec.is_a?(Hash)
 
-      check_equal(errors, "#{site} private block", network.fetch("address_domains").fetch(site), spec.fetch("private_block"))
+      check_equal(errors, "#{site} private block", canonical_spec.fetch("private_block"), spec.fetch("private_block"))
+      check_equal(errors, "#{site} exact physical hosts", canonical_hosts.sort, spec.fetch("physical_hosts").keys.sort)
       check_equal(errors, "#{site} physical hosts", topology.fetch("physical_hosts_per_site"), spec.fetch("physical_hosts").length)
       check_equal(errors, "#{site} control planes", topology.fetch("control_planes_per_site"), spec.fetch("control_planes").length)
       check_equal(errors, "#{site} data workers", topology.fetch("data_workers_per_site"), spec.fetch("data_workers").length)
@@ -234,7 +312,7 @@ module ArchitectureValidator
                   spec.fetch("data_workers").length + spec.fetch("general_workers").length)
     end
     total_physical_hosts = expected_prod_sites.sum do |site|
-      prod.fetch("sites").fetch(site, {}).fetch("physical_hosts", {}).length
+      prod_sites.fetch(site, {}).fetch("physical_hosts", {}).length
     end
     check_equal(errors, "PROD total physical hosts", topology.fetch("physical_hosts_total"), total_physical_hosts)
     {
@@ -289,6 +367,10 @@ module ArchitectureValidator
       check_equal(errors, "network-plan.validation.#{field}", true, network_policy.fetch(field))
     end
     errors
+  rescue ContractLoadError => e
+    [e.message]
+  rescue KeyError, TypeError, NoMethodError, ArgumentError => e
+    ["architecture contract structure is invalid: #{e.message}"]
   end
 end
 

@@ -97,6 +97,19 @@ prod_certified_topology:
   workers_per_site: 5
   data_workers_per_site: 3
   general_workers_per_site: 2
+  sites:
+    prod-a:
+      private_block: 10.241.0.0/16
+      physical_hosts:
+        - a-host-01
+        - a-host-02
+        - a-host-03
+    prod-b:
+      private_block: 10.242.0.0/16
+      physical_hosts:
+        - b-host-01
+        - b-host-02
+        - b-host-03
 
 superseded:
   fluxcd: rancher-fleet

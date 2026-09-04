@@ -13,8 +13,11 @@ class ArchitectureValidatorTest < Minitest::Test
     config/contracts/dependency-map.yaml
     config/contracts/event-contracts.yaml
     config/contracts/service-ownership.yaml
+    config/infrastructure/deployment-waves.yaml
     config/infrastructure/network-plan.yaml
+    config/infrastructure/preprod-inventory.yaml
     config/infrastructure/prod-inventory.yaml
+    config/infrastructure/storage-plan.yaml
     docs/architecture/EVENT_CONTRACT_MATRIX.md
     docs/architecture/SERVICE_OWNERSHIP_MATRIX.md
   ].freeze
@@ -155,6 +158,42 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_coordinated_prod_site_rename
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/network-plan.yaml") do |data|
+        data["address_domains"]["prod-c"] = data["address_domains"].delete("prod-b")
+        data["vlans"]["prod-c"] = data["vlans"].delete("prod-b")
+        data["kubernetes"]["prod-c"] = data["kubernetes"].delete("prod-b")
+      end
+      mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") do |data|
+        data["sites"]["prod-c"] = data["sites"].delete("prod-b")
+      end
+
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("exact PROD network sites") }
+      assert errors.any? { |error| error.include?("exact PROD sites") }
+    end
+  end
+
+  def test_rejects_noncanonical_prod_physical_host_ids
+    mutations = {
+      "renamed host" => lambda { |hosts| hosts["renamed-host"] = hosts.delete("a-host-01") },
+      "missing host" => lambda { |hosts| hosts.delete("a-host-01") },
+      "compensated noncanonical host" => lambda { |hosts|
+        hosts["extra-host"] = hosts.delete("a-host-01")
+      }
+    }
+    mutations.each do |message, mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") do |data|
+          mutation.call(data["sites"]["prod-a"]["physical_hosts"])
+        end
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("prod-a exact physical hosts") }, message
+      end
+    end
+  end
+
   def test_rejects_cross_database_read_policy_corruption
     {
       "service-ownership.yaml" => ["config/contracts/service-ownership.yaml", %w[forbidden cross_database_reads]],
@@ -195,6 +234,114 @@ class ArchitectureValidatorTest < Minitest::Test
       assert_includes ArchitectureValidator.validate(root),
                       "architecture.lock.yaml machine_contracts.network_plan declared file does not exist: " \
                       "config/infrastructure/missing-network-plan.yaml"
+    end
+  end
+
+  def test_all_declared_machine_contract_paths_must_exist
+    %w[preprod_inventory storage_plan deployment_waves].each do |contract|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") do |data|
+          data["machine_contracts"][contract] = "config/infrastructure/missing-#{contract}.yaml"
+        end
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("machine_contracts.#{contract} declared file does not exist") },
+               contract
+      end
+    end
+  end
+
+  def test_machine_contract_paths_must_be_nonempty_strings
+    {"non-string" => 42, "empty" => "", "whitespace-only" => "  "}.each do |message, value|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") do |data|
+          data["machine_contracts"]["preprod_inventory"] = value
+        end
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("must declare a non-empty relative path") }, message
+      end
+    end
+  end
+
+  def test_machine_contract_keys_must_be_nonempty_strings
+    {"empty" => "", "non-string" => 42}.each do |message, key|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") { |data| data["machine_contracts"][key] = "unused.yaml" }
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("machine_contracts keys must be non-empty strings") }, message
+      end
+    end
+  end
+
+  def test_rejects_absolute_machine_contract_path
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["machine_contracts"]["preprod_inventory"] = "/tmp/outside.yaml"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("must declare a relative path") }
+    end
+  end
+
+  def test_rejects_machine_contract_symlink_escape
+    with_contract_copy do |root|
+      Dir.mktmpdir("architecture-validator-outside") do |outside|
+        outside_file = File.join(outside, "contract.yaml")
+        File.write(outside_file, "version: 1\n")
+        symlink = File.join(root, "config/infrastructure/outside-contract.yaml")
+        File.symlink(outside_file, symlink)
+        mutate_yaml(root, "architecture.lock.yaml") do |data|
+          data["machine_contracts"]["preprod_inventory"] = "config/infrastructure/outside-contract.yaml"
+        end
+
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("resolves outside the repository") }
+      end
+    end
+  end
+
+  def test_rejects_duplicate_machine_contract_key
+    with_contract_copy do |root|
+      replace_in_file(root, "architecture.lock.yaml",
+                      "  network_plan: config/infrastructure/network-plan.yaml\n",
+                      "  network_plan: config/infrastructure/missing.yaml\n" \
+                      "  network_plan: config/infrastructure/network-plan.yaml\n")
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("duplicate YAML key \"machine_contracts.network_plan\"") }
+    end
+  end
+
+  def test_rejects_duplicate_top_level_yaml_key
+    with_contract_copy do |root|
+      File.open(File.join(root, "architecture.lock.yaml"), "a") { |file| file.write("status: locked-for-build\n") }
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("duplicate YAML key \"status\"") }
+    end
+  end
+
+  def test_rejects_duplicate_nested_machine_contract_key
+    with_contract_copy do |root|
+      replace_in_file(root, "config/infrastructure/network-plan.yaml",
+                      "  require_unique_ips: true\n",
+                      "  require_unique_ips: false\n  require_unique_ips: true\n")
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? do |error|
+        error.include?("network-plan.yaml") && error.include?("duplicate YAML key \"validation.require_unique_ips\"")
+      end
+    end
+  end
+
+  def test_reports_invalid_boundary_types_without_a_stack_trace
+    mutations = {
+      "machine_contracts" => ["architecture.lock.yaml", lambda { |data| data["machine_contracts"] = [] }],
+      "semantics" => ["config/contracts/event-contracts.yaml", lambda { |data| data["semantics"] = "invalid" }],
+      "static_allocations" => ["config/infrastructure/network-plan.yaml",
+                               lambda { |data| data["static_allocations"] = "invalid" }]
+    }
+    mutations.each do |label, (path, mutation)|
+      with_contract_copy do |root|
+        mutate_yaml(root, path, &mutation)
+        errors = ArchitectureValidator.validate(root)
+        assert_equal 1, errors.length, label
+        assert_includes errors.first, "must be a mapping", label
+      end
     end
   end
 
@@ -281,6 +428,14 @@ class ArchitectureValidatorTest < Minitest::Test
 
   def mutate_yaml(root, relative, &block)
     self.class.mutate_yaml(root, relative, &block)
+  end
+
+  def replace_in_file(root, relative, current, replacement)
+    path = File.join(root, relative)
+    contents = File.read(path)
+    raise "#{current.inspect} not found in #{relative}" unless contents.include?(current)
+
+    File.write(path, contents.sub(current, replacement))
   end
 
   def with_contract_copy
