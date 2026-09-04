@@ -1,0 +1,14 @@
+---
+- name: Remove the previous management firewall table
+  ansible.builtin.command:
+    cmd: nft delete table inet ecommerce_management
+  register: management_firewall_delete
+  changed_when: false
+  failed_when: management_firewall_delete.rc not in [0, 1]
+  listen: Reload management firewall
+
+- name: Load the management firewall table
+  ansible.builtin.command:
+    cmd: nft --file /etc/nftables.conf
+  changed_when: true
+  listen: Reload management firewall

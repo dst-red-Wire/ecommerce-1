@@ -1,0 +1,220 @@
+---
+- name: Validate GitOps and supply-chain APIs without persistence
+  hosts: staging
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  vars:
+    repository_root: "{{ playbook_dir }}/../.."
+    versions_mk_content: "{{ lookup('file', repository_root ~ '/versions.mk') }}"
+    tekton_chains_version: >-
+      {{ (versions_mk_content |
+          regex_findall('(?m)^TEKTON_CHAINS_VERSION\s*:=\s*(\S+)'))[0] }}
+    tekton_chains_release_sha256: >-
+      {{ (versions_mk_content |
+          regex_findall('(?m)^TEKTON_CHAINS_RELEASE_SHA256\s*:=\s*(\S+)'))[0] }}
+    kube_env:
+      KUBECONFIG: /var/lib/ecommerce-staging/kubeconfig
+    tekton_validation_files:
+      - gitops/infrastructure/tekton-ci/tasks/git-clone.yaml
+      - gitops/infrastructure/tekton-ci/tasks/go-test.yaml
+      - gitops/infrastructure/tekton-ci/tasks/source-security.yaml
+      - gitops/infrastructure/tekton-ci/tasks/build-push.yaml
+      - gitops/infrastructure/tekton-ci/tasks/scan-image.yaml
+      - gitops/infrastructure/tekton-ci/tasks/generate-sbom.yaml
+      - gitops/infrastructure/tekton-ci/tasks/create-delivery-evidence.yaml
+      - gitops/infrastructure/tekton-ci/tasks/verify-promotion-proof.yaml
+      - gitops/infrastructure/tekton-ci/tasks/gitops-propose-promotion.yaml
+      - gitops/infrastructure/tekton-ci/pipelines/build-and-publish.yaml
+      - gitops/infrastructure/tekton-ci/pipelines/promote-image.yaml
+    tekton_core_validation_files:
+      - gitops/infrastructure/tekton-ci/serviceaccounts.yaml
+      - gitops/infrastructure/tekton-ci/rbac.yaml
+      - gitops/infrastructure/tekton-ci/networkpolicies.yaml
+    kyverno_validation_files:
+      - gitops/infrastructure/policies/kyverno/tekton-run-contracts.yaml
+    flux_validation_files:
+      - gitops/clusters/integration/flux-system/gotk-sync.yaml
+      - gitops/clusters/preproduction/flux-system/gotk-sync.yaml
+      - gitops/clusters/production/flux-system/gotk-sync.yaml
+  tasks:
+    - name: Read the remote hostname
+      ansible.builtin.command:
+        cmd: hostname
+      register: gitops_validation_hostname
+      changed_when: false
+
+    - name: Lock validation to the authorized target
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == 'ecommerce-staging'
+          - ansible_host | default('') == '178.104.138.200'
+          - gitops_validation_hostname.stdout == 'ecommerce-staging'
+        fail_msg: GitOps validation can only target ecommerce-staging at 178.104.138.200.
+
+    - name: Verify the explicit remote kubeconfig
+      ansible.builtin.stat:
+        path: /var/lib/ecommerce-staging/kubeconfig
+      register: gitops_validation_kubeconfig
+
+    - name: Refuse a missing or permissive kubeconfig
+      ansible.builtin.assert:
+        that:
+          - gitops_validation_kubeconfig.stat.exists
+          - gitops_validation_kubeconfig.stat.isreg
+          - gitops_validation_kubeconfig.stat.mode == '0600'
+
+    - name: Verify Kubernetes API readiness
+      ansible.builtin.command:
+        cmd: kubectl get --raw=/readyz
+      environment: "{{ kube_env }}"
+      register: gitops_validation_readyz
+      changed_when: false
+      failed_when: gitops_validation_readyz.rc != 0 or gitops_validation_readyz.stdout | trim != 'ok'
+
+    - name: Inspect target supply-chain namespaces
+      ansible.builtin.command:
+        cmd: kubectl get namespace {{ item }} --ignore-not-found -o name
+      environment: "{{ kube_env }}"
+      loop:
+        - tekton-ci
+        - tekton-chains
+      register: gitops_validation_target_namespaces
+      changed_when: false
+
+    - name: Document dry-run namespace strategy
+      ansible.builtin.debug:
+        msg: >-
+          VALIDATION API TRANSFORMÉE: target namespaces are not created by this
+          playbook. Namespaced Tekton and Chains objects are rewritten to the
+          existing tekton-pipelines namespace only for non-persistent
+          API/schema validation. VALIDATION RUNTIME CHAINS: NOT PROVEN.
+
+    - name: Validate local Chains contracts statically
+      ansible.builtin.assert:
+        that:
+          - >-
+            'tekton-chains-controller' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/README.md')
+          - >-
+            'name: signing-secrets' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/signing-secret.contract.yaml')
+          - >-
+            'namespace: tekton-chains' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/chains-config.yaml')
+          - >-
+            'artifacts.taskrun.storage: ""' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/chains-config.yaml')
+          - >-
+            'artifacts.oci.storage: ""' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/chains-config.yaml')
+          - >-
+            'name: chains-ghcr-write' in
+            lookup('file', repository_root ~ '/platform/tekton/chains/registry-secret.contract.yaml')
+        fail_msg: Local Chains namespace, controller, configuration or Secret contract is incomplete.
+
+    - name: Server-side dry-run Flux sources
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: "{{ lookup('file', repository_root ~ '/' ~ item) }}"
+      environment: "{{ kube_env }}"
+      loop: "{{ flux_validation_files }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Server-side dry-run Tekton resources in an existing namespace
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: >-
+          {{ lookup('file', repository_root ~ '/' ~ item) |
+             regex_replace('namespace: tekton-ci', 'namespace: tekton-pipelines') }}
+      environment: "{{ kube_env }}"
+      loop: "{{ tekton_validation_files }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Server-side dry-run Tekton identity, RBAC and network contracts
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: >-
+          {{ lookup('file', repository_root ~ '/' ~ item) |
+             regex_replace('namespace: tekton-ci', 'namespace: tekton-pipelines') }}
+      environment: "{{ kube_env }}"
+      loop: "{{ tekton_core_validation_files }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Server-side dry-run Kyverno admission contracts
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: "{{ lookup('file', repository_root ~ '/' ~ item) }}"
+      environment: "{{ kube_env }}"
+      loop: "{{ kyverno_validation_files }}"
+      loop_control:
+        label: "{{ item }}"
+      changed_when: false
+
+    - name: Server-side dry-run Chains configuration as a Kubernetes object
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: >-
+          {{ lookup('file', repository_root ~ '/platform/tekton/chains/chains-config.yaml') |
+             regex_replace('namespace: tekton-chains', 'namespace: tekton-pipelines') }}
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Download the pinned Chains release from the remote target
+      ansible.builtin.uri:
+        url: >-
+          https://infra.tekton.dev/tekton-releases/chains/previous/{{
+          tekton_chains_version }}/release.yaml
+        return_content: true
+        status_code: 200
+        timeout: 30
+      register: tekton_chains_release
+      changed_when: false
+
+    - name: Verify the pinned Chains release checksum
+      ansible.builtin.assert:
+        that:
+          - tekton_chains_release.content | hash('sha256') == tekton_chains_release_sha256
+        fail_msg: >-
+          The downloaded Tekton Chains release does not match versions.mk:
+          expected {{ tekton_chains_release_sha256 }}, got
+          {{ tekton_chains_release.content | hash('sha256') }}.
+
+    - name: Verify official Chains object contracts
+      ansible.builtin.assert:
+        that:
+          - >-
+            tekton_chains_release.content is
+            regex('(?ms)kind:\s*Namespace.*?name:\s*tekton-chains(?:\s|$)')
+          - >-
+            tekton_chains_release.content is
+            regex('(?ms)kind:\s*ServiceAccount.*?name:\s*tekton-chains-controller(?:\s|$)')
+          - >-
+            tekton_chains_release.content is
+            regex('(?ms)kind:\s*ConfigMap.*?name:\s*chains-config(?:\s|$)')
+          - >-
+            tekton_chains_release.content |
+            regex_findall('(?m)^\s*namespace:\s*tekton-chains\s*$') | length > 0
+        fail_msg: The pinned official release lacks the expected Chains namespace, ServiceAccount or ConfigMap.
+
+    - name: API transformed dry-run of the pinned Chains release
+      ansible.builtin.command:
+        cmd: kubectl apply --dry-run=server -f -
+        stdin: >-
+          {{ tekton_chains_release.content |
+             regex_replace('namespace: tekton-chains', 'namespace: tekton-pipelines') }}
+      environment: "{{ kube_env }}"
+      changed_when: false
+
+    - name: Reiterate Chains runtime status
+      ansible.builtin.debug:
+        msg: >-
+          VALIDATION API TRANSFORMÉE completed only if all preceding dry-runs
+          succeeded. No namespace, controller, signing Secret or workload was
+          persisted. VALIDATION RUNTIME CHAINS: NOT PROVEN.

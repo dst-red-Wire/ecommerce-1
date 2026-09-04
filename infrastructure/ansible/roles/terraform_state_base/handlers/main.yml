@@ -1,0 +1,9 @@
+---
+- name: Reload Terraform state SSH
+  ansible.builtin.systemd:
+    name: ssh
+    state: reloaded
+
+- name: Reload Terraform state systemd
+  ansible.builtin.systemd:
+    daemon_reload: true

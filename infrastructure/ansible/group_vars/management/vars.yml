@@ -1,0 +1,34 @@
+---
+# Non-secret management-plane defaults. Addresses and SSH CIDRs come only from
+# the Terraform-rendered inventory.
+
+management_root: /var/lib/ecommerce-management
+management_config_root: /etc/ecommerce-management
+management_log_root: /var/log/ecommerce-management
+management_cache_root: /var/cache/ecommerce-management
+management_install_root: /opt/ecommerce-management
+
+management_git_fqdn: git.deployfrance.com
+management_registry_fqdn: registry.deployfrance.com
+management_postgresql_port: 5432
+management_egress_proxy_port: 3128
+management_postgresql_major: 16
+management_postgresql_filesystem_group: ecommerce-postgresql
+
+management_docker_log_max_size: 50m
+management_docker_log_max_file: "5"
+docker_log_max_size: "{{ management_docker_log_max_size }}"
+docker_log_max_file: "{{ management_docker_log_max_file }}"
+management_health_interval: 1m
+management_secret_min_length: 24
+
+management_gitea_database: gitea
+management_gitea_database_user: gitea
+management_harbor_database: harbor
+management_harbor_database_user: harbor
+
+# Single-node integration defaults. Gitea deliberately uses its database for
+# sessions and a local bounded cache; no shared Redis is required. Harbor's
+# installer retains its private, non-published Valkey service.
+management_gitea_disable_registration: true
+management_harbor_with_trivy: true

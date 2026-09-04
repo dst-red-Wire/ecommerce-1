@@ -1,0 +1,75 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: promote-image
+  namespace: tekton-ci
+spec:
+  description: Verify a signed proof and propose one reviewable main-based Git change.
+  params:
+    - name: repository-url
+      type: string
+      default: https://github.com/dst-red-Wire/ecommerce-1.git
+    - name: environment
+      type: string
+    - name: expected-main-sha
+      type: string
+  workspaces:
+    - name: desired-state
+    - name: evidence
+    - name: trust
+    - name: git-auth
+  results:
+    - name: IMAGE_REFERENCE
+      value: $(tasks.verify-proof.results.VERIFIED_IMAGE_REPOSITORY)@$(tasks.verify-proof.results.VERIFIED_IMAGE_DIGEST)
+    - name: BASE_BRANCH
+      value: $(tasks.propose-git-change.results.BASE_BRANCH)
+    - name: BASE_SHA
+      value: $(tasks.propose-git-change.results.BASE_SHA)
+    - name: PROPOSAL_BRANCH
+      value: $(tasks.propose-git-change.results.PROPOSAL_BRANCH)
+    - name: PROPOSAL_COMMIT
+      value: $(tasks.propose-git-change.results.PROPOSAL_COMMIT)
+    - name: IDEMPOTENCE_KEY
+      value: $(tasks.verify-proof.results.IDEMPOTENCE_KEY)
+  tasks:
+    - name: verify-proof
+      taskRef:
+        name: verify-promotion-proof
+      params:
+        - name: environment
+          value: $(params.environment)
+      workspaces:
+        - name: evidence
+          workspace: evidence
+        - name: trust
+          workspace: trust
+    - name: propose-git-change
+      runAfter: [verify-proof]
+      taskRef:
+        name: gitops-propose-promotion
+      params:
+        - name: repository-url
+          value: $(params.repository-url)
+        - name: expected-base-sha
+          value: $(params.expected-main-sha)
+        - name: environment
+          value: $(params.environment)
+        - name: service
+          value: $(tasks.verify-proof.results.SERVICE)
+        - name: image-repository
+          value: $(tasks.verify-proof.results.VERIFIED_IMAGE_REPOSITORY)
+        - name: image-digest
+          value: $(tasks.verify-proof.results.VERIFIED_IMAGE_DIGEST)
+        - name: source-commit
+          value: $(tasks.verify-proof.results.SOURCE_COMMIT)
+        - name: idempotence-key
+          value: $(tasks.verify-proof.results.IDEMPOTENCE_KEY)
+        - name: promotion-proof-sha256
+          value: $(tasks.verify-proof.results.PROOF_SHA256)
+        - name: allowed-path
+          value: $(tasks.verify-proof.results.ALLOWED_PATH)
+      workspaces:
+        - name: desired-state
+          workspace: desired-state
+        - name: git-auth
+          workspace: git-auth

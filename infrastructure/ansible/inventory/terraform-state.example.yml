@@ -1,0 +1,26 @@
+---
+# Documentation-only inventory. Render the real inventory from the reviewed
+# bootstrap Terraform output; do not edit management.example.yml for this host.
+all:
+  children:
+    terraform_state_bootstrap:
+      hosts:
+        terraform-state-mgmt:
+          ansible_host: 192.0.2.10
+          ansible_user: root
+          ansible_ssh_common_args: >-
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile=/secure/terraform-state/known_hosts
+          terraform_state_server_id: 123456
+          terraform_state_server_name: terraform-state-mgmt
+          terraform_state_server_ipv4: 192.0.2.10
+          service: terraform-state-postgresql
+          postgresql_bind_address: 127.0.0.1
+          terraform_state_volume_device: /dev/disk/by-id/scsi-0HC_Volume_12345678
+          terraform_state_volume_id: 12345678
+          postgresql_volume_device: /dev/disk/by-id/scsi-0HC_Volume_12345678
+          postgresql_volume_id: 12345678
+          ssh_allowed_ipv4_cidrs:
+            - 198.51.100.10/32
+          public_postgresql_exposed: false
+          management_plane_dependency: false

@@ -1,0 +1,26 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: ecommerce-preproduction
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/dst-red-Wire/ecommerce-1.git
+  ref:
+    branch: main
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ecommerce-preproduction
+  namespace: flux-system
+spec:
+  interval: 1m
+  path: ./gitops/clusters/preproduction
+  prune: true
+  wait: true
+  timeout: 15m
+  sourceRef:
+    kind: GitRepository
+    name: ecommerce-preproduction

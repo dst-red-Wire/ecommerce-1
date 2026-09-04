@@ -1,0 +1,14 @@
+---
+- name: Pull the pinned Gitea image
+  ansible.builtin.command:
+    cmd: docker compose --file compose.yml pull --quiet
+    chdir: "{{ management_install_root }}/gitea"
+  changed_when: true
+  listen: Reconcile Gitea
+
+- name: Start the Gitea Compose project
+  ansible.builtin.command:
+    cmd: docker compose --file compose.yml up --detach --remove-orphans --wait --wait-timeout 180
+    chdir: "{{ management_install_root }}/gitea"
+  changed_when: true
+  listen: Reconcile Gitea

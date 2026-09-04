@@ -1,0 +1,111 @@
+---
+- name: Validate independent Terraform state inventory boundary
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'terraform-state-mgmt'
+      - terraform_state_server_id | int > 0
+      - terraform_state_server_name == inventory_hostname
+      - terraform_state_server_ipv4 == ansible_host
+      - terraform_state_volume_id | int == postgresql_volume_id | int
+      - terraform_state_volume_device == postgresql_volume_device
+      - >-
+        postgresql_volume_device ==
+        '/dev/disk/by-id/scsi-0HC_Volume_' ~ (postgresql_volume_id | string)
+      - service == 'terraform-state-postgresql'
+      - postgresql_bind_address == '127.0.0.1'
+      - not public_postgresql_exposed | bool
+      - not management_plane_dependency | bool
+      - postgresql_volume_device is match('^/dev/disk/by-id/scsi-0HC_Volume_[0-9]+$')
+      - postgresql_volume_id | int > 0
+      - ssh_allowed_ipv4_cidrs | length > 0
+      - ssh_allowed_ipv4_cidrs | length == ssh_allowed_ipv4_cidrs | unique | length
+    fail_msg: The bootstrap inventory must come from the independent Terraform output contract.
+
+- name: Validate reviewed host operating system and architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_version'] is version('24.04', '==')
+      - ansible_facts['architecture'] in ['x86_64', 'amd64']
+    fail_msg: terraform-state-mgmt requires Ubuntu 24.04 on x86_64.
+
+- name: Install base security and backup packages
+  ansible.builtin.apt:
+    name:
+      - age
+      - ca-certificates
+      - jq
+      - nftables
+      - openssh-server
+      - openssl
+      - unattended-upgrades
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Harden SSH while retaining local PostgreSQL forwarding
+  ansible.builtin.template:
+    src: sshd-terraform-state.conf.j2
+    dest: /etc/ssh/sshd_config.d/90-terraform-state.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload Terraform state SSH
+
+- name: Create protected local directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ terraform_state_root }}", owner: root, group: root, mode: "0750" }
+    - { path: "{{ terraform_state_backup_root }}", owner: root, group: root, mode: "0700" }
+    - { path: "{{ terraform_state_postgresql_data_root }}", owner: root, group: root, mode: "0755" }
+
+- name: Install the protected PostgreSQL volume mount unit
+  ansible.builtin.template:
+    src: var-lib-postgresql.mount.j2
+    dest: /etc/systemd/system/var-lib-postgresql.mount
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload Terraform state systemd
+
+- name: Apply systemd unit changes before mounting PostgreSQL data
+  ansible.builtin.meta: flush_handlers
+
+- name: Mount the protected PostgreSQL volume
+  ansible.builtin.systemd:
+    name: var-lib-postgresql.mount
+    enabled: true
+    state: started
+
+- name: Verify PostgreSQL data is backed by the reviewed volume
+  ansible.builtin.command:
+    argv:
+      - findmnt
+      - --noheadings
+      - --output
+      - SOURCE
+      - --target
+      - "{{ terraform_state_postgresql_data_root }}"
+  register: terraform_state_base_mount_source
+  changed_when: false
+
+- name: Resolve the stable Hetzner volume device path
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - --canonicalize-existing
+      - "{{ postgresql_volume_device }}"
+  register: terraform_state_base_resolved_volume_device
+  changed_when: false
+
+- name: Prove the PostgreSQL mount uses the reviewed Hetzner volume
+  ansible.builtin.assert:
+    that:
+      - terraform_state_base_mount_source.stdout | trim == terraform_state_base_resolved_volume_device.stdout | trim
+    fail_msg: PostgreSQL data is not mounted from the Terraform-provided Hetzner Volume.

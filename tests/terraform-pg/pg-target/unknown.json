@@ -1,0 +1,1 @@
+{"database":"wrong_database","user":"terraform_backend","schema":"terraform_management","table":"states","schemaExists":true,"tableExists":true,"tableColumnsExact":true,"uniqueWorkspaceIndex":true,"rowCount":0,"workspaceNames":[],"emptyStateRowCount":0}

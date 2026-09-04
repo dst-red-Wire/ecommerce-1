@@ -1,0 +1,5 @@
+---
+- name: Restart Terraform state PostgreSQL
+  ansible.builtin.systemd:
+    name: "postgresql@{{ terraform_state_postgresql_major }}-main"
+    state: restarted

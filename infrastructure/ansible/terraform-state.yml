@@ -1,0 +1,127 @@
+---
+- name: Configure the independent Terraform PostgreSQL backend
+  hosts: terraform_state_bootstrap
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Assert pinned SSH transport and Terraform identity binding
+      ansible.builtin.assert:
+        that:
+          - ansible_ssh_common_args is defined
+          - "'StrictHostKeyChecking=yes' in ansible_ssh_common_args"
+          - "'UserKnownHostsFile=' in ansible_ssh_common_args"
+          - "'StrictHostKeyChecking=no' not in ansible_ssh_common_args"
+          - terraform_state_server_id | int > 0
+          - terraform_state_server_name == 'terraform-state-mgmt'
+          - terraform_state_server_ipv4 == ansible_host
+          - terraform_state_volume_id | int > 0
+          - >-
+            terraform_state_volume_device ==
+            '/dev/disk/by-id/scsi-0HC_Volume_' ~ (terraform_state_volume_id | string)
+          - postgresql_volume_id | int == terraform_state_volume_id | int
+          - postgresql_volume_device == terraform_state_volume_device
+        fail_msg: Inventory identity or pinned SSH transport is incomplete; remote mutation is forbidden.
+
+    - name: Require the external Terraform backend password before remote mutation
+      ansible.builtin.assert:
+        that:
+          - terraform_state_postgresql_password is defined
+          - terraform_state_postgresql_password | default('') | length >= terraform_state_secret_min_length
+          - not (terraform_state_postgresql_password | default('REPLACE_') | upper).startswith('REPLACE')
+          - "'PLACEHOLDER' not in (terraform_state_postgresql_password | default('') | upper)"
+        fail_msg: Supply TERRAFORM_STATE_POSTGRESQL_PASSWORD through the canonical project environment.
+      no_log: true
+
+    - name: Validate the public backup encryption recipient before remote mutation
+      ansible.builtin.assert:
+        that:
+          - terraform_state_backup_age_recipient is match('^age1[0-9a-z]{20,}$')
+          - not (terraform_state_backup_age_recipient | upper).startswith('AGE1REPLACE')
+          - "'PLACEHOLDER' not in (terraform_state_backup_age_recipient | upper)"
+        fail_msg: Supply the locally validated TERRAFORM_STATE_BACKUP_AGE_RECIPIENT before remote execution.
+
+    - name: Read Hetzner instance ID from the link-local metadata service
+      ansible.builtin.uri:
+        url: http://169.254.169.254/hetzner/v1/metadata/instance-id
+        return_content: true
+        status_code: 200
+        timeout: 3
+        use_proxy: false
+      register: terraform_state_metadata_instance_id
+      changed_when: false
+
+    - name: Read Hetzner server name from the link-local metadata service
+      ansible.builtin.uri:
+        url: http://169.254.169.254/hetzner/v1/metadata/hostname
+        return_content: true
+        status_code: 200
+        timeout: 3
+        use_proxy: false
+      register: terraform_state_metadata_hostname
+      changed_when: false
+
+    - name: Read Hetzner public IPv4 from the link-local metadata service
+      ansible.builtin.uri:
+        url: http://169.254.169.254/hetzner/v1/metadata/public-ipv4
+        return_content: true
+        status_code: 200
+        timeout: 3
+        use_proxy: false
+      register: terraform_state_metadata_public_ipv4
+      changed_when: false
+
+    - name: Inspect the Terraform-bound Hetzner volume link before mutation
+      ansible.builtin.stat:
+        path: "{{ terraform_state_volume_device }}"
+        follow: false
+      register: terraform_state_volume_link
+
+    - name: Resolve the Terraform-bound Hetzner volume before mutation
+      ansible.builtin.command:
+        argv:
+          - readlink
+          - --canonicalize-existing
+          - "{{ terraform_state_volume_device }}"
+      register: terraform_state_resolved_volume
+      changed_when: false
+
+    - name: Identify the Terraform-bound block device before mutation
+      ansible.builtin.command:
+        argv:
+          - lsblk
+          - --nodeps
+          - --noheadings
+          - --output
+          - TYPE
+          - "{{ terraform_state_resolved_volume.stdout | trim }}"
+      register: terraform_state_volume_type
+      changed_when: false
+
+    - name: Prove remote Hetzner and volume identity before any mutation
+      ansible.builtin.assert:
+        that:
+          - (terraform_state_metadata_instance_id.content | trim | int) == (terraform_state_server_id | int)
+          - terraform_state_metadata_hostname.content | trim == terraform_state_server_name
+          - terraform_state_metadata_public_ipv4.content | trim == terraform_state_server_ipv4
+          - terraform_state_volume_link.stat.exists
+          - terraform_state_volume_link.stat.islnk
+          - terraform_state_resolved_volume.stdout | trim | length > 0
+          - terraform_state_volume_type.stdout | trim == 'disk'
+        fail_msg: Hetzner metadata or volume identity differs from Terraform; remote mutation is forbidden.
+
+    - name: Gather facts only after independent remote identity proof
+      ansible.builtin.setup:
+
+    - name: Validate reviewed host operating system identity before roles
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['hostname'] == terraform_state_server_name
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] is version('24.04', '==')
+          - ansible_facts['architecture'] in ['x86_64', 'amd64']
+        fail_msg: terraform-state-mgmt requires the bound Ubuntu 24.04 x86_64 server.
+  roles:
+    - role: terraform_state_base
+    - role: terraform_state_firewall
+    - role: terraform_state_postgresql

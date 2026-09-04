@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreproductionLifecycleApproval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "campaignId", "owner", "expiresAt", "costCenter", "terraformState", "destruction"],
+  "properties": {
+    "schemaVersion": {"const": "ecommerce.dev/preproduction-lifecycle/v1"},
+    "campaignId": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
+    "owner": {"type": "string", "minLength": 1},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "costCenter": {"type": "string", "minLength": 1},
+    "terraformState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "backendId", "stateKey", "expectedLineage", "expectedSerial", "lockRequired"],
+      "properties": {
+        "backend": {"const": "s3"},
+        "backendId": {"type": "string", "minLength": 1},
+        "stateKey": {"const": "ecommerce/preproduction/terraform.tfstate"},
+        "expectedLineage": {"type": "string", "pattern": "^[0-9a-f-]{36}$"},
+        "expectedSerial": {"type": "integer", "minimum": 0},
+        "lockRequired": {"const": true}
+      }
+    },
+    "destruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorized", "authorizedBy", "authorizedAt", "reviewedDestroyPlanSha256", "confirmation"],
+      "properties": {
+        "authorized": {"const": true},
+        "authorizedBy": {"type": "string", "minLength": 1},
+        "authorizedAt": {"type": "string", "format": "date-time"},
+        "reviewedDestroyPlanSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "confirmation": {"type": "string", "pattern": "^DESTROY preproduction campaign [a-z0-9][a-z0-9-]{2,62} at lineage [0-9a-f-]{36} serial [0-9]+$"}
+      }
+    }
+  }
+}

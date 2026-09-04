@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: tekton-ci
+resources:
+  - namespace.yaml
+  - serviceaccounts.yaml
+  - rbac.yaml
+  - networkpolicies.yaml
+  - tasks/git-clone.yaml
+  - tasks/go-test.yaml
+  - tasks/source-security.yaml
+  - tasks/build-push.yaml
+  - tasks/scan-image.yaml
+  - tasks/generate-sbom.yaml
+  - tasks/create-delivery-evidence.yaml
+  - tasks/verify-promotion-proof.yaml
+  - tasks/gitops-propose-promotion.yaml
+  - pipelines/build-and-publish.yaml
+  - pipelines/promote-image.yaml

@@ -1,0 +1,33 @@
+---
+- name: Restrict the egress proxy role to gitea-mgmt
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'gitea-mgmt'
+      - private_ip == management_gitea_private_ip
+
+- name: Install Squid
+  ansible.builtin.apt:
+    name: squid
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Configure the private-only bounded egress proxy
+  ansible.builtin.template:
+    src: squid.conf.j2
+    dest: /etc/squid/squid.conf
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Restart Squid
+
+- name: Validate the Squid configuration
+  ansible.builtin.command:
+    cmd: squid -k parse
+  changed_when: false
+
+- name: Enable Squid
+  ansible.builtin.systemd:
+    name: squid
+    enabled: true
+    state: started

@@ -1,0 +1,21 @@
+# Configuration S3 Hetzner canonique et non secrète conservée uniquement pour
+# le diagnostic de locking INCOMPATIBLE. Le bucket est injecté par
+# scripts/init-hetzner-s3-backend.sh ; aucun root management ne consomme ce
+# fichier.
+
+region = "nbg1"
+
+endpoints = {
+  s3 = "https://nbg1.your-objectstorage.com"
+}
+
+acl            = "private"
+use_path_style = false
+
+# Hetzner n'expose pas les API AWS STS/IAM et n'utilise pas une région AWS.
+# La recherche EC2 Metadata est désactivée pour imposer les credentials
+# explicites fournis au processus et éviter tout fallback vers IMDS.
+skip_credentials_validation = true
+skip_metadata_api_check     = true
+skip_region_validation      = true
+skip_requesting_account_id  = true

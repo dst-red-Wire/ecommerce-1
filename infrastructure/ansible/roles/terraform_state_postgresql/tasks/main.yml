@@ -1,0 +1,297 @@
+---
+- name: Assert the dedicated PostgreSQL boundary
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'terraform-state-mgmt'
+      - terraform_state_postgresql_major == 16
+      - terraform_state_postgresql_database == 'terraform_backend'
+      - terraform_state_postgresql_user == 'terraform_backend'
+      - terraform_state_management_schema == 'terraform_management'
+      - terraform_state_lock_probe_schema == 'terraform_lock_probe'
+      - postgresql_bind_address == '127.0.0.1'
+    fail_msg: Terraform backend PostgreSQL must remain isolated from management and application databases.
+
+- name: Install pinned Ubuntu PostgreSQL packages
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ terraform_state_postgresql_major }}"
+      - "postgresql-client-{{ terraform_state_postgresql_major }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create PostgreSQL configuration boundaries
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ terraform_state_config_root }}"
+      owner: root
+      group: postgres
+      mode: "0750"
+    - path: "{{ terraform_state_config_root }}/postgresql"
+      owner: root
+      group: postgres
+      mode: "0750"
+    - path: "{{ terraform_state_config_root }}/postgresql/tls"
+      owner: root
+      group: postgres
+      mode: "0750"
+    - path: "{{ terraform_state_log_root }}"
+      owner: root
+      group: postgres
+      mode: "0750"
+    - path: "{{ terraform_state_log_root }}/postgresql"
+      owner: postgres
+      group: postgres
+      mode: "0750"
+
+- name: Install local CA OpenSSL configuration
+  ansible.builtin.template:
+    src: ca-openssl.cnf.j2
+    dest: "{{ terraform_state_config_root }}/postgresql/tls/ca-openssl.cnf"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install server OpenSSL configuration
+  ansible.builtin.template:
+    src: server-openssl.cnf.j2
+    dest: "{{ terraform_state_config_root }}/postgresql/tls/server-openssl.cnf"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Generate the local PostgreSQL certificate authority
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -new
+      - -nodes
+      - -newkey
+      - rsa:3072
+      - -sha256
+      - -days
+      - "825"
+      - -config
+      - "{{ terraform_state_config_root }}/postgresql/tls/ca-openssl.cnf"
+      - -keyout
+      - "{{ terraform_state_config_root }}/postgresql/tls/ca.key"
+      - -out
+      - "{{ terraform_state_config_root }}/postgresql/tls/ca.crt"
+    creates: "{{ terraform_state_config_root }}/postgresql/tls/ca.crt"
+
+- name: Generate the PostgreSQL server private key and request
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -new
+      - -newkey
+      - rsa:3072
+      - -nodes
+      - -sha256
+      - -config
+      - "{{ terraform_state_config_root }}/postgresql/tls/server-openssl.cnf"
+      - -keyout
+      - "{{ terraform_state_config_root }}/postgresql/tls/server.key"
+      - -out
+      - "{{ terraform_state_config_root }}/postgresql/tls/server.csr"
+    creates: "{{ terraform_state_config_root }}/postgresql/tls/server.csr"
+
+- name: Sign the PostgreSQL server certificate
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - x509
+      - -req
+      - -sha256
+      - -days
+      - "397"
+      - -in
+      - "{{ terraform_state_config_root }}/postgresql/tls/server.csr"
+      - -CA
+      - "{{ terraform_state_config_root }}/postgresql/tls/ca.crt"
+      - -CAkey
+      - "{{ terraform_state_config_root }}/postgresql/tls/ca.key"
+      - -CAcreateserial
+      - -extfile
+      - "{{ terraform_state_config_root }}/postgresql/tls/server-openssl.cnf"
+      - -extensions
+      - server_extensions
+      - -out
+      - "{{ terraform_state_config_root }}/postgresql/tls/server.crt"
+    creates: "{{ terraform_state_config_root }}/postgresql/tls/server.crt"
+  notify: Restart Terraform state PostgreSQL
+
+- name: Protect PostgreSQL TLS material
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ terraform_state_config_root }}/postgresql/tls/ca.key", owner: root, group: root, mode: "0600" }
+    - { path: "{{ terraform_state_config_root }}/postgresql/tls/ca.crt", owner: root, group: postgres, mode: "0644" }
+    - { path: "{{ terraform_state_config_root }}/postgresql/tls/server.key", owner: postgres, group: postgres, mode: "0600" }
+    - { path: "{{ terraform_state_config_root }}/postgresql/tls/server.csr", owner: root, group: root, mode: "0600" }
+    - { path: "{{ terraform_state_config_root }}/postgresql/tls/server.crt", owner: postgres, group: postgres, mode: "0644" }
+
+- name: Configure loopback TLS-only PostgreSQL
+  ansible.builtin.template:
+    src: postgresql.conf.j2
+    dest: "/etc/postgresql/{{ terraform_state_postgresql_major }}/main/conf.d/90-terraform-state.conf"
+    owner: postgres
+    group: postgres
+    mode: "0644"
+  notify: Restart Terraform state PostgreSQL
+
+- name: Configure SCRAM-only PostgreSQL client boundaries
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "/etc/postgresql/{{ terraform_state_postgresql_major }}/main/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart Terraform state PostgreSQL
+
+- name: Apply PostgreSQL configuration before provisioning backend objects
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the Terraform state PostgreSQL service umbrella
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: true
+
+- name: Start the Terraform state PostgreSQL cluster
+  ansible.builtin.systemd:
+    name: "postgresql@{{ terraform_state_postgresql_major }}-main"
+    state: started
+
+- name: Test the current Terraform backend role credential
+  ansible.builtin.command:
+    argv:
+      - psql
+      - "dbname=postgres user={{ terraform_state_postgresql_user }}"
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - --command=SELECT 1;
+  become: true
+  become_user: postgres
+  environment:
+    PGPASSWORD: "{{ terraform_state_postgresql_password }}"
+  register: terraform_state_postgresql_credential_check
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Reconcile the least-privilege Terraform backend role
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --set=ON_ERROR_STOP=1
+      - --dbname=postgres
+    stdin: "{{ lookup('ansible.builtin.template', 'roles.sql.j2') }}"
+  become: true
+  become_user: postgres
+  changed_when: false
+  no_log: true
+
+- name: Inspect the dedicated Terraform backend database
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - --dbname=postgres
+      - "--command=SELECT datname FROM pg_database WHERE datname='{{ terraform_state_postgresql_database }}';"
+  become: true
+  become_user: postgres
+  register: terraform_state_postgresql_database_check
+  changed_when: false
+
+- name: Create the dedicated Terraform backend database
+  ansible.builtin.command:
+    argv:
+      - createdb
+      - --owner=postgres
+      - --encoding=UTF8
+      - --template=template0
+      - "{{ terraform_state_postgresql_database }}"
+  become: true
+  become_user: postgres
+  when: terraform_state_postgresql_database_check.stdout | trim != terraform_state_postgresql_database
+  changed_when: true
+
+- name: Restrict the dedicated Terraform backend database
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --set=ON_ERROR_STOP=1
+      - --dbname=postgres
+      - "--command=REVOKE ALL ON DATABASE {{ terraform_state_postgresql_database }} FROM PUBLIC;"
+      - "--command=GRANT CONNECT ON DATABASE {{ terraform_state_postgresql_database }} TO {{ terraform_state_postgresql_user }};"
+  become: true
+  become_user: postgres
+  changed_when: false
+
+- name: Apply Terraform 1.15.5 backend objects and grants
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --set=ON_ERROR_STOP=1
+      - "--dbname={{ terraform_state_postgresql_database }}"
+    stdin: "{{ lookup('ansible.builtin.template', 'backend-objects.sql.j2') }}"
+  become: true
+  become_user: postgres
+  changed_when: false
+
+- name: Install the encrypted PostgreSQL backup interface
+  ansible.builtin.template:
+    src: terraform-state-backup.sh.j2
+    dest: /usr/local/sbin/terraform-state-backup
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Prove local TLS, SCRAM identity and least privileges
+  ansible.builtin.command:
+    argv:
+      - psql
+      - >-
+        host=127.0.0.1 port={{ terraform_state_postgresql_port }}
+        dbname={{ terraform_state_postgresql_database }}
+        user={{ terraform_state_postgresql_user }}
+        sslmode=verify-full
+        sslrootcert={{ terraform_state_config_root }}/postgresql/tls/ca.crt
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - >-
+        --command=SELECT ssl
+        AND version IS NOT NULL
+        AND current_user = '{{ terraform_state_postgresql_user }}'
+        AND current_database() = '{{ terraform_state_postgresql_database }}'
+        AND has_schema_privilege(current_user, '{{ terraform_state_management_schema }}', 'USAGE')
+        AND has_table_privilege(current_user, '{{ terraform_state_management_schema }}.states', 'SELECT')
+        AND has_table_privilege(current_user, '{{ terraform_state_management_schema }}.states', 'INSERT')
+        AND has_table_privilege(current_user, '{{ terraform_state_management_schema }}.states', 'UPDATE')
+        AND has_table_privilege(current_user, '{{ terraform_state_management_schema }}.states', 'DELETE')
+        AND NOT has_schema_privilege(current_user, '{{ terraform_state_management_schema }}', 'CREATE')
+        FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+  environment:
+    PGPASSWORD: "{{ terraform_state_postgresql_password }}"
+  register: terraform_state_postgresql_tls_check
+  changed_when: false
+  failed_when: terraform_state_postgresql_tls_check.stdout | trim != 't'
+  no_log: true

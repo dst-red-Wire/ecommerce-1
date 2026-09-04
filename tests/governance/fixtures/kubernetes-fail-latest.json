@@ -1,0 +1,11 @@
+{
+  "environment": "production",
+  "manifests": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"name": "catalog", "namespace": "shop"},
+      "spec": {"template": {"spec": {"containers": [{"name": "catalog", "image": "registry.example/catalog:latest"}]}}}
+    }
+  ]
+}

@@ -1,31 +1,39 @@
+# LEGACY / NON-AUTHORITATIVE. Manual local compatibility only.
+# GitHub plus Tekton are the delivery source of truth; results from this file
+# never satisfy a GateEvidence or PromotionProof.
 when:
-  event: [push, pull_request, manual]
+  event: [manual]
 
 steps:
   lint:
-    image: golang:1.24-alpine
+    # golang:1.24-alpine
+    image: golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
     commands:
       - apk add --no-cache git make nodejs npm shellcheck
       - make lint
 
   test:
-    image: golang:1.24-alpine
+    # golang:1.24-alpine
+    image: golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
     commands:
       - apk add --no-cache make nodejs npm
       - make test
 
   security:
-    image: zricethezav/gitleaks:v8.24.3
+    # zricethezav/gitleaks:v8.30.1
+    image: zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     commands:
       - ./scripts/ci-security.sh
 
   terraform:
-    image: hashicorp/terraform:1.11
+    # hashicorp/terraform:1.11
+    image: hashicorp/terraform@sha256:5820b87995595425074f881500a037b0ccd41158d0d9b44d78f5f120612f2d3d
     entrypoint: [""]
     commands:
       - ./scripts/ci-terraform.sh
 
   ansible:
-    image: cytopia/ansible-lint:latest
+    # cytopia/ansible-lint:latest (legacy compatibility image)
+    image: cytopia/ansible-lint@sha256:85e3a4ea07d3a6b02732dcb991f7e3b0a30ea43e7c4968dcda0190d3cba3b263
     commands:
       - ./scripts/ci-ansible.sh

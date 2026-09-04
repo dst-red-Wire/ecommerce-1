@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "activationStatus": "NOT_PROVEN",
+  "backendType": "s3",
+  "stateKey": "ecommerce/preproduction/terraform.tfstate",
+  "stagingStateReuseForbidden": true,
+  "locking": {
+    "mechanism": "s3-native-lockfile",
+    "useLockfile": true,
+    "lockRequiredForPlanApplyDestroy": true
+  },
+  "requiredExternalConfiguration": [
+    "bucket",
+    "region",
+    "endpoints.s3",
+    "credential-source"
+  ],
+  "credentialsInRepositoryForbidden": true,
+  "decisionOwnerRequired": true
+}

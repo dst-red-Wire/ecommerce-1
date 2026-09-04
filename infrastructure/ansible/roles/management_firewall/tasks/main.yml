@@ -1,0 +1,32 @@
+---
+- name: Validate firewall inputs
+  ansible.builtin.assert:
+    that:
+      - management_ssh_allowed_ipv4_cidrs | length > 0
+      - management_gitea_private_ip == hostvars['gitea-mgmt'].private_ip
+      - management_harbor_private_ip == hostvars['harbor-mgmt'].private_ip
+      - management_data_private_ip == hostvars['data-mgmt'].private_ip
+    fail_msg: Host firewall addresses must come from the rendered Terraform inventory.
+
+- name: Install the management nftables policy
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/nft --check --file %s
+  notify: Reload management firewall
+
+- name: Enable nftables at boot
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+
+- name: Apply firewall changes before starting authoritative services
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the active management firewall table
+  ansible.builtin.command:
+    cmd: nft list table inet ecommerce_management
+  changed_when: false

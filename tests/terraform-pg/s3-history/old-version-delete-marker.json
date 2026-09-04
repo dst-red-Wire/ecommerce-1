@@ -1,0 +1,1 @@
+{"apiStatus":"OK","isTruncated":false,"nextKeyMarker":null,"nextVersionIdMarker":null,"entries":[{"key":"ecommerce/management/terraform.tfstate","versionId":"v1","latest":false,"deleteMarker":false,"lastModified":"2026-08-18T10:00:00Z"},{"key":"ecommerce/management/terraform.tfstate","versionId":"delete-2","latest":true,"deleteMarker":true,"lastModified":"2026-08-19T10:00:00Z"}]}

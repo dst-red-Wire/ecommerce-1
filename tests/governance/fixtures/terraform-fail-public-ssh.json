@@ -1,0 +1,17 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "hcloud_firewall.management",
+      "type": "hcloud_firewall",
+      "change": {
+        "actions": ["update"],
+        "after": {
+          "rules": [
+            {"direction": "in", "protocol": "tcp", "port": "22", "source_ips": ["0.0.0.0/0"]}
+          ]
+        }
+      }
+    }
+  ]
+}

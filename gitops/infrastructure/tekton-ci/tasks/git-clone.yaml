@@ -1,0 +1,81 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone
+  namespace: tekton-ci
+spec:
+  description: Clone an exact commit and emit a content-addressed archive into a separate build workspace.
+  params:
+    - name: repository-url
+      type: string
+    - name: revision
+      type: string
+    - name: subdirectory
+      type: string
+      default: source
+  workspaces:
+    - name: source
+    - name: source-snapshot
+  results:
+    - name: COMMIT_SHA
+      description: Exact source commit checked out by the task.
+    - name: SNAPSHOT_SHA256
+      description: SHA-256 of the exact git archive consumed by the build task.
+  steps:
+    - name: clone
+      # alpine/git:2.49.1
+      image: alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      env:
+        - name: REPOSITORY_URL
+          value: $(params.repository-url)
+        - name: REVISION
+          value: $(params.revision)
+        - name: SUBDIRECTORY
+          value: $(params.subdirectory)
+        - name: HOME
+          value: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      script: |
+        #!/bin/sh
+        set -eu
+        destination="$(workspaces.source.path)/$SUBDIRECTORY"
+        snapshot="$(workspaces.source-snapshot.path)/source.tar"
+        [ "$REPOSITORY_URL" = "https://github.com/dst-red-Wire/ecommerce-1.git" ] || {
+          printf 'unauthorized source repository: %s\n' "$REPOSITORY_URL" >&2
+          exit 1
+        }
+        printf '%s\n' "$REVISION" | grep -Eq '^[0-9a-f]{40}$' || {
+          printf 'source revision must be a full commit SHA\n' >&2
+          exit 1
+        }
+        mkdir -p "$destination"
+        [ -z "$(ls -A "$destination")" ] || {
+          printf 'source workspace is not empty: %s\n' "$destination" >&2
+          exit 1
+        }
+        [ -z "$(ls -A "$(workspaces.source-snapshot.path)")" ] || {
+          printf 'source snapshot workspace is not empty\n' >&2
+          exit 1
+        }
+        git -C "$destination" init
+        git -C "$destination" remote add origin "$REPOSITORY_URL"
+        git -C "$destination" fetch --depth=1 origin "$REVISION"
+        git -C "$destination" checkout --detach FETCH_HEAD
+        commit_sha=$(git -C "$destination" rev-parse HEAD)
+        [ "$commit_sha" = "$REVISION" ] || {
+          printf 'resolved commit differs from requested revision\n' >&2
+          exit 1
+        }
+        git -C "$destination" archive --format=tar HEAD >"$snapshot"
+        test -s "$snapshot"
+        snapshot_sha=$(sha256sum "$snapshot" | awk '{print $1}')
+        chmod 0444 "$snapshot"
+        printf '%s' "$commit_sha" >"$(results.COMMIT_SHA.path)"
+        printf '%s' "$snapshot_sha" >"$(results.SNAPSHOT_SHA256.path)"

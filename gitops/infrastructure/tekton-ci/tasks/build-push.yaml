@@ -1,0 +1,182 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-push
+  namespace: tekton-ci
+spec:
+  description: Build rootlessly, push to GHCR, and return an unapproved registry digest.
+  params:
+    - name: context
+      type: string
+    - name: dockerfile
+      type: string
+      default: Dockerfile
+    - name: image-repository
+      type: string
+    - name: image-tag
+      type: string
+    - name: expected-snapshot-sha256
+      type: string
+  workspaces:
+    - name: source-snapshot
+      readOnly: true
+  results:
+    - name: BUILT_IMAGE_URL
+      description: Tagged output; deliberately not a Chains type-hinted approval result.
+    - name: BUILT_IMAGE_DIGEST
+      description: Exact unapproved sha256 digest returned by the registry push.
+    - name: BUILT_IMAGE_REFERENCE
+      description: Immutable but not yet approved repository@sha256 reference.
+  volumes:
+    - name: build-context
+      emptyDir: {}
+    - name: build-output
+      emptyDir: {}
+    - name: buildkit-state
+      emptyDir: {}
+  steps:
+    - name: prepare-build-context
+      # alpine/git:2.49.1
+      image: alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      env:
+        - name: EXPECTED_SNAPSHOT_SHA256
+          value: $(params.expected-snapshot-sha256)
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: build-context
+          mountPath: /workspace/build-context
+      script: |
+        #!/bin/sh
+        set -eu
+        archive="$(workspaces.source-snapshot.path)/source.tar"
+        test -f "$archive"
+        test ! -L "$archive"
+        printf '%s\n' "$EXPECTED_SNAPSHOT_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+        actual_sha=$(sha256sum "$archive" | awk '{print $1}')
+        [ "$actual_sha" = "$EXPECTED_SNAPSHOT_SHA256" ] || {
+          printf 'source snapshot digest mismatch\n' >&2
+          exit 1
+        }
+        [ -z "$(ls -A /workspace/build-context)" ]
+        tar -xf "$archive" -C /workspace/build-context
+        chmod -R a-w,go+rX /workspace/build-context
+    - name: build-and-push
+      # moby/buildkit:v0.32.2-rootless
+      image: moby/buildkit@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b
+      workingDir: /workspace/build-context
+      env:
+        - name: CONTEXT
+          value: $(params.context)
+        - name: DOCKERFILE
+          value: $(params.dockerfile)
+        - name: IMAGE_REPOSITORY
+          value: $(params.image-repository)
+        - name: IMAGE_TAG
+          value: $(params.image-tag)
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+        - name: BUILDKITD_FLAGS
+          value: --oci-worker-no-process-sandbox
+      securityContext:
+        allowPrivilegeEscalation: false
+        appArmorProfile:
+          type: Unconfined
+        capabilities:
+          drop: [ALL]
+        privileged: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: Unconfined
+      computeResources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: "4"
+          memory: 8Gi
+      volumeMounts:
+        - name: build-context
+          mountPath: /workspace/build-context
+          readOnly: true
+        - name: build-output
+          mountPath: /workspace/build-output
+        - name: buildkit-state
+          mountPath: /home/user/.local/share/buildkit
+      script: |
+        #!/bin/sh
+        set -eu
+        case "$IMAGE_REPOSITORY" in
+          ghcr.io/dst-red-wire/ecommerce-1/*) ;;
+          *) printf 'unauthorized image repository: %s\n' "$IMAGE_REPOSITORY" >&2; exit 1 ;;
+        esac
+        printf '%s\n' "$IMAGE_TAG" | grep -Eq '^[0-9a-f]{40}$' || {
+          printf 'image tag must be the full source commit SHA\n' >&2
+          exit 1
+        }
+        printf '%s\n' "$CONTEXT" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || {
+          printf 'invalid build context\n' >&2
+          exit 1
+        }
+        case "$DOCKERFILE" in
+          /*|*../*|*/..|..|*\\*) printf 'invalid Dockerfile path\n' >&2; exit 1 ;;
+        esac
+        printf '%s\n' "$DOCKERFILE" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
+        context_path="/workspace/build-context/$CONTEXT"
+        metadata_file="/workspace/build-output/buildkit-metadata.json"
+        test -f "$context_path/$DOCKERFILE"
+        buildctl-daemonless.sh build \
+          --frontend dockerfile.v0 \
+          --local context="$context_path" \
+          --local dockerfile="$context_path" \
+          --opt filename="$DOCKERFILE" \
+          --output "type=image,name=$IMAGE_REPOSITORY:$IMAGE_TAG,push=true" \
+          --metadata-file "$metadata_file"
+    - name: expose-registry-digest
+      # mikefarah/yq:4.53.3
+      image: mikefarah/yq@sha256:11a1f0b604b13dbbdc662260d8db6f644b22d8553122a25c1b5b2e8713ca6977
+      env:
+        - name: IMAGE_REPOSITORY
+          value: $(params.image-repository)
+        - name: IMAGE_TAG
+          value: $(params.image-tag)
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      volumeMounts:
+        - name: build-output
+          mountPath: /workspace/build-output
+          readOnly: true
+      script: |
+        #!/bin/sh
+        set -eu
+        metadata_file="/workspace/build-output/buildkit-metadata.json"
+        digest=$(yq -r '."containerimage.digest"' "$metadata_file")
+        printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || {
+          printf 'registry did not return a valid sha256 digest\n' >&2
+          exit 1
+        }
+        printf '%s' "$IMAGE_REPOSITORY:$IMAGE_TAG" >"$(results.BUILT_IMAGE_URL.path)"
+        printf '%s' "$digest" >"$(results.BUILT_IMAGE_DIGEST.path)"
+        printf '%s@%s' "$IMAGE_REPOSITORY" "$digest" >"$(results.BUILT_IMAGE_REFERENCE.path)"

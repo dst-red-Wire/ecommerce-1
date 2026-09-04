@@ -1,0 +1,7 @@
+schema_version: 1
+policy:
+  permanent_exceptions_allowed: false
+  wildcard_scope_allowed: false
+  expiry_required: true
+  expired_exception_action: FAIL
+exceptions: []

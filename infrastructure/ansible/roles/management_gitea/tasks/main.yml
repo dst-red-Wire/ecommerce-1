@@ -1,0 +1,134 @@
+---
+- name: Restrict Gitea role to gitea-mgmt
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'gitea-mgmt'
+      - private_ip == management_gitea_private_ip
+
+- name: Require Gitea secrets and initial administrator identity
+  ansible.builtin.assert:
+    that:
+      - management_postgres_gitea_password is defined
+      - management_gitea_secret_key is defined
+      - management_gitea_internal_token is defined
+      - management_gitea_lfs_jwt_secret is defined
+      - management_gitea_initial_admin_username is defined
+      - management_gitea_initial_admin_email is defined
+      - management_gitea_initial_admin_password is defined
+  no_log: true
+
+- name: Validate Gitea secret strength
+  ansible.builtin.assert:
+    that:
+      - management_postgres_gitea_password | length >= management_secret_min_length
+      - management_gitea_secret_key | length >= 32
+      - management_gitea_internal_token | length >= 32
+      - management_gitea_lfs_jwt_secret | length >= 32
+      - management_gitea_initial_admin_password | length >= management_secret_min_length
+      - management_gitea_initial_admin_username is match('^[a-zA-Z0-9_.-]{3,40}$')
+      - management_gitea_initial_admin_email is match('^[^@ ]+@[^@ ]+$')
+  no_log: true
+
+- name: Load pinned management service versions
+  ansible.builtin.set_fact:
+    management_gitea_versions_mk: "{{ lookup('file', role_path ~ '/../../../../versions.mk') }}"
+
+- name: Resolve the pinned Gitea image
+  ansible.builtin.set_fact:
+    management_gitea_version: >-
+      {{ (management_gitea_versions_mk | regex_findall('(?m)^GITEA_VERSION\s*:=\s*(\S+)'))[0] }}
+    management_gitea_image_digest: >-
+      {{ (management_gitea_versions_mk | regex_findall('(?m)^GITEA_IMAGE_DIGEST\s*:=\s*(sha256:[0-9a-f]{64})'))[0] }}
+
+- name: Create persistent Gitea directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "1000"
+    group: "1000"
+    mode: "0750"
+  loop:
+    - "{{ management_root }}/gitea/data"
+    - "{{ management_root }}/gitea/config"
+
+- name: Create the Gitea deployment directory
+  ansible.builtin.file:
+    path: "{{ management_install_root }}/gitea"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Render the secret Gitea configuration
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: "{{ management_root }}/gitea/config/app.ini"
+    owner: "1000"
+    group: "1000"
+    mode: "0600"
+  no_log: true
+  notify: Reconcile Gitea
+
+- name: Render the Gitea Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ management_install_root }}/gitea/compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Reconcile Gitea
+
+- name: Validate the Gitea Compose project
+  ansible.builtin.command:
+    cmd: docker compose --file compose.yml config --quiet
+    chdir: "{{ management_install_root }}/gitea"
+  changed_when: false
+
+- name: Reconcile Gitea before administrator bootstrap
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the local Gitea health endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3000/api/healthz
+    method: GET
+    status_code: 200
+    return_content: false
+  register: management_gitea_health
+  retries: 12
+  delay: 5
+  until: management_gitea_health.status == 200
+
+- name: Inspect Gitea administrators
+  ansible.builtin.command:
+    cmd: docker compose --file compose.yml exec -T gitea gitea admin user list --admin
+    chdir: "{{ management_install_root }}/gitea"
+  register: management_gitea_admins
+  changed_when: false
+  no_log: true
+
+- name: Create the initial Gitea administrator once
+  ansible.builtin.command:
+    argv:
+      - docker
+      - compose
+      - --file
+      - compose.yml
+      - exec
+      - -T
+      - gitea
+      - gitea
+      - admin
+      - user
+      - create
+      - --username
+      - "{{ management_gitea_initial_admin_username }}"
+      - --password
+      - "{{ management_gitea_initial_admin_password }}"
+      - --email
+      - "{{ management_gitea_initial_admin_email }}"
+      - --admin
+      - --must-change-password
+    chdir: "{{ management_install_root }}/gitea"
+  when: management_gitea_initial_admin_username not in management_gitea_admins.stdout
+  changed_when: true
+  no_log: true

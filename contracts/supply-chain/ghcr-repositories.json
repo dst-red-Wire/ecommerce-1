@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "registry": "ghcr.io",
+  "owner": "dst-red-wire",
+  "repository": "ecommerce-1",
+  "canonicalPattern": "ghcr.io/dst-red-wire/ecommerce-1/<service>",
+  "lowercaseRequired": true,
+  "defaultVisibility": "private",
+  "publicPackagePolicy": "explicit-review-required",
+  "privatePackageRuntimeContract": {
+    "secretName": "ghcr-pull",
+    "permission": "packages:read",
+    "serviceAccountPerService": true,
+    "automountServiceAccountToken": false
+  },
+  "ciPushContract": {
+    "secretName": "ghcr-push",
+    "permission": "packages:write",
+    "serviceAccount": "tekton-image-push",
+    "runtimeReuseForbidden": true
+  },
+  "services": []
+}

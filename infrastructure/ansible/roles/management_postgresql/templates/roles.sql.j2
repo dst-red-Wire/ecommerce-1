@@ -1,0 +1,23 @@
+DO $management_roles$
+DECLARE
+  role_password text;
+BEGIN
+  role_password := convert_from(decode('{{ management_postgres_gitea_password | b64encode }}', 'base64'), 'UTF8');
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ management_gitea_database_user }}') THEN
+    EXECUTE format('CREATE ROLE {{ management_gitea_database_user }} LOGIN PASSWORD %L', role_password);
+  ELSE
+    EXECUTE format('ALTER ROLE {{ management_gitea_database_user }} LOGIN PASSWORD %L', role_password);
+  END IF;
+  ALTER ROLE {{ management_gitea_database_user }} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  ALTER ROLE {{ management_gitea_database_user }} SET statement_timeout = '60s';
+
+  role_password := convert_from(decode('{{ management_postgres_harbor_password | b64encode }}', 'base64'), 'UTF8');
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ management_harbor_database_user }}') THEN
+    EXECUTE format('CREATE ROLE {{ management_harbor_database_user }} LOGIN PASSWORD %L', role_password);
+  ELSE
+    EXECUTE format('ALTER ROLE {{ management_harbor_database_user }} LOGIN PASSWORD %L', role_password);
+  END IF;
+  ALTER ROLE {{ management_harbor_database_user }} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+  ALTER ROLE {{ management_harbor_database_user }} SET statement_timeout = '120s';
+END
+$management_roles$;

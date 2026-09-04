@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chains-config
+  namespace: tekton-chains
+data:
+  artifacts.taskrun.format: slsa/v2alpha4
+  # Task-level storage is disabled: a successful build TaskRun is not a final
+  # approval. Only the completed, deeply inspected PipelineRun is attested.
+  artifacts.taskrun.storage: ""
+  artifacts.taskrun.signer: none
+  artifacts.pipelinerun.format: slsa/v2alpha4
+  artifacts.pipelinerun.storage: tekton,oci
+  artifacts.pipelinerun.signer: x509
+  artifacts.pipelinerun.enable-deep-inspection: "true"
+  # v0.29.0 cannot express "sign OCI only after all Pipeline gates" safely at
+  # TaskRun level. Generic OCI result signing is therefore disabled. The
+  # authoritative OCI object is completed PipelineRun provenance above.
+  artifacts.oci.format: simplesigning
+  artifacts.oci.storage: ""
+  artifacts.oci.signer: none
+  storage.oci.encoding-format: sigstore-bundle
+  storage.oci.repository.insecure: "false"
+  transparency.enabled: "false"

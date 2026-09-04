@@ -1,0 +1,238 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: verify-promotion-proof
+  namespace: tekton-ci
+spec:
+  description: >-
+    Freeze untrusted proof bytes once, verify that frozen snapshot with Cosign,
+    apply the pinned JSON Schemas, and derive promotion values only from the
+    same immutable snapshot.
+  params:
+    - name: environment
+      type: string
+  workspaces:
+    - name: evidence
+      description: Read-only workspace containing the proof, bundle, and DeliveryEvidence.
+      readOnly: true
+    - name: trust
+      description: Read-only ConfigMap with cosign.pub and the two pinned JSON Schemas.
+      readOnly: true
+  results:
+    - name: VERIFIED_IMAGE_REPOSITORY
+    - name: VERIFIED_IMAGE_DIGEST
+    - name: SOURCE_COMMIT
+    - name: SERVICE
+    - name: IDEMPOTENCE_KEY
+    - name: ALLOWED_PATH
+    - name: PROOF_SHA256
+  volumes:
+    - name: frozen-input
+      emptyDir: {}
+  steps:
+    - name: freeze-untrusted-input
+      # alpine/git:2.49.1
+      image: alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65531
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: frozen-input
+          mountPath: /var/run/frozen
+      script: |
+        #!/bin/sh
+        set -eu
+        umask 077
+        destination=/var/run/frozen/payload
+        mkdir "$destination"
+        for name in promotion-proof.json promotion-proof.sigstore.json delivery-evidence.json; do
+          source_file="$(workspaces.evidence.path)/$name"
+          test -f "$source_file"
+          test ! -L "$source_file" || {
+            printf 'symlink evidence is forbidden: %s\n' "$name" >&2
+            exit 1
+          }
+          dd if="$source_file" of="$destination/$name" bs=64k 2>/dev/null
+          test -s "$destination/$name"
+        done
+        sha256sum "$destination/promotion-proof.json" | awk '{print $1}' >"$destination/proof.sha256"
+        sha256sum "$destination/delivery-evidence.json" | awk '{print $1}' >"$destination/delivery.sha256"
+        chmod 0444 "$destination"/*
+        chmod 0555 "$destination"
+    - name: verify-frozen-cryptographic-bundle
+      # ghcr.io/sigstore/cosign/cosign:v3.0.2
+      image: ghcr.io/sigstore/cosign/cosign@sha256:b29487e48205d875c324c79583e2806d9d269c0fa299e0861bbec023d8430c8b
+      command: [/ko-app/cosign]
+      args:
+        - verify-blob
+        - --offline
+        - --key
+        - $(workspaces.trust.path)/cosign.pub
+        - --bundle
+        - /var/run/frozen/payload/promotion-proof.sigstore.json
+        - /var/run/frozen/payload/promotion-proof.json
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
+      volumeMounts:
+        - name: frozen-input
+          mountPath: /var/run/frozen
+          readOnly: true
+    - name: validate-promotion-proof-schema
+      # ghcr.io/sourcemeta/jsonschema:v15.6.3
+      image: ghcr.io/sourcemeta/jsonschema@sha256:6ce01c0d77f7baccd64ae05672ad9c7e189f9cae9a95138af42688255aa4a1a1
+      args:
+        - validate
+        - $(workspaces.trust.path)/promotion-proof.schema.json
+        - /var/run/frozen/payload/promotion-proof.json
+        - --format-assertion
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65533
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: frozen-input
+          mountPath: /var/run/frozen
+          readOnly: true
+    - name: validate-delivery-evidence-schema
+      # ghcr.io/sourcemeta/jsonschema:v15.6.3
+      image: ghcr.io/sourcemeta/jsonschema@sha256:6ce01c0d77f7baccd64ae05672ad9c7e189f9cae9a95138af42688255aa4a1a1
+      args:
+        - validate
+        - $(workspaces.trust.path)/delivery-evidence.schema.json
+        - /var/run/frozen/payload/delivery-evidence.json
+        - --format-assertion
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65533
+        seccompProfile:
+          type: RuntimeDefault
+      volumeMounts:
+        - name: frozen-input
+          mountPath: /var/run/frozen
+          readOnly: true
+    - name: validate-frozen-semantics
+      # mikefarah/yq:4.53.3
+      image: mikefarah/yq@sha256:11a1f0b604b13dbbdc662260d8db6f644b22d8553122a25c1b5b2e8713ca6977
+      env:
+        - name: TARGET_ENVIRONMENT
+          value: $(params.environment)
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65533
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      volumeMounts:
+        - name: frozen-input
+          mountPath: /var/run/frozen
+          readOnly: true
+      script: |
+        #!/bin/sh
+        set -eu
+        frozen=/var/run/frozen/payload
+        proof="$frozen/promotion-proof.json"
+        delivery="$frozen/delivery-evidence.json"
+        expected_proof_sha=$(cat "$frozen/proof.sha256")
+        expected_delivery_sha=$(cat "$frozen/delivery.sha256")
+        [ "$(sha256sum "$proof" | awk '{print $1}')" = "$expected_proof_sha" ]
+        [ "$(sha256sum "$delivery" | awk '{print $1}')" = "$expected_delivery_sha" ]
+        [ "$(sha256sum "$(workspaces.trust.path)/promotion-proof.schema.json" | awk '{print $1}')" = "bf946de44db43128974201ce00888a1e4bfddc6f18aa165e53eb2e708a019503" ]
+        [ "$(sha256sum "$(workspaces.trust.path)/delivery-evidence.schema.json" | awk '{print $1}')" = "45ea68410facc5860c58c41fd76722bfac9da9e1be38f1091208d611ad972089" ]
+        [ "$(yq -r '.evidence.deliveryEvidenceSha256' "$proof")" = "$expected_delivery_sha" ] || {
+          printf 'DeliveryEvidence SHA-256 mismatch\n' >&2
+          exit 1
+        }
+        case "$TARGET_ENVIRONMENT:$(yq -r '.promotion.sourceEnvironment' "$proof")" in
+          integration:build|preproduction:integration|production:preproduction) ;;
+          *) printf 'invalid signed promotion edge\n' >&2; exit 1 ;;
+        esac
+        [ "$(yq -r '.promotion.environment' "$proof")" = "$TARGET_ENVIRONMENT" ]
+        [ "$(yq -r '.approval.gateId' "$proof")" = "promotion-$TARGET_ENVIRONMENT" ]
+        [ "$(yq -r '.approval.issuer' "$proof")" = ecommerce-promotion-attestor ]
+        [ "$(yq -r '.approval.signatureMechanism' "$proof")" = cosign-key ]
+        expected_key_id="sha256:$(sha256sum "$(workspaces.trust.path)/cosign.pub" | awk '{print $1}')"
+        [ "$(yq -r '.approval.keyId' "$proof")" = "$expected_key_id" ] || {
+          printf 'signed key identity does not match the trusted public key\n' >&2
+          exit 1
+        }
+        expires_epoch=$(yq -r '.approval.expiresAtEpoch' "$proof")
+        parsed_expires=$(yq -r '.approval.expiresAt | fromdateiso8601' "$proof")
+        issued_epoch=$(yq -r '.approval.issuedAt | fromdateiso8601' "$proof")
+        now_epoch=$(date -u +%s)
+        [ "$expires_epoch" -eq "$parsed_expires" ]
+        [ "$expires_epoch" -gt "$now_epoch" ]
+        [ "$issued_epoch" -le $((now_epoch + 300)) ]
+        [ "$expires_epoch" -gt "$issued_epoch" ]
+        [ $((expires_epoch - issued_epoch)) -le 86400 ]
+        repository=$(yq -r '.subject.image.repository' "$proof")
+        digest=$(yq -r '.subject.image.digest' "$proof")
+        service=$(yq -r '.subject.service' "$proof")
+        source_commit=$(yq -r '.subject.sourceCommit' "$proof")
+        snapshot_sha=$(yq -r '.subject.sourceSnapshotSha256' "$proof")
+        [ "$repository" = "ghcr.io/dst-red-wire/ecommerce-1/$service" ]
+        allowed_path=$(yq -r '.promotion.allowedPath' "$proof")
+        [ "$allowed_path" = "gitops/apps/$service/overlays/$TARGET_ENVIRONMENT/kustomization.yaml" ]
+        calculated_key=$(printf '%s|%s|%s' "$TARGET_ENVIRONMENT" "$repository" "$digest" | sha256sum | awk '{print "sha256:" $1}')
+        signed_key=$(yq -r '.promotion.idempotenceKey' "$proof")
+        [ "$calculated_key" = "$signed_key" ]
+        [ "$(yq -r '.subject.gitRepository' "$delivery")" = "$(yq -r '.subject.gitRepository' "$proof")" ]
+        [ "$(yq -r '.subject.sourceCommit' "$delivery")" = "$source_commit" ]
+        [ "$(yq -r '.subject.sourceSnapshotSha256' "$delivery")" = "$snapshot_sha" ]
+        [ "$(yq -r '.subject.serviceContext' "$delivery")" = "$service" ]
+        [ "$(yq -r '.subject.image.repository' "$delivery")" = "$repository" ]
+        [ "$(yq -r '.subject.image.digest' "$delivery")" = "$digest" ]
+        [ "$(yq -r '.attestationBoundary.pipelineRunUid' "$delivery")" = "$(yq -r '.evidence.chains.pipelineRunUid' "$proof")" ]
+        image_reference="$repository@$digest"
+        [ "$(yq -r '.evidence.chains.provenance.subject' "$proof")" = "$image_reference" ]
+        case "$(yq -r '.evidence.sbom.uri' "$proof")" in "oci://$image_reference"*) ;; *) exit 1 ;; esac
+        for scan_id in gitleaks-source trivy-source trivy-image; do
+          [ "$(yq "[.evidence.scans[] | select(.id == \"$scan_id\")] | length" "$proof")" -eq 1 ]
+          [ "$(yq "[.materials.scans[] | select(.id == \"$scan_id\")] | length" "$delivery")" -eq 1 ]
+          proof_scan_sha=$(yq -r ".evidence.scans[] | select(.id == \"$scan_id\") | .sha256" "$proof")
+          delivery_scan_sha=$(yq -r ".materials.scans[] | select(.id == \"$scan_id\") | .sha256" "$delivery")
+          [ "$proof_scan_sha" = "$delivery_scan_sha" ]
+        done
+        [ "$(yq -r '.evidence.sbom.sha256' "$proof")" = "$(yq -r '.materials.sbom.sha256' "$delivery")" ]
+        [ "$(sha256sum "$proof" | awk '{print $1}')" = "$expected_proof_sha" ]
+        printf '%s' "$repository" >"$(results.VERIFIED_IMAGE_REPOSITORY.path)"
+        printf '%s' "$digest" >"$(results.VERIFIED_IMAGE_DIGEST.path)"
+        printf '%s' "$source_commit" >"$(results.SOURCE_COMMIT.path)"
+        printf '%s' "$service" >"$(results.SERVICE.path)"
+        printf '%s' "$signed_key" >"$(results.IDEMPOTENCE_KEY.path)"
+        printf '%s' "$allowed_path" >"$(results.ALLOWED_PATH.path)"
+        printf '%s' "$expected_proof_sha" >"$(results.PROOF_SHA256.path)"

@@ -1,0 +1,15 @@
+# Managed by Ansible. Local TCP forwarding is required for the PostgreSQL
+# tunnel; remote forwarding and public gateway binding remain forbidden.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AllowTcpForwarding local
+GatewayPorts no
+PermitTunnel no
+X11Forwarding no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2

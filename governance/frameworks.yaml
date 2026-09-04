@@ -1,0 +1,56 @@
+schema_version: 1
+frameworks:
+  - id: NIST_SSDF_1_1
+    name: NIST SP 800-218 SSDF 1.1
+    status: FINAL
+    baseline: true
+    claim_allowed: false
+    reference_url: https://csrc.nist.gov/pubs/sp/800/218/final
+  - id: NIST_SSDF_1_2_DRAFT
+    name: NIST SP 800-218 Rev. 1 SSDF 1.2
+    status: DRAFT
+    baseline: false
+    claim_allowed: false
+    reference_url: https://csrc.nist.gov/projects/ssdf/publications
+  - id: OWASP_ASVS_5_0_0
+    name: OWASP ASVS 5.0.0
+    status: STABLE
+    baseline: true
+    claim_allowed: false
+    reference_url: https://owasp.org/www-project-application-security-verification-standard/
+  - id: SLSA_1_2
+    name: SLSA 1.2
+    status: APPROVED
+    baseline: true
+    claim_allowed: false
+    reference_url: https://slsa.dev/spec/v1.2/
+  - id: NIST_CSF_2_0
+    name: NIST Cybersecurity Framework 2.0
+    status: FINAL
+    baseline: true
+    claim_allowed: false
+    reference_url: https://www.nist.gov/cyberframework
+  - id: ISO_IEC_27001_2022
+    name: ISO/IEC 27001:2022
+    status: INFORMATIVE_MAPPING_ONLY
+    baseline: false
+    claim_allowed: false
+    reference_url: https://www.iso.org/standard/27001
+  - id: GDPR
+    name: GDPR / RGPD technical and privacy principles
+    status: APPLICABLE_DESIGN_BASELINE
+    baseline: true
+    claim_allowed: false
+    reference_url: https://commission.europa.eu/law/law-topic/data-protection/data-protection-eu_en
+  - id: PCI_DSS
+    name: PCI DSS
+    status: CONDITIONAL_SCOPE_DEPENDENT
+    baseline: false
+    claim_allowed: false
+    reference_url: https://www.pcisecuritystandards.org/standards/pci-dss/
+  - id: CIS
+    name: CIS Controls and Benchmarks
+    status: INFORMATIVE_VERSION_TO_VERIFY_PER_TARGET
+    baseline: false
+    claim_allowed: false
+    reference_url: https://www.cisecurity.org/cis-benchmarks

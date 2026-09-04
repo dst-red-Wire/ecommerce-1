@@ -1,0 +1,63 @@
+---
+- name: Validate a future real-VM preproduction inventory
+  hosts: preproduction
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Refuse staging or local hosts
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname != 'ecommerce-staging'
+          - ansible_host | default('') != '178.104.138.200'
+          - "'docker-desktop' not in inventory_hostname"
+        fail_msg: Preproduction cannot target staging or a local Docker context.
+
+    - name: Validate the production-like topology
+      ansible.builtin.assert:
+        that:
+          - groups['kube_control_plane'] | length >= 3
+          - groups['kube_control_plane'] | length % 2 == 1
+          - groups['kube_workers'] | length >= 2
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version is version('24.04', '>=')
+          - private_ip is defined
+          - private_ip is match('^(10|172|192)\.')
+        fail_msg: Preproduction requires Ubuntu 24.04, odd HA control planes and two workers.
+
+    - name: Validate campaign and private API contracts
+      ansible.builtin.assert:
+        that:
+          - preproduction_campaign_id | length >= 3
+          - preproduction_owner | length > 0
+          - preproduction_cost_center | length > 0
+          - preproduction_api_endpoint is regex('^[a-z0-9.-]+:6443$')
+          - preproduction_api_private_ipv4 is match('^(10|172|192)\.')
+          - preproduction_bootstrap_status == 'NOT_PROVEN'
+        fail_msg: Campaign ownership, cost, private API endpoint or NOT_PROVEN status is missing.
+
+    - name: Read cgroup filesystem without mutation
+      ansible.builtin.command:
+        cmd: stat -fc %T /sys/fs/cgroup
+      register: preproduction_cgroup
+      changed_when: false
+
+    - name: Require cgroup v2
+      ansible.builtin.assert:
+        that:
+          - preproduction_cgroup.stdout == 'cgroup2fs'
+
+    - name: Verify private node addressing is unique
+      ansible.builtin.assert:
+        that:
+          - >-
+            groups['preproduction'] |
+            map('extract', hostvars, 'private_ip') |
+            list | unique | length == groups['preproduction'] | length
+
+    - name: Explain bootstrap boundary
+      ansible.builtin.debug:
+        msg: >-
+          Preflight validates topology and host prerequisites only. Containerd,
+          kubeadm init/join, stacked etcd, API SANs, Cilium, Flux, HA and
+          recovery remain NOT PROVEN and require a separately authorized phase.

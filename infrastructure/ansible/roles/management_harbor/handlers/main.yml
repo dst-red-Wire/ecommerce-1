@@ -1,0 +1,32 @@
+---
+- name: Prepare the pinned Harbor Compose project
+  ansible.builtin.command:
+    cmd: "./prepare{{ ' --with-trivy' if management_harbor_with_trivy | bool else '' }}"
+    chdir: "{{ management_install_root }}/harbor"
+  changed_when: true
+  no_log: true
+  listen: Reconcile Harbor
+
+- name: Validate the generated Harbor Compose project
+  ansible.builtin.command:
+    cmd: docker compose config --quiet
+    chdir: "{{ management_install_root }}/harbor"
+  changed_when: false
+  no_log: true
+  listen: Reconcile Harbor
+
+- name: Pull the pinned Harbor release images
+  ansible.builtin.command:
+    cmd: docker compose pull --quiet
+    chdir: "{{ management_install_root }}/harbor"
+  changed_when: true
+  no_log: true
+  listen: Reconcile Harbor
+
+- name: Start the Harbor Compose project
+  ansible.builtin.command:
+    cmd: docker compose up --detach --remove-orphans --wait --wait-timeout 300
+    chdir: "{{ management_install_root }}/harbor"
+  changed_when: true
+  no_log: true
+  listen: Reconcile Harbor

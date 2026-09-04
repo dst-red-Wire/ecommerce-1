@@ -1,0 +1,9 @@
+---
+- name: Reload systemd for management health
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Run management health check
+  ansible.builtin.systemd:
+    name: ecommerce-management-healthcheck.service
+    state: started

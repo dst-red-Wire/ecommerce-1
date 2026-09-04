@@ -1,0 +1,19 @@
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+{% if inventory_hostname == 'gitea-mgmt' %}
+AllowTcpForwarding local
+PermitOpen {{ management_data_private_ip }}:22
+{% else %}
+DisableForwarding yes
+{% endif %}

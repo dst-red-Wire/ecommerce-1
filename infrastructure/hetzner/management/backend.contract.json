@@ -1,0 +1,95 @@
+{
+  "version": 4,
+  "architectureDecision": {
+    "selected": "hetzner-postgresql",
+    "aws": "NOT_SELECTED",
+    "hcpTerraform": "NOT_SELECTED",
+    "hetznerObjectStorageBackend": "INCOMPATIBLE"
+  },
+  "activationStatus": "BLOCKED_UNTIL_RUNTIME_PROOFS_AND_STATE_DECISION",
+  "backendType": "pg",
+  "database": "terraform_backend",
+  "schemaName": "terraform_management",
+  "tableName": "states",
+  "workspace": "default",
+  "nonDefaultWorkspacesForbidden": true,
+  "terraformVersion": "1.15.5",
+  "schemaObjectsPrecreatedByAnsible": true,
+  "skipSchemaCreation": true,
+  "skipTableCreation": true,
+  "skipIndexCreation": true,
+  "credentials": {
+    "repositoryStorageForbidden": true,
+    "backendConfigStorageForbidden": true,
+    "connectionEnvironment": "PG_CONN_STR",
+    "passwordEnvironment": "PGPASSWORD",
+    "passwordInConnectionStringForbidden": true,
+    "canonicalConnectionUrl": "postgres://terraform_backend@127.0.0.1:${TERRAFORM_PG_TUNNEL_PORT}/terraform_backend?sslmode=verify-full",
+    "allowedConnectionUrlFields": [
+      "scheme",
+      "user",
+      "host",
+      "port",
+      "database",
+      "sslmode"
+    ],
+    "unknownOrDuplicateParametersForbidden": true,
+    "competingPostgresqlEnvironmentForbidden": true,
+    "runtimeOnly": true
+  },
+  "tls": {
+    "required": true,
+    "sslmode": "verify-full",
+    "sshTunnelRequiredForInitialIntegration": true,
+    "localTunnelHost": "127.0.0.1",
+    "localTunnelHostEnvironment": "TERRAFORM_PG_TUNNEL_HOST",
+    "localTunnelPortEnvironment": "TERRAFORM_PG_TUNNEL_PORT",
+    "wrongCaRejectionRequired": true,
+    "wrongHostnameRejectionRequired": true,
+    "publicPostgresqlPortForbidden": true
+  },
+  "postgresqlBoundary": {
+    "server": "terraform-state-mgmt",
+    "dedicated": true,
+    "independentFromManagementPlane": true,
+    "dataMgmtReuseForbidden": true,
+    "applicationDatabaseForbidden": true,
+    "allowedSchemas": [
+      "terraform_management",
+      "terraform_lock_probe"
+    ]
+  },
+  "locking": {
+    "mechanism": "postgresql-advisory-locks",
+    "documentedByTerraform": true,
+    "forceUnlockSupported": false,
+    "runtimeStatus": "NOT_PROVEN_RUNTIME",
+    "runtimeHarness": "scripts/test-terraform-pg-locking.sh",
+    "activationBeforeProofForbidden": true
+  },
+  "stateActivation": {
+    "knownIntentionalManagementState": "NONE",
+    "absoluteRemoteAbsenceClaimed": false,
+    "inspectionRequired": true,
+    "completeLegacyVersionHistoryRequired": true,
+    "deleteMarkersInspected": true,
+    "unknownHistoryForbidsInitialization": true,
+    "postgresqlTargetEmptyPreflightRequired": true,
+    "postgresqlTargetPostInitValidationRequired": true,
+    "operatorWriterFreezeRequired": true,
+    "humanDecisionRequired": true,
+    "allowedDecisions": [
+      "initialize-empty",
+      "migrate-after-separate-human-approval"
+    ],
+    "migrateStateNowForbidden": true,
+    "initializer": "scripts/init-terraform-pg-backend.sh"
+  },
+  "objectStorage": {
+    "bucket": "ecommerce-management-tfstate-20260820-70b94831",
+    "authoritativeStateLocking": false,
+    "lockingStatus": "INCOMPATIBLE",
+    "role": "encrypted-backup-and-evidence-archive"
+  },
+  "localStateFallbackForbidden": true
+}

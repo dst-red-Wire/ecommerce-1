@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+
+backup_root={{ terraform_state_backup_root | quote }}
+database={{ terraform_state_postgresql_database | quote }}
+age_recipient={{ terraform_state_backup_age_recipient | quote }}
+lock_directory=/run/lock/terraform-state-postgresql-backup.lock
+
+if ! mkdir "$lock_directory" 2>/dev/null; then
+  printf '%s\n' 'backup already running' >&2
+  exit 1
+fi
+
+temporary_parent=/tmp
+[ -d /dev/shm ] && temporary_parent=/dev/shm
+temporary_directory=$(mktemp -d "$temporary_parent/terraform-state-backup.XXXXXX")
+plaintext=$temporary_directory/postgresql.dump
+cleanup() {
+  rm -f "$plaintext"
+  rmdir "$temporary_directory" 2>/dev/null || true
+  rmdir "$lock_directory" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
+backup_name=terraform-state-postgresql-$timestamp.dump.age
+manifest_name=terraform-state-postgresql-$timestamp.manifest.json
+encrypted=$backup_root/$backup_name
+manifest=$backup_root/$manifest_name
+[ ! -e "$encrypted" ] || {
+  printf '%s\n' 'backup timestamp collision' >&2
+  exit 1
+}
+
+runuser -u postgres -- pg_dump \
+  --dbname="$database" \
+  --format=custom \
+  --no-owner \
+  --no-privileges >"$plaintext"
+pg_restore --list "$plaintext" >/dev/null
+plaintext_sha256=$(sha256sum "$plaintext" | awk '{print $1}')
+age --recipient "$age_recipient" --output "$encrypted" "$plaintext"
+encrypted_sha256=$(sha256sum "$encrypted" | awk '{print $1}')
+
+jq -n \
+  --arg backup "$backup_name" \
+  --arg created "$timestamp" \
+  --arg database "$database" \
+  --arg plaintext_sha256 "$plaintext_sha256" \
+  --arg encrypted_sha256 "$encrypted_sha256" \
+  --arg object_key "ecommerce/backups/postgresql/$backup_name" \
+  '{
+    version: 1,
+    component: "terraform-state-mgmt",
+    format: "postgresql-custom-dump-age",
+    encryptedBackup: $backup,
+    createdAtUtc: $created,
+    database: $database,
+    schemas: ["terraform_management", "terraform_lock_probe"],
+    plaintextSha256: $plaintext_sha256,
+    encryptedSha256: $encrypted_sha256,
+    archiveObjectKey: $object_key
+  }' >"$manifest"
+chmod 0600 "$encrypted" "$manifest"
+
+trap - EXIT HUP INT TERM
+cleanup
+printf '%s\n' "$manifest"

@@ -1,0 +1,9 @@
+# TYPE      DATABASE                         USER                              ADDRESS                                  METHOD
+local       all                              postgres                                                                   peer
+local       all                              all                                                                        scram-sha-256
+hostssl     {{ management_gitea_database }}  {{ management_gitea_database_user }}  127.0.0.1/32                           scram-sha-256
+hostssl     {{ management_gitea_database }}  {{ management_gitea_database_user }}  {{ management_gitea_private_ip }}/32  scram-sha-256
+hostssl     {{ management_harbor_database }} {{ management_harbor_database_user }} {{ management_harbor_private_ip }}/32 scram-sha-256
+hostnossl   all                              all                               0.0.0.0/0                                reject
+host        all                              all                               0.0.0.0/0                                reject
+host        all                              all                               ::/0                                     reject

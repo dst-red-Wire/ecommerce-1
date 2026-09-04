@@ -2,16 +2,16 @@
 - name: Vérifier que le noyau expose cgroup v2
   ansible.builtin.command:
     cmd: stat -fc %T /sys/fs/cgroup
-  register: cgroup_filesystem
+  register: docker_engine_cgroup_filesystem
   changed_when: false
 
 - name: Refuser un hôte sans cgroup v2
   ansible.builtin.assert:
     that:
-      - cgroup_filesystem.stdout | trim == 'cgroup2fs'
+      - docker_engine_cgroup_filesystem.stdout | trim == 'cgroup2fs'
     fail_msg: >-
-      Docker natif staging exige cgroup v2 ; filesystem détecté :
-      {{ cgroup_filesystem.stdout | trim }}.
+      Docker Engine exige cgroup v2 ; filesystem détecté :
+      {{ docker_engine_cgroup_filesystem.stdout | trim }}.
 
 - name: Installer les prérequis du dépôt Docker
   ansible.builtin.apt:
@@ -92,13 +92,13 @@
 - name: Vérifier Docker Engine et cgroup v2
   ansible.builtin.command:
     cmd: docker info --format '{{ "{{.CgroupVersion}}" }}'
-  register: docker_cgroup_version
+  register: docker_engine_cgroup_version
   changed_when: false
 
 - name: Refuser une configuration Docker non conforme
   ansible.builtin.assert:
     that:
-      - docker_cgroup_version.stdout | trim == '2'
+      - docker_engine_cgroup_version.stdout | trim == '2'
     fail_msg: >-
       Docker ne fonctionne pas en cgroup v2 ; valeur détectée :
-      {{ docker_cgroup_version.stdout | trim }}.
+      {{ docker_engine_cgroup_version.stdout | trim }}.

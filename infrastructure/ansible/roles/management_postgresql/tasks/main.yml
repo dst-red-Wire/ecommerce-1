@@ -1,0 +1,247 @@
+---
+- name: Restrict PostgreSQL management to private data-mgmt
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'data-mgmt'
+      - ansible_host == management_data_private_ip
+      - private_ip == management_data_private_ip
+      - management_postgresql_major == 16
+    fail_msg: PostgreSQL management may run only on private-only data-mgmt.
+
+- name: Require external database secrets
+  ansible.builtin.assert:
+    that:
+      - management_postgres_gitea_password is defined
+      - management_postgres_harbor_password is defined
+  no_log: true
+
+- name: Validate external database secret strength
+  ansible.builtin.assert:
+    that:
+      - management_postgres_gitea_password | length >= management_secret_min_length
+      - management_postgres_harbor_password | length >= management_secret_min_length
+      - not management_postgres_gitea_password.startswith('REPLACE_')
+      - not management_postgres_harbor_password.startswith('REPLACE_')
+  no_log: true
+
+- name: Install PostgreSQL management packages
+  ansible.builtin.apt:
+    name:
+      - "postgresql-{{ management_postgresql_major }}"
+      - "postgresql-client-{{ management_postgresql_major }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Grant PostgreSQL only the dedicated filesystem traversal group
+  ansible.builtin.user:
+    name: postgres
+    groups:
+      - "{{ management_postgresql_filesystem_group }}"
+    append: true
+  notify: Restart PostgreSQL management
+
+- name: Create PostgreSQL filesystem boundaries
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ management_config_root }}/postgresql"
+      owner: root
+      group: "{{ management_postgresql_filesystem_group }}"
+      mode: "0710"
+    - path: "{{ management_config_root }}/postgresql/tls"
+      owner: postgres
+      group: postgres
+      mode: "0700"
+    - path: "{{ management_log_root }}/postgresql"
+      owner: postgres
+      group: postgres
+      mode: "0750"
+
+- name: Generate the integration PostgreSQL TLS key and certificate
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -nodes
+      - -newkey
+      - rsa:3072
+      - -sha256
+      - -days
+      - "825"
+      - -subj
+      - /CN=data-mgmt
+      - -addext
+      - "subjectAltName=DNS:data-mgmt,IP:{{ management_data_private_ip }}"
+      - -keyout
+      - "{{ management_config_root }}/postgresql/tls/server.key"
+      - -out
+      - "{{ management_config_root }}/postgresql/tls/server.crt"
+    creates: "{{ management_config_root }}/postgresql/tls/server.key"
+  notify: Restart PostgreSQL management
+
+- name: Protect the PostgreSQL TLS private key
+  ansible.builtin.file:
+    path: "{{ management_config_root }}/postgresql/tls/server.key"
+    owner: postgres
+    group: postgres
+    mode: "0600"
+
+- name: Set PostgreSQL certificate ownership
+  ansible.builtin.file:
+    path: "{{ management_config_root }}/postgresql/tls/server.crt"
+    owner: postgres
+    group: postgres
+    mode: "0644"
+
+- name: Inspect PostgreSQL filesystem permissions before configuration restart
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+  loop:
+    - { path: "{{ management_config_root }}", owner: root, group: "{{ management_postgresql_filesystem_group }}", mode: "0710" }
+    - { path: "{{ management_config_root }}/postgresql", owner: root, group: "{{ management_postgresql_filesystem_group }}", mode: "0710" }
+    - { path: "{{ management_config_root }}/postgresql/tls", owner: postgres, group: postgres, mode: "0700" }
+    - { path: "{{ management_config_root }}/postgresql/tls/server.key", owner: postgres, group: postgres, mode: "0600" }
+    - { path: "{{ management_config_root }}/postgresql/tls/server.crt", owner: postgres, group: postgres, mode: "0644" }
+    - { path: "{{ management_log_root }}", owner: root, group: "{{ management_postgresql_filesystem_group }}", mode: "0710" }
+    - { path: "{{ management_log_root }}/postgresql", owner: postgres, group: postgres, mode: "0750" }
+  register: management_postgresql_filesystem_checks
+
+- name: Assert PostgreSQL filesystem permissions before configuration restart
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.pw_name == item.item.owner
+      - item.stat.gr_name == item.item.group
+      - item.stat.mode == item.item.mode
+    fail_msg: "Unsafe PostgreSQL filesystem permissions on {{ item.item.path }}."
+  loop: "{{ management_postgresql_filesystem_checks.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+- name: Configure private TLS-only PostgreSQL management
+  ansible.builtin.template:
+    src: management.conf.j2
+    dest: "/etc/postgresql/{{ management_postgresql_major }}/main/conf.d/90-ecommerce-management.conf"
+    owner: postgres
+    group: postgres
+    mode: "0644"
+  notify: Restart PostgreSQL management
+
+- name: Configure exact PostgreSQL client boundaries
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: "/etc/postgresql/{{ management_postgresql_major }}/main/pg_hba.conf"
+    owner: postgres
+    group: postgres
+    mode: "0640"
+  notify: Restart PostgreSQL management
+
+- name: Apply PostgreSQL configuration before creating databases
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable PostgreSQL management
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: true
+    state: started
+
+- name: Reconcile the isolated database roles
+  block:
+    - name: Materialize transient role reconciliation SQL
+      ansible.builtin.template:
+        src: roles.sql.j2
+        dest: /run/ecommerce-management-postgresql-roles.sql
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      no_log: true
+
+    - name: Apply role reconciliation SQL
+      ansible.builtin.command:
+        cmd: psql --no-psqlrc --set=ON_ERROR_STOP=1 --file=/run/ecommerce-management-postgresql-roles.sql
+      become: true
+      become_user: postgres
+      changed_when: false
+      no_log: true
+  always:
+    - name: Remove transient role reconciliation SQL
+      ansible.builtin.file:
+        path: /run/ecommerce-management-postgresql-roles.sql
+        state: absent
+      no_log: true
+
+- name: Inspect required management databases
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - --dbname=postgres
+      - "--command=SELECT datname FROM pg_database WHERE datname='{{ item.name }}';"
+  become: true
+  become_user: postgres
+  loop:
+    - { name: "{{ management_gitea_database }}", owner: "{{ management_gitea_database_user }}" }
+    - { name: "{{ management_harbor_database }}", owner: "{{ management_harbor_database_user }}" }
+  register: management_postgresql_database_checks
+  changed_when: false
+
+- name: Create missing isolated management databases
+  ansible.builtin.command:
+    argv:
+      - createdb
+      - "--owner={{ item.item.owner }}"
+      - --encoding=UTF8
+      - --template=template0
+      - "{{ item.item.name }}"
+  become: true
+  become_user: postgres
+  loop: "{{ management_postgresql_database_checks.results }}"
+  when: item.stdout | trim != item.item.name
+  changed_when: true
+
+- name: Restrict public privileges on management databases
+  ansible.builtin.command:
+    argv:
+      - psql
+      - --no-psqlrc
+      - --set=ON_ERROR_STOP=1
+      - --dbname=postgres
+      - "--command=REVOKE ALL ON DATABASE {{ item.name }} FROM PUBLIC;"
+      - "--command=GRANT CONNECT,TEMPORARY ON DATABASE {{ item.name }} TO {{ item.owner }};"
+  become: true
+  become_user: postgres
+  loop:
+    - { name: "{{ management_gitea_database }}", owner: "{{ management_gitea_database_user }}" }
+    - { name: "{{ management_harbor_database }}", owner: "{{ management_harbor_database_user }}" }
+  changed_when: false
+
+- name: Prove authenticated Gitea database connectivity uses TLS locally
+  ansible.builtin.command:
+    argv:
+      - psql
+      - >-
+        host=127.0.0.1 port={{ management_postgresql_port }}
+        dbname={{ management_gitea_database }} user={{ management_gitea_database_user }}
+        sslmode=require
+      - --no-psqlrc
+      - --tuples-only
+      - --no-align
+      - >-
+        --command=SELECT ssl AND version IS NOT NULL
+        AND current_user = '{{ management_gitea_database_user }}'
+        AND current_database() = '{{ management_gitea_database }}'
+        FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+  environment:
+    PGPASSWORD: "{{ management_postgres_gitea_password }}"
+  register: management_postgresql_tls_check
+  changed_when: false
+  failed_when: management_postgresql_tls_check.stdout | trim != 't'
+  no_log: true

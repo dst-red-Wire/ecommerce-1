@@ -1,0 +1,60 @@
+apiVersion: ecommerce.dev/v1alpha1
+kind: RunContract
+metadata:
+  name: build-and-publish
+  namespace: tekton-ci
+spec:
+  activationStatus: NOT_PROVEN
+  pipelineRef: build-and-publish
+  defaultServiceAccountName: tekton-test
+  defaultPodTemplate:
+    securityContext:
+      fsGroup: 65532
+      fsGroupChangePolicy: OnRootMismatch
+  timeouts:
+    pipeline: 1h
+    tasks: 50m
+    finally: 10m
+  taskRunSpecs:
+    - pipelineTaskName: clone
+      serviceAccountName: tekton-source-read
+    - pipelineTaskName: test
+      serviceAccountName: tekton-test
+    - pipelineTaskName: source-security
+      serviceAccountName: tekton-source-scan
+    - pipelineTaskName: build
+      serviceAccountName: tekton-image-push
+      podTemplate:
+        nodeSelector:
+          ecommerce.dev/workload: ci-build
+        tolerations:
+          - key: ecommerce.dev/ci-build
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+    - pipelineTaskName: scan-image
+      serviceAccountName: tekton-image-read
+    - pipelineTaskName: generate-sbom
+      serviceAccountName: tekton-image-read
+    - pipelineTaskName: create-evidence
+      serviceAccountName: tekton-evidence
+  requiredWorkspaces:
+    - name: source
+      access: read-write-ephemeral
+      source:
+        kind: EmptyDir
+    - name: source-snapshot
+      access: write-once-then-read-only
+      source:
+        kind: EmptyDir
+    - name: evidence
+      access: read-write-bounded-retention
+      source:
+        kind: PersistentVolumeClaim
+        claimName: tekton-build-evidence
+  activationGates:
+    - dedicated-ci-node-ready
+    - pod-security-buildkit-exception-reviewed
+    - kyverno-run-contract-enforce
+    - chains-runtime-verified
+    - ghcr-push-secret-provisioned-out-of-band

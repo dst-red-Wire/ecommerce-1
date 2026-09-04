@@ -1,0 +1,57 @@
+schema_version: 1
+classifications:
+  - id: PUBLIC
+    access: unrestricted_after_approval
+    encryption: transport_required
+    logging: allowed_subject_to_integrity
+  - id: INTERNAL
+    access: authenticated_project_members
+    encryption: transport_and_managed_storage
+    logging: minimize
+  - id: CONFIDENTIAL
+    access: explicit_business_need
+    encryption: transport_and_at_rest
+    logging: metadata_only_by_default
+  - id: RESTRICTED
+    access: least_privilege_and_audited
+    encryption: transport_and_at_rest_with_managed_keys
+    logging: prohibited_except_sanitized_metadata
+classification_rules:
+  pii: RESTRICTED
+  credentials: RESTRICTED
+  authentication_tokens: RESTRICTED
+  psp_tokens: RESTRICTED
+  cardholder_data: RESTRICTED
+  public_catalog: PUBLIC
+retention_rules:
+  - dataset: customer-accounts
+    owner_role: data
+    classification: RESTRICTED
+    retention_status: TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL
+    backup_required: true
+    restore_proof_required: true
+    lower_environment: synthetic_or_anonymized_only
+  - dataset: orders-and-invoices
+    owner_role: data
+    classification: RESTRICTED
+    retention_status: TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL
+    backup_required: true
+    restore_proof_required: true
+    lower_environment: synthetic_or_anonymized_only
+  - dataset: security-audit-events
+    owner_role: security
+    classification: CONFIDENTIAL
+    retention_status: TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL
+    backup_required: true
+    restore_proof_required: true
+    lower_environment: environment_local_only
+  - dataset: operational-logs
+    owner_role: operations
+    classification: CONFIDENTIAL
+    retention_status: TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL
+    backup_required: false
+    restore_proof_required: false
+    lower_environment: environment_local_only
+third_party_processors:
+  inventory_status: TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL
+  entries: []

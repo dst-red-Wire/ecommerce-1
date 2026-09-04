@@ -1,0 +1,21 @@
+apiVersion: ecommerce.dev/v1alpha1
+kind: ConfigMapContract
+metadata:
+  name: promotion-trust-root
+  namespace: tekton-ci
+spec:
+  activationStatus: NOT_PROVEN
+  requiredKeys:
+    - cosign.pub
+    - promotion-proof.schema.json
+    - delivery-evidence.schema.json
+  schemaSha256:
+    promotion-proof.schema.json: bf946de44db43128974201ce00888a1e4bfddc6f18aa165e53eb2e708a019503
+    delivery-evidence.schema.json: 45ea68410facc5860c58c41fd76722bfac9da9e1be38f1091208d611ad972089
+  distribution: independently-reviewed-out-of-band
+  signerRole: final-promotion-attestor
+  keyFingerprintRequiredBeforeActivation: true
+  callerSuppliedTrustForbidden: true
+  rotation:
+    ownerRequired: true
+    overlapRequired: true

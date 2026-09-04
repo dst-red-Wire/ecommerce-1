@@ -1,0 +1,86 @@
+{
+  "validRuns": {
+    "build": {
+      "apiVersion": "tekton.dev/v1",
+      "kind": "PipelineRun",
+      "metadata": {"name": "valid-build", "namespace": "tekton-ci"},
+      "spec": {
+        "pipelineRef": {"name": "build-and-publish"},
+        "params": [
+          {"name": "repository-url", "value": "https://github.com/dst-red-Wire/ecommerce-1.git"},
+          {"name": "source-revision", "value": "1111111111111111111111111111111111111111"},
+          {"name": "service-context", "value": "catalog"},
+          {"name": "dockerfile", "value": "Dockerfile"},
+          {"name": "image-repository", "value": "ghcr.io/dst-red-wire/ecommerce-1/catalog"},
+          {"name": "image-tag", "value": "1111111111111111111111111111111111111111"}
+        ],
+        "workspaces": [
+          {"name": "source", "emptyDir": {}},
+          {"name": "source-snapshot", "emptyDir": {}},
+          {"name": "evidence", "persistentVolumeClaim": {"claimName": "tekton-build-evidence"}}
+        ],
+        "taskRunTemplate": {
+          "serviceAccountName": "tekton-test",
+          "podTemplate": {"securityContext": {"fsGroup": 65532, "fsGroupChangePolicy": "OnRootMismatch"}}
+        },
+        "taskRunSpecs": [
+          {"pipelineTaskName": "clone", "serviceAccountName": "tekton-source-read"},
+          {"pipelineTaskName": "test", "serviceAccountName": "tekton-test"},
+          {"pipelineTaskName": "source-security", "serviceAccountName": "tekton-source-scan"},
+          {
+            "pipelineTaskName": "build",
+            "serviceAccountName": "tekton-image-push",
+            "podTemplate": {
+              "nodeSelector": {"ecommerce.dev/workload": "ci-build"},
+              "tolerations": [
+                {"key": "ecommerce.dev/ci-build", "operator": "Equal", "value": "true", "effect": "NoSchedule"}
+              ]
+            }
+          },
+          {"pipelineTaskName": "scan-image", "serviceAccountName": "tekton-image-read"},
+          {"pipelineTaskName": "generate-sbom", "serviceAccountName": "tekton-image-read"},
+          {"pipelineTaskName": "create-evidence", "serviceAccountName": "tekton-evidence"}
+        ]
+      }
+    },
+    "promotion": {
+      "apiVersion": "tekton.dev/v1",
+      "kind": "PipelineRun",
+      "metadata": {"name": "valid-promotion", "namespace": "tekton-ci"},
+      "spec": {
+        "pipelineRef": {"name": "promote-image"},
+        "params": [
+          {"name": "repository-url", "value": "https://github.com/dst-red-Wire/ecommerce-1.git"},
+          {"name": "environment", "value": "integration"},
+          {"name": "expected-main-sha", "value": "2222222222222222222222222222222222222222"}
+        ],
+        "workspaces": [
+          {"name": "desired-state", "emptyDir": {}},
+          {"name": "evidence", "persistentVolumeClaim": {"claimName": "tekton-promotion-evidence"}},
+          {"name": "trust", "configMap": {"name": "promotion-trust-root"}},
+          {"name": "git-auth", "secret": {"secretName": "github-git-write"}}
+        ],
+        "taskRunTemplate": {
+          "serviceAccountName": "tekton-test",
+          "podTemplate": {"securityContext": {"fsGroup": 65532, "fsGroupChangePolicy": "OnRootMismatch"}}
+        },
+        "taskRunSpecs": [
+          {"pipelineTaskName": "verify-proof", "serviceAccountName": "tekton-evidence-verifier"},
+          {"pipelineTaskName": "propose-git-change", "serviceAccountName": "tekton-git-promotion"}
+        ]
+      }
+    }
+  },
+  "denyCases": [
+    {"name": "pipelineSpec inline", "base": "build", "mutation": {"op": "set", "path": ["spec", "pipelineSpec"], "value": {"tasks": []}}},
+    {"name": "resolver", "base": "build", "mutation": {"op": "set", "path": ["spec", "pipelineRef", "resolver"], "value": "git"}},
+    {"name": "pipelineRef inconnu", "base": "build", "mutation": {"op": "set", "path": ["spec", "pipelineRef", "name"], "value": "attacker-pipeline"}},
+    {"name": "mauvais ServiceAccount", "base": "build", "mutation": {"op": "set", "path": ["spec", "taskRunSpecs", 0, "serviceAccountName"], "value": "tekton-image-push"}},
+    {"name": "image-push SA sur test", "base": "build", "mutation": {"op": "set", "path": ["spec", "taskRunSpecs", 1, "serviceAccountName"], "value": "tekton-image-push"}},
+    {"name": "git-promotion SA sur pipeline non autorisee", "base": "build", "mutation": {"op": "set", "path": ["spec", "taskRunSpecs", 1, "serviceAccountName"], "value": "tekton-git-promotion"}},
+    {"name": "parametre libre inattendu", "base": "build", "mutation": {"op": "append", "path": ["spec", "params"], "value": {"name": "shell", "value": "true"}}},
+    {"name": "Secret workspace non approuve", "base": "promotion", "mutation": {"op": "set", "path": ["spec", "workspaces", 3, "secret", "secretName"], "value": "attacker-secret"}},
+    {"name": "path traversal via service", "base": "build", "mutation": {"op": "set", "path": ["spec", "params", 2, "value"], "value": "../../escape"}},
+    {"name": "environnement inconnu", "base": "promotion", "mutation": {"op": "set", "path": ["spec", "params", 1, "value"], "value": "staging"}}
+  ]
+}

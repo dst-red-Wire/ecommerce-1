@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "namespace": "tekton-ci",
+  "activationStatus": "NOT_PROVEN",
+  "enforcementPrerequisite": "Kyverno Enforce plus rejection tests before any submitter RoleBinding",
+  "denyPipelineSpec": true,
+  "denyResolvers": true,
+  "denyUnknownPipelines": true,
+  "denyDirectTaskRunSubmission": true,
+  "pipelines": {
+    "build-and-publish": {
+      "params": [
+        "repository-url",
+        "source-revision",
+        "service-context",
+        "dockerfile",
+        "image-repository",
+        "image-tag"
+      ],
+      "workspaces": {
+        "source": {"kind": "emptyDir"},
+        "source-snapshot": {"kind": "emptyDir"},
+        "evidence": {"kind": "persistentVolumeClaim", "claimName": "tekton-build-evidence"}
+      },
+      "defaultServiceAccountName": "tekton-test",
+      "taskServiceAccounts": {
+        "clone": "tekton-source-read",
+        "test": "tekton-test",
+        "source-security": "tekton-source-scan",
+        "build": "tekton-image-push",
+        "scan-image": "tekton-image-read",
+        "generate-sbom": "tekton-image-read",
+        "create-evidence": "tekton-evidence"
+      }
+    },
+    "promote-image": {
+      "params": ["repository-url", "environment", "expected-main-sha"],
+      "workspaces": {
+        "desired-state": {"kind": "emptyDir"},
+        "evidence": {"kind": "persistentVolumeClaim", "claimName": "tekton-promotion-evidence"},
+        "trust": {"kind": "configMap", "name": "promotion-trust-root"},
+        "git-auth": {"kind": "secret", "secretName": "github-git-write"}
+      },
+      "defaultServiceAccountName": "tekton-test",
+      "taskServiceAccounts": {
+        "verify-proof": "tekton-evidence-verifier",
+        "propose-git-change": "tekton-git-promotion"
+      }
+    }
+  }
+}

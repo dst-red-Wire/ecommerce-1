@@ -1,0 +1,45 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: go-test
+  namespace: tekton-ci
+spec:
+  description: Run deterministic Go tests for one service context.
+  params:
+    - name: source-subdirectory
+      type: string
+      default: source
+    - name: context
+      type: string
+  workspaces:
+    - name: source
+      readOnly: true
+  steps:
+    - name: test
+      # golang:1.24-alpine
+      image: golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
+      workingDir: $(workspaces.source.path)/$(params.source-subdirectory)/$(params.context)
+      env:
+        - name: CGO_ENABLED
+          value: "0"
+        - name: GOMODCACHE
+          value: /tmp/go-mod
+        - name: GOCACHE
+          value: /tmp/go-build
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      script: |
+        #!/bin/sh
+        set -eu
+        test -f go.mod
+        test -d vendor || {
+          printf 'vendored Go dependencies are required for network-isolated tests\n' >&2
+          exit 1
+        }
+        GOPROXY=off go test -mod=vendor ./...

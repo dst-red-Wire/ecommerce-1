@@ -1,0 +1,62 @@
+APP_NAME = DeployFrance Git
+RUN_MODE = prod
+RUN_USER = git
+WORK_PATH = /var/lib/gitea
+
+[server]
+DOMAIN = {{ management_git_fqdn }}
+ROOT_URL = https://{{ management_git_fqdn }}/
+PROTOCOL = http
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = 3000
+OFFLINE_MODE = true
+START_SSH_SERVER = true
+SSH_DOMAIN = {{ management_git_fqdn }}
+SSH_LISTEN_HOST = 0.0.0.0
+SSH_LISTEN_PORT = 2222
+SSH_PORT = 2222
+LFS_START_SERVER = true
+LFS_JWT_SECRET = {{ management_gitea_lfs_jwt_secret | to_json }}
+
+[database]
+DB_TYPE = postgres
+HOST = {{ management_data_private_ip }}:{{ management_postgresql_port }}
+NAME = {{ management_gitea_database }}
+USER = {{ management_gitea_database_user }}
+PASSWD = {{ management_postgres_gitea_password | to_json }}
+SSL_MODE = require
+LOG_SQL = false
+
+[repository]
+ROOT = /var/lib/gitea/git/repositories
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = {{ management_gitea_secret_key | to_json }}
+INTERNAL_TOKEN = {{ management_gitea_internal_token | to_json }}
+PASSWORD_HASH_ALGO = argon2
+
+[service]
+DISABLE_REGISTRATION = {{ management_gitea_disable_registration | ternary('true', 'false') }}
+REQUIRE_SIGNIN_VIEW = true
+REGISTER_EMAIL_CONFIRM = false
+ENABLE_NOTIFY_MAIL = false
+
+[session]
+PROVIDER = db
+COOKIE_SECURE = true
+SAME_SITE = strict
+
+[cache]
+ADAPTER = twoqueue
+HOST = {"size":50000,"recent_ratio":0.25,"ghost_ratio":0.5}
+
+[queue]
+TYPE = level
+DATADIR = /var/lib/gitea/queues/common
+
+[log]
+MODE = console
+LEVEL = Info
+STACKTRACE_LEVEL = Error
+ENABLE_SSH_LOG = true

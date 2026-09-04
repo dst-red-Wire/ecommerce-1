@@ -351,7 +351,7 @@ Read model reconstruisible pour la recherche avancée lorsque justifié.
 Stockage objet pour :
 
 - assets
-- Harbor blobs
+- artefacts métier
 - Loki
 - Tempo
 - sauvegardes
@@ -400,13 +400,15 @@ Pipeline cible :
 6. build OCI
 7. Trivy
 8. Syft/SBOM
-9. Cosign
-10. publication Harbor
+9. Tekton Chains / Cosign provenance et signatures
+10. publication GHCR et récupération du digest OCI réel
 
 ### Registry
 
-- Harbor
-- images de production par digest SHA256
+- GitHub Container Registry (`ghcr.io`)
+- convention applicative `ghcr.io/dst-red-wire/ecommerce-1/<service>`
+- images déployées exclusivement par digest SHA256
+- un seul build, puis promotion du même digest entre environnements
 
 ### CD
 

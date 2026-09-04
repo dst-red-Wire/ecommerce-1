@@ -1,0 +1,46 @@
+#!/usr/sbin/nft -f
+
+table inet ecommerce_management {
+  set operator_ssh_v4 {
+    type ipv4_addr
+    flags interval
+    elements = { {{ management_ssh_allowed_ipv4_cidrs | join(', ') }} }
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    iifname "lo" accept
+    ct state invalid drop
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+    udp sport 67 udp dport 68 accept
+
+{% if inventory_hostname in groups['gitea_management'] or inventory_hostname in groups['harbor_management'] %}
+    ip saddr @operator_ssh_v4 tcp dport 22 ct state new accept
+    tcp dport { 80, 443 } ct state new accept
+{% endif %}
+{% if inventory_hostname in groups['gitea_management'] %}
+    ip saddr @operator_ssh_v4 tcp dport 2222 ct state new accept
+    ip saddr {{ management_data_private_ip }}/32 tcp dport {{ management_egress_proxy_port }} ct state new accept
+{% endif %}
+{% if inventory_hostname in groups['data_management'] %}
+    ip saddr {{ management_gitea_private_ip }}/32 tcp dport 22 ct state new accept
+    ip saddr { {{ management_gitea_private_ip }}/32, {{ management_harbor_private_ip }}/32 } tcp dport {{ management_postgresql_port }} ct state new accept
+{% endif %}
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+
+    ct state invalid drop
+    ct state established,related accept
+    iifname "docker0" accept
+    iifname "br-*" accept
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

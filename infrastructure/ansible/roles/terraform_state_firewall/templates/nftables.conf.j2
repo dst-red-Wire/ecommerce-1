@@ -1,0 +1,29 @@
+#!/usr/sbin/nft -f
+
+table inet terraform_state {
+  set operator_ssh_v4 {
+    type ipv4_addr
+    flags interval
+    elements = { {{ ssh_allowed_ipv4_cidrs | join(', ') }} }
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    iifname "lo" accept
+    ct state invalid drop
+    ct state established,related accept
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+    udp sport 67 udp dport 68 accept
+    ip saddr @operator_ssh_v4 tcp dport 22 ct state new accept
+  }
+
+  chain forward {
+    type filter hook forward priority filter; policy drop;
+  }
+
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+}

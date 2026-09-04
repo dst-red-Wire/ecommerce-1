@@ -1,0 +1,44 @@
+---
+- name: Install the management health check
+  ansible.builtin.template:
+    src: management-healthcheck.sh.j2
+    dest: /usr/local/sbin/ecommerce-management-healthcheck
+    owner: root
+    group: root
+    mode: "0750"
+  notify: Run management health check
+
+- name: Install the management health service
+  ansible.builtin.template:
+    src: management-healthcheck.service.j2
+    dest: /etc/systemd/system/ecommerce-management-healthcheck.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for management health
+    - Run management health check
+
+- name: Install the management health timer
+  ansible.builtin.template:
+    src: management-healthcheck.timer.j2
+    dest: /etc/systemd/system/ecommerce-management-healthcheck.timer
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload systemd for management health
+
+- name: Apply health monitoring changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable the management health timer
+  ansible.builtin.systemd:
+    name: ecommerce-management-healthcheck.timer
+    enabled: true
+    state: started
+
+- name: Execute a final management health check
+  ansible.builtin.systemd:
+    name: ecommerce-management-healthcheck.service
+    state: started
+  changed_when: false

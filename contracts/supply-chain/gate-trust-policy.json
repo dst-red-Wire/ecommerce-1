@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "activationStatus": "NOT_PROVEN",
+  "maximumValiditySeconds": 86400,
+  "maximumFutureSkewSeconds": 300,
+  "authorities": {
+    "ci": {
+      "issuerId": "tekton-ci-attestor",
+      "issuerType": "tekton",
+      "keyFile": "ci-gates.pub",
+      "mechanisms": ["cosign-key"]
+    },
+    "security": {
+      "issuerId": "security-gate-attestor",
+      "issuerType": "policy-controller",
+      "keyFile": "security-gates.pub",
+      "mechanisms": ["cosign-key"]
+    },
+    "performance": {
+      "issuerId": "performance-gate-attestor",
+      "issuerType": "tekton",
+      "keyFile": "performance-gates.pub",
+      "mechanisms": ["cosign-key"]
+    },
+    "release": {
+      "issuerId": "release-gate-attestor",
+      "issuerType": "human-approver",
+      "keyFile": "release-gates.pub",
+      "mechanisms": ["cosign-key"]
+    }
+  },
+  "gateAuthorities": {
+    "lint": "ci",
+    "unit-tests": "ci",
+    "integration-tests": "ci",
+    "api-tests": "ci",
+    "security-tests": "security",
+    "identity-fraud-abuse": "security",
+    "supply-chain": "security",
+    "performance": "performance",
+    "load": "performance",
+    "production-readiness": "release",
+    "promotion-validation": "release"
+  }
+}

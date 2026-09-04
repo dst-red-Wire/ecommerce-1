@@ -1,0 +1,118 @@
+---
+- name: Validate the management host identity and operating system
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in ['gitea-mgmt', 'harbor-mgmt', 'data-mgmt']
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_major_version == '24'
+      - ansible_facts.architecture in ['x86_64', 'amd64']
+      - private_ip is match('^10\.30\.0\.(10|20|30)$')
+    fail_msg: Management roles only support the reviewed Ubuntu 24.04 topology.
+
+- name: Configure the private host APT proxy before package installation
+  ansible.builtin.template:
+    src: apt-proxy.conf.j2
+    dest: /etc/apt/apt.conf.d/80ecommerce-management-proxy
+    owner: root
+    group: root
+    mode: "0644"
+  when: inventory_hostname == 'data-mgmt'
+
+- name: Remove an APT proxy from Internet-connected management hosts
+  ansible.builtin.file:
+    path: /etc/apt/apt.conf.d/80ecommerce-management-proxy
+    state: absent
+  when: inventory_hostname != 'data-mgmt'
+
+- name: Install management base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - jq
+      - nftables
+      - openssh-server
+      - openssl
+      - python3
+      - systemd-timesyncd
+      - unattended-upgrades
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create the dedicated PostgreSQL filesystem access group
+  ansible.builtin.group:
+    name: "{{ management_postgresql_filesystem_group }}"
+    system: true
+    state: present
+  when: inventory_hostname == 'data-mgmt'
+
+- name: Create management filesystem boundaries
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ management_root }}", group: root, mode: "0750" }
+    - path: "{{ management_config_root }}"
+      group: >-
+        {{ management_postgresql_filesystem_group
+           if inventory_hostname == 'data-mgmt' else 'root' }}
+      mode: "{{ '0710' if inventory_hostname == 'data-mgmt' else '0750' }}"
+    - path: "{{ management_log_root }}"
+      group: >-
+        {{ management_postgresql_filesystem_group
+           if inventory_hostname == 'data-mgmt' else 'root' }}
+      mode: "{{ '0710' if inventory_hostname == 'data-mgmt' else '0750' }}"
+    - { path: "{{ management_cache_root }}", group: root, mode: "0750" }
+    - { path: "{{ management_install_root }}", group: root, mode: "0750" }
+
+- name: Configure SSH security defaults
+  ansible.builtin.template:
+    src: sshd-management.conf.j2
+    dest: /etc/ssh/sshd_config.d/60-ecommerce-management.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Reload OpenSSH
+
+- name: Create journald override directory
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure persistent bounded host logs
+  ansible.builtin.template:
+    src: journald-management.conf.j2
+    dest: /etc/systemd/journald.conf.d/60-ecommerce-management.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald
+
+- name: Configure unattended security upgrades
+  ansible.builtin.template:
+    src: unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52ecommerce-management-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable time synchronization
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+
+- name: Enable OpenSSH
+  ansible.builtin.systemd:
+    name: ssh
+    enabled: true
+    state: started

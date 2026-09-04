@@ -43,8 +43,6 @@ Desktop.ini
 .env
 .env.*
 !.env.example
-!.env.sample
-!.env.template
 
 *.local
 *.secret
@@ -166,6 +164,9 @@ junit-*.xml
 cucumber-report.*
 test-report/
 test-reports/
+__pycache__/
+*.py[cod]
+.venv/
 
 # Keep intentionally versioned fixtures / snapshots
 !**/tests/fixtures/**
@@ -191,6 +192,12 @@ chaos-output/
 *.tfstate
 *.tfstate.*
 *.tfplan
+*.tfbackend
+!infrastructure/hetzner/backend/hetzner-s3.common.tfbackend
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
 
 crash.log
 crash.*.log
@@ -223,6 +230,10 @@ fact_cache/
 # Local inventory overrides may contain secrets
 inventory.local
 inventory.local.*
+infrastructure/ansible/inventory/preproduction.generated.yml
+infrastructure/ansible/inventory/management.generated.yml
+infrastructure/ansible/inventory/terraform-state.generated.yml
+infrastructure/ansible/group_vars/management/secrets.yml
 host_vars/*/local.yml
 group_vars/*/local.yml
 

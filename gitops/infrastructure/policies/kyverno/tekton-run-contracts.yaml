@@ -1,0 +1,252 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: audit-tekton-run-contracts
+  annotations:
+    policies.kyverno.io/title: Fail-closed Tekton PipelineRun contract
+    ecommerce.dev/activation-gate: switch-to-Enforce-and-test-rejections-before-binding-run-submitter
+    ecommerce.dev/admission-contract-sha256: 724b1d1b8b8a5d3a12545936af3a5659a704f22766d45639adf03ea4b96c0755
+spec:
+  validationFailureAction: Audit
+  # request.userInfo is admission-only and cannot be evaluated by background scans.
+  background: false
+  rules:
+    - name: deny-direct-user-taskruns
+      match:
+        any:
+          - resources:
+              kinds: [TaskRun]
+              namespaces: [tekton-ci]
+      validate:
+        message: Direct TaskRun submission and custom-task execution are forbidden.
+        deny:
+          conditions:
+            all:
+              - key: "{{ request.userInfo.username || '' }}"
+                operator: NotEquals
+                value: system:serviceaccount:tekton-pipelines:tekton-pipelines-controller
+    - name: deny-unsupported-pipelinerun-shapes
+      match:
+        any:
+          - resources:
+              kinds: [PipelineRun]
+              namespaces: [tekton-ci]
+      validate:
+        message: Only named, local, explicitly allowlisted Pipelines may run.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.pipelineSpec || '' }}"
+                operator: NotEquals
+                value: ""
+              - key: "{{ request.object.spec.pipelineRef.resolver || '' }}"
+                operator: NotEquals
+                value: ""
+              - key: "{{ request.object.spec.pipelineRef.name || '' }}"
+                operator: AnyNotIn
+                value: [build-and-publish, promote-image]
+    - name: deny-unexpected-build-fields
+      match:
+        any:
+          - resources:
+              kinds: [PipelineRun]
+              namespaces: [tekton-ci]
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.pipelineRef.name || '' }}"
+            operator: Equals
+            value: build-and-publish
+      validate:
+        message: Build PipelineRun parameters, workspaces, and task identities must match the closed contract.
+        deny:
+          conditions:
+            any:
+              - key: "{{ length(request.object.spec.params || `[]`) }}"
+                operator: NotEquals
+                value: 6
+              - key: "{{ request.object.spec.params[].name || `[]` }}"
+                operator: AnyNotIn
+                value: [repository-url, source-revision, service-context, dockerfile, image-repository, image-tag]
+              - key: "{{ length(request.object.spec.workspaces || `[]`) }}"
+                operator: NotEquals
+                value: 3
+              - key: "{{ request.object.spec.workspaces[].name || `[]` }}"
+                operator: AnyNotIn
+                value: [source, source-snapshot, evidence]
+              - key: "{{ length(request.object.spec.taskRunSpecs || `[]`) }}"
+                operator: NotEquals
+                value: 7
+              - key: "{{ request.object.spec.taskRunSpecs[].pipelineTaskName || `[]` }}"
+                operator: AnyNotIn
+                value: [clone, test, source-security, build, scan-image, generate-sbom, create-evidence]
+              - key: "{{ request.object.spec.params[?name=='repository-url'].value | [0] || '' }}"
+                operator: NotEquals
+                value: https://github.com/dst-red-Wire/ecommerce-1.git
+              - key: "{{ length(request.object.spec.params[?name=='source-revision'].value | [0] || '') }}"
+                operator: NotEquals
+                value: 40
+              - key: "{{ request.object.spec.params[?name=='image-tag'].value | [0] || '' }}"
+                operator: NotEquals
+                value: "{{ request.object.spec.params[?name=='source-revision'].value | [0] || '' }}"
+              - key: "{{ contains(request.object.spec.params[?name=='service-context'].value | [0] || '', '/') }}"
+                operator: Equals
+                value: true
+              - key: "{{ contains(request.object.spec.params[?name=='service-context'].value | [0] || '', '..') }}"
+                operator: Equals
+                value: true
+              - key: "{{ contains(request.object.spec.params[?name=='dockerfile'].value | [0] || '', '..') }}"
+                operator: Equals
+                value: true
+    - name: require-exact-build-contract
+      match:
+        any:
+          - resources:
+              kinds: [PipelineRun]
+              namespaces: [tekton-ci]
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.pipelineRef.name || '' }}"
+            operator: Equals
+            value: build-and-publish
+      validate:
+        message: Build workspaces, critical parameters, ServiceAccounts, and BuildKit placement are fixed.
+        pattern:
+          spec:
+            params:
+              - (name): repository-url
+                value: https://github.com/dst-red-Wire/ecommerce-1.git
+              - (name): source-revision
+                value: "????????????????????????????????????????"
+              - (name): service-context
+                value: "?*"
+              - (name): dockerfile
+                value: "?*"
+              - (name): image-repository
+                value: ghcr.io/dst-red-wire/ecommerce-1/?*
+              - (name): image-tag
+                value: "????????????????????????????????????????"
+            workspaces:
+              - (name): source
+                emptyDir: {}
+              - (name): source-snapshot
+                emptyDir: {}
+              - (name): evidence
+                persistentVolumeClaim:
+                  claimName: tekton-build-evidence
+            taskRunTemplate:
+              serviceAccountName: tekton-test
+              podTemplate:
+                securityContext:
+                  fsGroup: 65532
+                  fsGroupChangePolicy: OnRootMismatch
+            taskRunSpecs:
+              - (pipelineTaskName): clone
+                serviceAccountName: tekton-source-read
+              - (pipelineTaskName): test
+                serviceAccountName: tekton-test
+              - (pipelineTaskName): source-security
+                serviceAccountName: tekton-source-scan
+              - (pipelineTaskName): build
+                serviceAccountName: tekton-image-push
+                podTemplate:
+                  nodeSelector:
+                    ecommerce.dev/workload: ci-build
+                  tolerations:
+                    - key: ecommerce.dev/ci-build
+                      operator: Equal
+                      value: "true"
+                      effect: NoSchedule
+              - (pipelineTaskName): scan-image
+                serviceAccountName: tekton-image-read
+              - (pipelineTaskName): generate-sbom
+                serviceAccountName: tekton-image-read
+              - (pipelineTaskName): create-evidence
+                serviceAccountName: tekton-evidence
+    - name: deny-unexpected-promotion-fields
+      match:
+        any:
+          - resources:
+              kinds: [PipelineRun]
+              namespaces: [tekton-ci]
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.pipelineRef.name || '' }}"
+            operator: Equals
+            value: promote-image
+      validate:
+        message: Promotion PipelineRun parameters, workspaces, and task identities must match the closed contract.
+        deny:
+          conditions:
+            any:
+              - key: "{{ length(request.object.spec.params || `[]`) }}"
+                operator: NotEquals
+                value: 3
+              - key: "{{ request.object.spec.params[].name || `[]` }}"
+                operator: AnyNotIn
+                value: [repository-url, environment, expected-main-sha]
+              - key: "{{ length(request.object.spec.workspaces || `[]`) }}"
+                operator: NotEquals
+                value: 4
+              - key: "{{ request.object.spec.workspaces[].name || `[]` }}"
+                operator: AnyNotIn
+                value: [desired-state, evidence, trust, git-auth]
+              - key: "{{ length(request.object.spec.taskRunSpecs || `[]`) }}"
+                operator: NotEquals
+                value: 2
+              - key: "{{ request.object.spec.taskRunSpecs[].pipelineTaskName || `[]` }}"
+                operator: AnyNotIn
+                value: [verify-proof, propose-git-change]
+              - key: "{{ request.object.spec.params[?name=='repository-url'].value | [0] || '' }}"
+                operator: NotEquals
+                value: https://github.com/dst-red-Wire/ecommerce-1.git
+              - key: "{{ request.object.spec.params[?name=='environment'].value | [0] || '' }}"
+                operator: AnyNotIn
+                value: [integration, preproduction, production]
+              - key: "{{ length(request.object.spec.params[?name=='expected-main-sha'].value | [0] || '') }}"
+                operator: NotEquals
+                value: 40
+    - name: require-exact-promotion-contract
+      match:
+        any:
+          - resources:
+              kinds: [PipelineRun]
+              namespaces: [tekton-ci]
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.pipelineRef.name || '' }}"
+            operator: Equals
+            value: promote-image
+      validate:
+        message: Promotion trust, Git credential, ServiceAccounts, and parameters are fixed.
+        pattern:
+          spec:
+            params:
+              - (name): repository-url
+                value: https://github.com/dst-red-Wire/ecommerce-1.git
+              - (name): environment
+                value: integration|preproduction|production
+              - (name): expected-main-sha
+                value: "????????????????????????????????????????"
+            workspaces:
+              - (name): desired-state
+                emptyDir: {}
+              - (name): evidence
+                persistentVolumeClaim:
+                  claimName: tekton-promotion-evidence
+              - (name): trust
+                configMap:
+                  name: promotion-trust-root
+              - (name): git-auth
+                secret:
+                  secretName: github-git-write
+            taskRunTemplate:
+              serviceAccountName: tekton-test
+              podTemplate:
+                securityContext:
+                  fsGroup: 65532
+                  fsGroupChangePolicy: OnRootMismatch
+            taskRunSpecs:
+              - (pipelineTaskName): verify-proof
+                serviceAccountName: tekton-evidence-verifier
+              - (pipelineTaskName): propose-git-change
+                serviceAccountName: tekton-git-promotion

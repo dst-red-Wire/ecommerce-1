@@ -1,0 +1,19 @@
+---
+# Non-secret defaults for the independent Terraform state host.
+terraform_state_root: /var/lib/terraform-state
+terraform_state_config_root: /etc/terraform-state
+terraform_state_log_root: /var/log/terraform-state
+terraform_state_backup_root: /var/backups/terraform-state
+terraform_state_postgresql_data_root: /var/lib/postgresql
+terraform_state_postgresql_major: 16
+terraform_state_postgresql_port: 5432
+terraform_state_postgresql_database: terraform_backend
+terraform_state_postgresql_user: terraform_backend
+terraform_state_management_schema: terraform_management
+terraform_state_lock_probe_schema: terraform_lock_probe
+terraform_state_secret_min_length: 32
+
+# Secret values are loaded only from the canonical external project environment.
+# The private age identity intentionally has no Ansible variable and stays local.
+terraform_state_postgresql_password: "{{ lookup('env', 'TERRAFORM_STATE_POSTGRESQL_PASSWORD') }}"
+terraform_state_backup_age_recipient: "{{ lookup('env', 'TERRAFORM_STATE_BACKUP_AGE_RECIPIENT') }}"

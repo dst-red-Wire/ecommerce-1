@@ -1,0 +1,35 @@
+---
+- name: Assert the host firewall contains no PostgreSQL public exception
+  ansible.builtin.assert:
+    that:
+      - postgresql_bind_address == '127.0.0.1'
+      - ssh_allowed_ipv4_cidrs | length > 0
+    fail_msg: PostgreSQL must remain loopback-only behind the SSH boundary.
+
+- name: Install the default-deny Terraform state firewall
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/nft --check --file %s
+  notify: Reload Terraform state firewall
+
+- name: Enable the Terraform state firewall at boot
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+
+- name: Apply the firewall before PostgreSQL installation
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the active Terraform state firewall table
+  ansible.builtin.command:
+    argv:
+      - nft
+      - list
+      - table
+      - inet
+      - terraform_state
+  changed_when: false

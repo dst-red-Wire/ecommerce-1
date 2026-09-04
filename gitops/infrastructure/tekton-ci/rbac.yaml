@@ -1,0 +1,24 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tekton-run-observer
+  namespace: tekton-ci
+rules:
+  - apiGroups: [tekton.dev]
+    resources: [pipelineruns, taskruns]
+    verbs: [get, list, watch]
+---
+# Deliberately unbound. Before a principal can submit runs, the Kyverno run
+# contract must be switched from Audit to Enforce and a separately reviewed
+# RoleBinding must grant this Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tekton-approved-run-submitter
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/binding-status: forbidden-until-admission-enforce
+rules:
+  - apiGroups: [tekton.dev]
+    resources: [pipelineruns]
+    verbs: [create, get, list, watch]

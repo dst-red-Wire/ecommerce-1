@@ -1,0 +1,51 @@
+apiVersion: ecommerce.dev/v1alpha1
+kind: RunContract
+metadata:
+  name: promote-image
+  namespace: tekton-ci
+spec:
+  activationStatus: NOT_PROVEN
+  pipelineRef: promote-image
+  defaultServiceAccountName: tekton-test
+  defaultPodTemplate:
+    securityContext:
+      fsGroup: 65532
+      fsGroupChangePolicy: OnRootMismatch
+  timeouts:
+    pipeline: 20m
+    tasks: 15m
+    finally: 5m
+  taskRunSpecs:
+    - pipelineTaskName: verify-proof
+      serviceAccountName: tekton-evidence-verifier
+    - pipelineTaskName: propose-git-change
+      serviceAccountName: tekton-git-promotion
+  requiredWorkspaces:
+    - name: evidence
+      access: read-only
+      source:
+        kind: PersistentVolumeClaim
+        claimName: tekton-promotion-evidence
+    - name: trust
+      access: read-only
+      source:
+        kind: ConfigMap
+        name: promotion-trust-root
+      requiredKeys:
+        - cosign.pub
+        - promotion-proof.schema.json
+        - delivery-evidence.schema.json
+    - name: desired-state
+      access: read-write-ephemeral
+      source:
+        kind: EmptyDir
+    - name: git-auth
+      access: secret-read-only
+      source:
+        kind: Secret
+        name: github-git-write
+  activationGates:
+    - kyverno-run-contract-enforce
+    - trusted-cosign-public-key-distributed
+    - github-app-proposal-branch-write
+    - github-pr-creation-integration

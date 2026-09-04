@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dst-red-Wire/ecommerce-1/contracts/supply-chain/delivery-evidence.schema.json",
+  "title": "DeliveryEvidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "status", "subject", "materials", "attestationBoundary"],
+  "properties": {
+    "apiVersion": {"const": "ecommerce.dev/v1alpha1"},
+    "kind": {"const": "DeliveryEvidence"},
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "reason"],
+      "properties": {
+        "phase": {"const": "NOT_PROVEN"},
+        "reason": {"const": "awaiting-signed-completed-pipelinerun-and-final-attestor"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitRepository", "sourceCommit", "sourceSnapshotSha256", "serviceContext", "image"],
+      "properties": {
+        "gitRepository": {"const": "https://github.com/dst-red-Wire/ecommerce-1.git"},
+        "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "sourceSnapshotSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "serviceContext": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "digest"],
+          "properties": {
+            "repository": {"type": "string", "pattern": "^ghcr\\.io/dst-red-wire/ecommerce-1/[a-z0-9][a-z0-9._-]*$"},
+            "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "materials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scans", "sbom"],
+      "properties": {
+        "scans": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "sha256"],
+            "properties": {
+              "id": {"enum": ["gitleaks-source", "trivy-source", "trivy-image"]},
+              "status": {"const": "PASSED_BY_TASK"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "sha256"],
+          "properties": {
+            "format": {"const": "CycloneDX"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "attestationBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredPipeline", "pipelineRunUid", "chainsPipelineRunProvenance", "finalApproval"],
+      "properties": {
+        "requiredPipeline": {"const": "build-and-publish"},
+        "pipelineRunUid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+        "chainsPipelineRunProvenance": {"const": "NOT_PROVEN"},
+        "finalApproval": {"const": "NOT_PROVEN"}
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "hcloud_volume.postgresql",
+      "type": "hcloud_volume",
+      "change": {"actions": ["delete", "create"], "before": {"name": "postgresql"}, "after": {}}
+    }
+  ]
+}

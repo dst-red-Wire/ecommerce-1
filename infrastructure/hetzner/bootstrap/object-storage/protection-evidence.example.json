@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "status": "PROVEN_MANUAL",
+  "bucketName": "replace-with-approved-bucket-name",
+  "protected": true,
+  "observedAt": "2026-01-01T00:00:00Z",
+  "verifiedBy": [
+    "operator-identity"
+  ],
+  "evidenceReference": "secure-evidence-store-reference"
+}

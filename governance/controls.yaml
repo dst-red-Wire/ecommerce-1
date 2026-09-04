@@ -1,0 +1,878 @@
+schema_version: 1
+governance_claim:
+  certification_claimed: false
+  legal_advice: false
+  statement: >-
+    Ce registre décrit des exigences, des contrôles et des preuves du projet; il ne constitue
+    ni une certification, ni une attestation de conformité juridique ou réglementaire.
+status_models:
+  enforcement: [DOCUMENTED, STATICALLY_ENFORCED, RUNTIME_ENFORCED, PLANNED]
+  runtime_evidence: [PROVEN_RUNTIME, NOT_PROVEN_RUNTIME, NOT_APPLICABLE]
+architecture_requirements:
+  H3_REQUIRED_FOR_PRODUCTION_EDGE: true
+  HTTP2_FALLBACK_REQUIRED: true
+  HTTP1_FALLBACK_REQUIRED_WHEN_NEEDED: true
+  ZERO_RTT_POLICY: DISABLED_BY_DEFAULT
+  TARGET_SLSA_BUILD_LEVEL: L3_CONDITIONAL_ON_BUILDER_VALIDATION
+runtime_proofs:
+  - capability: remote identity
+    status: PROVEN_RUNTIME
+    evidence: &prior-runtime
+      - type: runtime_probe
+        status: EXTERNAL_REVIEWED
+        reference: prior-runtime-evidence-register
+        notes: Preuve établie avant ce milestone repository-only et conservée hors dépôt.
+  - capability: volume attachment
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: volume mount
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: PostgreSQL
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: TLS
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: SCRAM
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: PGDATA
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: Ansible idempotence
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: Terraform PG backend
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: Terraform PG locking
+    status: PROVEN_RUNTIME
+    evidence: *prior-runtime
+  - capability: reboot persistence
+    status: PROVISIONAL_RUNTIME_PASS
+    evidence:
+      - type: independent_review
+        status: PLANNED
+        reference: independent-reboot-persistence-review
+        notes: Revue indépendante séparée requise; aucune promotion de statut dans ce milestone.
+  - capability: HTTP/3 production edge
+    status: NOT_PROVEN_RUNTIME
+    evidence:
+      - type: runtime_probe
+        status: PLANNED
+        path: scripts/test-http3.sh
+        notes: Harness créé; aucun endpoint production-like n'est testé dans ce milestone.
+  - capability: Management backend
+    status: NOT_MIGRATED
+    evidence:
+      - type: config
+        status: AVAILABLE
+        path: docs/architecture/terraform-state-backend.md
+        notes: La migration est explicitement hors périmètre de ce milestone.
+
+controls:
+  - id: ARCH-001
+    title: Secure by Design gate
+    category: architecture
+    statement: >-
+      Tout composant significatif doit documenter assets, trust boundaries, authn, authz,
+      secrets, classification, défaillances, abuse cases, logs, recovery, dépendances et critères
+      de sécurité avant implémentation.
+    rationale: Empêcher le passage direct idea-to-code des changements à risque.
+    scope: [architecture, applications, platform, data]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secure-design-sdlc.md, notes: Gate et livrables requis.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: Présence et cohérence validées.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PO.1, relationship: SUPPORTS, notes: Préparer les rôles et exigences de développement sécurisé.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-15, relationship: SUPPORTS, notes: Architecture et secure coding.}
+      - {framework: NIST_CSF_2_0, control: GV.PO, relationship: SUPPORTS, notes: Politique de gestion du risque cyber.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Le template threat model est le livrable minimal pour un changement significatif.
+
+  - id: ARCH-002
+    title: Threat modeling continu
+    category: architecture
+    statement: Tout changement significatif doit mettre à jour un threat model STRIDE et ses risques résiduels avant promotion.
+    rationale: Les nouvelles frontières et data flows créent des risques qui doivent être visibles avant le runtime.
+    scope: [architecture, applications, platform, supply-chain]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/threat-modeling.md, notes: "Méthode, cadence et responsabilités."}
+      - {type: config, status: AVAILABLE, path: docs/security/threat-model-template.md, notes: Template réutilisable.}
+      - {type: config, status: AVAILABLE, path: docs/architecture/threat-model.md, notes: Modèle initial ecommerce-1.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PW.1, relationship: SUPPORTS, notes: Concevoir selon les exigences de sécurité.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-15, relationship: SUPPORTS, notes: Analyse d'architecture applicative.}
+      - {framework: NIST_CSF_2_0, control: ID.RA, relationship: SUPPORTS, notes: Évaluation et traitement des risques.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Le delta du threat model est revu avec le design, pas après déploiement.
+
+  - id: ARCH-003
+    title: Isolation des environnements
+    category: architecture
+    statement: DEV, integration, preproduction, production et management ont des secrets, credentials, données et décisions policy séparés.
+    rationale: Une confiance ou un état partagé permettrait une propagation inter-environnements.
+    scope: [platform, identity, data, gitops]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: Frontières et promotion par digest.}
+      - {type: config, status: AVAILABLE, path: governance/environments.yaml, notes: Modèle machine-readable des environnements.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.AA, relationship: SUPPORTS, notes: Accès et identités séparés.}
+      - {framework: ISO_IEC_27001_2022, control: A.8.31, relationship: INFORMATIVE, notes: Séparation des environnements.}
+    exception_allowed: false
+    owner_role: platform
+    implementation_notes: La promotion réutilise le même digest et ne réutilise jamais directement un state.
+
+  - id: SEC-001
+    title: Secure by Default
+    category: security
+    statement: >-
+      Les valeurs par défaut imposent deny-by-default, authentification sauf exposition publique explicite,
+      chiffrement, absence de credentials admin par défaut, de debug production et de secrets en clair.
+    rationale: Les oublis de configuration ne doivent pas créer une exposition permissive.
+    scope: [applications, platform, infrastructure]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secure-design-sdlc.md, notes: Baseline secure-by-default.}
+      - {type: policy_test, status: AVAILABLE, path: security/opa/kubernetes/kubernetes_test.rego, notes: Contrôles Kubernetes négatifs et positifs.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PW.9, relationship: SUPPORTS, notes: Configurer le logiciel de manière sécurisée.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-13, relationship: SUPPORTS, notes: Configuration sécurisée.}
+      - {framework: NIST_CSF_2_0, control: PR.PS, relationship: SUPPORTS, notes: Sécurisation des plateformes.}
+    exception_allowed: true
+    owner_role: security
+    implementation_notes: Toute exception est ciblée, expirante et référencée dans governance/exceptions.yaml.
+
+  - id: SEC-002
+    title: Defense in Depth
+    category: security
+    statement: Les contrôles identité, réseau, application, données, livraison et observabilité doivent rester indépendants et cumulables.
+    rationale: Aucun contrôle unique ne doit constituer l'unique barrière face à une compromission.
+    scope: [applications, platform, infrastructure, supply-chain]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: Couches de défense attendues.}
+      - {type: config, status: AVAILABLE, path: docs/architecture/system-context.md, notes: Frontières et responsabilités.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR, relationship: SUPPORTS, notes: Mesures de protection complémentaires.}
+      - {framework: ISO_IEC_27001_2022, control: A.8, relationship: INFORMATIVE, notes: Contrôles technologiques informatifs.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Une mitigation compensatoire ne supprime pas l'obligation de traiter la cause.
+
+  - id: SEC-003
+    title: Secrets Management
+    category: security
+    statement: >-
+      Les secrets réels restent hors Git, logs, images et sorties; leur emplacement local canonique est
+      $HOME/.config/ecommerce-1/.env et leur livraison runtime doit être séparée par environnement.
+    rationale: Réduire la persistance, la duplication et l'exposition accidentelle des credentials.
+    scope: [source, ci, gitops, runtime, local-control-node]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secrets-crypto-network.md, notes: "Contrat, rotation et exposition minimale."}
+      - {type: scanner, status: AVAILABLE, path: scripts/ci-security.sh, notes: Gitleaks canonique et redaction.}
+      - {type: config, status: AVAILABLE, path: docs/security/supply-chain-secrets.md, notes: Contrats de secrets delivery.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PO.5, relationship: SUPPORTS, notes: Protéger les environnements et outils.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-13, relationship: SUPPORTS, notes: Gestion sûre de configuration.}
+      - {framework: NIST_CSF_2_0, control: PR.AA, relationship: SUPPORTS, notes: Gestion des identités et secrets.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: SOPS plus age reste la cible GitOps pour les secrets chiffrés lorsque pertinent.
+
+  - id: PRIV-001
+    title: Privacy by Design and Default
+    category: privacy
+    statement: Les garanties de vie privée sont intégrées au design et les réglages par défaut limitent collecte, accès et exposition.
+    rationale: La protection des données doit précéder le traitement et non être ajoutée après incident.
+    scope: [applications, data, analytics, third-parties]
+    environments: [development, integration, preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: Baseline Privacy by Design.}
+    framework_mappings:
+      - {framework: GDPR, control: Article 25, relationship: SUPPORTS, notes: Protection des données dès la conception et par défaut.}
+      - {framework: NIST_CSF_2_0, control: GV.OC, relationship: PARTIAL, notes: Contexte et obligations de l'organisation.}
+    exception_allowed: false
+    owner_role: privacy
+    implementation_notes: Cette exigence de design n'est pas un avis juridique ni une claim de conformité RGPD.
+
+  - id: PRIV-002
+    title: Minimisation et finalité
+    category: privacy
+    statement: Chaque donnée personnelle collectée doit avoir une finalité documentée et être limitée au minimum nécessaire.
+    rationale: Réduire le volume de données réduit simultanément risque privacy et impact de compromission.
+    scope: [applications, data, analytics, logs]
+    environments: [development, integration, preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: "Inventaire, finalité et minimisation."}
+    framework_mappings:
+      - {framework: GDPR, control: Article 5(1)(b)-(c), relationship: SUPPORTS, notes: Limitation des finalités et minimisation.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-14, relationship: SUPPORTS, notes: Protection des données applicatives.}
+    exception_allowed: false
+    owner_role: privacy
+    implementation_notes: Les exports sont contrôlés et journalisés sans dupliquer inutilement les données.
+
+  - id: PRIV-003
+    title: Droits, DPIA et sous-traitants
+    category: privacy
+    statement: L'architecture doit soutenir recherche, export, correction et suppression contrôlées et déclencher une DPIA selon le risque.
+    rationale: Les opérations privacy et risques tiers doivent être réalisables et traçables par conception.
+    scope: [applications, data, third-parties]
+    environments: [production]
+    enforcement_status: PLANNED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: Triggers DPIA et inventaire processors.}
+      - {type: test, status: PLANNED, reference: privacy-rights-runtime-test, notes: Validation future des workflows de droits.}
+    framework_mappings:
+      - {framework: GDPR, control: Articles 15-22 and 35, relationship: SUPPORTS, notes: Support architectural des droits et analyse d'impact.}
+      - {framework: NIST_CSF_2_0, control: GV.RM, relationship: PARTIAL, notes: Gestion du risque et parties prenantes.}
+    exception_allowed: false
+    owner_role: privacy
+    implementation_notes: Les décisions juridiques et business requièrent approbation qualifiée.
+
+  - id: DATA-001
+    title: Data Classification
+    category: data
+    statement: Toute donnée est classée PUBLIC, INTERNAL, CONFIDENTIAL ou RESTRICTED avec un owner role et des exigences associées.
+    rationale: La protection, la journalisation, les backups et l'accès dépendent de la sensibilité réelle.
+    scope: [data, logs, backups, events, artifacts]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: Modèle de classification et règles associées.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: Valeurs de classification gouvernées.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: ID.AM, relationship: SUPPORTS, notes: Inventaire et compréhension des données.}
+      - {framework: ISO_IEC_27001_2022, control: A.5.12, relationship: INFORMATIVE, notes: Classification de l'information.}
+      - {framework: GDPR, control: Article 32, relationship: PARTIAL, notes: Mesures adaptées au risque.}
+    exception_allowed: false
+    owner_role: data
+    implementation_notes: PII, credentials, PSP tokens et données de paiement sont RESTRICTED.
+
+  - id: DATA-002
+    title: Retention et suppression
+    category: data
+    statement: Chaque dataset doit avoir une règle de conservation, suppression et preuve; une durée inconnue reste explicitement en attente d'approbation.
+    rationale: Une conservation indéfinie implicite augmente les risques et empêche une gouvernance vérifiable.
+    scope: [databases, object-storage, logs, backups, analytics]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: Retention status et suppression contrôlée.}
+    framework_mappings:
+      - {framework: GDPR, control: Article 5(1)(e), relationship: SUPPORTS, notes: Limitation de conservation.}
+      - {framework: NIST_CSF_2_0, control: PR.DS, relationship: SUPPORTS, notes: Protection du cycle de vie des données.}
+    exception_allowed: true
+    owner_role: data
+    implementation_notes: La valeur autorisée en attente est TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL.
+
+  - id: DATA-003
+    title: Données des environnements inférieurs
+    category: data
+    statement: Les données PII réelles de production ne sont pas utilisées en DEV, integration ou preproduction par défaut.
+    rationale: Les environnements inférieurs ont une surface d'accès plus large et ne doivent pas dupliquer le risque production.
+    scope: [development-data, test-fixtures, exports]
+    environments: [development, integration, preproduction]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: Données synthétiques ou anonymisées par défaut.}
+    framework_mappings:
+      - {framework: GDPR, control: Article 25, relationship: SUPPORTS, notes: Protection par défaut.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-14, relationship: SUPPORTS, notes: Limitation des données sensibles.}
+    exception_allowed: true
+    owner_role: privacy
+    implementation_notes: Toute copie exceptionnelle exige minimisation, scope, chiffrement, expiry et approbation.
+
+  - id: DATA-004
+    title: Payment Data Scope Minimization
+    category: data
+    statement: >-
+      Un PSP externe et la tokenisation sont préférés; le CVV ne doit jamais être persisté, le PAN brut doit rester hors systèmes
+      si possible et toute nouvelle cardholder data déclenche un gate architecture/security/compliance.
+    rationale: Réduire le périmètre de données carte réduit le risque et le scope PCI DSS potentiel.
+    scope: [checkout, payment, refunds, logs, events]
+    environments: [development, integration, preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/privacy-data.md, notes: "Architecture PSP, tokenisation et interdictions."}
+    framework_mappings:
+      - {framework: PCI_DSS, control: 3.3.1.2, relationship: CONDITIONAL, notes: Interdiction de conserver les codes de vérification après autorisation.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-14, relationship: SUPPORTS, notes: Protection des données sensibles.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Les tokens PSP sont RESTRICTED et aucune donnée carte n'est admise dans logs ou messages.
+
+  - id: IAM-001
+    title: Zero Trust and Workload Identity
+    category: identity
+    statement: La localisation réseau ne confère aucune confiance; chaque identité utilisateur ou workload est authentifiée et explicitement autorisée.
+    rationale: Limiter l'usurpation et les mouvements latéraux entre services et environnements.
+    scope: [keycloak, istio, opa, workloads, administrators]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: "Modèle Keycloak, Istio et OPA."}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.AA, relationship: SUPPORTS, notes: Authentification et autorisation explicites.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-6, relationship: PARTIAL, notes: Authentification applicative.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-8, relationship: PARTIAL, notes: Autorisation applicative.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Istio fournit la cible mTLS/service identity; Keycloak user/admin identity; OPA les décisions policy.
+
+  - id: IAM-002
+    title: Least Privilege
+    category: identity
+    statement: Chaque humain, workload, pipeline et compte technique reçoit uniquement les permissions minimales nécessaires et bornées.
+    rationale: Réduire l'impact d'un credential ou composant compromis.
+    scope: [rbac, ci, cloud-apis, databases, git, registries]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: Least privilege par rôle et workload.}
+      - {type: config, status: AVAILABLE, path: gitops/infrastructure/tekton-ci/serviceaccounts.yaml, notes: Identités CI séparées et token automount désactivé.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.AA, relationship: SUPPORTS, notes: Permissions minimales.}
+      - {framework: ISO_IEC_27001_2022, control: A.5.15, relationship: INFORMATIVE, notes: Contrôle d'accès.}
+    exception_allowed: true
+    owner_role: security
+    implementation_notes: Les credentials longue durée partagés sont interdits en production.
+
+  - id: IAM-003
+    title: Break-glass temporaire et audité
+    category: identity
+    statement: L'accès d'urgence est nominatif ou attribuable, minimal, temporaire, audité et suivi d'une réconciliation déclarative.
+    rationale: Permettre la réponse incident sans créer de drift permanent ni de credential partagé.
+    scope: [production, management, cloud-apis, kubernetes]
+    environments: [production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: Procédure incident et break-glass.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: RS.MA, relationship: SUPPORTS, notes: Gestion de réponse incident.}
+      - {framework: ISO_IEC_27001_2022, control: A.5.24, relationship: INFORMATIVE, notes: Préparation à la gestion des incidents.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: Aucun compte d'urgence permanent partagé n'est autorisé.
+
+  - id: NET-001
+    title: Default-deny network segmentation
+    category: network
+    statement: Ingress et egress sont refusés par défaut lorsque possible, puis ouverts explicitement entre frontières nécessaires.
+    rationale: Empêcher l'exposition implicite et limiter les mouvements latéraux.
+    scope: [cloud-firewalls, kubernetes, service-mesh, hosts]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secrets-crypto-network.md, notes: Baseline réseau.}
+      - {type: policy_test, status: AVAILABLE, path: security/opa/kubernetes/kubernetes_test.rego, notes: Default-deny attendu par namespace production.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.IR, relationship: SUPPORTS, notes: Résilience et segmentation technologique.}
+      - {framework: CIS, control: target-specific-network-benchmark, relationship: INFORMATIVE, notes: Version à vérifier pour chaque cible.}
+    exception_allowed: true
+    owner_role: platform
+    implementation_notes: Aucune confiance implicite ne traverse DEV, integration, preproduction et production.
+
+  - id: NET-002
+    title: Exposition réseau explicite
+    category: network
+    statement: Les bases de données ne sont jamais publiques et SSH public universel est interdit; les expositions attendues sont revues par port et protocole.
+    rationale: Réduire la surface d'attaque externe de l'infrastructure sensible.
+    scope: [terraform, cloud-firewalls, databases, ssh]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy_test, status: AVAILABLE, path: security/opa/terraform/terraform_test.rego, notes: PostgreSQL public et SSH universel refusés.}
+      - {type: test, status: AVAILABLE, path: tests/governance/fixtures/terraform-fail-public-db.json, notes: Fixture publique négative.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.IR, relationship: SUPPORTS, notes: Protection de l'infrastructure.}
+      - {framework: ISO_IEC_27001_2022, control: A.8.20, relationship: INFORMATIVE, notes: Sécurité réseau.}
+    exception_allowed: true
+    owner_role: platform
+    implementation_notes: SSH reste restreint et orienté break-glass; PostgreSQL 5432 ne doit pas être public.
+
+  - id: CRYPTO-001
+    title: Cryptographic Baseline and Agility
+    category: cryptography
+    statement: >-
+      TLS 1.0 et 1.1 sont interdits; TLS 1.3 est supporté et préféré, la validation certificat/hostname est obligatoire,
+      les clés ne sont jamais journalisées et aucune cryptographie maison n'est admise.
+    rationale: Fournir une baseline moderne sans figer une liste d'algorithmes rapidement obsolète.
+    scope: [edge, service-mesh, databases, messaging, ci, backups]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secrets-crypto-network.md, notes: "TLS, clés, random et crypto agility."}
+    framework_mappings:
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-11, relationship: SUPPORTS, notes: Cryptographie.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-12, relationship: SUPPORTS, notes: Communications sécurisées.}
+      - {framework: NIST_CSF_2_0, control: PR.DS, relationship: SUPPORTS, notes: Données protégées en transit et au repos.}
+    exception_allowed: true
+    owner_role: security
+    implementation_notes: Les choix algorithmiques suivent une baseline versionnée et révisable.
+
+  - id: SUPPLY-001
+    title: SLSA Build maturity target
+    category: supply-chain
+    statement: Les artifacts production ciblent SLSA v1.2 Build L3 uniquement si le builder satisfait et prouve toutes les exigences associées.
+    rationale: Éviter une claim de maturité fondée sur la seule présence de provenance ou de documentation.
+    scope: [tekton, builder, production-artifacts]
+    environments: [integration, preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/supply-chain-policy.md, notes: Maturité actuelle et chemin vers L3.}
+      - {type: provenance, status: PLANNED, reference: verified-slsa-v1.2-provenance, notes: Preuve authentifiée et builder isolé à établir.}
+    framework_mappings:
+      - {framework: SLSA_1_2, control: Build L3, relationship: SUPPORTS, notes: "Cible conditionnelle, jamais claim actuelle."}
+      - {framework: NIST_SSDF_1_1, control: PS.2, relationship: SUPPORTS, notes: Vérifier l'intégrité des releases.}
+    exception_allowed: false
+    owner_role: platform
+    implementation_notes: État courant non revendiqué; baseline puis provenance, authenticité, isolation et vérification au déploiement.
+
+  - id: SUPPLY-002
+    title: SLSA Source Track
+    category: supply-chain
+    statement: La source doit être versionnée, ses révisions immuables et les contrôles de revue/protection mesurés selon SLSA v1.2 Source Track.
+    rationale: La sécurité du build ne compense pas une source non gouvernée ou une révision ambiguë.
+    scope: [git, source-review, branch-protection]
+    environments: [development, integration, preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/supply-chain-policy.md, notes: Source Track et preuves attendues.}
+      - {type: test, status: AVAILABLE, path: scripts/test-source-immutability.sh, notes: Tests statiques de révisions et promotion.}
+    framework_mappings:
+      - {framework: SLSA_1_2, control: Source L1-L4, relationship: PARTIAL, notes: Niveau réel à mesurer par branche sans claim actuelle.}
+      - {framework: NIST_SSDF_1_1, control: PO.3, relationship: SUPPORTS, notes: Implémenter des rôles et processus de développement.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: La configuration Gitea/GitHub actuelle ne prouve encore aucun niveau Source Track revendiqué.
+
+  - id: SUPPLY-003
+    title: SBOM par artifact production
+    category: supply-chain
+    statement: Chaque image production possède un SBOM CycloneDX ou SPDX lié au digest, généré automatiquement, archivé avec provenance et scan.
+    rationale: Permettre traçabilité, investigation de vulnérabilités et vérification de composition.
+    scope: [container-images, ci, registry, evidence]
+    environments: [preproduction, production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/supply-chain-policy.md, notes: "Format, binding digest et archivage."}
+      - {type: config, status: AVAILABLE, path: gitops/infrastructure/tekton-ci/tasks/generate-sbom.yaml, notes: Génération SBOM Tekton prévue.}
+      - {type: sbom, status: PLANNED, reference: production-artifact-sbom, notes: Aucun artifact production vérifié dans ce milestone.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PS.3, relationship: SUPPORTS, notes: Archiver et protéger les données de release.}
+      - {framework: SLSA_1_2, control: Build provenance, relationship: PARTIAL, notes: SBOM lié au subject digest et à la provenance.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: L'absence d'un SBOM lié interdit la promotion production.
+
+  - id: SUPPLY-004
+    title: Signature et provenance vérifiées
+    category: supply-chain
+    statement: Images, provenance et attestations SBOM sont signées et vérifiées avant promotion, avec trust root distinct du build utilisateur.
+    rationale: Empêcher substitution d'artifact, provenance forgée et promotion sans identité vérifiée.
+    scope: [tekton-chains, cosign, registry, promotion, flux]
+    environments: [integration, preproduction, production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/supply-chain-policy.md, notes: Sigstore/Cosign et identité OIDC future.}
+      - {type: config, status: AVAILABLE, path: gitops/infrastructure/tekton-ci/tasks/verify-promotion-proof.yaml, notes: Vérification cryptographique statique.}
+      - {type: signature_verification, status: PLANNED, reference: production-signature-verification, notes: REQUIRES_RUNTIME_VALIDATION.}
+    framework_mappings:
+      - {framework: SLSA_1_2, control: Build L2-L3 provenance authenticity, relationship: SUPPORTS, notes: Provenance authentifiée puis infalsifiable.}
+      - {framework: NIST_SSDF_1_1, control: PS.2, relationship: SUPPORTS, notes: Mécanismes d'intégrité de release.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Keyless/OIDC est préféré si l'environnement futur le permet; aucune clé réelle n'est provisionnée ici.
+
+  - id: SUPPLY-005
+    title: Promotion immutable par digest
+    category: supply-chain
+    statement: Production consomme uniquement des digests immuables depuis des registries approuvés; latest est interdit et les tags restent informatifs.
+    rationale: Une promotion doit désigner exactement les octets scannés, attestés et signés.
+    scope: [harbor, ghcr, gitops, kubernetes, container-images]
+    environments: [preproduction, production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: test, status: AVAILABLE, path: scripts/ci-supply-chain.sh, notes: Images mutables et non épinglées refusées.}
+      - {type: policy_test, status: AVAILABLE, path: security/opa/kubernetes/kubernetes_test.rego, notes: Digests requis en production.}
+    framework_mappings:
+      - {framework: SLSA_1_2, control: Verifying artifacts, relationship: SUPPORTS, notes: Le subject digest est lié à l'artifact consommé.}
+      - {framework: NIST_SSDF_1_1, control: PS.2, relationship: SUPPORTS, notes: Intégrité des releases.}
+    exception_allowed: false
+    owner_role: platform
+    implementation_notes: Flux déploie le digest inscrit dans Git après scan, SBOM, provenance, signature et vérification.
+
+  - id: IMM-001
+    title: Immutable Infrastructure
+    category: infrastructure
+    statement: Les changements normaux de production passent par Git, Terraform, Ansible ou GitOps; les artifacts applicatifs restent immuables.
+    rationale: Supprimer le drift manuel durable tout en distinguant infrastructure déclarative et données stateful persistantes.
+    scope: [terraform, ansible, gitops, production-artifacts, stateful-data]
+    environments: [production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: Immutabilité pragmatique et break-glass.}
+      - {type: test, status: AVAILABLE, path: scripts/test-source-immutability.sh, notes: Contrôles statiques de source et promotion.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.PS, relationship: SUPPORTS, notes: Gestion de configuration des plateformes.}
+      - {framework: NIST_SSDF_1_1, control: PO.5, relationship: SUPPORTS, notes: Sécuriser les environnements de développement et livraison.}
+    exception_allowed: true
+    owner_role: platform
+    implementation_notes: Une VM stateful n'est pas détruite artificiellement; une réparation durable retourne dans la source déclarative.
+
+  - id: IMM-002
+    title: Reproducible Infrastructure
+    category: infrastructure
+    statement: Outils, providers, collections, modules, images de base et dépendances sont pinnés et vérifiés avec des entrées explicites.
+    rationale: Réduire les différences cachées et rendre les validations répétables sur des environnements propres.
+    scope: [terraform, ansible, containers, ci, generated-files]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/infrastructure-security.md, notes: Reproductibilité et déterminisme.}
+      - {type: config, status: AVAILABLE, path: versions.mk, notes: Versions et checksums canoniques.}
+      - {type: config, status: AVAILABLE, path: infrastructure/hetzner/staging/.terraform.lock.hcl, notes: Providers Terraform verrouillés.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PW.4, relationship: SUPPORTS, notes: Réutiliser et maintenir des composants sécurisés.}
+      - {framework: SLSA_1_2, control: Build consistent process, relationship: SUPPORTS, notes: Processus de build prévisible.}
+    exception_allowed: true
+    owner_role: platform
+    implementation_notes: Les résultats non byte-for-byte sont marqués REPRODUCIBILITY_TARGET avec leur delta.
+
+  - id: SDLC-001
+    title: Secure SDLC
+    category: sdlc
+    statement: >-
+      Le flux minimal est design, threat/privacy review, code, tests, analyses statiques et secrets/dépendances/IaC,
+      SBOM/provenance/signature, validation staging, promotion gouvernée, production et monitoring continu.
+    rationale: Rendre les contrôles prévisibles, revus et exécutables sur tout le cycle de livraison.
+    scope: [source, ci, artifacts, gitops, runtime]
+    environments: [development, integration, preproduction, production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/secure-design-sdlc.md, notes: Cycle et acceptance criteria.}
+      - {type: config, status: AVAILABLE, path: docs/architecture/devsecops-delivery.md, notes: Pipeline et frontières de promotion.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PO-PW-PS-RV, relationship: SUPPORTS, notes: Cycle SSDF 1.1 complet par pratiques.}
+      - {framework: NIST_SSDF_1_2_DRAFT, control: monitored-evolution, relationship: INFORMATIVE, notes: Évolution surveillée; aucune baseline finale sur le draft.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0, relationship: SUPPORTS, notes: Baseline web et API.}
+    exception_allowed: false
+    owner_role: application
+    implementation_notes: Une validation statique ne promeut jamais automatiquement un statut runtime.
+
+  - id: SDLC-002
+    title: Vulnerability Management
+    category: sdlc
+    statement: Sources, dépendances, images, IaC, secrets, SBOM et contexte d'exploitabilité sont analysés; aucun finding n'est ignoré silencieusement.
+    rationale: Prioriser le risque exploitable et conserver une décision révisable pour tout risque accepté.
+    scope: [source, dependencies, containers, iac, sbom]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/vulnerability-dependency.md, notes: "Triage, remediation et exceptions."}
+      - {type: scanner, status: AVAILABLE, path: scripts/ci-security.sh, notes: Gitleaks et Trivy local.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: RV.1, relationship: SUPPORTS, notes: Identifier et confirmer les vulnérabilités.}
+      - {framework: NIST_SSDF_1_1, control: RV.2, relationship: SUPPORTS, notes: "Évaluer, prioriser et remédier."}
+      - {framework: NIST_CSF_2_0, control: ID.RA, relationship: SUPPORTS, notes: Évaluation du risque.}
+    exception_allowed: true
+    owner_role: security
+    implementation_notes: Un CRITICAL/HIGH exploitable en production ne peut pas être accepté silencieusement; aucun SLA chiffré n'est inventé.
+
+  - id: SDLC-003
+    title: Dependency and EOL Management
+    category: sdlc
+    statement: Les dépendances et runtimes production sont pinnés, verrouillés, maintenus et non EOL; toute major update est revue avant production.
+    rationale: Éviter le drift, les upgrades non évalués et les composants sans correctifs de sécurité.
+    scope: [application-dependencies, runtimes, build-tools, infrastructure-tools]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/vulnerability-dependency.md, notes: "Pinning, lockfiles, EOL et update review."}
+      - {type: test, status: AVAILABLE, path: scripts/check-security-tool-versions.sh, notes: Drift Gitleaks et Trivy bloqué.}
+    framework_mappings:
+      - {framework: NIST_SSDF_1_1, control: PW.4, relationship: SUPPORTS, notes: Acquérir et maintenir des composants sûrs.}
+      - {framework: NIST_CSF_2_0, control: PR.PS, relationship: SUPPORTS, notes: Maintenance des plateformes.}
+    exception_allowed: true
+    owner_role: security
+    implementation_notes: Le processus automatisé d'update reste futur; les versions canoniques sont contrôlées maintenant.
+
+  - id: OBS-001
+    title: Security Logging and Auditability
+    category: observability
+    statement: >-
+      Les logs structurés portent correlation IDs, événements authn/authz, actions admin, provenance de déploiement,
+      commit/digest, protocole h1/h2/h3 et temps synchronisé sans secrets ni PII inutile.
+    rationale: Permettre détection, investigation et attribution sans créer une nouvelle fuite de données.
+    scope: [applications, edge, identity, ci, gitops, infrastructure]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: Événements et restrictions de logs.}
+      - {type: test, status: PLANNED, reference: runtime-audit-observability-probe, notes: Couverture et retention à prouver.}
+    framework_mappings:
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-16, relationship: SUPPORTS, notes: Logging sécurité et gestion d'erreurs.}
+      - {framework: NIST_CSF_2_0, control: DE.CM, relationship: SUPPORTS, notes: Monitoring continu.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: La durée d'audit reste TBD_REQUIRES_BUSINESS_OR_LEGAL_APPROVAL.
+
+  - id: OBS-002
+    title: Evidence-driven continuous verification
+    category: observability
+    statement: Toute claim runtime critique exige une probe bornée, reproductible, sanitized, reviewable et liée au contrôle concerné.
+    rationale: Documentation compatibility et validation statique ne prouvent pas le comportement runtime.
+    scope: [runtime-evidence, promotion, reviews]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: Modèle de preuve et statuts.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: PROVEN_RUNTIME refusé sans preuve.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: DE.CM, relationship: SUPPORTS, notes: Vérification continue des contrôles.}
+      - {framework: SLSA_1_2, control: Verifying artifacts, relationship: PARTIAL, notes: Preuves liées et vérifiables.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Le chemin critique est static validation, JIT probe, evidence, independent review puis PROVEN_RUNTIME.
+
+  - id: RES-001
+    title: Backup and Restore Proof
+    category: resilience
+    statement: Les données stateful ont des backups protégés hors hôte et des restore-tests périodiques avant dépendance production.
+    rationale: Un backup non restauré ne constitue pas une preuve de récupérabilité.
+    scope: [postgresql, mongodb, object-storage, terraform-state, git, registry]
+    environments: [preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: "Backup, off-host et restore proof."}
+      - {type: test, status: AVAILABLE, path: scripts/test-terraform-state-postgresql-backup.sh, notes: Harness ciblé existant.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: RC.RP, relationship: SUPPORTS, notes: Plan et capacité de recovery.}
+      - {framework: ISO_IEC_27001_2022, control: A.8.13, relationship: INFORMATIVE, notes: Sauvegarde de l'information.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: RPO et RTO restent TBD_REQUIRES_BUSINESS_APPROVAL avant production.
+
+  - id: RES-002
+    title: Resilience and State Integrity
+    category: resilience
+    statement: Idempotence, persistence au reboot, integrity, locking et défaillances de dépendances sont testés avec preuves distinctes.
+    rationale: La disponibilité et la cohérence dépendent du comportement lors de pannes et redémarrages réels.
+    scope: [infrastructure, databases, messaging, applications]
+    environments: [integration, preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: Scénarios de résilience requis.}
+      - {type: independent_review, status: PLANNED, reference: reboot-persistence-independent-review, notes: Reboot persistence reste provisoire.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.IR, relationship: SUPPORTS, notes: Résilience de l'infrastructure technologique.}
+      - {framework: NIST_CSF_2_0, control: RC.RP, relationship: SUPPORTS, notes: Recovery éprouvé.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: Le statut reboot persistence reste PROVISIONAL_RUNTIME_PASS jusqu'à revue séparée.
+
+  - id: COMP-001
+    title: Compliance as Code mappings
+    category: compliance
+    statement: Les relations aux frameworks sont machine-readable, validées et ne constituent ni certification ni conformité juridique.
+    rationale: Permettre une traçabilité contrôlée sans transformer un mapping en claim trompeuse.
+    scope: [governance, audit, architecture]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: HIGH
+    evidence:
+      - {type: config, status: AVAILABLE, path: governance/controls.yaml, notes: Mappings canoniques par contrôle.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: Frameworks et structures validés.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: GV.OV, relationship: SUPPORTS, notes: Revue et évaluation de gouvernance.}
+      - {framework: ISO_IEC_27001_2022, control: clauses-and-Annex-A, relationship: INFORMATIVE, notes: Mapping informatif uniquement.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: SSDF 1.1 est la baseline finale; SSDF 1.2 draft est uniquement surveillé.
+
+  - id: COMP-002
+    title: Risk Acceptance and Exceptions
+    category: compliance
+    statement: Toute dérogation a justification, risque, compensating controls, scope, approver role, référence, création et expiration.
+    rationale: Empêcher une désactivation silencieuse, permanente ou globale des contrôles.
+    scope: [governance, policies, runtime]
+    environments: [development, integration, preproduction, production, management]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_APPLICABLE
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/exception-policy.md, notes: Règles d'acceptation de risque.}
+      - {type: config, status: AVAILABLE, path: governance/exceptions.yaml, notes: Registre canonique des exceptions.}
+      - {type: test, status: AVAILABLE, path: tests/governance/test_governance_validator.py, notes: Expiry et champs obligatoires testés.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: GV.RM, relationship: SUPPORTS, notes: Gestion explicite du risque.}
+      - {framework: ISO_IEC_27001_2022, control: "6.1", relationship: INFORMATIVE, notes: Traitement du risque informatif.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: L'expiration bloque le validator et une exception ne modifie jamais le statut du contrôle.
+
+  - id: COMP-003
+    title: Change Management and Human Gates
+    category: compliance
+    statement: Les changements infrastructure significatifs suivent plan, Independent Reviewer, Human Gate, puis apply avec preuve liée.
+    rationale: Séparer préparation, revue et autorisation des mutations à fort impact.
+    scope: [terraform, ansible, kubernetes, gitops, production]
+    environments: [preproduction, production, management]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/security/resilience-evidence-operations.md, notes: Workflow de changement et preuves.}
+      - {type: independent_review, status: PLANNED, reference: significant-change-review-record, notes: Gate humain runtime non franchi dans ce milestone.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: GV.PO, relationship: SUPPORTS, notes: Politique de gouvernance des changements.}
+      - {framework: NIST_SSDF_1_1, control: PO.3, relationship: SUPPORTS, notes: Rôles et responsabilités du processus.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: Les actions destructives, payantes ou distantes exigent une autorisation distincte.
+
+  - id: H3-001
+    title: Production HTTP/3 edge requirement
+    category: edge-protocol
+    statement: Caddy edge doit offrir HTTP/3 over QUIC en production avec UDP/443 gouverné, H2 obligatoire et H1.1 si nécessaire.
+    rationale: Définir explicitement la cible edge sans imposer QUIC east-west ni déclarer une preuve inexistante.
+    scope: [caddy-edge, production-network, clients]
+    environments: [production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/architecture/adr-http3-production-edge.md, notes: ADR et conditions réseau/protocole.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: Target et fallbacks vérifiés statiquement.}
+      - {type: runtime_probe, status: PLANNED, path: scripts/test-http3.sh, notes: Aucun endpoint implicite et aucune mutation.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: PR.IR, relationship: SUPPORTS, notes: Résilience et compatibilité du service edge.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-12, relationship: SUPPORTS, notes: Communications sécurisées.}
+    exception_allowed: false
+    owner_role: platform
+    implementation_notes: Target Internet vers Caddy H3/QUIC puis Istio/services; TCP/443 fallback reste disponible.
+
+  - id: H3-002
+    title: HTTP/3 0-RTT replay safety
+    category: edge-protocol
+    statement: 0-RTT est désactivé par défaut et interdit pour opérations non idempotentes, auth, checkout, payment, refund et admin.
+    rationale: Les early data QUIC peuvent être rejouées et corrompre des opérations à effet de bord.
+    scope: [caddy-edge, api, checkout, payment, admin]
+    environments: [production]
+    enforcement_status: STATICALLY_ENFORCED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: CRITICAL
+    evidence:
+      - {type: policy, status: AVAILABLE, path: docs/architecture/adr-http3-production-edge.md, notes: 0-RTT disabled-by-default.}
+      - {type: test, status: AVAILABLE, path: scripts/validate-governance.py, notes: Valeur canonique contrôlée.}
+    framework_mappings:
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-2, relationship: SUPPORTS, notes: Intégrité de logique métier et opérations.}
+      - {framework: NIST_CSF_2_0, control: PR.DS, relationship: SUPPORTS, notes: Intégrité des échanges.}
+    exception_allowed: false
+    owner_role: security
+    implementation_notes: Toute future activation exige threat model dédié, idempotence prouvée et mitigation du replay.
+
+  - id: H3-003
+    title: HTTP/3 runtime verification
+    category: edge-protocol
+    statement: >-
+      La preuve HTTP/3 exige HTTPS, h3-only, H2 et H1 attendus, UDP/443, Alt-Svc, certificat, TLS 1.3,
+      visibilité protocole et absence de bypass des contrôles de sécurité.
+    rationale: Une configuration compatible ne prouve ni négociation QUIC ni équivalence des protections.
+    scope: [production-like-edge, observability, security-controls]
+    environments: [preproduction, production]
+    enforcement_status: DOCUMENTED
+    runtime_status: NOT_PROVEN_RUNTIME
+    severity: HIGH
+    evidence:
+      - {type: runtime_probe, status: PLANNED, path: scripts/test-http3.sh, notes: Harness partiel h3/h2/TLS sans mutation.}
+      - {type: independent_review, status: PLANNED, reference: http3-runtime-independent-review, notes: Revue après test production-like complet.}
+    framework_mappings:
+      - {framework: NIST_CSF_2_0, control: DE.CM, relationship: SUPPORTS, notes: Vérification et visibilité continues.}
+      - {framework: OWASP_ASVS_5_0_0, control: v5.0.0-12, relationship: SUPPORTS, notes: Validation de communication sécurisée.}
+    exception_allowed: false
+    owner_role: operations
+    implementation_notes: HTTP/3 production edge reste NOT_PROVEN_RUNTIME dans ce milestone.

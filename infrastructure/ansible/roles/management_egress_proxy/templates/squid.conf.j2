@@ -1,0 +1,27 @@
+http_port {{ management_gitea_private_ip }}:{{ management_egress_proxy_port }}
+
+acl data_management src {{ management_data_private_ip }}/32
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 443
+acl CONNECT method CONNECT
+
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+http_access allow data_management
+http_access deny all
+
+cache deny all
+via off
+forwarded_for delete
+request_header_access X-Forwarded-For deny all
+
+connect_timeout 10 seconds
+forward_timeout 30 seconds
+read_timeout 60 seconds
+request_timeout 60 seconds
+
+logformat management_json {"client_ip":"%>a","method":"%rm","status":%>Hs,"bytes":%<st,"duration_ms":%tr}
+access_log daemon:/var/log/squid/access.log management_json
+cache_log /var/log/squid/cache.log
+logfile_rotate 10

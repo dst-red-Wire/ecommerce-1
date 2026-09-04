@@ -1,0 +1,177 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: tekton-ci
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: tekton-ci
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Kubernetes NetworkPolicy cannot filter FQDNs. GitHub uses dynamic addresses,
+# so source-read currently receives bounded public TCP/443. A FQDN-aware CNI
+# rule or egress proxy is required before claiming exfiltration resistance.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-source-read-public-https
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/network-limit: public-https-not-fqdn-filtered
+spec:
+  podSelector:
+    matchLabels:
+      tekton.dev/pipelineTask: clone
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports: [{protocol: TCP, port: 443}]
+---
+# Trivy database updates require HTTPS. Gitleaks shares this Task pod, so the
+# source-scan role remains broader than ideal until scanner steps are split.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-source-scan-public-https
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/network-limit: public-https-not-fqdn-filtered
+spec:
+  podSelector:
+    matchLabels:
+      tekton.dev/pipelineTask: source-security
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-image-push-public-https
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/network-limit: public-https-not-fqdn-filtered
+spec:
+  podSelector:
+    matchLabels:
+      tekton.dev/pipelineTask: build
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-image-read-public-https
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/network-limit: public-https-not-fqdn-filtered
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tekton.dev/pipelineTask
+        operator: In
+        values: [scan-image, generate-sbom]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-git-promotion-public-https
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/network-limit: public-https-not-fqdn-filtered
+spec:
+  podSelector:
+    matchLabels:
+      tekton.dev/pipelineTask: propose-git-change
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports: [{protocol: TCP, port: 443}]
+---
+# No public egress policy intentionally selects test, create-evidence, or
+# verify-proof. Tests use vendored Go modules with GOPROXY=off; evidence binding
+# and offline Cosign verification need only their mounted files.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: document-offline-roles
+  namespace: tekton-ci
+  annotations:
+    ecommerce.dev/offline-pipeline-tasks: test,create-evidence,verify-proof
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tekton.dev/pipelineTask
+        operator: In
+        values: [test, create-evidence, verify-proof]
+  policyTypes: [Egress]

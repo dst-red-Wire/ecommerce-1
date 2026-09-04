@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-# shellcheck source=scripts/lib.sh
+# shellcheck disable=SC1091
 . "$(dirname "$0")/lib.sh"
 cd "$(repo_root)"
 
@@ -14,6 +14,13 @@ if have tofu; then tool=tofu
 elif have terraform; then tool=terraform
 else fail "Terraform files exist but neither tofu nor terraform is installed"
 fi
+require sha256sum
+
+terraform_data_root=$(mktemp -d)
+cleanup_terraform_data() {
+  rm -rf "$terraform_data_root"
+}
+trap cleanup_terraform_data EXIT HUP INT TERM
 
 unformatted=$($tool fmt -check -recursive -diff 2>&1) || {
   printf '%s\n' "$unformatted" >&2
@@ -22,5 +29,12 @@ unformatted=$($tool fmt -check -recursive -diff 2>&1) || {
 
 printf '%s\n' "$tf_files" | sed 's,/[^/]*$,,' | sort -u | while IFS= read -r directory; do
   info "validating Terraform in $directory"
-  (cd "$directory" && "$tool" init -backend=false -input=false >/dev/null && "$tool" validate)
+  directory_id=$(printf '%s' "$directory" | sha256sum | awk '{print $1}')
+  directory_data=$terraform_data_root/$directory_id
+  mkdir -p "$directory_data"
+  (
+    cd "$directory"
+    TF_DATA_DIR="$directory_data" "$tool" init -backend=false -input=false >/dev/null
+    TF_DATA_DIR="$directory_data" "$tool" validate
+  )
 done

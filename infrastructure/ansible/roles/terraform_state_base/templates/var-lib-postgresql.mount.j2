@@ -1,0 +1,14 @@
+[Unit]
+Description=Protected Hetzner Volume for Terraform state PostgreSQL
+After=local-fs-pre.target
+Before=postgresql.service
+
+[Mount]
+What={{ postgresql_volume_device }}
+Where={{ terraform_state_postgresql_data_root }}
+Type=ext4
+Options=defaults,noatime,nodev,nosuid
+TimeoutSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,29 @@
+{
+  email {{ management_acme_email }}
+  admin off
+  servers {
+    protocols h1 h2
+  }
+}
+
+{{ management_reverse_proxy_fqdn }} {
+  encode zstd gzip
+
+  header {
+    -Server
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "strict-origin-when-cross-origin"
+  }
+
+  reverse_proxy {{ management_reverse_proxy_upstream }} {
+    health_uri {{ management_reverse_proxy_health_uri }}
+    health_interval 15s
+    health_timeout 5s
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}

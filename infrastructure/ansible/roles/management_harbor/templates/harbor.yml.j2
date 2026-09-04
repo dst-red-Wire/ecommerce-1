@@ -1,0 +1,68 @@
+hostname: {{ management_registry_fqdn }}
+
+http:
+  port: 8080
+
+external_url: https://{{ management_registry_fqdn }}
+harbor_admin_password: {{ management_harbor_admin_password | to_json }}
+
+data_volume: {{ management_root }}/harbor
+
+external_database:
+  harbor:
+    host: {{ management_data_private_ip }}
+    port: {{ management_postgresql_port }}
+    db_name: {{ management_harbor_database }}
+    username: {{ management_harbor_database_user }}
+    password: {{ management_postgres_harbor_password | to_json }}
+    ssl_mode: require
+    max_idle_conns: 5
+    max_open_conns: 50
+
+trivy:
+  ignore_unfixed: false
+  skip_update: false
+  skip_java_db_update: false
+  offline_scan: false
+  security_check: vuln
+  insecure: false
+  timeout: 10m0s
+
+jobservice:
+  max_job_workers: 5
+  max_job_duration_hours: 24
+  job_loggers:
+    - STD_OUTPUT
+    - FILE
+  logger_sweeper_duration: 7
+
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+
+log:
+  level: info
+  local:
+    rotate_count: 14
+    rotate_size: 100M
+    location: {{ management_log_root }}/harbor
+
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy: 127.0.0.1,localhost,{{ management_data_private_ip }}
+  components:
+    - core
+    - jobservice
+    - trivy
+
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+
+cache:
+  enabled: false
+
+_version: 2.15.0

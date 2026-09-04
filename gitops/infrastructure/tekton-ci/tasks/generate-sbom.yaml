@@ -1,0 +1,46 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-sbom
+  namespace: tekton-ci
+spec:
+  description: Produce a CycloneDX SBOM for the exact immutable image.
+  params:
+    - name: image-reference
+      type: string
+  workspaces:
+    - name: evidence
+  results:
+    - name: SBOM_PATH
+  steps:
+    - name: syft
+      # anchore/syft:v1.51.0
+      image: anchore/syft@sha256:678bfa565b60f747aac0f8e964fe5588a24445b8d0a480e91f6efd70020dfbb0
+      env:
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+        - name: SYFT_CHECK_FOR_APP_UPDATE
+          value: "false"
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      script: |
+        #!/bin/sh
+        set -eu
+        sbom="$(workspaces.evidence.path)/sbom.cdx.json"
+        syft "$(params.image-reference)" -o "cyclonedx-json=$sbom"
+        test -s "$sbom"
+        grep -q '"bomFormat"[[:space:]]*:[[:space:]]*"CycloneDX"' "$sbom"
+        printf '%s' "$sbom" >"$(results.SBOM_PATH.path)"

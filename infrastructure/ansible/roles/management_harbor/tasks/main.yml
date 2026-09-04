@@ -1,0 +1,107 @@
+---
+- name: Restrict Harbor role to harbor-mgmt
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname == 'harbor-mgmt'
+      - private_ip == management_harbor_private_ip
+
+- name: Require Harbor secrets
+  ansible.builtin.assert:
+    that:
+      - management_postgres_harbor_password is defined
+      - management_harbor_admin_password is defined
+  no_log: true
+
+- name: Validate Harbor secret strength
+  ansible.builtin.assert:
+    that:
+      - management_postgres_harbor_password | length >= management_secret_min_length
+      - management_harbor_admin_password | length >= management_secret_min_length
+      - not management_postgres_harbor_password.startswith('REPLACE_')
+      - not management_harbor_admin_password.startswith('REPLACE_')
+  no_log: true
+
+- name: Load pinned management service versions
+  ansible.builtin.set_fact:
+    management_harbor_versions_mk: "{{ lookup('file', role_path ~ '/../../../../versions.mk') }}"
+
+- name: Resolve the pinned Harbor installer
+  ansible.builtin.set_fact:
+    management_harbor_version: >-
+      {{ (management_harbor_versions_mk | regex_findall('(?m)^HARBOR_VERSION\s*:=\s*(\S+)'))[0] }}
+    management_harbor_installer_sha256: >-
+      {{ (management_harbor_versions_mk | regex_findall('(?m)^HARBOR_ONLINE_INSTALLER_SHA256\s*:=\s*([0-9a-f]{64})'))[0] }}
+
+- name: Create Harbor persistent and installer directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ management_root }}/harbor", mode: "0750" }
+    - { path: "{{ management_log_root }}/harbor", mode: "0750" }
+    - { path: "{{ management_install_root }}/harbor-{{ management_harbor_version }}", mode: "0750" }
+
+- name: Download the checksum-pinned Harbor online installer
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/goharbor/harbor/releases/download/v{{ management_harbor_version }}/harbor-online-installer-v{{ management_harbor_version }}.tgz
+    dest: "{{ management_cache_root }}/harbor-online-installer-v{{ management_harbor_version }}.tgz"
+    owner: root
+    group: root
+    mode: "0640"
+    checksum: "sha256:{{ management_harbor_installer_sha256 }}"
+    timeout: 60
+
+- name: Extract the versioned Harbor installer
+  ansible.builtin.unarchive:
+    src: "{{ management_cache_root }}/harbor-online-installer-v{{ management_harbor_version }}.tgz"
+    dest: "{{ management_install_root }}/harbor-{{ management_harbor_version }}"
+    remote_src: true
+    creates: "{{ management_install_root }}/harbor-{{ management_harbor_version }}/harbor/prepare"
+    owner: root
+    group: root
+
+- name: Point the stable Harbor path at the pinned installer
+  ansible.builtin.file:
+    src: "{{ management_install_root }}/harbor-{{ management_harbor_version }}/harbor"
+    dest: "{{ management_install_root }}/harbor"
+    state: link
+    owner: root
+    group: root
+  notify: Reconcile Harbor
+
+- name: Render the secret Harbor configuration
+  ansible.builtin.template:
+    src: harbor.yml.j2
+    dest: "{{ management_install_root }}/harbor-{{ management_harbor_version }}/harbor/harbor.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Reconcile Harbor
+
+- name: Restrict the generated Harbor proxy to loopback
+  ansible.builtin.template:
+    src: docker-compose.override.yml.j2
+    dest: "{{ management_install_root }}/harbor-{{ management_harbor_version }}/harbor/docker-compose.override.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Reconcile Harbor
+
+- name: Reconcile Harbor before its health check
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the local Harbor API health endpoint
+  ansible.builtin.uri:
+    url: http://127.0.0.1:8080/api/v2.0/ping
+    method: GET
+    status_code: 200
+    return_content: false
+  register: management_harbor_health
+  retries: 30
+  delay: 10
+  until: management_harbor_health.status == 200

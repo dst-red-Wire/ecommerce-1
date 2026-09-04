@@ -1,0 +1,27 @@
+services:
+  gitea:
+    image: docker.gitea.com/gitea:{{ management_gitea_version }}-rootless@{{ management_gitea_image_digest }}
+    container_name: gitea
+    restart: unless-stopped
+    network_mode: host
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - {{ management_root }}/gitea/data:/var/lib/gitea
+      - {{ management_root }}/gitea/config:/etc/gitea
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/api/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: {{ management_docker_log_max_size | quote }}
+        max-file: {{ management_docker_log_max_file | quote }}

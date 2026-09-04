@@ -1,0 +1,43 @@
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE ON SCHEMA public TO {{ terraform_state_postgresql_user }};
+
+CREATE SEQUENCE IF NOT EXISTS public.global_states_id_seq AS bigint;
+ALTER SEQUENCE public.global_states_id_seq OWNER TO postgres;
+REVOKE ALL ON SEQUENCE public.global_states_id_seq FROM PUBLIC;
+GRANT USAGE ON SEQUENCE public.global_states_id_seq TO {{ terraform_state_postgresql_user }};
+
+CREATE SCHEMA IF NOT EXISTS {{ terraform_state_management_schema }} AUTHORIZATION postgres;
+ALTER SCHEMA {{ terraform_state_management_schema }} OWNER TO postgres;
+REVOKE ALL ON SCHEMA {{ terraform_state_management_schema }} FROM PUBLIC;
+GRANT USAGE ON SCHEMA {{ terraform_state_management_schema }} TO {{ terraform_state_postgresql_user }};
+
+CREATE TABLE IF NOT EXISTS {{ terraform_state_management_schema }}.states (
+  id bigint NOT NULL DEFAULT nextval('public.global_states_id_seq') PRIMARY KEY,
+  name text UNIQUE,
+  data text
+);
+ALTER TABLE {{ terraform_state_management_schema }}.states OWNER TO postgres;
+CREATE UNIQUE INDEX IF NOT EXISTS states_by_name
+  ON {{ terraform_state_management_schema }}.states (name);
+REVOKE ALL ON TABLE {{ terraform_state_management_schema }}.states FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON TABLE {{ terraform_state_management_schema }}.states
+  TO {{ terraform_state_postgresql_user }};
+
+CREATE SCHEMA IF NOT EXISTS {{ terraform_state_lock_probe_schema }} AUTHORIZATION postgres;
+ALTER SCHEMA {{ terraform_state_lock_probe_schema }} OWNER TO postgres;
+REVOKE ALL ON SCHEMA {{ terraform_state_lock_probe_schema }} FROM PUBLIC;
+GRANT USAGE ON SCHEMA {{ terraform_state_lock_probe_schema }} TO {{ terraform_state_postgresql_user }};
+
+CREATE TABLE IF NOT EXISTS {{ terraform_state_lock_probe_schema }}.states (
+  id bigint NOT NULL DEFAULT nextval('public.global_states_id_seq') PRIMARY KEY,
+  name text UNIQUE,
+  data text
+);
+ALTER TABLE {{ terraform_state_lock_probe_schema }}.states OWNER TO postgres;
+CREATE UNIQUE INDEX IF NOT EXISTS states_by_name
+  ON {{ terraform_state_lock_probe_schema }}.states (name);
+REVOKE ALL ON TABLE {{ terraform_state_lock_probe_schema }}.states FROM PUBLIC;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON TABLE {{ terraform_state_lock_probe_schema }}.states
+  TO {{ terraform_state_postgresql_user }};

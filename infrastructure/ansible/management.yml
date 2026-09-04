@@ -1,0 +1,94 @@
+---
+- name: Validate the rendered management inventory contract
+  hosts: management
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Refuse examples and incomplete topology
+      ansible.builtin.assert:
+        that:
+          - management_inventory_status == 'RENDERED_FROM_TERRAFORM'
+          - groups['gitea_management'] == ['gitea-mgmt']
+          - groups['harbor_management'] == ['harbor-mgmt']
+          - groups['data_management'] == ['data-mgmt']
+          - groups['management'] | sort == ['data-mgmt', 'gitea-mgmt', 'harbor-mgmt']
+          - private_ip is defined
+          - management_ssh_allowed_ipv4_cidrs | length > 0
+          - management_acme_email | length > 3
+        fail_msg: >-
+          Management requires the exact Terraform-rendered three-host topology;
+          example inventories are never executable.
+
+- name: Prepare public management hosts
+  hosts: gitea_management:harbor_management
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  pre_tasks:
+    - name: Select the Docker repository architecture
+      ansible.builtin.set_fact:
+        tool_arch: "{{ 'amd64' if ansible_facts.architecture in ['x86_64', 'amd64'] else 'arm64' }}"
+  roles:
+    - role: management_base
+    - role: docker_engine
+
+- name: Establish the private egress path and Gitea host firewall
+  hosts: gitea_management
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: management_egress_proxy
+    - role: management_firewall
+
+- name: Apply the Harbor host firewall before service deployment
+  hosts: harbor_management
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: management_firewall
+
+- name: Prepare private data-mgmt and PostgreSQL management
+  hosts: data_management
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - role: management_base
+    - role: management_firewall
+    - role: management_postgresql
+
+- name: Deploy Gitea against PostgreSQL management
+  hosts: gitea_management
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: management_gitea
+    - role: management_reverse_proxy
+      vars:
+        management_reverse_proxy_fqdn: "{{ management_git_fqdn }}"
+        management_reverse_proxy_upstream: http://127.0.0.1:3000
+        management_reverse_proxy_health_uri: /api/healthz
+
+- name: Deploy Harbor against PostgreSQL management
+  hosts: harbor_management
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: management_harbor
+    - role: management_reverse_proxy
+      vars:
+        management_reverse_proxy_fqdn: "{{ management_registry_fqdn }}"
+        management_reverse_proxy_upstream: http://127.0.0.1:8080
+        management_reverse_proxy_health_uri: /api/v2.0/ping
+
+- name: Install local structured health monitoring
+  hosts: management
+  become: true
+  gather_facts: false
+  any_errors_fatal: true
+  roles:
+    - role: management_health

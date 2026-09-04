@@ -1,0 +1,77 @@
+---
+- name: Validate reverse proxy inputs
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in ['gitea-mgmt', 'harbor-mgmt']
+      - management_reverse_proxy_fqdn in [management_git_fqdn, management_registry_fqdn]
+      - management_reverse_proxy_upstream is match('^http://127\.0\.0\.1:[0-9]+$')
+      - management_acme_email is match('^[^@ ]+@[^@ ]+$')
+
+- name: Load pinned Caddy version
+  ansible.builtin.set_fact:
+    management_reverse_proxy_versions_mk: "{{ lookup('file', role_path ~ '/../../../../versions.mk') }}"
+
+- name: Resolve the immutable Caddy image
+  ansible.builtin.set_fact:
+    management_reverse_proxy_caddy_version: >-
+      {{ (management_reverse_proxy_versions_mk | regex_findall('(?m)^CADDY_VERSION\s*:=\s*(\S+)'))[0] }}
+    management_reverse_proxy_caddy_image_digest: >-
+      {{ (management_reverse_proxy_versions_mk | regex_findall('(?m)^CADDY_IMAGE_DIGEST\s*:=\s*(sha256:[0-9a-f]{64})'))[0] }}
+
+- name: Create Caddy persistent directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - "{{ management_root }}/caddy/data"
+    - "{{ management_root }}/caddy/config"
+
+- name: Create Caddy deployment directory
+  ansible.builtin.file:
+    path: "{{ management_install_root }}/caddy"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Render the Caddy configuration
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ management_install_root }}/caddy/Caddyfile"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reconcile Caddy
+
+- name: Render the Caddy Compose project
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ management_install_root }}/caddy/compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: Reconcile Caddy
+
+- name: Validate the Caddy Compose project
+  ansible.builtin.command:
+    cmd: docker compose --file compose.yml config --quiet
+    chdir: "{{ management_install_root }}/caddy"
+  changed_when: false
+
+- name: Reconcile Caddy before checking public HTTPS
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the authoritative HTTPS endpoint
+  ansible.builtin.uri:
+    url: "https://{{ management_reverse_proxy_fqdn }}{{ management_reverse_proxy_health_uri }}"
+    method: GET
+    status_code: 200
+    validate_certs: true
+    return_content: false
+  register: management_reverse_proxy_health
+  retries: 24
+  delay: 5
+  until: management_reverse_proxy_health.status == 200

@@ -1,0 +1,149 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: create-delivery-evidence
+  namespace: tekton-ci
+spec:
+  description: >-
+    Bind the successful scan and SBOM outputs to the source commit and image.
+    The emitted predicate remains NOT_PROVEN until Chains signs the completed
+    PipelineRun and a trusted final attestor issues a PromotionProof.
+  params:
+    - name: repository-url
+      type: string
+    - name: source-commit
+      type: string
+    - name: source-snapshot-sha256
+      type: string
+    - name: pipeline-run-uid
+      type: string
+    - name: service-context
+      type: string
+    - name: image-url
+      type: string
+    - name: image-repository
+      type: string
+    - name: image-digest
+      type: string
+    - name: gitleaks-report-path
+      type: string
+    - name: source-scan-report-path
+      type: string
+    - name: image-scan-report-path
+      type: string
+    - name: sbom-path
+      type: string
+  workspaces:
+    - name: evidence
+  results:
+    - name: APPROVED_IMAGE_URL
+      description: Internal final-gate result; deliberately not a TaskRun Chains type hint.
+    - name: APPROVED_IMAGE_DIGEST
+      description: Internal final-gate result; deliberately not a TaskRun Chains type hint.
+    - name: IMAGE_REFERENCE
+    - name: DELIVERY_EVIDENCE_PATH
+    - name: DELIVERY_EVIDENCE_SHA256
+    - name: APPROVAL_STATE
+  steps:
+    - name: bind-evidence
+      # mikefarah/yq:4.53.3
+      image: mikefarah/yq@sha256:11a1f0b604b13dbbdc662260d8db6f644b22d8553122a25c1b5b2e8713ca6977
+      env:
+        - name: GIT_REPOSITORY
+          value: $(params.repository-url)
+        - name: SOURCE_COMMIT
+          value: $(params.source-commit)
+        - name: SOURCE_SNAPSHOT_SHA256
+          value: $(params.source-snapshot-sha256)
+        - name: PIPELINE_RUN_UID
+          value: $(params.pipeline-run-uid)
+        - name: SERVICE_CONTEXT
+          value: $(params.service-context)
+        - name: IMAGE_URL_VALUE
+          value: $(params.image-url)
+        - name: IMAGE_REPOSITORY
+          value: $(params.image-repository)
+        - name: IMAGE_DIGEST_VALUE
+          value: $(params.image-digest)
+        - name: GITLEAKS_REPORT
+          value: $(params.gitleaks-report-path)
+        - name: SOURCE_SCAN_REPORT
+          value: $(params.source-scan-report-path)
+        - name: IMAGE_SCAN_REPORT
+          value: $(params.image-scan-report-path)
+        - name: SBOM_REPORT
+          value: $(params.sbom-path)
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 25m
+          memory: 32Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      script: |
+        #!/bin/sh
+        set -eu
+        [ "$GIT_REPOSITORY" = "https://github.com/dst-red-Wire/ecommerce-1.git" ]
+        printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+        printf '%s\n' "$SOURCE_SNAPSHOT_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+        test -n "$PIPELINE_RUN_UID"
+        case "$IMAGE_REPOSITORY" in ghcr.io/dst-red-wire/ecommerce-1/*) ;; *) exit 1 ;; esac
+        printf '%s\n' "$IMAGE_DIGEST_VALUE" | grep -Eq '^sha256:[0-9a-f]{64}$'
+        for artifact in "$GITLEAKS_REPORT" "$SOURCE_SCAN_REPORT" "$IMAGE_SCAN_REPORT" "$SBOM_REPORT"; do
+          test -s "$artifact"
+        done
+        GITLEAKS_SHA=$(sha256sum "$GITLEAKS_REPORT" | awk '{print $1}')
+        SOURCE_SCAN_SHA=$(sha256sum "$SOURCE_SCAN_REPORT" | awk '{print $1}')
+        IMAGE_SCAN_SHA=$(sha256sum "$IMAGE_SCAN_REPORT" | awk '{print $1}')
+        SBOM_SHA=$(sha256sum "$SBOM_REPORT" | awk '{print $1}')
+        export GITLEAKS_SHA SOURCE_SCAN_SHA IMAGE_SCAN_SHA SBOM_SHA
+        evidence="$(workspaces.evidence.path)/delivery-evidence.json"
+        yq -n -o=json '
+          {
+            "apiVersion": "ecommerce.dev/v1alpha1",
+            "kind": "DeliveryEvidence",
+            "status": {
+              "phase": "NOT_PROVEN",
+              "reason": "awaiting-signed-completed-pipelinerun-and-final-attestor"
+            },
+            "subject": {
+              "gitRepository": strenv(GIT_REPOSITORY),
+              "sourceCommit": strenv(SOURCE_COMMIT),
+              "sourceSnapshotSha256": strenv(SOURCE_SNAPSHOT_SHA256),
+              "serviceContext": strenv(SERVICE_CONTEXT),
+              "image": {
+                "repository": strenv(IMAGE_REPOSITORY),
+                "digest": strenv(IMAGE_DIGEST_VALUE)
+              }
+            },
+            "materials": {
+              "scans": [
+                {"id": "gitleaks-source", "status": "PASSED_BY_TASK", "sha256": strenv(GITLEAKS_SHA)},
+                {"id": "trivy-source", "status": "PASSED_BY_TASK", "sha256": strenv(SOURCE_SCAN_SHA)},
+                {"id": "trivy-image", "status": "PASSED_BY_TASK", "sha256": strenv(IMAGE_SCAN_SHA)}
+              ],
+              "sbom": {"format": "CycloneDX", "sha256": strenv(SBOM_SHA)}
+            },
+            "attestationBoundary": {
+              "requiredPipeline": "build-and-publish",
+              "pipelineRunUid": strenv(PIPELINE_RUN_UID),
+              "chainsPipelineRunProvenance": "NOT_PROVEN",
+              "finalApproval": "NOT_PROVEN"
+            }
+          }' >"$evidence"
+        test -s "$evidence"
+        evidence_sha=$(sha256sum "$evidence" | awk '{print $1}')
+        printf '%s' "$IMAGE_URL_VALUE" >"$(results.APPROVED_IMAGE_URL.path)"
+        printf '%s' "$IMAGE_DIGEST_VALUE" >"$(results.APPROVED_IMAGE_DIGEST.path)"
+        printf '%s@%s' "$IMAGE_REPOSITORY" "$IMAGE_DIGEST_VALUE" >"$(results.IMAGE_REFERENCE.path)"
+        printf '%s' "$evidence" >"$(results.DELIVERY_EVIDENCE_PATH.path)"
+        printf '%s' "$evidence_sha" >"$(results.DELIVERY_EVIDENCE_SHA256.path)"
+        printf '%s' NOT_PROVEN >"$(results.APPROVAL_STATE.path)"

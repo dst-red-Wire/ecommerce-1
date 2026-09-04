@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "status": "REVIEW_REQUIRED",
+  "decision": "initialize-empty",
+  "inspectionEvidenceSha256": "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS",
+  "inspectionObservedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+  "allSourcesAbsent": true,
+  "migrationApproved": false,
+  "postgresqlTargetExpectedEmpty": true,
+  "postgresqlWriterFreezeConfirmed": true,
+  "approvedAt": "REPLACE_WITH_UTC_TIMESTAMP",
+  "approvedBy": [
+    "REPLACE_WITH_REVIEWER_IDENTITY"
+  ],
+  "rationale": "No intentional management state was created and all declared candidates were proved absent."
+}

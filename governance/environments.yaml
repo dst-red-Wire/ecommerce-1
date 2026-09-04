@@ -1,0 +1,29 @@
+schema_version: 1
+environments:
+  - id: development
+    production_like: false
+    real_production_pii_allowed: false
+    secret_boundary: isolated
+  - id: integration
+    production_like: false
+    real_production_pii_allowed: false
+    secret_boundary: isolated
+  - id: preproduction
+    production_like: true
+    real_production_pii_allowed: false
+    secret_boundary: isolated
+  - id: production
+    production_like: true
+    real_production_pii_allowed: true
+    secret_boundary: isolated
+  - id: management
+    production_like: true
+    real_production_pii_allowed: false
+    secret_boundary: isolated
+promotion:
+  rebuild_per_environment: false
+  artifact_identity: digest
+  allowed_edges:
+    - build->integration
+    - integration->preproduction
+    - preproduction->production

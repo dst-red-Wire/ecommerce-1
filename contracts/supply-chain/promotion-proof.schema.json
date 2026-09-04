@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dst-red-Wire/ecommerce-1/contracts/supply-chain/promotion-proof.schema.json",
+  "title": "PromotionProof",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "apiVersion", "kind", "status", "subject", "promotion", "evidence", "approval"],
+  "properties": {
+    "schemaVersion": {"const": "ecommerce.dev/promotion-proof/v1"},
+    "apiVersion": {"const": "ecommerce.dev/v1alpha1"},
+    "kind": {"const": "PromotionProof"},
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "verification"],
+      "properties": {
+        "phase": {"const": "APPROVED"},
+        "verification": {"const": "CRYPTOGRAPHICALLY_VERIFIED"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gitRepository", "sourceCommit", "sourceSnapshotSha256", "service", "image"],
+      "properties": {
+        "gitRepository": {"const": "https://github.com/dst-red-Wire/ecommerce-1.git"},
+        "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "sourceSnapshotSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "service": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "digest"],
+          "properties": {
+            "repository": {"type": "string", "pattern": "^ghcr\\.io/dst-red-wire/ecommerce-1/[a-z0-9][a-z0-9._-]*$"},
+            "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceEnvironment", "environment", "baseBranch", "pullRequestRequired", "allowedPath", "idempotenceKey"],
+      "properties": {
+        "sourceEnvironment": {"enum": ["build", "integration", "preproduction"]},
+        "environment": {"enum": ["integration", "preproduction", "production"]},
+        "baseBranch": {"const": "main"},
+        "pullRequestRequired": {"const": true},
+        "allowedPath": {"type": "string", "pattern": "^gitops/apps/[a-z0-9][a-z0-9-]*/overlays/(integration|preproduction|production)/kustomization\\.yaml$"},
+        "idempotenceKey": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deliveryEvidenceSha256", "scans", "sbom", "chains"],
+      "properties": {
+        "deliveryEvidenceSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "scans": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "sha256"],
+            "properties": {
+              "id": {"enum": ["gitleaks-source", "trivy-source", "trivy-image"]},
+              "status": {"const": "PASS"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          },
+          "allOf": [
+            {"contains": {"properties": {"id": {"const": "gitleaks-source"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+            {"contains": {"properties": {"id": {"const": "trivy-source"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1},
+            {"contains": {"properties": {"id": {"const": "trivy-image"}}, "required": ["id"]}, "minContains": 1, "maxContains": 1}
+          ]
+        },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["format", "uri", "sha256"],
+          "properties": {
+            "format": {"const": "CycloneDX"},
+            "uri": {"type": "string", "pattern": "^oci://ghcr\\.io/dst-red-wire/ecommerce-1/[a-z0-9][a-z0-9._-]*@sha256:[0-9a-f]{64}$"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        },
+        "chains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pipeline", "pipelineRunUid", "status", "provenance"],
+          "properties": {
+            "pipeline": {"const": "build-and-publish"},
+            "pipelineRunUid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+            "status": {"const": "VERIFIED"},
+            "provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["subject", "bundleSha256"],
+              "properties": {
+                "subject": {"type": "string", "pattern": "^ghcr\\.io/dst-red-wire/ecommerce-1/[a-z0-9][a-z0-9._-]*@sha256:[0-9a-f]{64}$"},
+                "bundleSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateId", "issuer", "issuedAt", "expiresAt", "expiresAtEpoch", "signatureMechanism", "keyId"],
+      "properties": {
+        "gateId": {"enum": ["promotion-integration", "promotion-preproduction", "promotion-production"]},
+        "issuer": {"const": "ecommerce-promotion-attestor"},
+        "issuedAt": {"type": "string", "format": "date-time"},
+        "expiresAt": {"type": "string", "format": "date-time"},
+        "expiresAtEpoch": {"type": "integer", "minimum": 1},
+        "signatureMechanism": {"const": "cosign-key"},
+        "keyId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

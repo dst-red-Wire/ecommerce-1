@@ -1,0 +1,5 @@
+# Non-secret example only. Use the name of a key that already exists in Hetzner.
+ssh_key_name = "management-operator"
+
+# Replace this documentation-only address with one or more approved operator CIDRs.
+ssh_allowed_cidrs = ["203.0.113.10/32"]

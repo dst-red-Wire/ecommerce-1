@@ -1,0 +1,21 @@
+apiVersion: ecommerce.dev/v1alpha1
+kind: ApplicationRuntimeContract
+metadata:
+  name: ghcr-private-package-defaults
+spec:
+  activationStatus: NOT_PROVEN
+  appliesTo: gitops/apps/<service>/base
+  serviceAccount:
+    naming: <service>
+    automountServiceAccountToken: false
+  privatePackage:
+    imagePullSecret: ghcr-pull
+    permission: packages:read
+    namespaceScoped: true
+    sharedWithCiPushCredential: false
+  publicPackage:
+    imagePullSecretRequired: false
+  rotation:
+    ownerRequired: true
+    maximumAgeDays: 90
+    overlapRequired: true

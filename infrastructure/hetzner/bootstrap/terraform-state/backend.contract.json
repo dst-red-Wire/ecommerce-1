@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "component": "terraform-state-mgmt",
+  "independentFrom": [
+    "gitea-mgmt",
+    "harbor-mgmt",
+    "data-mgmt",
+    "kubernetes",
+    "cloudnativepg",
+    "management-terraform",
+    "future-ci"
+  ],
+  "bootstrapState": {
+    "backendType": "local",
+    "authoritativeLocation": "${XDG_STATE_HOME:-$HOME/.local/state}/ecommerce-1/terraform/bootstrap-terraform-state/terraform.tfstate",
+    "repositoryLocationForbidden": true,
+    "oneDriveLocationForbidden": true,
+    "permissions": "0600",
+    "hashRequired": true,
+    "lineageRequired": true,
+    "serialRequired": true,
+    "encryptedBackupRequired": true,
+    "restoreTestRequired": true,
+    "wrapper": "scripts/terraform-state-bootstrap-state.sh"
+  },
+  "identityBinding": {
+    "serverIdRequired": true,
+    "serverNameRequired": true,
+    "serverIpv4Required": true,
+    "volumeIdRequired": true,
+    "volumeByIdDerivedFromVolumeId": true,
+    "hetznerMetadataPreMutationGateRequired": true,
+    "dedicatedKnownHostsRequired": true,
+    "independentSshFingerprintRequired": true,
+    "runtimeStatus": "NOT_PROVEN_RUNTIME"
+  },
+  "resources": {
+    "serverName": "terraform-state-mgmt",
+    "location": "nbg1",
+    "serverType": "cx23",
+    "architecture": "x86",
+    "image": "ubuntu-24.04",
+    "postgresqlVolumeSizeGb": 10,
+    "serverDeleteProtectionRequired": true,
+    "serverRebuildProtectionRequired": true,
+    "volumeDeleteProtectionRequired": true,
+    "terraformPreventDestroyRequired": true
+  },
+  "network": {
+    "publicIpv4Purpose": "restricted-ssh-and-postgresql-tunnel-only",
+    "publicIpv6Enabled": false,
+    "sshAllowedCidrsRequired": true,
+    "postgresqlPublicPortForbidden": true,
+    "postgresqlBindAddress": "127.0.0.1",
+    "hostFirewallDefaultDenyRequired": true
+  },
+  "paidApplyStatus": "NOT_EXECUTED",
+  "nextGate": "HUMAN_REVIEWED_BOOTSTRAP_PLAN"
+}

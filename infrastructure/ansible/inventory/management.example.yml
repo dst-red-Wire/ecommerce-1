@@ -1,0 +1,32 @@
+all:
+  children:
+    management:
+      children:
+        gitea_management:
+          hosts:
+            gitea-mgmt:
+              ansible_host: 192.0.2.10
+              private_ip: 10.30.0.10
+        harbor_management:
+          hosts:
+            harbor-mgmt:
+              ansible_host: 192.0.2.20
+              private_ip: 10.30.0.20
+        data_management:
+          hosts:
+            data-mgmt:
+              ansible_host: 10.30.0.30
+              private_ip: 10.30.0.30
+              ansible_ssh_common_args: >-
+                -o ProxyJump=root@192.0.2.10
+      vars:
+        ansible_user: root
+        ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+        management_ssh_allowed_ipv4_cidrs:
+          - 192.0.2.100/32
+        management_gitea_private_ip: 10.30.0.10
+        management_harbor_private_ip: 10.30.0.20
+        management_data_private_ip: 10.30.0.30
+        management_egress_proxy_url: http://10.30.0.10:3128
+        management_acme_email: ops@example.invalid
+        management_inventory_status: EXAMPLE_NOT_AUTHORIZED

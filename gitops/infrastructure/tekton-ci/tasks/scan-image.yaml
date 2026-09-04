@@ -1,0 +1,52 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: scan-image
+  namespace: tekton-ci
+spec:
+  description: Fail on HIGH or CRITICAL findings in the immutable image.
+  params:
+    - name: image-reference
+      type: string
+  workspaces:
+    - name: evidence
+  results:
+    - name: SCAN_REPORT_PATH
+  steps:
+    - name: trivy
+      # aquasec/trivy:0.74.0
+      image: aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+      env:
+        - name: TRIVY_CACHE_DIR
+          value: /tmp/trivy
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      computeResources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+        limits:
+          cpu: "2"
+          memory: 2Gi
+      script: |
+        #!/bin/sh
+        set -eu
+        report="$(workspaces.evidence.path)/trivy-image.json"
+        trivy image \
+          --exit-code 1 \
+          --severity HIGH,CRITICAL \
+          --scanners vuln \
+          --format json \
+          --output "$report" \
+          --no-progress \
+          "$(params.image-reference)"
+        test -s "$report"
+        printf '%s' "$report" >"$(results.SCAN_REPORT_PATH.path)"

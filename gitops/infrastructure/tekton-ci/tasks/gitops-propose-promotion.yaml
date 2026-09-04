@@ -1,0 +1,291 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: gitops-propose-promotion
+  namespace: tekton-ci
+spec:
+  description: >-
+    Create one idempotent proposal branch from the current remote main HEAD.
+    Never transport source-branch history and never push directly to main.
+  params:
+    - name: repository-url
+      type: string
+      default: https://github.com/dst-red-Wire/ecommerce-1.git
+    - name: expected-base-sha
+      type: string
+    - name: environment
+      type: string
+    - name: service
+      type: string
+    - name: image-repository
+      type: string
+    - name: image-digest
+      type: string
+    - name: source-commit
+      type: string
+    - name: idempotence-key
+      type: string
+    - name: promotion-proof-sha256
+      type: string
+    - name: allowed-path
+      type: string
+    - name: git-author-name
+      type: string
+      default: ecommerce-promotion-bot
+    - name: git-author-email
+      type: string
+      default: ecommerce-promotion-bot@users.noreply.github.com
+  workspaces:
+    - name: desired-state
+    - name: git-auth
+      description: Secret workspace containing only .git-credentials.
+      readOnly: true
+  results:
+    - name: BASE_BRANCH
+    - name: BASE_SHA
+    - name: PROPOSAL_BRANCH
+    - name: PROPOSAL_COMMIT
+    - name: UPDATED_FILE
+  steps:
+    - name: checkout-authoritative-base
+      # alpine/git:2.49.1
+      image: alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      env:
+        - name: REPOSITORY_URL
+          value: $(params.repository-url)
+        - name: EXPECTED_BASE_SHA
+          value: $(params.expected-base-sha)
+        - name: TARGET_ENVIRONMENT
+          value: $(params.environment)
+        - name: SERVICE
+          value: $(params.service)
+        - name: IMAGE_DIGEST
+          value: $(params.image-digest)
+        - name: HOME
+          value: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      script: |
+        #!/bin/sh
+        set -eu
+        [ "$REPOSITORY_URL" = "https://github.com/dst-red-Wire/ecommerce-1.git" ]
+        printf '%s\n' "$EXPECTED_BASE_SHA" | grep -Eq '^[0-9a-f]{40}$'
+        case "$TARGET_ENVIRONMENT" in integration|preproduction|production) ;; *) exit 1 ;; esac
+        printf '%s\n' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$'
+        credentials="$(workspaces.git-auth.path)/.git-credentials"
+        test -s "$credentials"
+        destination="$(workspaces.desired-state.path)/repository"
+        mkdir -p "$destination"
+        [ -z "$(ls -A "$destination")" ]
+        git -C "$destination" init
+        git -C "$destination" remote add origin "$REPOSITORY_URL"
+        git -C "$destination" config credential.helper "store --file=$credentials"
+        git -C "$destination" fetch --depth=1 origin refs/heads/main
+        base_sha=$(git -C "$destination" rev-parse FETCH_HEAD)
+        [ "$base_sha" = "$EXPECTED_BASE_SHA" ] || {
+          printf 'stale main HEAD: expected %s, remote is %s\n' "$EXPECTED_BASE_SHA" "$base_sha" >&2
+          exit 1
+        }
+        digest_short=$(printf '%s' "${IMAGE_DIGEST#sha256:}" | cut -c1-12)
+        proposal_branch="promotion/$TARGET_ENVIRONMENT/$SERVICE/$digest_short"
+        git -C "$destination" checkout -b "$proposal_branch" "$base_sha"
+        git -C "$destination" config --unset credential.helper
+        printf '%s' main >"$(results.BASE_BRANCH.path)"
+        printf '%s' "$base_sha" >"$(results.BASE_SHA.path)"
+        printf '%s' "$proposal_branch" >"$(results.PROPOSAL_BRANCH.path)"
+    - name: update-one-allowed-overlay
+      # mikefarah/yq:4.53.3
+      image: mikefarah/yq@sha256:11a1f0b604b13dbbdc662260d8db6f644b22d8553122a25c1b5b2e8713ca6977
+      workingDir: $(workspaces.desired-state.path)/repository
+      env:
+        - name: TARGET_ENVIRONMENT
+          value: $(params.environment)
+        - name: SERVICE
+          value: $(params.service)
+        - name: IMAGE_REPOSITORY
+          value: $(params.image-repository)
+        - name: IMAGE_DIGEST
+          value: $(params.image-digest)
+        - name: ALLOWED_PATH
+          value: $(params.allowed-path)
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      script: |
+        #!/bin/sh
+        set -eu
+        target_file="gitops/apps/$SERVICE/overlays/$TARGET_ENVIRONMENT/kustomization.yaml"
+        [ "$target_file" = "$ALLOWED_PATH" ]
+        test -f "$target_file"
+        base_directory="gitops/apps/$SERVICE/base"
+        test -f "$base_directory/kustomization.yaml"
+        grep -RqsF "image: $IMAGE_REPOSITORY" "$base_directory" || {
+          printf 'digest target is not referenced by the service base\n' >&2
+          exit 1
+        }
+        count=$(yq '[.images[] | select(.name == strenv(IMAGE_REPOSITORY))] | length' "$target_file")
+        [ "$count" -eq 1 ] || {
+          printf 'overlay must contain exactly one matching images[] entry\n' >&2
+          exit 1
+        }
+        yq -i '
+          (.images[] | select(.name == strenv(IMAGE_REPOSITORY))).newName = strenv(IMAGE_REPOSITORY) |
+          (.images[] | select(.name == strenv(IMAGE_REPOSITORY))).digest = strenv(IMAGE_DIGEST)
+        ' "$target_file"
+        printf '%s' "$target_file" >"$(results.UPDATED_FILE.path)"
+    - name: commit-and-push-proposal
+      # alpine/git:2.49.1
+      image: alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+      workingDir: $(workspaces.desired-state.path)/repository
+      env:
+        - name: EXPECTED_BASE_SHA
+          value: $(params.expected-base-sha)
+        - name: GIT_AUTHOR_NAME_VALUE
+          value: $(params.git-author-name)
+        - name: GIT_AUTHOR_EMAIL_VALUE
+          value: $(params.git-author-email)
+        - name: IMAGE_REPOSITORY
+          value: $(params.image-repository)
+        - name: IMAGE_DIGEST
+          value: $(params.image-digest)
+        - name: SOURCE_COMMIT
+          value: $(params.source-commit)
+        - name: IDEMPOTENCE_KEY
+          value: $(params.idempotence-key)
+        - name: PROMOTION_PROOF_SHA256
+          value: $(params.promotion-proof-sha256)
+        - name: TARGET_ENVIRONMENT
+          value: $(params.environment)
+        - name: SERVICE
+          value: $(params.service)
+        - name: HOME
+          value: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: [ALL]
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      script: |
+        #!/bin/sh
+        set -eu
+        credentials="$(workspaces.git-auth.path)/.git-credentials"
+        test -s "$credentials"
+        printf '%s\n' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+        printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'
+        printf '%s\n' "$IDEMPOTENCE_KEY" | grep -Eq '^sha256:[0-9a-f]{64}$'
+        printf '%s\n' "$PROMOTION_PROOF_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+        case "$TARGET_ENVIRONMENT" in integration|preproduction|production) ;; *) exit 1 ;; esac
+        printf '%s\n' "$SERVICE" | grep -Eq '^[a-z0-9][a-z0-9-]*$'
+        [ "$IMAGE_REPOSITORY" = "ghcr.io/dst-red-wire/ecommerce-1/$SERVICE" ]
+        target_file=$(cat "$(results.UPDATED_FILE.path)")
+        proposal_branch=$(cat "$(results.PROPOSAL_BRANCH.path)")
+        [ "$(git diff --name-only | sed '/^$/d')" = "$target_file" ] || {
+          printf 'promotion attempted to change a non-authorized path\n' >&2
+          exit 1
+        }
+        test -z "$(git ls-files --others --exclude-standard)"
+        git config user.name "$GIT_AUTHOR_NAME_VALUE"
+        git config user.email "$GIT_AUTHOR_EMAIL_VALUE"
+        git add -- "$target_file"
+        if git diff --cached --quiet; then
+          printf 'promotion proof describes the digest already in main\n' >&2
+          exit 1
+        fi
+        git commit -m "chore(gitops): propose $IMAGE_REPOSITORY@$IMAGE_DIGEST" \
+          -m "Source-Commit: $SOURCE_COMMIT" \
+          -m "Promotion-Idempotence-Key: $IDEMPOTENCE_KEY" \
+          -m "Promotion-Proof-SHA256: $PROMOTION_PROOF_SHA256" \
+          -m "Promotion-Environment: $TARGET_ENVIRONMENT" \
+          -m "Promotion-Service: $SERVICE" \
+          -m "Image-Repository: $IMAGE_REPOSITORY" \
+          -m "Image-Digest: $IMAGE_DIGEST"
+        credentials_helper="store --file=$credentials"
+        git config credential.helper "$credentials_helper"
+        proposed_tree=$(git rev-parse HEAD^{tree})
+        trailer_value() {
+          candidate=$1
+          label=$2
+          values=$(git log -1 --format=%B "$candidate" | sed -n "s/^$label: //p")
+          count=$(printf '%s\n' "$values" | sed '/^$/d' | wc -l | tr -d ' ')
+          [ "$count" -eq 1 ] || {
+            printf 'candidate has an invalid %s trailer count\n' "$label" >&2
+            return 1
+          }
+          printf '%s' "$values"
+        }
+        validate_candidate() {
+          candidate=$1
+          parents=$(git cat-file -p "$candidate" | sed -n 's/^parent //p')
+          parent_count=$(printf '%s\n' "$parents" | sed '/^$/d' | wc -l | tr -d ' ')
+          [ "$parent_count" -eq 1 ] && [ "$parents" = "$EXPECTED_BASE_SHA" ] || {
+            printf 'proposal must have exactly expected main as its parent\n' >&2
+            return 1
+          }
+          [ "$(git rev-parse "$candidate^{tree}")" = "$proposed_tree" ] || {
+            printf 'proposal tree differs from the reviewed tree\n' >&2
+            return 1
+          }
+          changed_paths=$(git diff-tree --no-commit-id --name-only -r "$candidate" | sed '/^$/d')
+          [ "$changed_paths" = "$target_file" ] || {
+            printf 'proposal commit changes a non-authorized path\n' >&2
+            return 1
+          }
+          [ "$(trailer_value "$candidate" Source-Commit)" = "$SOURCE_COMMIT" ]
+          [ "$(trailer_value "$candidate" Promotion-Idempotence-Key)" = "$IDEMPOTENCE_KEY" ]
+          [ "$(trailer_value "$candidate" Promotion-Proof-SHA256)" = "$PROMOTION_PROOF_SHA256" ]
+          [ "$(trailer_value "$candidate" Promotion-Environment)" = "$TARGET_ENVIRONMENT" ]
+          [ "$(trailer_value "$candidate" Promotion-Service)" = "$SERVICE" ]
+          [ "$(trailer_value "$candidate" Image-Repository)" = "$IMAGE_REPOSITORY" ]
+          [ "$(trailer_value "$candidate" Image-Digest)" = "$IMAGE_DIGEST" ]
+        }
+        refresh_and_validate_main() {
+          git fetch --depth=1 origin refs/heads/main
+          remote_main=$(git rev-parse FETCH_HEAD)
+          [ "$remote_main" = "$EXPECTED_BASE_SHA" ] || {
+            printf 'main changed during proposal; rerun from the new HEAD\n' >&2
+            return 1
+          }
+        }
+        validate_candidate HEAD
+        refresh_and_validate_main
+        existing_sha=$(git ls-remote --heads origin "refs/heads/$proposal_branch" | awk '{print $1}')
+        if [ -n "$existing_sha" ]; then
+          git fetch --depth=2 origin "refs/heads/$proposal_branch"
+          existing_sha=$(git rev-parse FETCH_HEAD)
+          validate_candidate "$existing_sha" || {
+            printf 'proposal branch collision for %s\n' "$proposal_branch" >&2
+            exit 1
+          }
+          refresh_and_validate_main
+          printf '%s' "$existing_sha" >"$(results.PROPOSAL_COMMIT.path)"
+          exit 0
+        fi
+        if git push origin "HEAD:refs/heads/$proposal_branch"; then
+          git fetch --depth=2 origin "refs/heads/$proposal_branch"
+          pushed_sha=$(git rev-parse FETCH_HEAD)
+          validate_candidate "$pushed_sha"
+          refresh_and_validate_main
+          printf '%s' "$pushed_sha" >"$(results.PROPOSAL_COMMIT.path)"
+          exit 0
+        fi
+        # A concurrent writer may have created the same deterministic branch.
+        # Accept only an identical tree carrying the exact idempotence key.
+        git fetch --depth=2 origin "refs/heads/$proposal_branch"
+        concurrent_sha=$(git rev-parse FETCH_HEAD)
+        validate_candidate "$concurrent_sha"
+        refresh_and_validate_main
+        printf '%s' "$concurrent_sha" >"$(results.PROPOSAL_COMMIT.path)"

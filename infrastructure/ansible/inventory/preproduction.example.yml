@@ -1,0 +1,33 @@
+all:
+  children:
+    preproduction:
+      children:
+        kube_control_plane:
+          hosts:
+            ecommerce-preproduction-control-plane-01:
+              ansible_host: 192.0.2.11
+              private_ip: 10.40.0.11
+            ecommerce-preproduction-control-plane-02:
+              ansible_host: 192.0.2.12
+              private_ip: 10.40.0.12
+            ecommerce-preproduction-control-plane-03:
+              ansible_host: 192.0.2.13
+              private_ip: 10.40.0.13
+        kube_workers:
+          hosts:
+            ecommerce-preproduction-worker-01:
+              ansible_host: 192.0.2.21
+              private_ip: 10.40.0.21
+            ecommerce-preproduction-worker-02:
+              ansible_host: 192.0.2.22
+              private_ip: 10.40.0.22
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+    preproduction_api_endpoint: api.preproduction.example.invalid:6443
+    preproduction_api_private_ipv4: 10.40.0.10
+    preproduction_campaign_id: example-not-authorized
+    preproduction_owner: example-owner
+    preproduction_expires_at: "2099-01-01T00:00:00Z"
+    preproduction_cost_center: example-only
+    preproduction_bootstrap_status: NOT_PROVEN

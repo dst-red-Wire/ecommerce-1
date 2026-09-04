@@ -1,0 +1,29 @@
+listen_addresses = '127.0.0.1,{{ management_data_private_ip }}'
+port = {{ management_postgresql_port }}
+password_encryption = 'scram-sha-256'
+
+ssl = on
+ssl_min_protocol_version = 'TLSv1.2'
+ssl_cert_file = '{{ management_config_root }}/postgresql/tls/server.crt'
+ssl_key_file = '{{ management_config_root }}/postgresql/tls/server.key'
+
+max_connections = 200
+shared_buffers = '1GB'
+effective_cache_size = '3GB'
+maintenance_work_mem = '256MB'
+work_mem = '8MB'
+
+log_destination = 'jsonlog'
+logging_collector = on
+log_directory = '{{ management_log_root }}/postgresql'
+log_filename = 'postgresql-%Y-%m-%d.json'
+log_rotation_age = '1d'
+log_truncate_on_rotation = on
+log_connections = on
+log_disconnections = on
+log_lock_waits = on
+log_min_duration_statement = 1000
+log_statement = 'ddl'
+
+timezone = 'Europe/Paris'
+datestyle = 'iso, dmy'

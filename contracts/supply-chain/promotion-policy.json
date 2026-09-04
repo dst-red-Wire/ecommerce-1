@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "authoritativeRepository": "https://github.com/dst-red-Wire/ecommerce-1.git",
+  "authoritativeBranch": "main",
+  "changeMode": "pull-request-proposal",
+  "forcePushAllowed": false,
+  "directTargetPushAllowed": false,
+  "transitions": {
+    "integration": {"source": "build", "baseBranch": "main"},
+    "preproduction": {"source": "integration", "baseBranch": "main"},
+    "production": {"source": "preproduction", "baseBranch": "main"}
+  },
+  "allowedPathTemplate": "gitops/apps/<service>/overlays/<environment>/kustomization.yaml",
+  "proposalBranchTemplate": "promotion/<environment>/<service>/<digest-prefix>",
+  "idempotenceFields": ["environment", "imageRepository", "imageDigest"],
+  "optimisticLock": "expected-remote-main-sha"
+}

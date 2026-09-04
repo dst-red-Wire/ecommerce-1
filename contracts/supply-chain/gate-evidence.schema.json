@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dst-red-Wire/ecommerce-1/contracts/supply-chain/gate-evidence.schema.json",
+  "title": "GateEvidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "gateId", "status", "repository", "sourceCommit", "imageDigest", "environment", "issuedAt", "expiresAt", "expiresAtEpoch", "idempotenceKey", "issuer", "evidence", "verification"],
+  "properties": {
+    "schemaVersion": {"const": "ecommerce.dev/gate-evidence/v1"},
+    "gateId": {"type": "string", "minLength": 1},
+    "status": {"const": "PASS"},
+    "repository": {"const": "https://github.com/dst-red-Wire/ecommerce-1.git"},
+    "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "environment": {"enum": ["integration", "preproduction", "production"]},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "expiresAtEpoch": {"type": "integer", "minimum": 1},
+    "idempotenceKey": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "issuer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": {"enum": ["tekton-ci-attestor", "security-gate-attestor", "performance-gate-attestor", "release-gate-attestor"]},
+        "type": {"enum": ["tekton", "human-approver", "policy-controller"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "sha256"],
+      "properties": {
+        "artifact": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "keyId"],
+      "properties": {
+        "mechanism": {"enum": ["cosign-key", "cosign-kms"]},
+        "keyId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

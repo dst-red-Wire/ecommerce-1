@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the e-commerce management health check periodically
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec={{ management_health_interval }}
+AccuracySec=15s
+Persistent=true
+RandomizedDelaySec=10s
+
+[Install]
+WantedBy=timers.target

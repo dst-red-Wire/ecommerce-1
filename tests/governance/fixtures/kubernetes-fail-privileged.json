@@ -1,0 +1,33 @@
+{
+  "environment": "production",
+  "manifests": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {"name": "catalog", "namespace": "shop"},
+      "spec": {
+        "template": {
+          "spec": {
+            "securityContext": {"runAsNonRoot": true, "seccompProfile": {"type": "RuntimeDefault"}},
+            "containers": [
+              {
+                "name": "catalog",
+                "image": "registry.example/catalog@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "securityContext": {"privileged": true, "capabilities": {"drop": ["ALL"]}},
+                "resources": {"requests": {"cpu": "100m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "512Mi"}},
+                "livenessProbe": {},
+                "readinessProbe": {}
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "apiVersion": "networking.k8s.io/v1",
+      "kind": "NetworkPolicy",
+      "metadata": {"name": "default-deny", "namespace": "shop"},
+      "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []}
+    }
+  ]
+}

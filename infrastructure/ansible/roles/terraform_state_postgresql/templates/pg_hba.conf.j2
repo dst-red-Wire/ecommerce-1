@@ -1,0 +1,7 @@
+# TYPE      DATABASE                          USER                              ADDRESS       METHOD
+local       all                               postgres                                        peer
+local       all                               all                                             scram-sha-256
+hostssl     {{ terraform_state_postgresql_database }} {{ terraform_state_postgresql_user }} 127.0.0.1/32  scram-sha-256
+hostnossl   all                               all                               0.0.0.0/0     reject
+host        all                               all                               0.0.0.0/0     reject
+host        all                               all                               ::/0          reject

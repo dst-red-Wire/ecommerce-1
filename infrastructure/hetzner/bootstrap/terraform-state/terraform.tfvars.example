@@ -1,0 +1,7 @@
+# Non-secret example only. Copy values through an ignored local tfvars file or
+# TF_VAR_* environment variables; never place HCLOUD_TOKEN in this file.
+ssh_key_name = "REPLACE_WITH_EXISTING_HETZNER_SSH_KEY_NAME"
+
+ssh_allowed_cidrs = [
+  "198.51.100.10/32",
+]

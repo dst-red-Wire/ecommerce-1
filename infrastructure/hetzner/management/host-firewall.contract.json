@@ -1,0 +1,56 @@
+{
+  "version": 2,
+  "status": "DEFINED_NOT_PROVEN_RUNTIME",
+  "implementation": "infrastructure/ansible/roles/management_firewall",
+  "securityBoundary": {
+    "hetznerCloudFirewallFiltersPublicTrafficOnly": true,
+    "hetznerCloudFirewallProtectsPrivateNetwork": false,
+    "hostFirewallRequiredBeforeAuthoritativeServices": true
+  },
+  "hosts": {
+    "gitea-mgmt": {
+      "publicInterface": "cloud-firewall-and-host-firewall",
+      "egressProxy": {
+        "environment": "integration",
+        "listenInterface": "private-management-only",
+        "allowedClientHosts": [
+          "data-mgmt"
+        ],
+        "port": 3128,
+        "implementation": "squid-private-only"
+      }
+    },
+    "harbor-mgmt": {
+      "publicInterface": "cloud-firewall-and-host-firewall"
+    },
+    "data-mgmt": {
+      "publicInterface": "absent",
+      "defaultInboundPolicy": "deny",
+      "allowedInbound": [
+        {
+          "protocol": "tcp",
+          "port": 22,
+          "sourceHosts": [
+            "gitea-mgmt"
+          ],
+          "purpose": "SSH through the management bastion"
+        },
+        {
+          "protocol": "tcp",
+          "port": 5432,
+          "sourceHosts": [
+            "gitea-mgmt",
+            "harbor-mgmt"
+          ],
+          "purpose": "PostgreSQL"
+        }
+      ]
+    }
+  },
+  "redisDecision": {
+    "sharedDataMgmtRedisDeployed": false,
+    "giteaRequirement": "none-for-single-node-integration",
+    "harborRequirement": "installer-managed-private-valkey-on-harbor-mgmt",
+    "hostPort6379Exposed": false
+  }
+}
