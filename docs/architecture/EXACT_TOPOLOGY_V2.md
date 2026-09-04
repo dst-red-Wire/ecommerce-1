@@ -9,14 +9,17 @@ This file is the entrypoint for deterministic infrastructure/application topolog
 ```text
 Clients Web/Mobile
   -> ClouDNS registrar / public DNS
-  -> PowerDNS + dnsdist + Unbound/GSLB decision layer
-  -> Site A or Site B
+  -> PowerDNS + dnsdist + external secondary
+  -> PROD-A or PROD-B
 
 api:
   HAProxy -> Caddy + Coraza -> Kong -> Istio Gateway -> Go services
 
 www:
   ATS -> Storefront Next.js
+
+admin:
+  ATS -> Admin Next.js
 
 cdn:
   ATS -> SeaweedFS S3 assets
@@ -58,30 +61,41 @@ Private blocks:
 - PROD-B `10.242.0.0/16`
 - permanent MGMT `10.243.0.0/16`
 
-VLAN functions 401-406 and exact allocations are in `NETWORK_IPAM_CONTRACT.md` and `network-plan.yaml`.
+VLAN functions 401-406 and exact allocations are in `NETWORK_IPAM_CONTRACT.md` and `config/infrastructure/network-plan.yaml`.
 
 ## Storage
 
-Per PREPROD worker:
+PREPROD worker:
 
 ```text
 NVMe-1 LocalPV-A
 NVMe-2 LocalPV-B
-NVMe-3 reserved conditional block/RWX
+NVMe-3 reserved conditional block/RWX campaign only
 NVMe-4 SeaweedFS volume disk 1
 NVMe-5 SeaweedFS volume disk 2
 NVMe-6 spare
 ```
 
-No default Ceph. No active MinIO CE. See `STORAGE_TOPOLOGY_V2.md`.
+PROD data host:
+
+```text
+NVMe-1 LocalPV-A
+NVMe-2 LocalPV-B
+NVMe-3 SeaweedFS volume disk 1
+NVMe-4 spare
+NVMe-5 SeaweedFS volume disk 2
+```
+
+No default Ceph. No active MinIO CE. See `STORAGE_TOPOLOGY_V2.md` and `config/infrastructure/storage-plan.yaml`.
 
 ## Application ownership
 
 Exactly 17 Go services. No checkout service. `order` orchestrates checkout.
 
-Authority and dependencies: `SERVICE_OWNERSHIP_MATRIX.md`.
-Data ownership: `DATA_OWNERSHIP_MATRIX.md`.
-Durable events: `EVENT_CONTRACT_MATRIX.md`.
+- authority/dependencies: `SERVICE_OWNERSHIP_MATRIX.md`
+- data ownership: `DATA_OWNERSHIP_MATRIX.md`
+- durable events: `EVENT_CONTRACT_MATRIX.md`
+- machine dependency map: `config/contracts/dependency-map.yaml`
 
 ## Security
 
@@ -93,7 +107,15 @@ Trust zones and IAM/workload identity boundaries: `SECURITY_TRUST_ZONES.md`.
 Gitea -> Tekton -> Harbor -> Fleet -> RKE2 -> Argo Rollouts
 ```
 
-`DEPLOYMENT_DAG.md` defines dependency waves, gates and destruction order.
+`DEPLOYMENT_DAG.md` and `config/infrastructure/deployment-waves.yaml` define dependency waves, gates and destruction order.
+
+## AIOps
+
+`AIOPS_TOPOLOGY_V1.md` defines permanent MGMT control-plane, GPU JIT, evidence path, deterministic verifier, L1/L2/L3 authority and kill-switch boundaries.
+
+## MLOps
+
+`MLOPS_TOPOLOGY_V1.md` defines DVC/Git/SeaweedFS dataset lineage, MLflow metadata, Harbor Modelcars, deterministic gates, champion/challenger, bounded retraining and recovery.
 
 ## Status rule
 
@@ -101,4 +123,4 @@ If implementation differs from an exact contract, Codex must report `BLOCKED_ARC
 
 ## Superseded visual references
 
-Any diagram that shows MinIO CE, FluxCD, Flagger, Splunk baseline, Loki baseline or 5 physical PROD hosts/site is historical unless explicitly marked as a functional historical view.
+Any diagram that shows MinIO CE, FluxCD, Flagger, Splunk baseline, Loki baseline, default Rook-Ceph, or 5 physical PROD hosts/site is historical unless explicitly marked as a functional historical view.
