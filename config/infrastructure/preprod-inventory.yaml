@@ -1,0 +1,90 @@
+version: 2
+status: exact
+site: preprod-jit
+provider: phoenixnap
+region: amsterdam
+lifecycle:
+  standard_ttl_hours: 24
+  sequence:
+    - create
+    - validate
+    - archive
+    - destroy
+    - verify-zero-resource
+physical_hosts:
+  pve-01:
+    role: proxmox
+    min_physical_cores: 64
+    min_ram_gib: 256
+    min_nvme_data: 6
+    boot_media_separate: true
+    network: 2x25g-lacp
+  pve-02:
+    role: proxmox
+    min_physical_cores: 64
+    min_ram_gib: 256
+    min_nvme_data: 6
+    boot_media_separate: true
+    network: 2x25g-lacp
+  pve-03:
+    role: proxmox
+    min_physical_cores: 64
+    min_ram_gib: 256
+    min_nvme_data: 6
+    boot_media_separate: true
+    network: 2x25g-lacp
+vm_profiles:
+  rke2-cp: {vcpu: 8, ram_gib: 16, os_disk_gib: 100}
+  rke2-worker: {vcpu: 24, ram_gib: 96, os_disk_gib: 200}
+  edge: {vcpu: 4, ram_gib: 8, os_disk_gib: 64}
+  dns: {vcpu: 2, ram_gib: 4, os_disk_gib: 32}
+  squid: {vcpu: 4, ram_gib: 8, os_disk_gib: 64}
+  gw: {vcpu: 2, ram_gib: 4, os_disk_gib: 32}
+placement:
+  pve-01: [cp-01, worker-01, edge-01, dns-01, gw-01]
+  pve-02: [cp-02, worker-02, edge-02, squid-01]
+  pve-03: [cp-03, worker-03, dns-02, squid-02, gw-02]
+vms:
+  cp-01: {profile: rke2-cp, host: pve-01}
+  cp-02: {profile: rke2-cp, host: pve-02}
+  cp-03: {profile: rke2-cp, host: pve-03}
+  worker-01: {profile: rke2-worker, host: pve-01}
+  worker-02: {profile: rke2-worker, host: pve-02}
+  worker-03: {profile: rke2-worker, host: pve-03}
+  edge-01: {profile: edge, host: pve-01}
+  edge-02: {profile: edge, host: pve-02}
+  dns-01: {profile: dns, host: pve-01}
+  dns-02: {profile: dns, host: pve-03}
+  squid-01: {profile: squid, host: pve-02}
+  squid-02: {profile: squid, host: pve-03}
+  gw-01: {profile: gw, host: pve-01}
+  gw-02: {profile: gw, host: pve-03}
+strict_anti_affinity:
+  - [cp-01, cp-02, cp-03]
+  - [worker-01, worker-02, worker-03]
+  - [edge-01, edge-02]
+  - [dns-01, dns-02]
+  - [squid-01, squid-02]
+  - [gw-01, gw-02]
+perf_burst:
+  enabled_by_gate_only: true
+  temporary_workers: 2
+  count_toward_certified_minimum: false
+storage_per_worker:
+  nvme-1: localpv-a
+  nvme-2: localpv-b
+  nvme-3: reserved-conditional-block-rwx
+  nvme-4: seaweedfs-volume-data-1
+  nvme-5: seaweedfs-volume-data-2
+  nvme-6: spare
+public_ipv4_role_slots:
+  - edge-01-public
+  - edge-02-public
+  - dns-01-public
+  - dns-02-public
+  - public-reserve-01
+forbidden:
+  - minio-community
+  - fluxcd
+  - flagger
+  - ceph-default
