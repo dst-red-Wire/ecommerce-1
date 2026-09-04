@@ -14,6 +14,7 @@ Codex must always read, in order:
 
 ## Mandatory exact architecture contracts
 
+- `docs/architecture/EXACT_TOPOLOGY_V2.md`
 - `docs/architecture/PREPROD_TOPOLOGY_V2.md`
 - `docs/architecture/PROD_TOPOLOGY_V2.md`
 - `docs/architecture/NETWORK_IPAM_CONTRACT.md`
@@ -23,9 +24,16 @@ Codex must always read, in order:
 - `docs/architecture/EVENT_CONTRACT_MATRIX.md`
 - `docs/architecture/SECURITY_TRUST_ZONES.md`
 - `docs/architecture/DEPLOYMENT_DAG.md`
+- `docs/architecture/AIOPS_TOPOLOGY_V1.md`
+- `docs/architecture/MLOPS_TOPOLOGY_V1.md`
 - `config/infrastructure/preprod-inventory.yaml`
 - `config/infrastructure/prod-inventory.yaml`
 - `config/infrastructure/network-plan.yaml`
+- `config/infrastructure/storage-plan.yaml`
+- `config/infrastructure/deployment-waves.yaml`
+- `config/contracts/service-ownership.yaml`
+- `config/contracts/event-contracts.yaml`
+- `config/contracts/dependency-map.yaml`
 
 Codex must never infer or redesign architecture when these sources are explicit. If implementation exposes a contradiction, stop and report `BLOCKED_ARCHITECTURE` instead of silently choosing a new architecture.
 
@@ -50,7 +58,7 @@ Required result:
 - no MinIO CE/Loki/Splunk active defaults;
 - no image using `latest`;
 - shared repository scripts factored, POSIX compatible;
-- preserve `config/infrastructure/*` as single config sources;
+- preserve `config/infrastructure/*` and `config/contracts/*` as single config sources;
 - `make ci` green.
 
 Deliver one PR tied to #13. Include tree summary, commands run, results and SKIPs.
@@ -61,7 +69,7 @@ Tracker: `#14`.
 
 Goal: make Product the single proven service template for transport, persistence, events, telemetry, security, containerization and delivery.
 
-Use `SERVICE_OWNERSHIP_MATRIX.md`, `DATA_OWNERSHIP_MATRIX.md`, `EVENT_CONTRACT_MATRIX.md` and `SECURITY_TRUST_ZONES.md` as hard boundaries. Implement only Product deeply. REST and gRPC call the same application use-cases. Use pgx/sqlc, versioned migrations, transactional outbox, franz-go Kafka, Protobuf contracts, idempotence, OTel and structured logs. Provide unit, integration and contract tests. Provide non-root container, immutable dependencies, Fleet deployable configuration and Tekton CI stages for lint/test/build/scan/SBOM/sign/push. No other service may receive duplicated Product business logic.
+Use `SERVICE_OWNERSHIP_MATRIX.md`, `DATA_OWNERSHIP_MATRIX.md`, `EVENT_CONTRACT_MATRIX.md`, `dependency-map.yaml` and `SECURITY_TRUST_ZONES.md` as hard boundaries. Implement only Product deeply. REST and gRPC call the same application use-cases. Use pgx/sqlc, versioned migrations, transactional outbox, franz-go Kafka, Protobuf contracts, idempotence, OTel and structured logs. Provide unit, integration and contract tests. Provide non-root container, immutable dependencies, Fleet deployable configuration and Tekton CI stages for lint/test/build/scan/SBOM/sign/push. No other service may receive duplicated Product business logic.
 
 Deliver one or a small sequence of tightly-scoped PRs tied to #14.
 
@@ -69,13 +77,13 @@ Deliver one or a small sequence of tightly-scoped PRs tied to #14.
 
 Tracker: `#16`.
 
-Goal: implement reproducible JIT infrastructure as code from `PREPROD_TOPOLOGY_V2.md`, `NETWORK_IPAM_CONTRACT.md`, `STORAGE_TOPOLOGY_V2.md`, `preprod-inventory.yaml` and `network-plan.yaml`.
+Goal: implement reproducible JIT infrastructure as code from `PREPROD_TOPOLOGY_V2.md`, `NETWORK_IPAM_CONTRACT.md`, `STORAGE_TOPOLOGY_V2.md`, `preprod-inventory.yaml`, `network-plan.yaml` and `storage-plan.yaml`.
 
 Do not re-decide placement, VM sizing, VLANs, CIDRs, public-IP role slots, anti-affinity or storage-device ownership. Consume the canonical YAML and validate it.
 
 Implement:
 1. Terraform/OpenTofu provider modules and environment composition;
-2. inventory/IPAM loaders reused by Terraform/Ansible;
+2. inventory/IPAM/storage loaders reused by Terraform/Ansible;
 3. Proxmox host/bootstrap configuration hooks;
 4. VM creation with anti-affinity/layout assertions;
 5. Rocky cloud-init/bootstrap and Ansible hardening;
@@ -91,7 +99,7 @@ Do not hardcode credentials. Do not claim real provider provisioning when creden
 
 Tracker: `#17`.
 
-Goal: install the minimum complete platform needed to run and prove application slices, following `DEPLOYMENT_DAG.md`, `STORAGE_TOPOLOGY_V2.md` and `SECURITY_TRUST_ZONES.md`.
+Goal: install the minimum complete platform needed to run and prove application slices, following `DEPLOYMENT_DAG.md`, `deployment-waves.yaml`, `STORAGE_TOPOLOGY_V2.md`, `storage-plan.yaml` and `SECURITY_TRUST_ZONES.md`.
 
 Order:
 `RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> stateful platform`.
@@ -130,7 +138,7 @@ C. `Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
 For each slice:
-- contracts first, derived from `SERVICE_OWNERSHIP_MATRIX.md` and `EVENT_CONTRACT_MATRIX.md`;
+- contracts first, derived from `SERVICE_OWNERSHIP_MATRIX.md`, `EVENT_CONTRACT_MATRIX.md` and `dependency-map.yaml`;
 - enforce `DATA_OWNERSHIP_MATRIX.md` and no cross-database reads;
 - add outbox/idempotence where required;
 - BDD Given/When/Then for critical behavior;
@@ -203,7 +211,7 @@ Return machine-readable campaign result plus human summary. `FAIL` or `INCOMPLET
 
 Tracker: `#22`.
 
-Goal: deploy trusted production A/B from approved IaC/GitOps and execute controlled release using `PROD_TOPOLOGY_V2.md`, `prod-inventory.yaml`, `network-plan.yaml` and the release-governance rules.
+Goal: deploy trusted production A/B from approved IaC/GitOps and execute controlled release using `PROD_TOPOLOGY_V2.md`, `prod-inventory.yaml`, `network-plan.yaml`, `storage-plan.yaml` and release-governance rules.
 
 Requirements:
 - exact signed release manifest/digests from certification;
