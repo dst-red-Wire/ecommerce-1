@@ -67,6 +67,7 @@ supply_chain:
   forbid_latest: true
 
 topology_contracts:
+  exact_index: docs/architecture/EXACT_TOPOLOGY_V2.md
   preprod: docs/architecture/PREPROD_TOPOLOGY_V2.md
   prod: docs/architecture/PROD_TOPOLOGY_V2.md
   network_ipam: docs/architecture/NETWORK_IPAM_CONTRACT.md
@@ -81,6 +82,8 @@ machine_contracts:
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
+  service_ownership: config/contracts/service-ownership.yaml
+  event_contracts: config/contracts/event-contracts.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
