@@ -1,0 +1,55 @@
+version: 2
+status: exact
+naming: ecommerce.<domain>.<event-name>.v<major>
+envelope_required:
+  - event_id
+  - event_type
+  - schema_version
+  - occurred_at_utc
+  - producer
+  - aggregate_type
+  - aggregate_id
+  - correlation_id
+  - causation_id
+  - home_site
+  - payload
+semantics:
+  delivery: at-least-once
+  producer_pattern: transactional-outbox
+  consumer_idempotent: true
+  global_ordering: false
+  aggregate_key_ordering: true
+  secrets_in_events: forbidden
+  unnecessary_pii_in_events: forbidden
+events:
+  product.ProductCreated.v1: {consumers: [catalog, search, review]}
+  product.ProductUpdated.v1: {consumers: [catalog, search]}
+  product.SKUUpdated.v1: {consumers: [catalog, search, inventory]}
+  catalog.CatalogPublished.v1: {consumers: [search]}
+  pricing.PriceRuleChanged.v1: {consumers: [cart, order]}
+  inventory.StockReserved.v1: {consumers: [order]}
+  inventory.StockReleased.v1: {consumers: [order]}
+  inventory.StockAdjusted.v1: {consumers: [catalog, search]}
+  order.OrderCreated.v1: {consumers: [inventory, fraud-risk, notification]}
+  fraud-risk.FraudApproved.v1: {consumers: [order]}
+  fraud-risk.FraudRejected.v1: {consumers: [order, notification]}
+  fraud-risk.FraudReviewRequired.v1: {consumers: [order, notification]}
+  payment.PaymentAuthorized.v1: {consumers: [order, billing]}
+  payment.PaymentFailed.v1: {consumers: [order, notification]}
+  payment.PaymentCaptured.v1: {consumers: [order, billing, notification]}
+  order.OrderConfirmed.v1: {consumers: [shipping, billing, notification]}
+  order.OrderCancelled.v1: {consumers: [inventory, payment, notification]}
+  shipping.ShipmentCreated.v1: {consumers: [tracking, notification]}
+  shipping.ShipmentDispatched.v1: {consumers: [tracking, notification]}
+  tracking.TrackingUpdated.v1: {consumers: [notification]}
+  tracking.Delivered.v1: {consumers: [order, notification, returns]}
+  returns.ReturnRequested.v1: {consumers: [notification]}
+  returns.ReturnApproved.v1: {consumers: [shipping, notification]}
+  returns.ReturnReceived.v1: {consumers: [inventory, payment, notification]}
+  returns.RefundRequested.v1: {consumers: [payment]}
+  payment.RefundCompleted.v1: {consumers: [returns, billing, notification]}
+  billing.InvoiceIssued.v1: {consumers: [notification]}
+  billing.CreditNoteIssued.v1: {consumers: [notification]}
+  review.ReviewSubmitted.v1: {consumers: []}
+  review.ReviewPublished.v1: {consumers: [catalog, search]}
+  user-profile.ProfileUpdated.v1: {consumers: [notification]}
