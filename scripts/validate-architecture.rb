@@ -13,7 +13,11 @@ module ArchitectureValidator
   def load_yaml(root, path)
     contents = File.read(File.join(root, path))
     document = Psych.parse_stream(contents, filename: path)
-    reject_duplicate_yaml_keys(document, path)
+    # Match safe_load's restricted scalar construction, including tags and quoting.
+    class_loader = Psych::ClassLoader::Restricted.new([], [])
+    scanner = Psych::ScalarScanner.new(class_loader)
+    visitor = Psych::Visitors::NoAliasRuby.new(scanner, class_loader)
+    reject_duplicate_yaml_keys(document, path, visitor)
     YAML.safe_load(contents, aliases: false, filename: path)
   rescue Psych::Exception => e
     raise ContractLoadError, "#{path} is not valid YAML: #{e.message}"
@@ -21,13 +25,13 @@ module ArchitectureValidator
     raise ContractLoadError, "#{path} cannot be loaded: #{e.message}"
   end
 
-  def reject_duplicate_yaml_keys(node, path, context = [])
+  def reject_duplicate_yaml_keys(node, path, visitor, context = [])
     case node
     when Psych::Nodes::Mapping
       seen = {}
       node.children.each_slice(2) do |key_node, value_node|
-        key = yaml_key_identity(key_node)
-        key_name = yaml_key_name(key_node)
+        key = yaml_key_identity(key_node, visitor, path, context)
+        key_name = key.is_a?(String) ? key : key.inspect
         key_context = context + [key_name]
         if seen.key?(key)
           raise ContractLoadError,
@@ -36,29 +40,38 @@ module ArchitectureValidator
         end
 
         seen[key] = true
-        reject_duplicate_yaml_keys(key_node, path, context)
-        reject_duplicate_yaml_keys(value_node, path, key_context)
+        reject_duplicate_yaml_keys(value_node, path, visitor, key_context)
       end
     when Psych::Nodes::Sequence
       node.children.each_with_index do |child, index|
-        reject_duplicate_yaml_keys(child, path, context + ["[#{index}]"])
+        reject_duplicate_yaml_keys(child, path, visitor, context + ["[#{index}]"])
       end
     when Psych::Nodes::Stream, Psych::Nodes::Document
-      node.children.each { |child| reject_duplicate_yaml_keys(child, path, context) }
+      node.children.each { |child| reject_duplicate_yaml_keys(child, path, visitor, context) }
     end
   end
 
-  def yaml_key_identity(node)
-    return [node.class.name, node.tag, node.quoted, node.value] if node.is_a?(Psych::Nodes::Scalar)
-    return [node.class.name, node.anchor] if node.is_a?(Psych::Nodes::Alias)
+  # Custom tags may silently fall back to scalar scanning in Psych. Reject them
+  # explicitly; only standard scalar tags are supported by governance contracts.
+  YAML_KEY_TAGS = %w[
+    tag:yaml.org,2002:str tag:yaml.org,2002:bool tag:yaml.org,2002:null
+    tag:yaml.org,2002:int tag:yaml.org,2002:float tag:yaml.org,2002:binary
+  ].freeze
 
-    [node.class.name, node.children.map { |child| yaml_key_identity(child) }]
-  end
+  def yaml_key_identity(node, visitor, path, context)
+    location = "#{path} mapping #{context.join('.').inspect} at line #{node.start_line + 1}"
+    unless node.is_a?(Psych::Nodes::Scalar)
+      raise ContractLoadError, "#{location}: unsupported YAML key type #{node.class.name}"
+    end
+    if node.tag && !YAML_KEY_TAGS.include?(node.tag)
+      raise ContractLoadError, "#{location}: unsupported YAML key type (non-standard scalar tag)"
+    end
 
-  def yaml_key_name(node)
-    return node.value if node.is_a?(Psych::Nodes::Scalar)
-
-    "<complex-key>"
+    # Store the constructed object directly in seen: Hash uses hash/eql?, so
+    # equivalent spellings collide without conflating Integer, Float and String.
+    visitor.accept(node)
+  rescue Psych::Exception, ArgumentError, TypeError => e
+    raise ContractLoadError, "#{location}: unsupported YAML key type (#{e.class})"
   end
 
   def expect_mapping(value, label)

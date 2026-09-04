@@ -417,6 +417,143 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  YAML_EQUIVALENT_KEYS = {
+    "quoted_string" => ["network_plan", '"network_plan"'],
+    "boolean" => ["true", "True"],
+    "uppercase_boolean" => ["True", "TRUE"],
+    "yaml_boolean_spellings" => ["yes", "ON"],
+    "false_boolean" => ["false", "OFF"],
+    "null" => ["null", "~"],
+    "integer" => ["1", "01"],
+    "float" => ["1.0", "1.00"],
+    "explicit_string_tag" => ["network_plan", "!!str network_plan"],
+    "exact_string" => ["network_plan", "network_plan"]
+  }.freeze
+
+  YAML_EQUIVALENT_KEYS.each do |label, (left, right)|
+    define_method("test_rejects_semantically_duplicate_#{label}_keys") do
+      yaml = "#{left}: first\n#{right}: second\n"
+      # Psych itself is the oracle, including Ruby Hash identity.
+      assert_equal 1, YAML.safe_load(yaml, aliases: false).size, label
+      with_contract_copy do |root|
+        path = "config/infrastructure/network-plan.yaml"
+        File.write(File.join(root, path), yaml)
+        error = assert_raises(ArchitectureValidator::ContractLoadError) do
+          ArchitectureValidator.load_yaml(root, path)
+        end
+        assert_includes error.message, path
+        assert_includes error.message, "duplicate YAML key"
+        assert_includes error.message, "at line 2"
+      end
+    end
+  end
+
+  def test_rejects_quoted_machine_contract_path_override
+    with_contract_copy do |root|
+      replace_in_file(root, "architecture.lock.yaml",
+                      "  network_plan: config/infrastructure/network-plan.yaml\n",
+                      "  network_plan: config/infrastructure/missing.yaml\n" \
+                      "  \"network_plan\": config/infrastructure/network-plan.yaml\n")
+      errors = ArchitectureValidator.validate(root)
+      assert_equal 1, errors.size
+      assert_includes errors.first, 'duplicate YAML key "machine_contracts.network_plan"'
+      assert_includes errors.first, "architecture.lock.yaml"
+    end
+  end
+
+  def test_semantic_duplicates_are_rejected_in_every_declared_contract_and_lock
+    with_contract_copy do |root|
+      lock = YAML.safe_load_file(File.join(root, "architecture.lock.yaml"), aliases: false)
+      (["architecture.lock.yaml"] + lock.fetch("machine_contracts").values).each do |path|
+        original = File.read(File.join(root, path))
+        File.write(File.join(root, path), original + "\nprobe:\n  items:\n    - true: first\n      True: second\n")
+        errors = ArchitectureValidator.validate(root)
+        assert_equal 1, errors.size, path
+        assert_includes errors.first, path
+        assert_includes errors.first, 'duplicate YAML key "probe.items.[0].true"'
+        File.write(File.join(root, path), original)
+      end
+    end
+  end
+
+  def test_nested_semantic_duplicate
+    with_contract_copy do |root|
+      path = "config/infrastructure/network-plan.yaml"
+      File.open(File.join(root, path), "a") { |file| file.write("\nprobe:\n  null: first\n  ~: second\n") }
+      errors = ArchitectureValidator.validate(root)
+      assert_equal 1, errors.size
+      assert_includes errors.first, 'duplicate YAML key "probe.nil"'
+    end
+  end
+
+  def test_distinct_scalar_keys_preserve_safe_load_hash_identity
+    [
+      ["1", '"1"'], ["1", "1.0"], ["true", '"true"'], ["null", '"null"'],
+      ["false", '"false"'], ["1", "!!str 1"]
+    ].each do |left, right|
+      yaml = "#{left}: first\n#{right}: second\n"
+      expected = YAML.safe_load(yaml, aliases: false)
+      assert_equal 2, expected.size, yaml
+      with_contract_copy do |root|
+        path = "config/infrastructure/network-plan.yaml"
+        File.write(File.join(root, path), yaml)
+        assert_equal expected, ArchitectureValidator.load_yaml(root, path)
+      end
+    end
+  end
+
+  def test_distinct_non_string_machine_contract_key_reports_structural_error
+    with_contract_copy do |root|
+      replace_in_file(root, "architecture.lock.yaml", "machine_contracts:\n",
+                      "machine_contracts:\n  1: unused.yaml\n  \"1\": unused.yaml\n")
+      errors = ArchitectureValidator.validate(root)
+      assert_equal ["architecture.lock.yaml machine_contracts keys must be non-empty strings"], errors
+    end
+  end
+
+  UNSUPPORTED_YAML_KEYS = {
+    "sequence" => "? [one, two]\n: ignored\n",
+    "mapping" => "? {one: two}\n: ignored\n",
+    "custom_tag" => "!private marker: ignored\n",
+    "ruby_object" => "!ruby/object:Object marker: ignored\n",
+    "symbol_tag" => "!ruby/symbol marker: ignored\n",
+    "implicit_symbol" => ":marker: ignored\n",
+    "date" => "2026-01-01: ignored\n",
+    "invalid_float" => "!!float invalid: ignored\n",
+    "alias" => "anchor: &key marker\n*key: ignored\n"
+  }.freeze
+
+  UNSUPPORTED_YAML_KEYS.each do |label, yaml|
+    define_method("test_rejects_unsupported_#{label}_key_with_location") do
+      with_contract_copy do |root|
+        path = "config/infrastructure/network-plan.yaml"
+        File.open(File.join(root, path), "a") do |file|
+          file.write("\nprobe:\n")
+          yaml.each_line { |line| file.write("  #{line}") }
+        end
+        errors = ArchitectureValidator.validate(root)
+        assert_equal 1, errors.size
+        assert_includes errors.first, path
+        assert_includes errors.first, 'mapping "probe"'
+        assert_includes errors.first, "at line"
+        assert_includes errors.first, "unsupported YAML key type"
+        refute_includes errors.first, "ignored"
+        refute_includes errors.first, "marker"
+      end
+    end
+  end
+
+  def test_alias_values_remain_forbidden
+    with_contract_copy do |root|
+      path = "config/infrastructure/network-plan.yaml"
+      File.open(File.join(root, path), "a") { |file| file.write("\nprobe: &value example\ncopy: *value\n") }
+      errors = ArchitectureValidator.validate(root)
+      assert_equal 1, errors.size
+      assert_includes errors.first, "is not valid YAML"
+      assert_includes errors.first, "alias"
+    end
+  end
+
   private
 
   def self.mutate_yaml(root, relative)
