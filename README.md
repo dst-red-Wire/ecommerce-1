@@ -1,574 +1,209 @@
 # E-Commerce Platform
 
-Plateforme e-commerce self-hosted, cloud-native, multi-site actif/actif, construite autour d'une architecture microservices, d'une plateforme Kubernetes et d'un modèle GitOps strict.
+Plateforme e-commerce B2C mono-vendeur, cloud-native, self-hosted, multi-site A/B, construite autour de microservices Go, de Kubernetes RKE2 et d'un modèle GitOps strict.
 
-## 1. Objectif
+## Statut
 
-Le projet vise à construire une plateforme e-commerce capable de supporter :
+Le dépôt est en phase `ARCHITECTURE_SYNC -> BUILD`. L'architecture générale est verrouillée, mais le monorepo applicatif et l'IaC ne sont pas encore implémentés. Toute implémentation doit suivre `docs/architecture/BASELINE_V2.md` et `architecture.lock.yaml`.
 
-- 500 000 comptes utilisateurs ;
-- 50 000 utilisateurs actifs par jour ;
-- 10 000 utilisateurs simultanés au pic ;
-- 250 000 produits et 1 million de SKU à l'initial ;
-- jusqu'à 1 million de produits et 3 millions de SKU sans refonte majeure ;
-- 20 000 commandes/jour en nominal ;
-- 50 000 commandes/jour en pic ;
-- 500 RPS REST en nominal et 2 000 RPS en pic ;
-- 1 000 req/s gRPC en nominal et 5 000 req/s en pic ;
-- 1 000 événements Kafka/s en nominal, 5 000/s en pic et 10 000/s en burst.
-
-La plateforme est conçue pour être maintenable, observable, testable, automatisée et portable.
-
-## 2. Architecture métier
-
-Le backend est organisé en microservices Go autonomes :
+## Architecture métier — 17 microservices
 
 - `catalog`
 - `product`
-- `pricing`
 - `inventory`
 - `cart`
+- `pricing`
+- `tax`
 - `order`
 - `payment`
-- `tax`
+- `shipping`
 - `tracking`
-- `user-profile`
-- `notification`
 - `returns`
 - `billing`
 - `fraud-risk`
+- `search`
+- `review`
+- `user-profile`
+- `notification`
 
-Le modèle commercial est mono-vendeur.
+Il n'existe pas de microservice `checkout`. `Order` orchestre la Saga de commande et conserve le snapshot immuable du checkout.
 
-### Responsabilités
+## Frontends
 
-- **Catalog** : catégories, collections, navigation, merchandising, visibilité commerciale.
-- **Product** : fiches produit, SKU, variantes, attributs, médias, prix de référence.
-- **Pricing** : prix calculés, promotions, coupons, règles commerciales.
-- **Inventory** : stock, quantités, réservations, disponibilité.
-- **Cart** : panier et prix indicatifs.
-- **Order** : commande, orchestration métier, snapshot immuable du checkout.
-- **Payment** : transactions, captures, remboursements.
-- **Tax** : TVA, règles fiscales, calculs et versionnement.
-- **Returns** : workflow de retour et déclenchement des remboursements.
-- **Billing** : factures, avoirs, numérotation et documents.
-- **Fraud/Risk** : scoring, règles antifraude, décisions `allow/review/deny`.
-- **Tracking** : suivi logistique.
-- **User Profile** : données utilisateur strictement nécessaires.
-- **Notification** : orchestration métier des notifications.
+- `frontend/storefront` : Next.js, TypeScript, mobile-first, RSC/SSR privilégiés.
+- `frontend/admin` : Next.js, TypeScript, Tailwind CSS, shadcn/ui, Radix UI.
 
-## 3. Protocoles
+## Contrats
 
-### APIs externes
+- Externe : REST/JSON + OpenAPI 3.1.
+- Inter-services : gRPC + Protobuf + Buf.
+- Événements : Kafka + Protobuf + Apicurio Registry.
+- Jobs opérationnels : RabbitMQ Quorum Queues.
+- Patterns obligatoires selon le domaine : Outbox, idempotence, Saga, retry borné, DLQ, versioning et contract tests.
 
-- REST/JSON
-- OpenAPI 3.1
-- versioning explicite
-- contrôle des breaking changes en CI
+## Données
 
-### Inter-services synchrones
+- PostgreSQL / CloudNativePG : source de vérité transactionnelle des domaines concernés.
+- Kafka / Strimzi KRaft : événements durables, un cluster par site, MirrorMaker2 inter-site.
+- RabbitMQ : jobs asynchrones opérationnels.
+- Redis Cluster : cache et état temporaire, jamais source de vérité métier.
+- OpenSearch : recherche et read models reconstruisibles.
+- SeaweedFS S3 : cible objet distribuée pour les nouveaux déploiements PROD, sous qualification PREPROD.
+- Harbor : autorité OCI pour images, artefacts de supply chain et Modelcars OCI.
 
-- gRPC
-- Protocol Buffers
-- Buf
+## Plateforme
 
-### Asynchrone
+- RKE2 sur Rocky Linux 9.x.
+- Cilium + Hubble, LB IPAM, BGP vers FRR, Maglev.
+- Istio mTLS STRICT.
+- SPIFFE/SPIRE pour l'identité workload.
+- Keycloak pour IAM humain.
+- OpenBao + External Secrets Operator pour les secrets.
+- Kyverno, Pod Security `restricted`, Tetragon, NetworkPolicy default-deny.
 
-**Kafka** est réservé aux événements métier durables :
+## Edge et DNS
 
-- event streaming
-- intégration inter-services
-- projections CQRS
-- audit/replay
-- CDC ciblé
-
-**RabbitMQ** est réservé aux jobs opérationnels :
-
-- génération PDF
-- traitement d'images
-- email/SMS/push
-- imports/exports
-- purge CDN
-- tâches distribuées
-- retries différés
-- TTL/DLQ
-
-## 4. Structure backend Go
-
-Chaque microservice suit cette structure :
-
-```text
-services/<service>/
-├── cmd/
-├── internal/
-│   ├── domain/
-│   ├── application/
-│   ├── infrastructure/
-│   └── transport/
-│       ├── rest/
-│       └── grpc/
-├── api/
-├── migrations/
-├── tests/
-├── Dockerfile
-├── go.mod
-└── README.md
-```
-
-Règle impérative :
-
-> REST et gRPC appellent les mêmes use cases. La logique métier ne doit jamais être dupliquée dans les transports.
-
-Stack standard :
-
-- Go
-- pgx
-- sqlc
-- Atlas ou Goose
-- go-redis
-- franz-go
-- OpenTelemetry
-- log/slog JSON
-- testing
-- testcontainers-go
-
-## 5. Monorepo
-
-Structure cible :
-
-```text
-ecommerce/
-├── services/
-│   ├── catalog/
-│   ├── product/
-│   ├── pricing/
-│   ├── inventory/
-│   ├── cart/
-│   ├── order/
-│   ├── payment/
-│   ├── tax/
-│   ├── tracking/
-│   ├── user-profile/
-│   ├── notification/
-│   ├── returns/
-│   ├── billing/
-│   └── fraud-risk/
-├── frontend/
-│   ├── storefront/
-│   └── admin/
-├── contracts/
-│   ├── openapi/
-│   ├── grpc/
-│   ├── events/
-│   └── buf/
-├── platform/
-│   ├── kubernetes/
-│   ├── helm/
-│   ├── flux/
-│   ├── tekton/
-│   ├── terraform/
-│   ├── ansible/
-│   ├── awx/
-│   ├── cluster-api/
-│   ├── rancher/
-│   └── policies/
-├── observability/
-│   ├── otel/
-│   ├── prometheus/
-│   ├── grafana/
-│   ├── loki/
-│   ├── tempo/
-│   ├── alertmanager/
-│   └── splunk/
-├── tests/
-│   ├── bdd/
-│   ├── e2e/
-│   ├── performance/
-│   └── chaos/
-├── docs/
-│   ├── architecture/
-│   ├── adr/
-│   ├── security/
-│   ├── runbooks/
-│   ├── api/
-│   └── diagrams/
-├── scripts/
-├── tools/
-├── go.work
-├── README.md
-├── LICENSE
-├── .gitignore
-├── .editorconfig
-├── .gitattributes
-├── CODEOWNERS
-├── CONTRIBUTING.md
-├── SECURITY.md
-└── Makefile
-```
-
-Le monorepo utilise `go.work` tout en conservant l'autonomie stricte de chaque microservice.
-
-## 6. Frontend
-
-### Storefront
-
-- Next.js
-- TypeScript
-- Tailwind CSS
-- composants maison/headless
-- CSS variables
-- design tokens
-- mobile-first
-- RSC/SSR privilégiés
-- JavaScript client limité
-- Core Web Vitals surveillés
-
-### Admin Backoffice
-
-- Next.js
-- TypeScript
-- Tailwind CSS
-- shadcn/ui
-- Radix UI
-
-L'Admin Backoffice n'est pas un microservice métier séparé.
-
-## 7. IAM et sécurité
-
-### Humains
-
-Keycloak fournit :
-
-- OIDC/OAuth2
-- JWT
-- OTP/MFA
-- Passkeys
-- rôles
-- permissions/scopes
-
-Rôles de base :
-
-- `super_admin`
-- `catalog_manager`
-- `inventory_manager`
-- `order_manager`
-- `finance_manager`
-- `support_agent`
-- `customer`
-
-### Workloads
-
-- SPIFFE/SPIRE pour les identités machine
-- OpenBao pour les secrets et credentials dynamiques
-
-### Baseline Kubernetes
-
-- Pod Security `restricted`
-- `runAsNonRoot=true`
-- `readOnlyRootFilesystem=true`
-- `allowPrivilegeEscalation=false`
-- `capabilities.drop=["ALL"]`
-- `seccompProfile=RuntimeDefault`
-- Cilium `default-deny`
-- Kyverno pour l'admission
-
-## 8. Réseau et service mesh
-
-### CNI
-
-- Cilium
-- Hubble
-
-### Mesh
-
-- Istio Ambient Mesh
-- ztunnel pour mTLS/L4
-- waypoints uniquement lorsque le L7 est nécessaire
-
-### Chaîne API
+Chaîne API publique :
 
 ```text
 Internet
-  ↓
-PowerDNS + dnsdist
-  ↓
-HAProxy
-  ↓
-Caddy + Coraza
-  ↓
-Kong
-  ↓
-Istio Gateway
-  ↓
-Microservices
+  -> DNS/GSLB
+  -> HAProxy
+  -> Caddy + Coraza
+  -> Kong
+  -> Istio Gateway
+  -> services
 ```
 
-### Web/CDN
+DNS : ClouDNS registrar, PowerDNS Authoritative avec Hidden Primary MGMT + secondaries A/B, dnsdist, DNSSEC, ExternalDNS, CoreDNS interne et Unbound x2/site.
+
+Web/CDN :
 
 ```text
-www.example.com
-  ↓
-Apache Traffic Server
-  ↓
-Next.js Storefront
+www -> ATS -> Storefront
+cdn -> ATS -> S3/assets
 ```
+
+## CI/CD
+
+- CI plateforme : Tekton.
+- Registry : Harbor.
+- CD GitOps : Rancher Fleet.
+- Progressive delivery : Argo Rollouts.
+- Images : digests immuables, jamais `latest`.
+- Supply chain : Trivy, Syft SBOM, Cosign, admission policy.
+
+La CI Woodpecker présente dans le dépôt est uniquement un bootstrap transitoire du repository. Elle ne doit pas devenir une seconde CI applicative concurrente de Tekton.
+
+## Observabilité
+
+- OpenTelemetry Collector.
+- Prometheus + Alertmanager + Grafana.
+- Fluent Bit + Data Prepper + OpenSearch Logs.
+- Wazuh pour la sécurité et l'audit.
+- Archives DFIR immuables selon la politique de résilience.
+
+## QA
+
+- Go unit tests / TDD.
+- `testcontainers-go` pour l'intégration.
+- Contract tests REST/gRPC/Kafka.
+- BDD Gherkin + Godog.
+- E2E Playwright.
+- Performance k6.
+- Chaos Mesh.
+- DR et restauration mesurés.
+
+## PREPROD JIT
+
+Ordre imposé :
 
 ```text
-cdn.example.com
-  ↓
-Apache Traffic Server
-  ↓
-MinIO / assets
+CREATE
+-> Terraform
+-> Ansible
+-> Proxmox/RKE2
+-> Fleet
+-> plateforme
+-> données synthétiques
+-> validations
+-> PERF/Chaos/DR conditionnels
+-> ARCHIVE EVIDENCE
+-> DESTROY
+-> VERIFY ZERO RESOURCE
 ```
 
-## 9. Données
+Trois campagnes peuvent intervenir avant la première PROD : PREPROD standard 24 h, endurance 72 h et `PREPROD-CERT PROD-EQUIVALENT` sur six hôtes équivalents PROD.
 
-### PostgreSQL
+## Résilience
 
-- source de vérité métier
-- CloudNativePG
-- PgBouncer si nécessaire
-- LocalPV NVMe pour les bases critiques
-- migrations `expand -> migrate -> contract`
-
-### Redis
-
-Redis Cluster pour :
-
-- cache
-- panier temporaire
-- rate limiting
-- état temporaire
-
-Redis n'est jamais source de vérité.
-
-### OpenSearch
-
-Read model reconstruisible pour la recherche avancée lorsque justifié.
-
-### MinIO
-
-Stockage objet pour :
-
-- assets
-- Harbor blobs
-- Loki
-- Tempo
-- sauvegardes
-- objets métier
-
-### Ceph
-
-- Ceph RBD pour bloc RWO
-- CephFS uniquement pour RWX
-- un cluster Ceph par site
-
-## 10. Multi-site actif/actif
-
-Deux sites autonomes :
-
-- cluster Kubernetes par site
-- Kafka par site
-- Redis par site
-- RabbitMQ par site
-- Ceph par site
-- Istio par site
-
-Aucun cluster étendu sur WAN.
-
-Les écritures PostgreSQL utilisent un modèle d'ownership avec `home_site`.
-
-Le failover exige :
-
-- health checks
-- quorum
-- fencing
-- promotion contrôlée
-- protection split-brain
-
-## 11. CI/CD
-
-### CI : Tekton
-
-Pipeline cible :
-
-1. format/lint
-2. tests unitaires
-3. tests d'intégration
-4. contract tests
-5. tests BDD
-6. build OCI
-7. Trivy
-8. Syft/SBOM
-9. Cosign
-10. publication Harbor
-
-### Registry
-
-- Harbor
-- images de production par digest SHA256
-
-### CD
-
-- FluxCD
-
-### Progressive delivery
-
-- Flagger
-- canary
-- blue/green
-- A/B si pertinent
-- rollback automatique
-
-## 12. Tests
-
-- unitaires : Go
-- intégration : testcontainers-go
-- contrats : REST, gRPC, Kafka
-- BDD : Gherkin + Godog
-- E2E : Playwright
-- performance : k6
-- chaos : Chaos Mesh
-
-Les résultats BDD doivent être exportables en JUnit et Cucumber.
-
-## 13. Observabilité
-
-- OpenTelemetry
-- Prometheus
-- Grafana
-- Loki
-- Tempo
-- Alertmanager
-- Splunk pour les événements de sécurité ciblés
-
-SLO :
-
-- API publique : 99,9 %
-- Order : 99,95 %
-- Payment : 99,95 %
-
-Latences :
-
-- REST p95 < 300 ms
-- REST p99 < 1 s
-- gRPC p95 < 100 ms
-- gRPC p99 < 300 ms
-- Catalog/Product search p95 < 250 ms
-- Kafka consumer lag normal < 30 s
-
-## 14. Infrastructure as Code
-
-- Terraform : provisioning
-- Ansible : configuration, hardening, bootstrap OS
-- AWX : orchestration Ansible
-- Cluster API : lifecycle Kubernetes lorsque le provider est suffisamment mature
-- Rancher : visibilité et administration multi-cluster
-
-Rancher ne remplace pas GitOps.
-
-## 15. Configuration et secrets
-
-Configuration non sensible :
-
-- Git
-- Helm
-- Kustomize
-- ConfigMap
-
-Secrets :
-
-- OpenBao comme source de vérité
-- injection/fetch runtime privilégié
-- External Secrets Operator uniquement si nécessaire
-
-Aucun secret longue durée dans Git.
-
-## 16. Feature flags
-
-- OpenFeature côté applications
-- Flipt comme backend
-
-## 17. Paiement / PCI
-
-La plateforme ne stocke jamais :
-
-- PAN complet
-- CVV
-
-Les paiements utilisent tokenisation, Hosted Fields ou mécanisme équivalent.
-
-## 18. Webhooks
-
-Tous les webhooks externes passent par Kong et doivent appliquer :
-
-- signature/authentification
-- anti-replay
-- idempotence
-- validation de schéma
-- rate limiting
-- audit
-
-## 19. Événements Kafka
-
-Enveloppe standard :
+Règle après compromission d'un composant reproductible :
 
 ```text
-event_id
-event_type
-aggregate_id
-aggregate_version
-occurred_at
-producer
-correlation_id
-causation_id
-trace_id
+isoler -> acquérir les preuves -> détruire -> reconstruire via GitOps/IaC
 ```
 
-Clé de partition : `aggregate_id`.
+- PCA = continuer.
+- DFIR = comprendre et préserver.
+- PRI = reconstruire et restaurer.
 
-Les consommateurs doivent être idempotents.
+## Structure cible du monorepo
 
-## 20. Gouvernance
+```text
+services/
+frontend/
+contracts/
+platform/
+  kubernetes/
+  helm/
+  fleet/
+  tekton/
+  terraform/
+  ansible/
+  rancher/
+  policies/
+observability/
+tests/
+docs/
+scripts/
+tools/
+```
 
-Principes :
+Aucun ancien chemin `platform/flux/` ne doit être créé. Aucun nouveau code ne doit dépendre de MinIO CE, Flagger, Loki ou Splunk comme composants actifs de l'architecture cible.
 
-- GitOps first
-- Infrastructure as Code
-- API contracts first
-- backward compatibility
-- least privilege
-- privacy by design
-- data minimization
-- observability by default
-- idempotence
-- immutable artifacts
-- ADR pour les décisions structurantes
-- aucune duplication métier
+## Autorités documentaires
 
-## 21. Contribution
+Priorité :
 
-Avant toute modification :
+1. règles système et sécurité ;
+2. ADR et Skills spécialisés validés ;
+3. `docs/architecture/BASELINE_V2.md` ;
+4. `architecture.lock.yaml` ;
+5. specs et issues d'implémentation ;
+6. anciens prompts/PDF uniquement comme historique.
+
+Une décision supersédée reste historique mais ne doit pas être réintroduite comme cible active.
+
+## Développement
+
+Avant toute PR :
 
 1. identifier le domaine propriétaire ;
-2. vérifier les contrats existants ;
-3. préserver la compatibilité ;
-4. ajouter ou adapter les tests ;
-5. ne pas introduire de secret ;
-6. ne pas contourner les policies ;
-7. ne pas modifier manuellement la production ;
-8. documenter les décisions architecturales significatives.
+2. vérifier les contrats et ADR ;
+3. limiter le scope ;
+4. ajouter les tests ;
+5. préserver la compatibilité ;
+6. ne jamais introduire de secret ;
+7. ne jamais contourner GitOps/policies ;
+8. exécuter `make ci` ;
+9. documenter rollback et preuve attendue.
 
-## 22. Bootstrap maître
+## Bootstrap maître
 
-La création initiale de l'arborescence est gouvernée par :
+La création initiale du monorepo est gouvernée par :
 
 ```text
-PROMPT_IA_00_BOOTSTRAP_MONOREPO.md
+instruction/dev/PROMPT_IA_00_BOOTSTRAP_MONOREPO.md
 ```
 
-Les prompts IA ultérieurs doivent compléter cette structure et ne pas la recréer.
-
-## 23. Licence
-
-Voir [LICENSE](./LICENSE).
+Ce prompt doit rester synchronisé avec la baseline V2 avant toute exécution Codex.
