@@ -1,6 +1,6 @@
 # WORK HANDOFFS — BUSINESS, VENDORS, EVIDENCE, LAUNCH
 
-Status: `CHATGPT PREPARED`
+Status: `CHATGPT PREPARED — EXACT CONTEXT BOUND`
 
 Work is not a second engineering owner. It receives bounded research, browser, evidence and finished-deliverable tasks. It must return source-referenced outputs to ChatGPT for decisions or program status.
 
@@ -8,14 +8,26 @@ Work is not a second engineering owner. It receives bounded research, browser, e
 
 You are supporting the E-COMMERCE delivery program as a business/research/evidence operator. Use the project architecture and business scope as constraints; do not redesign technical architecture. For every external fact, capture the source and date. Separate verified fact, provider claim, assumption, unresolved question and recommendation. Do not mark a technical milestone complete from documentation alone. When a task depends on authenticated portals or contracts, collect what is actually available and clearly report inaccessible fields instead of guessing.
 
+For vendor/hardware/network work, always read the current exact contracts first:
+
+- `docs/architecture/EXACT_TOPOLOGY_V2.md`
+- `docs/architecture/PREPROD_TOPOLOGY_V2.md`
+- `docs/architecture/PROD_TOPOLOGY_V2.md`
+- `docs/architecture/NETWORK_IPAM_CONTRACT.md`
+- `docs/architecture/STORAGE_TOPOLOGY_V2.md`
+- `config/infrastructure/preprod-inventory.yaml`
+- `config/infrastructure/prod-inventory.yaml`
+
+If current provider facts conflict with these contracts, report the conflict to ChatGPT as a vendor constraint. Do not silently adapt the architecture.
+
 ## W1 — Vendor & commercial due diligence
 
 Run early and refresh before M3/M8/M9 if provider data may have changed.
 
 ### Scope
 
-- phoenixNAP PREPROD bare-metal availability and provisioning capabilities;
-- Hetzner production dedicated hardware/network options matching the certified BOM;
+- phoenixNAP PREPROD bare-metal availability and provisioning capabilities against the exact PREPROD inventory;
+- Hetzner production dedicated hardware/network options matching the six-host certified PROD topology and current certified BOM constraints;
 - ClouDNS registrar/DNS features relevant to locks, MFA, DNSSEC and secondary DNS;
 - Stripe features/constraints relevant to Payment Element, PaymentIntents, SCA/3DS, authorization/capture and webhooks;
 - Qonto PA/e-invoicing integration information relevant to the Billing adapter;
@@ -31,6 +43,7 @@ Create a dated vendor-readiness report containing for each provider:
 - support/SLA or operational dependency information where published/available;
 - pricing/cost evidence where accessible;
 - contractual/account prerequisites;
+- exact architecture requirement affected;
 - risk/limitation;
 - source reference;
 - status `CONFIRMED / CONDITIONAL / BLOCKED / NEEDS HUMAN CONTRACT REVIEW`.
@@ -73,6 +86,7 @@ Start when M7 produces evidence and continue through M8.
 
 - signed release manifest/digests;
 - exact configuration/version references;
+- exact topology/inventory identity;
 - CI/test artifacts;
 - performance/chaos/DR results;
 - restore evidence;
@@ -85,6 +99,7 @@ For each campaign create a concise evidence index:
 - release ID/commit/digest;
 - campaign type;
 - environment/hardware identity;
+- topology/inventory version;
 - start/end;
 - gate list with PASS/FAIL/INCOMPLETE;
 - evidence links;
@@ -104,6 +119,7 @@ Start after M8 campaign 3 reaches a candidate PASS.
 Create a decision pack with:
 - business scope included/excluded at launch;
 - architecture/release ID;
+- exact topology/certification identity;
 - certification summary;
 - unresolved risks and accepted residual risks;
 - provider readiness;

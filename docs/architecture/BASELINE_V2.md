@@ -124,6 +124,24 @@ Certification before first PROD:
 3. `PREPROD-CERT PROD-EQUIVALENT` on six final/equivalent hosts;
 4. destroy test state and rebuild trusted PROD via IaC/GitOps.
 
+## 9A. Exact topology contracts
+
+The following files are authoritative implementation contracts and must be read by Codex before M3-M9:
+
+- `PREPROD_TOPOLOGY_V2.md`
+- `PROD_TOPOLOGY_V2.md`
+- `NETWORK_IPAM_CONTRACT.md`
+- `STORAGE_TOPOLOGY_V2.md`
+- `SERVICE_OWNERSHIP_MATRIX.md`
+- `DATA_OWNERSHIP_MATRIX.md`
+- `EVENT_CONTRACT_MATRIX.md`
+- `SECURITY_TRUST_ZONES.md`
+- `DEPLOYMENT_DAG.md`
+
+Machine-readable inputs are under `config/infrastructure/` and are referenced by `architecture.lock.yaml`.
+
+Current exact PROD certified topology is six physical hosts total: three independent physical failure domains in PROD-A and three in PROD-B, with 3 control-plane VMs + 5 worker VMs per site. The five workers are 3 data workers + 2 general workers.
+
 ## 10. Resilience invariant
 
 For a compromised reproducible node, VM, container, or workload:
@@ -152,6 +170,7 @@ The following are historical and MUST NOT be introduced as active defaults:
 | MinIO Community Edition / Operator | SeaweedFS S3 for new PROD object storage |
 | Loki as logging baseline | OpenSearch Logs pipeline |
 | Splunk as SIEM baseline | Wazuh + OpenSearch Logs |
+| 5 physical PROD hosts/site planning target | 3 physical failure-domain hosts/site, 6 total, certified topology |
 
 References in historical ADRs/issues may remain if clearly marked `SUPERSEDED`.
 

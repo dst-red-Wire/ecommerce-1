@@ -1,0 +1,82 @@
+version: 2
+status: exact
+services:
+  catalog:
+    db: catalog-db
+    owns: [category-tree, assortment, presentation-metadata]
+    sync_dependencies: [product, pricing, inventory]
+  product:
+    db: product-db
+    owns: [products, skus, attributes, base-product-facts]
+    sync_dependencies: []
+  inventory:
+    db: inventory-db
+    owns: [stock, reservations, adjustments]
+    sync_dependencies: []
+  cart:
+    db: cart-db
+    owns: [cart-state, cart-intent]
+    sync_dependencies: [pricing, inventory, product]
+  pricing:
+    db: pricing-db
+    owns: [price-rules, promotion-rules, rule-versions]
+    sync_dependencies: [product]
+  tax:
+    db: tax-db
+    owns: [tax-rules, tax-rule-versions]
+    sync_dependencies: []
+  order:
+    db: order-db
+    owns: [orders, checkout-snapshot, saga-state, order-lifecycle]
+    sync_dependencies: [pricing, tax, inventory, fraud-risk, payment, shipping]
+  payment:
+    db: payment-db
+    owns: [psp-authorization, capture-state, refund-state]
+    sync_dependencies: [stripe]
+  shipping:
+    db: shipping-db
+    owns: [shipment-creation, carrier-handoff]
+    sync_dependencies: [order, inventory]
+  tracking:
+    db: tracking-db
+    owns: [tracking-timeline]
+    sync_dependencies: [shipping]
+  returns:
+    db: returns-db
+    owns: [return-rma-lifecycle]
+    sync_dependencies: [order, shipping]
+  billing:
+    db: billing-db
+    owns: [invoices, credit-notes, e-invoicing-state]
+    sync_dependencies: [order, payment, qonto-pa]
+  fraud-risk:
+    db: fraud-db
+    owns: [risk-decisions, manual-review-queue]
+    sync_dependencies: []
+  search:
+    db: null
+    owns: [search-projection]
+    authoritative: false
+    sync_dependencies: []
+  review:
+    db: review-db
+    owns: [reviews, moderation-state]
+    sync_dependencies: [product, user-profile]
+  user-profile:
+    db: user-profile-db
+    owns: [minimal-profile, preferences, privacy-workflow-metadata]
+    sync_dependencies: [keycloak-reference]
+  notification:
+    db: notification-db
+    owns: [notification-intent, delivery-attempts, delivery-status]
+    sync_dependencies: []
+forbidden:
+  services: [checkout]
+  cross_database_reads: true
+  cross_service_foreign_keys: true
+rules:
+  search_authoritative: false
+  redis_authoritative: false
+  rabbitmq_authoritative_business_state: false
+  keycloak_owns_authentication_identity: true
+  order_owns_checkout_orchestration: true

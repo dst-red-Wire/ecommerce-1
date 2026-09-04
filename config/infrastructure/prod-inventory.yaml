@@ -1,0 +1,64 @@
+version: 2
+status: exact
+sites:
+  prod-a:
+    private_block: 10.241.0.0/16
+    physical_hosts:
+      a-host-01:
+        failure_domain: a-fd-01
+        vms: [a-cp-01, a-data-01, a-general-01, a-gw-01, a-edge-01]
+      a-host-02:
+        failure_domain: a-fd-02
+        vms: [a-cp-02, a-data-02, a-general-02, a-gw-02, a-edge-02]
+      a-host-03:
+        failure_domain: a-fd-03
+        vms: [a-cp-03, a-data-03]
+    control_planes: [a-cp-01, a-cp-02, a-cp-03]
+    data_workers: [a-data-01, a-data-02, a-data-03]
+    general_workers: [a-general-01, a-general-02]
+    gateways: [a-gw-01, a-gw-02]
+    edges: [a-edge-01, a-edge-02]
+  prod-b:
+    private_block: 10.242.0.0/16
+    physical_hosts:
+      b-host-01:
+        failure_domain: b-fd-01
+        vms: [b-cp-01, b-data-01, b-general-01, b-gw-01, b-edge-01]
+      b-host-02:
+        failure_domain: b-fd-02
+        vms: [b-cp-02, b-data-02, b-general-02, b-gw-02, b-edge-02]
+      b-host-03:
+        failure_domain: b-fd-03
+        vms: [b-cp-03, b-data-03]
+    control_planes: [b-cp-01, b-cp-02, b-cp-03]
+    data_workers: [b-data-01, b-data-02, b-data-03]
+    general_workers: [b-general-01, b-general-02]
+    gateways: [b-gw-01, b-gw-02]
+    edges: [b-edge-01, b-edge-02]
+vm_profiles:
+  control-plane: {vcpu: 8, ram_gib: 16, os_disk_gib: 100}
+  data-worker: {vcpu: 16, ram_gib: 64}
+  general-worker: {vcpu: 8, ram_gib: 32}
+strict_anti_affinity:
+  - [a-cp-01, a-cp-02, a-cp-03]
+  - [a-data-01, a-data-02, a-data-03]
+  - [a-general-01, a-general-02]
+  - [a-gw-01, a-gw-02]
+  - [a-edge-01, a-edge-02]
+  - [b-cp-01, b-cp-02, b-cp-03]
+  - [b-data-01, b-data-02, b-data-03]
+  - [b-general-01, b-general-02]
+  - [b-gw-01, b-gw-02]
+  - [b-edge-01, b-edge-02]
+certification:
+  total_physical_hosts: 6
+  physical_hosts_per_site: 3
+  external_load_generators_count_toward_minimum: false
+  temporary_perf_workers_count_toward_minimum: false
+  invalidate_on:
+    - physical_host_bom_change
+    - worker_topology_change
+    - storage_allocation_change
+    - certified_capacity_profile_change
+superseded:
+  physical_hosts_per_site: 5
