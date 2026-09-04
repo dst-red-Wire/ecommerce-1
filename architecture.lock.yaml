@@ -77,13 +77,18 @@ topology_contracts:
   events: docs/architecture/EVENT_CONTRACT_MATRIX.md
   security_zones: docs/architecture/SECURITY_TRUST_ZONES.md
   deployment_dag: docs/architecture/DEPLOYMENT_DAG.md
+  aiops: docs/architecture/AIOPS_TOPOLOGY_V1.md
+  mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
 
 machine_contracts:
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
+  storage_plan: config/infrastructure/storage-plan.yaml
+  deployment_waves: config/infrastructure/deployment-waves.yaml
   service_ownership: config/contracts/service-ownership.yaml
   event_contracts: config/contracts/event-contracts.yaml
+  dependency_map: config/contracts/dependency-map.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
@@ -100,6 +105,7 @@ superseded:
   loki: opensearch-logs
   splunk: wazuh-opensearch
   prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
+  rook-ceph-launch-baseline: no-default-ceph
 
 build_milestones:
   - M0-architecture-sync
