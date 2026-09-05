@@ -162,6 +162,7 @@ module ArchitectureValidator
     events, events_path = required_machine_contract(contracts, "event_contracts")
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
     network, = required_machine_contract(contracts, "network_plan")
+    mgmt, = required_machine_contract(contracts, "mgmt_inventory")
     prod, = required_machine_contract(contracts, "prod_inventory")
 
     service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
@@ -368,6 +369,69 @@ module ArchitectureValidator
         check_equal(errors, "#{section}.#{field}", expected, actual_contract[field])
       end
     end
+
+    mgmt_control_planes = expect_mapping(mgmt["control_planes"], "mgmt-inventory.yaml control_planes")
+    mgmt_workers = expect_mapping(mgmt["workers"], "mgmt-inventory.yaml workers")
+    mgmt_profiles = expect_mapping(mgmt["vm_profiles"], "mgmt-inventory.yaml vm_profiles")
+
+    expected_mgmt_control_planes = %w[cp-01 cp-02 cp-03]
+    expected_mgmt_workers = %w[worker-01 worker-02 worker-03]
+
+    check_equal(errors, "MGMT exact control planes", expected_mgmt_control_planes, mgmt_control_planes.keys.sort)
+    check_equal(errors, "MGMT exact workers", expected_mgmt_workers, mgmt_workers.keys.sort)
+
+    mgmt_nodes = mgmt_control_planes.merge(mgmt_workers)
+
+    mgmt_inventory_ips = []
+    mgmt_nodes.each_value do |node|
+      mgmt_inventory_ips << node.fetch("mgmt_ip")
+      mgmt_inventory_ips << node.fetch("k8s_ip")
+    end
+    mgmt_workers.each_value do |node|
+      mgmt_inventory_ips << node.fetch("storage_ip")
+      mgmt_inventory_ips << node.fetch("backup_ip")
+    end
+
+    duplicates = mgmt_inventory_ips.group_by(&:itself).select { |_ip, values| values.length > 1 }.keys
+    duplicates.each { |ip| errors << "duplicate static IP #{ip} in mgmt-inventory.yaml" }
+
+    mgmt_mgmt_subnet = IPAddr.new(network.dig("vlans", "mgmt", 401, "cidr"))
+    mgmt_k8s_subnet = IPAddr.new(network.dig("vlans", "mgmt", 402, "cidr"))
+    mgmt_storage_subnet = IPAddr.new(network.dig("vlans", "mgmt", 403, "cidr"))
+    mgmt_backup_subnet = IPAddr.new(network.dig("vlans", "mgmt", 405, "cidr"))
+
+    mgmt_nodes.each do |name, node|
+      mgmt_ip = IPAddr.new(node.fetch("mgmt_ip"))
+      k8s_ip = IPAddr.new(node.fetch("k8s_ip"))
+
+      errors << "outside MGMT mgmt subnet for #{name}" unless mgmt_mgmt_subnet.include?(mgmt_ip)
+      errors << "outside MGMT k8s subnet for #{name}" unless mgmt_k8s_subnet.include?(k8s_ip)
+
+      profile = node.fetch("profile")
+      errors << "MGMT unknown profile #{profile} for #{name}" unless mgmt_profiles.key?(profile)
+
+      expected_mgmt_ip = network.dig("static_allocations", "mgmt", 401, name)
+      expected_k8s_ip = network.dig("static_allocations", "mgmt", 402, name)
+
+      check_equal(errors, "MGMT #{name} mgmt_ip", expected_mgmt_ip, node.fetch("mgmt_ip"))
+      check_equal(errors, "MGMT #{name} k8s_ip", expected_k8s_ip, node.fetch("k8s_ip"))
+    end
+
+    mgmt_workers.each do |name, node|
+      storage_ip = IPAddr.new(node.fetch("storage_ip"))
+      backup_ip = IPAddr.new(node.fetch("backup_ip"))
+
+      errors << "outside MGMT storage subnet for #{name}" unless mgmt_storage_subnet.include?(storage_ip)
+      errors << "outside MGMT backup subnet for #{name}" unless mgmt_backup_subnet.include?(backup_ip)
+
+      expected_storage_ip = network.dig("static_allocations", "mgmt", 403, name)
+      expected_backup_ip = network.dig("static_allocations", "mgmt", 405, name)
+
+      check_equal(errors, "MGMT #{name} storage_ip", expected_storage_ip, node.fetch("storage_ip"))
+      check_equal(errors, "MGMT #{name} backup_ip", expected_backup_ip, node.fetch("backup_ip"))
+    end
+
+    check_equal(errors, "MGMT private block", network.dig("address_domains", "mgmt"), mgmt.fetch("private_block"))
 
     network_policy = network.fetch("validation")
     %w[
