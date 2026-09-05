@@ -256,3 +256,4 @@ capabilities:
       - machine-readable performance/resource budgets
       - automated regression gates
       - benchmark and load-test evidence
+      - approved exception records for temporary budget breaches
