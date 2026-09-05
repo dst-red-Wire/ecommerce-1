@@ -1,0 +1,49 @@
+---
+- name: Assert required RKE2 agent variables
+  ansible.builtin.assert:
+    that:
+      - rke2_version | length > 0
+      - rke2_token | length > 0
+      - rke2_server_url | length > 0
+      - k8s_ip | length > 0
+    fail_msg: "rke2_version, rke2_token, rke2_server_url and k8s_ip are required."
+
+- name: Create RKE2 configuration directory
+  ansible.builtin.file:
+    path: "{{ rke2_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Download RKE2 installer
+  ansible.builtin.get_url:
+    url: "{{ rke2_install_script_url }}"
+    dest: /usr/local/src/install-rke2.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install pinned RKE2 agent
+  ansible.builtin.command:
+    cmd: /usr/local/src/install-rke2.sh
+    creates: /usr/local/bin/rke2
+  environment:
+    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
+    INSTALL_RKE2_TYPE: agent
+  notify: Restart rke2-agent
+
+- name: Render RKE2 agent configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ rke2_config_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart rke2-agent
+
+- name: Enable RKE2 agent
+  ansible.builtin.systemd_service:
+    name: rke2-agent
+    enabled: true
