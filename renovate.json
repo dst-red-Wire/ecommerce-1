@@ -1,0 +1,46 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests",
+    ":configMigration",
+    ":dependencyDashboard",
+    ":maintainLockFilesWeekly"
+  ],
+  "automerge": false,
+  "dependencyDashboard": true,
+  "dependencyDashboardTitle": "Dependency maintenance",
+  "enabledManagers": [
+    "ansible-galaxy",
+    "dockerfile",
+    "helmv3",
+    "npm",
+    "terraform"
+  ],
+  "minimumReleaseAge": "3 days",
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rangeStrategy": "pin",
+  "rebaseWhen": "conflicted",
+  "semanticCommits": "enabled",
+  "packageRules": [
+    {
+      "description": "Human review for every major update",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Group non-major Terraform dependencies",
+      "matchManagers": ["terraform"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "terraform non-major dependencies"
+    },
+    {
+      "description": "Group non-major frontend dependencies",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "frontend non-major dependencies"
+    }
+  ]
+}

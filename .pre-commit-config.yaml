@@ -1,0 +1,25 @@
+minimum_pre_commit_version: 4.6.2
+fail_fast: true
+repos:
+  - repo: local
+    hooks:
+      - id: governance
+        name: canonical architecture contracts
+        entry: ./scripts/ci-governance.sh
+        language: system
+        pass_filenames: false
+      - id: automation
+        name: engineering automation contracts
+        entry: ./scripts/ci-automation.sh
+        language: system
+        pass_filenames: false
+      - id: lint
+        name: repository lint
+        entry: ./scripts/ci-lint.sh
+        language: system
+        pass_filenames: false
+      - id: secrets
+        name: repository secret scan
+        entry: ./scripts/ci-security.sh
+        language: system
+        pass_filenames: false

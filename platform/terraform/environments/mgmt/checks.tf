@@ -22,11 +22,24 @@ check "private_block_consistency" {
   }
 }
 
+# The locked MGMT address plan uses IPv4 /24 segments. Terraform has no
+# cidrcontains function, so membership is proven by rebuilding the address from
+# the declared CIDR and the candidate's final octet.
+check "mgmt_node_segments_are_ipv4_24" {
+  assert {
+    condition = alltrue([
+      for segment in ["401", "402", "403", "405"] :
+      endswith(local.mgmt_segments[segment].cidr, "/24")
+    ])
+    error_message = "MGMT node address membership checks require the locked IPv4 /24 segments."
+  }
+}
+
 check "mgmt_ips_inside_segment" {
   assert {
     condition = alltrue([
       for node in values(local.nodes) :
-      cidrcontains(local.mgmt_segments["401"].cidr, node.mgmt_ip)
+      cidrhost(local.mgmt_segments["401"].cidr, tonumber(split(".", node.mgmt_ip)[3])) == node.mgmt_ip
     ])
     error_message = "Every MGMT management IP must belong to VLAN/segment 401."
   }
@@ -36,7 +49,7 @@ check "k8s_ips_inside_segment" {
   assert {
     condition = alltrue([
       for node in values(local.nodes) :
-      cidrcontains(local.mgmt_segments["402"].cidr, node.k8s_ip)
+      cidrhost(local.mgmt_segments["402"].cidr, tonumber(split(".", node.k8s_ip)[3])) == node.k8s_ip
     ])
     error_message = "Every MGMT Kubernetes node IP must belong to VLAN/segment 402."
   }
@@ -46,7 +59,7 @@ check "worker_storage_ips_inside_segment" {
   assert {
     condition = alltrue([
       for node in values(local.workers) :
-      cidrcontains(local.mgmt_segments["403"].cidr, node.storage_ip)
+      cidrhost(local.mgmt_segments["403"].cidr, tonumber(split(".", node.storage_ip)[3])) == node.storage_ip
     ])
     error_message = "Every MGMT worker storage IP must belong to VLAN/segment 403."
   }
@@ -56,7 +69,7 @@ check "worker_backup_ips_inside_segment" {
   assert {
     condition = alltrue([
       for node in values(local.workers) :
-      cidrcontains(local.mgmt_segments["405"].cidr, node.backup_ip)
+      cidrhost(local.mgmt_segments["405"].cidr, tonumber(split(".", node.backup_ip)[3])) == node.backup_ip
     ])
     error_message = "Every MGMT worker backup IP must belong to VLAN/segment 405."
   }

@@ -170,6 +170,10 @@ test-reports/
 !**/tests/fixtures/**
 !**/__snapshots__/**
 
+# Python validator caches
+__pycache__/
+*.py[cod]
+
 # -----------------------------------------------------------------------------
 # k6 / performance
 # -----------------------------------------------------------------------------
@@ -246,6 +250,8 @@ tekton-results/
 pipeline-results/
 ci-results/
 .woodpecker/local/
+.cache/pre-commit/
+.cache/toolchain/
 
 
 # -----------------------------------------------------------------------------
