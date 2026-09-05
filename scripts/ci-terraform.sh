@@ -22,5 +22,22 @@ unformatted=$($tool fmt -check -recursive -diff 2>&1) || {
 
 printf '%s\n' "$tf_files" | sed 's,/[^/]*$,,' | sort -u | while IFS= read -r directory; do
   info "validating Terraform in $directory"
-  (cd "$directory" && "$tool" init -backend=false -input=false >/dev/null && "$tool" validate)
+
+  case "$directory" in
+    ./platform/terraform/modules/*)
+      tmpdir=$(mktemp -d)
+      trap 'rm -rf "$tmpdir"' EXIT INT TERM
+      cp -R "$directory"/. "$tmpdir"/
+      (
+        cd "$tmpdir"
+        "$tool" init -backend=false -input=false >/dev/null
+        "$tool" validate
+      )
+      rm -rf "$tmpdir"
+      trap - EXIT INT TERM
+      ;;
+    *)
+      (cd "$directory" && "$tool" init -backend=false -input=false >/dev/null && "$tool" validate)
+      ;;
+  esac
 done
