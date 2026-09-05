@@ -1,0 +1,24 @@
+---
+- name: Assert supported operating system
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == "Rocky"
+      - ansible_facts.distribution_major_version == "9"
+    fail_msg: "MGMT nodes must run Rocky Linux 9.x."
+
+- name: Install baseline packages
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - ca-certificates
+      - chrony
+      - jq
+      - tar
+      - unzip
+    state: present
+
+- name: Enable and start chronyd
+  ansible.builtin.systemd_service:
+    name: chronyd
+    enabled: true
+    state: started

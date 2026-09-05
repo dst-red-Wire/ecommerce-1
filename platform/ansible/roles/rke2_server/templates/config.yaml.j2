@@ -1,0 +1,12 @@
+token: "{{ rke2_token }}"
+node-ip: "{{ k8s_ip }}"
+advertise-address: "{{ k8s_ip }}"
+tls-san:
+  - "{{ k8s_ip }}"
+write-kubeconfig-mode: "0640"
+disable:
+  - rke2-ingress-nginx
+cni: none
+{% if rke2_server_url | length > 0 %}
+server: "{{ rke2_server_url }}"
+{% endif %}

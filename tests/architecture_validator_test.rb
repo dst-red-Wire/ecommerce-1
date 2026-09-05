@@ -107,6 +107,40 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_mgmt_inventory_failures
+    mutations = {
+      "duplicate static IP" => lambda { |root|
+        mutate_yaml(root, "config/infrastructure/mgmt-inventory.yaml") do |data|
+          data["workers"]["worker-01"]["mgmt_ip"] = data["control_planes"]["cp-01"]["mgmt_ip"]
+        end
+      },
+      "outside" => lambda { |root|
+        mutate_yaml(root, "config/infrastructure/mgmt-inventory.yaml") do |data|
+          data["control_planes"]["cp-01"]["mgmt_ip"] = "10.243.2.61"
+        end
+      },
+      "MGMT unknown profile" => lambda { |root|
+        mutate_yaml(root, "config/infrastructure/mgmt-inventory.yaml") do |data|
+          data["workers"]["worker-01"]["profile"] = "unknown-profile"
+        end
+      },
+      "MGMT exact workers" => lambda { |root|
+        mutate_yaml(root, "config/infrastructure/mgmt-inventory.yaml") do |data|
+          data["workers"].delete("worker-03")
+        end
+      }
+    }
+
+    mutations.each do |message, mutation|
+      with_contract_copy do |root|
+        mutation.call(root)
+        errors = ArchitectureValidator.validate(root)
+        refute_empty errors, message
+        assert errors.any? { |error| error.include?(message) }, message
+      end
+    end
+  end
+
   def test_rejects_network_and_broadcast_static_addresses
     {
       "network address 10.240.1.0" => "10.240.1.0",
