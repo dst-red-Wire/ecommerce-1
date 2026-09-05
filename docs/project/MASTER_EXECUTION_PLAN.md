@@ -51,6 +51,11 @@ continue to use the statuses defined above. The machine-readable source is
 12. automated dependency maintenance with deterministic review gates;
 13. evidence/compliance pipeline for auditable releases;
 14. machine-readable project capability catalog.
+15. bounded AI context and deterministic Codex/Work handoffs;
+16. API/event contract governance and breaking-change detection;
+17. incremental affected-target build/test acceleration;
+18. drift detection with reconciliation owned by existing control planes;
+19. machine-readable performance and resource budgets.
 
 Each capability must be implemented in the milestone(s) assigned by the
 machine contract and must produce the evidence declared there.

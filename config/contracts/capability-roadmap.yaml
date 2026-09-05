@@ -181,3 +181,71 @@ capabilities:
     evidence:
       - capability catalog
       - validation against milestone/evidence state
+
+  - id: C15
+    name: ai-context-and-handoff-optimization
+    title: AI context and handoff optimization
+    primary_milestones: [M1, M2, M3, M4, M5, M6, M7, M8, M9]
+    requirement: >-
+      Produce deterministic, bounded and secret-safe handoff context for Codex
+      and Work, including the exact reviewed SHA, affected files and contracts,
+      relevant gate failures and concise machine-readable evidence so AI agents
+      do not repeatedly rediscover repository state or consume unnecessary logs.
+    evidence:
+      - deterministic handoff entrypoint
+      - bounded text and machine-readable handoff output
+      - secret-exclusion and context-budget tests
+
+  - id: C16
+    name: api-and-event-contract-governance
+    title: API and event contract governance
+    primary_milestones: [M2, M5, M6, M7]
+    requirement: >-
+      Govern OpenAPI, AsyncAPI, Protobuf/gRPC and event schemas with validation,
+      compatibility and breaking-change detection, generated mocks or clients
+      where appropriate, and contract tests that prevent incompatible service
+      changes from reaching integration environments.
+    evidence:
+      - versioned API and event schemas
+      - compatibility and breaking-change gates
+      - generated artifact validation and contract-test evidence
+
+  - id: C17
+    name: incremental-build-and-test-acceleration
+    title: Incremental build and test acceleration
+    primary_milestones: [M1, M2, M5, M6, M7]
+    requirement: >-
+      Use repository dependency and change-impact information to run only the
+      necessary builds, validations and tests where correctness permits, while
+      retaining explicit full-verification gates for qualification and release.
+      Include deterministic affected-target calculation, caching, parallelism
+      and fail-fast execution where they reduce feedback time safely.
+    evidence:
+      - affected-target calculation
+      - incremental local and CI entrypoints
+      - cache/parallel execution evidence
+      - equivalence tests against required full gates
+
+  - id: C18
+    name: drift-detection-and-reconciliation
+    title: Drift detection and reconciliation
+    primary_milestones: [M3, M4, M7, M8, M9]
+    requirement: >-
+      Detect and report drift between declared and observed infrastructure,
+      host configuration, Kubernetes/GitOps state, toolchain versions,
+      policies, images and other controlled runtime state without introducing
+      a competing mutation control plane. Reconciliation remains owned by the
+      existing Terraform/OpenTofu, Ansible and Fleet authorities.
+    evidence:
+      - deterministic drift report
+      - expected-versus-observed state checks
+      - reconciliation ownership tests
+      - exercised drift detection scenarios
+
+  - id: C19
+    name: performance-and-resource-budgets
+    title: Performance and resource budgets
+    primary_milestones: [M2, M5, M6, M7, M8, M9]
+    requirement: >-
+      Define machine-readable performance and resource budgets for services,
+      frontends and deployable artifacts, including latency, throughput,
