@@ -198,6 +198,22 @@ Avant toute PR :
 8. exécuter `make ci` ;
 9. documenter rollback et preuve attendue.
 
+### Automatisation locale
+
+Le dépôt reste l'autorité de configuration de la toolchain :
+
+```text
+make doctor          # état observé, sans mutation
+make bootstrap-check # vérification stricte, sans mutation
+make bootstrap       # installe uniquement les CLI Python épinglés via pipx
+make ci              # gates portables et déterministes
+```
+
+Les binaires autonomes doivent provenir des releases officielles avec contrôle
+du SHA-256 amont. Le bootstrap ne les télécharge donc pas tant que leur checksum
+n'est pas versionné. Toute mutation cloud reste soumise au gate humain défini
+dans `config/contracts/review-policy.yaml`.
+
 ## Bootstrap maître
 
 La création initiale du monorepo est gouvernée par :

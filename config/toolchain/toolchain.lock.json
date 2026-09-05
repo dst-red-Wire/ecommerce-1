@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "status": "exact",
+  "platform": {
+    "host": "windows-11",
+    "guest": "ubuntu-24.04-wsl2",
+    "wsl_networking_mode": "nat"
+  },
+  "policy": {
+    "binary_install": "official-release-with-upstream-sha256",
+    "python_cli_install": "pipx",
+    "container_images": "immutable-digest",
+    "forbid_latest": true,
+    "cloud_mutation_requires_human_gate": true
+  },
+  "tools": [
+    {"id": "git", "command": "git", "version": null, "scope": "ci", "required": true, "installer": "system"},
+    {"id": "ruby", "command": "ruby", "version": null, "scope": "ci", "required": true, "installer": "system"},
+    {"id": "shellcheck", "command": "shellcheck", "version": null, "scope": "ci", "required": true, "installer": "system"},
+    {"id": "gitleaks", "command": "gitleaks", "version": "8.30.1", "scope": "ci", "required": true, "installer": "verified-release"},
+    {"id": "terraform", "command": "terraform", "version": "1.15.5", "scope": "ci", "required": true, "installer": "verified-release"},
+    {"id": "ansible-core", "command": "ansible", "version": "2.16.3", "scope": "ci", "required": true, "installer": "pipx", "package": "ansible-core==2.16.3"},
+    {"id": "ansible-lint", "command": "ansible-lint", "version": "6.17.2", "scope": "ci", "required": true, "installer": "pipx", "package": "ansible-lint==6.17.2"},
+    {"id": "pre-commit", "command": "pre-commit", "version": "4.6.2", "scope": "local", "required": true, "installer": "pipx", "package": "pre-commit==4.6.2"},
+    {"id": "molecule", "command": "molecule", "version": "26.8.0", "scope": "local", "required": true, "installer": "pipx", "package": "molecule==26.8.0"},
+    {"id": "ansible-runner", "command": "ansible-runner", "version": "2.4.3", "scope": "local", "required": true, "installer": "pipx", "package": "ansible-runner==2.4.3"},
+    {"id": "ansible-navigator", "command": "ansible-navigator", "version": "26.8.0", "scope": "local", "required": true, "installer": "pipx", "package": "ansible-navigator==26.8.0"},
+    {"id": "ansible-builder", "command": "ansible-builder", "version": "3.1.1", "scope": "local", "required": true, "installer": "pipx", "package": "ansible-builder==3.1.1"},
+    {"id": "tflint", "command": "tflint", "version": "0.64.0", "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "trivy", "command": "trivy", "version": "0.74.0", "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "checkov", "command": "checkov", "version": "3.3.16", "scope": "local", "required": true, "installer": "pipx", "package": "checkov==3.3.16"},
+    {"id": "semgrep", "command": "semgrep", "version": "1.176.1", "scope": "local", "required": true, "installer": "pipx", "package": "semgrep==1.176.1"},
+    {"id": "ggshield", "command": "ggshield", "version": "1.54.0", "scope": "local", "required": true, "installer": "pipx", "package": "ggshield==1.54.0"},
+    {"id": "kubectl", "command": "kubectl", "version": "1.33.4", "version_args": ["version", "--client=true", "--output=yaml"], "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "helm", "command": "helm", "version": "3.18.4", "version_args": ["version", "--short"], "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "kustomize", "command": "kustomize", "version": "5.8.1", "version_args": ["version"], "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "kubeconform", "command": "kubeconform", "version": "0.8.0", "version_args": ["-v"], "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "opa", "command": "opa", "version": "1.17.0", "version_args": ["version"], "scope": "local", "required": true, "installer": "verified-release"},
+    {"id": "conftest", "command": "conftest", "version": "0.68.2", "scope": "local", "required": true, "installer": "verified-release"}
+  ],
+  "pipx_injections": [
+    {"venv": "molecule", "package": "molecule-plugins[docker]==26.7.15"},
+    {"venv": "molecule", "package": "pytest-testinfra==10.2.2"}
+  ]
+}
