@@ -395,6 +395,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform ci] => "github-actions",
       %w[platform progressive_delivery] => "flagger",
       %w[platform registry] => "docker-hub",
+      %w[platform runtime_security] => "falco",
       %w[stateful object_storage] => "minio-community",
       %w[observability log_shipper] => "vector",
       %w[observability log_pipeline] => "logstash",

@@ -40,6 +40,7 @@ platform:
   external_secrets: eso
   workload_identity: spire
   iam: keycloak
+  runtime_security: tetragon
 
 management_plane:
   provider: hetzner-cloud
