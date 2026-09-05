@@ -40,6 +40,22 @@ platform:
   external_secrets: eso
   workload_identity: spire
   iam: keycloak
+  runtime_security: tetragon
+
+management_plane:
+  provider: hetzner-cloud
+  lifecycle: persistent
+  private_block: 10.243.0.0/16
+  kubernetes: rke2
+  forge: gitea
+  ci: tekton
+  registry: harbor
+  gitops: rancher-fleet
+  woodpecker_runtime: false
+  bootstrap:
+    terraform_opentofu: true
+    ansible: true
+    requires_human_apply_gate: true
 
 stateful:
   database: cloudnativepg-postgresql
@@ -81,6 +97,8 @@ topology_contracts:
   mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
 
 machine_contracts:
+  review_policy: config/contracts/review-policy.yaml
+  mgmt_inventory: config/infrastructure/mgmt-inventory.yaml
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
@@ -97,6 +115,19 @@ prod_certified_topology:
   workers_per_site: 5
   data_workers_per_site: 3
   general_workers_per_site: 2
+  sites:
+    prod-a:
+      private_block: 10.241.0.0/16
+      physical_hosts:
+        - a-host-01
+        - a-host-02
+        - a-host-03
+    prod-b:
+      private_block: 10.242.0.0/16
+      physical_hosts:
+        - b-host-01
+        - b-host-02
+        - b-host-03
 
 superseded:
   fluxcd: rancher-fleet

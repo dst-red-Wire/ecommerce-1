@@ -2,7 +2,7 @@
 
 Status: `EXACT CONFIG CONTRACT`
 
-This contract removes address-allocation ambiguity for IaC. Public provider-assigned addresses are injected at runtime; private ranges below are the default project allocation and may change only through versioned configuration change, not agent guesswork.
+This contract explains the address-allocation invariants consumed by IaC. `config/infrastructure/network-plan.yaml` is the sole machine-canonical source for every CIDR, fixed private address and dynamic pool. Values shown here are a review-oriented presentation of that YAML and must not be edited independently. Public provider-assigned addresses are injected at runtime and are never recorded as address values in either contract.
 
 ## Address domains
 
@@ -37,67 +37,17 @@ Within each `/24`:
 
 DHCP, if used for bootstrap, must not allocate from static ranges unless the allocation is reservation-backed and exported to the same inventory source.
 
-## PREPROD static allocations
+## PREPROD deterministic allocations
 
-### VLAN 401 MGMT
+The complete fixed assignments are held under `static_allocations.preprod` in `config/infrastructure/network-plan.yaml`, grouped by VLAN. The allocation set covers:
 
-- `pve-01`: `10.240.1.11`
-- `pve-02`: `10.240.1.12`
-- `pve-03`: `10.240.1.13`
-- `edge-01`: `10.240.1.41`
-- `edge-02`: `10.240.1.42`
-- `dns-01`: `10.240.1.43`
-- `dns-02`: `10.240.1.44`
-- `squid-01`: `10.240.1.45`
-- `squid-02`: `10.240.1.46`
-- `gw-01`: `10.240.1.47`
-- `gw-02`: `10.240.1.48`
-- `cp-01`: `10.240.1.61`
-- `cp-02`: `10.240.1.62`
-- `cp-03`: `10.240.1.63`
-- `worker-01`: `10.240.1.71`
-- `worker-02`: `10.240.1.72`
-- `worker-03`: `10.240.1.73`
+- VLAN 401: the three Proxmox hosts plus edge, DNS, Squid, gateway, control-plane and worker VMs;
+- VLAN 402: control-plane and worker node addresses;
+- VLANs 403 and 404: worker storage and replication addresses;
+- VLAN 405: worker, Squid and gateway backup addresses;
+- VLAN 406: edge, DNS and gateway DMZ addresses.
 
-### VLAN 402 K8S-NODES
-
-- `cp-01`: `10.240.2.61`
-- `cp-02`: `10.240.2.62`
-- `cp-03`: `10.240.2.63`
-- `worker-01`: `10.240.2.71`
-- `worker-02`: `10.240.2.72`
-- `worker-03`: `10.240.2.73`
-- PERF workers: allocate sequentially from `10.240.2.200/29` equivalent host range, beginning `.201`.
-
-### VLAN 403 STORAGE
-
-- `worker-01`: `10.240.3.71`
-- `worker-02`: `10.240.3.72`
-- `worker-03`: `10.240.3.73`
-
-### VLAN 404 REPLICATION
-
-- `worker-01`: `10.240.4.71`
-- `worker-02`: `10.240.4.72`
-- `worker-03`: `10.240.4.73`
-- stateful services use node-local transport and Kubernetes/service identities; do not assign ad-hoc fixed workload IPs unless the owning operator requires them.
-
-### VLAN 405 BACKUP
-
-- workers: `.71-.73`
-- `squid-01`: `.45`
-- `squid-02`: `.46`
-- `gw-01`: `.47`
-- `gw-02`: `.48`
-
-### VLAN 406 EDGE-DMZ
-
-- `edge-01`: `10.240.6.41`
-- `edge-02`: `10.240.6.42`
-- `dns-01`: `10.240.6.43`
-- `dns-02`: `10.240.6.44`
-- `gw-01`: `10.240.6.47`
-- `gw-02`: `10.240.6.48`
+The gated PERF-worker range is `dynamic_pools.preprod.402.perf-workers` in that same machine contract. IaC and inventory generation must read these mappings directly; this document intentionally does not maintain a second list of address literals.
 
 ## PROD private ranges
 

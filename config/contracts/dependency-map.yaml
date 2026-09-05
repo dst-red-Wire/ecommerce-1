@@ -3,39 +3,38 @@ status: exact
 services:
   catalog:
     sync: [product, pricing, inventory]
-    events_in: [ProductCreated.v1, ProductUpdated.v1, SKUUpdated.v1, StockAdjusted.v1, ReviewPublished.v1]
+    events_in: [ProductCreated.v1, ProductUpdated.v1, SKUUpdated.v1, StockAdjusted.v1, OutOfStock.v1, ReviewPublished.v1]
   product:
     sync: []
     events_in: []
   inventory:
     sync: []
-    events_in: [OrderCreated.v1, ReturnReceived.v1]
+    events_in: [SKUUpdated.v1, OrderCreated.v1, OrderCancelled.v1, ReturnReceived.v1]
   cart:
-    sync: [product, pricing, inventory]
+    sync: [pricing, inventory, product]
     events_in: [PriceRuleChanged.v1]
   pricing:
     sync: [product]
-    events_in: [ProductUpdated.v1, SKUUpdated.v1]
+    events_in: [TaxRuleChanged.v1]
   tax:
     sync: []
     events_in: []
   order:
     sync: [pricing, tax, inventory, fraud-risk, payment, shipping]
-    events_in: [StockReserved.v1, StockReleased.v1, FraudApproved.v1, FraudRejected.v1, FraudReviewRequired.v1, PaymentAuthorized.v1, PaymentFailed.v1, PaymentCaptured.v1, Delivered.v1]
+    events_in: [PriceRuleChanged.v1, TaxRuleChanged.v1, StockReserved.v1, StockReleased.v1, FraudApproved.v1, FraudRejected.v1, FraudReviewRequired.v1, PaymentAuthorized.v1, PaymentFailed.v1, PaymentCaptured.v1, DeliveryException.v1, Delivered.v1]
   payment:
     sync_external: [stripe]
     sync: []
-    events_in: [OrderCancelled.v1, RefundRequested.v1]
+    events_in: [OrderCancelled.v1, ReturnReceived.v1, RefundRequested.v1]
   shipping:
     sync: [order, inventory]
     sync_external: [carrier-adapters]
     events_in: [OrderConfirmed.v1, ReturnApproved.v1]
   tracking:
     sync: [shipping]
-    sync_external: [carrier-tracking-feeds]
     events_in: [ShipmentCreated.v1, ShipmentDispatched.v1]
   returns:
-    sync: [order, shipping, inventory, payment]
+    sync: [order, shipping]
     events_in: [Delivered.v1, RefundCompleted.v1]
   billing:
     sync: [order, payment]
@@ -46,7 +45,7 @@ services:
     events_in: [OrderCreated.v1]
   search:
     sync: []
-    events_in: [ProductCreated.v1, ProductUpdated.v1, SKUUpdated.v1, CatalogPublished.v1, StockAdjusted.v1, ReviewPublished.v1]
+    events_in: [ProductCreated.v1, ProductUpdated.v1, SKUUpdated.v1, CatalogPublished.v1, CatalogEntryChanged.v1, StockAdjusted.v1, OutOfStock.v1, ReviewPublished.v1]
   review:
     sync: [product, user-profile]
     events_in: [ProductCreated.v1]
@@ -56,7 +55,7 @@ services:
     events_in: []
   notification:
     sync: []
-    events_in: [OrderCreated.v1, OrderConfirmed.v1, OrderCancelled.v1, PaymentFailed.v1, PaymentCaptured.v1, FraudRejected.v1, FraudReviewRequired.v1, ShipmentCreated.v1, ShipmentDispatched.v1, TrackingUpdated.v1, Delivered.v1, ReturnRequested.v1, ReturnApproved.v1, ReturnReceived.v1, RefundCompleted.v1, InvoiceIssued.v1, CreditNoteIssued.v1]
+    events_in: [OutOfStock.v1, CartExpired.v1, OrderCreated.v1, OrderConfirmed.v1, OrderCancelled.v1, OrderFailed.v1, PaymentFailed.v1, PaymentCaptured.v1, FraudRejected.v1, FraudReviewRequired.v1, ShipmentCreated.v1, ShipmentDispatched.v1, DeliveryException.v1, TrackingUpdated.v1, Delivered.v1, ReturnRequested.v1, ReturnApproved.v1, ReturnReceived.v1, RefundCompleted.v1, InvoiceIssued.v1, CreditNoteIssued.v1, EInvoiceSubmitted.v1, ReviewRejected.v1, ProfileUpdated.v1, PrivacyRequestRecorded.v1]
 rules:
   no_cross_database_reads: true
   sync_protocol: grpc

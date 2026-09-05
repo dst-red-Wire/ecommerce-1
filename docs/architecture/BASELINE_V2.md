@@ -46,6 +46,19 @@ Two Next.js frontends: `storefront` and `admin`.
 
 Woodpecker is tolerated only as a temporary repository bootstrap CI. It must not duplicate the application/platform CI responsibilities owned by Tekton.
 
+## 4.1 Persistent management plane
+
+- Provider: Hetzner Cloud.
+- Lifecycle: persistent and independent from PREPROD JIT.
+- Private address domain: `10.243.0.0/16`.
+- Kubernetes: RKE2.
+- Forge: Gitea.
+- CI: Tekton from the first persistent MGMT cluster.
+- OCI registry: Harbor.
+- GitOps management: Rancher + Fleet.
+- Initial infrastructure bootstrap: Terraform/OpenTofu + Ansible with a human gate before state-changing apply.
+- Woodpecker is not deployed on the persistent MGMT plane. The repository Woodpecker workflow remains temporary bootstrap/qualification material only until Tekton reproduces its gates.
+
 ## 5. Stateful baseline
 
 - PostgreSQL: CloudNativePG, domain-owned databases, single-writer/home_site model for multi-site writes.
