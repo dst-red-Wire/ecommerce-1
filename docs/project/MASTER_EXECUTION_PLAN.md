@@ -29,6 +29,32 @@ Only these statuses are allowed:
 
 `IMPLEMENTED` or `DEPLOYED` never implies `PROVEN`.
 
+### Mandatory cross-cutting engineering capabilities
+
+The following capabilities are mandatory implementation requirements across
+M0-M9. They do not create a parallel status vocabulary; readiness and proof
+continue to use the statuses defined above. The machine-readable source is
+`config/contracts/capability-roadmap.yaml`.
+
+1. toolchain lock and reproducible bootstrap;
+2. golden paths and validated templates/generators;
+3. policy-as-code with fail-closed deterministic gates;
+4. fast local quality gates before Codex/CI;
+5. automated testing pyramid from infrastructure to E2E;
+6. structured security engineering: threat models, DAST, SAST, SCA, SBOM,
+   secrets, CVE/CWE/CVSS, signing and provenance;
+7. versioned operational runbooks with exercised recovery/rollback paths;
+8. observability and SLI/SLO definitions by design;
+9. automated service/platform maturity scorecards;
+10. Architecture Decision Records with explicit supersession;
+11. reproducible workstation/WSL development environment;
+12. automated dependency maintenance with deterministic review gates;
+13. evidence/compliance pipeline for auditable releases;
+14. machine-readable project capability catalog.
+
+Each capability must be implemented in the milestone(s) assigned by the
+machine contract and must produce the evidence declared there.
+
 ## 3. Milestone program
 
 | Milestone | Primary owner | Objective | Entry gate | Exit gate | Current status |

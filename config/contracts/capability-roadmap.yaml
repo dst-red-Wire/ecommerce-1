@@ -1,0 +1,183 @@
+version: 1
+policy: mandatory
+
+# Cross-cutting engineering capabilities that must be implemented as part of
+# the M0-M9 delivery program. These capabilities do not introduce a parallel
+# status vocabulary: progress is reported through the milestone statuses in
+# docs/project/MASTER_EXECUTION_PLAN.md.
+capabilities:
+  - id: C01
+    name: toolchain-lock-and-bootstrap
+    title: Toolchain lock and reproducible bootstrap
+    primary_milestones: [M1]
+    requirement: >-
+      Maintain one machine-readable lock for required engineering and security
+      tools, including exact versions and checksums where applicable, plus a
+      deterministic bootstrap and doctor/verification entrypoint.
+    evidence:
+      - machine-readable toolchain lock
+      - reproducible bootstrap
+      - deterministic doctor/verification output
+
+  - id: C02
+    name: golden-paths-and-templates
+    title: Golden paths and project templates
+    primary_milestones: [M1, M2]
+    requirement: >-
+      Provide validated templates/generators for recurring project primitives
+      such as services, APIs, event consumers, migrations, Kubernetes/Fleet
+      resources, Tekton pipelines and tests so implementations do not restart
+      from zero.
+    evidence:
+      - versioned templates or generators
+      - validation tests for generated output
+
+  - id: C03
+    name: policy-as-code
+    title: Policy as code
+    primary_milestones: [M4, M7]
+    requirement: >-
+      Encode enforceable repository, IaC, Kubernetes and supply-chain rules in
+      policy engines and deterministic gates, including immutable images,
+      workload hardening, required resources and approved trust boundaries.
+    evidence:
+      - policy sources
+      - negative tests
+      - fail-closed CI or admission evidence
+
+  - id: C04
+    name: fast-local-quality-gates
+    title: Fast local quality gates
+    primary_milestones: [M1]
+    requirement: >-
+      Provide fast local pre-commit/Make gates for formatting, linting, secret
+      scanning, Terraform, Ansible, Kubernetes, lightweight SAST and targeted
+      tests before work is delegated to Codex or CI.
+    evidence:
+      - local gate entrypoint
+      - pre-commit integration where appropriate
+      - deterministic PASS/FAIL output
+
+  - id: C05
+    name: automated-testing-pyramid
+    title: Automated testing pyramid
+    primary_milestones: [M2, M7]
+    requirement: >-
+      Implement layered automated tests for infrastructure, configuration,
+      contracts, services and user flows, including Molecule/Testinfra,
+      Terraform tests, contract tests, unit/integration tests, BDD and E2E.
+    evidence:
+      - test suites by layer
+      - CI execution evidence
+      - negative-path coverage for critical contracts
+
+  - id: C06
+    name: structured-security-engineering
+    title: Structured security engineering
+    primary_milestones: [M4, M7]
+    requirement: >-
+      Integrate threat modelling, DAST, SAST, SCA, SBOM, secret scanning,
+      CVE/CWE/CVSS handling, signing and provenance as a coherent DevSecOps
+      pipeline rather than isolated manual tools.
+    evidence:
+      - threat models
+      - scanner outputs
+      - SBOM and vulnerability evidence
+      - signature/provenance evidence
+
+  - id: C07
+    name: operational-runbooks
+    title: Versioned operational runbooks
+    primary_milestones: [M3, M4, M7]
+    requirement: >-
+      Maintain versioned runbooks for bootstrap, failure recovery, restore,
+      rollback, certificate/secret rotation and critical platform incidents.
+    evidence:
+      - reviewed runbooks
+      - exercised recovery/rollback evidence
+
+  - id: C08
+    name: observability-and-slos
+    title: Observability and SLOs by design
+    primary_milestones: [M2, M4, M7]
+    requirement: >-
+      Define metrics, logs, traces, alerts, SLI/SLOs and operational acceptance
+      criteria as part of service/platform construction, not as post-build work.
+    evidence:
+      - telemetry definitions
+      - SLI/SLO definitions
+      - alert and dashboard validation
+
+  - id: C09
+    name: service-maturity-scorecards
+    title: Service maturity scorecards
+    primary_milestones: [M6, M7]
+    requirement: >-
+      Produce automated maturity scorecards for service ownership, tests,
+      contracts, SBOM, vulnerabilities, signing, SLOs, documentation,
+      runbooks and Kubernetes readiness.
+    evidence:
+      - machine-readable scorecard rules
+      - generated scorecards
+
+  - id: C10
+    name: architecture-decision-records
+    title: Architecture Decision Records
+    primary_milestones: [M0, M1, M2, M3, M4, M5, M6, M7, M8, M9]
+    requirement: >-
+      Record durable structural decisions and supersessions as ADRs explaining
+      why a decision exists, while machine contracts remain the executable
+      source of truth for what is currently valid.
+    evidence:
+      - ADR index
+      - accepted/superseded decision records
+
+  - id: C11
+    name: reproducible-development-environment
+    title: Reproducible development environment
+    primary_milestones: [M1]
+    requirement: >-
+      Provide a deterministic workstation/WSL bootstrap, doctor command and
+      version-pinned local tooling so a new environment can be recreated
+      without mechanical setup.
+    evidence:
+      - bootstrap entrypoint
+      - doctor entrypoint
+      - clean-environment reproduction evidence
+
+  - id: C12
+    name: dependency-automation
+    title: Automated dependency maintenance
+    primary_milestones: [M1, M2, M3, M4, M5, M6, M7, M8, M9]
+    requirement: >-
+      Automate dependency/update discovery for application dependencies,
+      Terraform providers, images, charts and engineering tools while keeping
+      sensitive upgrades behind deterministic tests and human review.
+    evidence:
+      - dependency automation configuration
+      - tested update workflow
+
+  - id: C13
+    name: evidence-and-compliance-pipeline
+    title: Evidence and compliance pipeline
+    primary_milestones: [M4, M7, M8, M9]
+    requirement: >-
+      Capture and index release evidence such as tests, SAST/SCA/DAST results,
+      SBOMs, plans, provenance, signatures, reviewed SHAs and qualification
+      outputs so releases are auditable and reproducible.
+    evidence:
+      - evidence manifest/index
+      - immutable release evidence references
+
+  - id: C14
+    name: capability-catalog
+    title: Project capability catalog
+    primary_milestones: [M1, M7]
+    requirement: >-
+      Maintain a machine-readable catalog that distinguishes capabilities that
+      are required, deployed and proven through the program's existing
+      milestone/evidence model, preventing planned work from being mistaken for
+      working runtime capability.
+    evidence:
+      - capability catalog
+      - validation against milestone/evidence state
