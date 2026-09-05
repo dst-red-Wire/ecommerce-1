@@ -1,0 +1,31 @@
+version: 1
+status: exact
+
+pull_request_review:
+  forge: gitea
+  ci: tekton
+
+  deterministic_gate:
+    authority: true
+    required_for_merge: true
+    binds_exact_commit_sha: true
+    fail_closed: true
+
+  ai_reviewer:
+    enabled: true
+    advisory_only: true
+    may_comment: true
+    may_request_changes: true
+    may_approve: false
+    may_merge: false
+    may_sign: false
+    may_promote: false
+    may_push: false
+
+  human_gate:
+    required_for:
+      - architecture_changes
+      - infrastructure_apply
+      - destructive_changes
+      - state_migrations
+      - dns_network_iam_secret_changes
