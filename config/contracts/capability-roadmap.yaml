@@ -249,3 +249,10 @@ capabilities:
     requirement: >-
       Define machine-readable performance and resource budgets for services,
       frontends and deployable artifacts, including latency, throughput,
+      CPU/memory, startup time, image size, frontend bundle/Web Vitals and
+      regression thresholds where applicable, with deterministic gates against
+      material regressions.
+    evidence:
+      - machine-readable performance/resource budgets
+      - automated regression gates
+      - benchmark and load-test evidence
