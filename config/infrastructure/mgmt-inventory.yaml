@@ -1,0 +1,63 @@
+version: 1
+status: exact
+site: mgmt
+provider: hetzner-cloud
+lifecycle:
+  mode: persistent
+
+private_block: 10.243.0.0/16
+
+vm_profiles:
+  rke2-cp:
+    vcpu: 4
+    ram_gib: 8
+    os_disk_gib: 80
+  rke2-worker:
+    vcpu: 8
+    ram_gib: 32
+    os_disk_gib: 160
+
+control_planes:
+  cp-01:
+    profile: rke2-cp
+    mgmt_ip: 10.243.1.61
+    k8s_ip: 10.243.2.61
+  cp-02:
+    profile: rke2-cp
+    mgmt_ip: 10.243.1.62
+    k8s_ip: 10.243.2.62
+  cp-03:
+    profile: rke2-cp
+    mgmt_ip: 10.243.1.63
+    k8s_ip: 10.243.2.63
+
+workers:
+  worker-01:
+    profile: rke2-worker
+    mgmt_ip: 10.243.1.71
+    k8s_ip: 10.243.2.71
+    storage_ip: 10.243.3.71
+    backup_ip: 10.243.5.71
+  worker-02:
+    profile: rke2-worker
+    mgmt_ip: 10.243.1.72
+    k8s_ip: 10.243.2.72
+    storage_ip: 10.243.3.72
+    backup_ip: 10.243.5.72
+  worker-03:
+    profile: rke2-worker
+    mgmt_ip: 10.243.1.73
+    k8s_ip: 10.243.2.73
+    storage_ip: 10.243.3.73
+    backup_ip: 10.243.5.73
+
+platform_services:
+  forge: gitea
+  ci: tekton
+  registry: harbor
+  gitops: rancher-fleet
+
+bootstrap:
+  infrastructure: terraform-opentofu
+  configuration: ansible
+  human_apply_gate: true

@@ -34,11 +34,42 @@ vlans:
     404: {name: replication, cidr: 10.242.4.0/24}
     405: {name: backup, cidr: 10.242.5.0/24}
     406: {name: edge-dmz, cidr: 10.242.6.0/24}
+  mgmt:
+    401: {name: mgmt, cidr: 10.243.1.0/24}
+    402: {name: k8s-nodes, cidr: 10.243.2.0/24}
+    403: {name: storage, cidr: 10.243.3.0/24}
+    404: {name: replication, cidr: 10.243.4.0/24}
+    405: {name: backup, cidr: 10.243.5.0/24}
+    406: {name: edge-dmz, cidr: 10.243.6.0/24}
 kubernetes:
   preprod: {pod_cidr: 10.250.0.0/16, service_cidr: 10.251.0.0/16}
   prod-a: {pod_cidr: 10.252.0.0/16, service_cidr: 10.253.0.0/16}
   prod-b: {pod_cidr: 10.254.0.0/16, service_cidr: 10.255.0.0/16}
+  mgmt: {pod_cidr: 10.244.0.0/16, service_cidr: 10.245.0.0/16}
 static_allocations:
+  mgmt:
+    401:
+      cp-01: 10.243.1.61
+      cp-02: 10.243.1.62
+      cp-03: 10.243.1.63
+      worker-01: 10.243.1.71
+      worker-02: 10.243.1.72
+      worker-03: 10.243.1.73
+    402:
+      cp-01: 10.243.2.61
+      cp-02: 10.243.2.62
+      cp-03: 10.243.2.63
+      worker-01: 10.243.2.71
+      worker-02: 10.243.2.72
+      worker-03: 10.243.2.73
+    403:
+      worker-01: 10.243.3.71
+      worker-02: 10.243.3.72
+      worker-03: 10.243.3.73
+    405:
+      worker-01: 10.243.5.71
+      worker-02: 10.243.5.72
+      worker-03: 10.243.5.73
   preprod:
     401:
       pve-01: 10.240.1.11

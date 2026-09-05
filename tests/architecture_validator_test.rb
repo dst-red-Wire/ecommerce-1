@@ -8,19 +8,20 @@ require_relative "../scripts/validate-architecture"
 
 class ArchitectureValidatorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  CONTRACT_FILES = %w[
+  BASE_CONTRACT_FILES = %w[
     architecture.lock.yaml
     config/contracts/dependency-map.yaml
     config/contracts/event-contracts.yaml
     config/contracts/service-ownership.yaml
-    config/infrastructure/deployment-waves.yaml
-    config/infrastructure/network-plan.yaml
-    config/infrastructure/preprod-inventory.yaml
-    config/infrastructure/prod-inventory.yaml
-    config/infrastructure/storage-plan.yaml
     docs/architecture/EVENT_CONTRACT_MATRIX.md
     docs/architecture/SERVICE_OWNERSHIP_MATRIX.md
   ].freeze
+
+  def contract_files(root = ROOT)
+    lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
+    machine_contracts = lock.fetch("machine_contracts").values
+    (BASE_CONTRACT_FILES + machine_contracts).uniq
+  end
 
   def test_repository_contracts_are_consistent
     assert_empty ArchitectureValidator.validate(ROOT)
@@ -577,7 +578,7 @@ class ArchitectureValidatorTest < Minitest::Test
 
   def with_contract_copy
     Dir.mktmpdir do |root|
-      CONTRACT_FILES.each do |relative|
+      contract_files.each do |relative|
         target = File.join(root, relative)
         FileUtils.mkdir_p(File.dirname(target))
         FileUtils.cp(File.join(ROOT, relative), target)

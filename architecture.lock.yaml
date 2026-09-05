@@ -96,6 +96,7 @@ topology_contracts:
   mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
 
 machine_contracts:
+  mgmt_inventory: config/infrastructure/mgmt-inventory.yaml
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
