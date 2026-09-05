@@ -41,6 +41,21 @@ platform:
   workload_identity: spire
   iam: keycloak
 
+management_plane:
+  provider: hetzner-cloud
+  lifecycle: persistent
+  private_block: 10.243.0.0/16
+  kubernetes: rke2
+  forge: gitea
+  ci: tekton
+  registry: harbor
+  gitops: rancher-fleet
+  woodpecker_runtime: false
+  bootstrap:
+    terraform_opentofu: true
+    ansible: true
+    requires_human_apply_gate: true
+
 stateful:
   database: cloudnativepg-postgresql
   events: strimzi-kafka-kraft
