@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class ProductCgoRaceContract(unittest.TestCase):
     def test_product_gate_reconciles_cgo_before_race_tests(self):
-        text = (ROOT / "scripts/ci-product.sh").read_text()
+        text = (ROOT / "scripts/ci-service.sh").read_text()
         self.assertIn("./scripts/ensure-cgo-toolchain.sh", text)
         self.assertIn("CGO_ENABLED=1 go test -race ./...", text)
         self.assertIn(

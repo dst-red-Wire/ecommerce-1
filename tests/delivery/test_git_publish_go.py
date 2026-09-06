@@ -28,10 +28,10 @@ class GoToolchainDeliveryTests(unittest.TestCase):
         modules = sorted(path.relative_to(ROOT).as_posix() for path in ROOT.glob("services/*/go.mod"))
         self.assertEqual(modules, ["services/product/go.mod"])
 
-    def test_product_service_does_not_claim_production_persistence(self):
+    def test_product_service_claims_postgres_as_authoritative_persistence(self):
         readme = (ROOT / "services/product/README.md").read_text()
-        self.assertIn("in-memory adapter is not a production source of truth", readme)
-        self.assertIn("PostgreSQL/pgx/sqlc", readme)
+        self.assertIn("The authoritative runtime store is PostgreSQL.", readme)
+        self.assertIn("Memory mode must be selected explicitly.", readme)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/application"
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
@@ -33,7 +34,7 @@ func (s *Store) CreateProduct(ctx context.Context, product domain.Product) error
 		ID: product.ID, Name: product.Name, Description: product.Description,
 		Brand: product.Brand, ManufacturerPartNumber: product.ManufacturerPartNumber,
 		Status: string(product.Status), Attributes: attributes,
-		CreatedAt: product.CreatedAt, UpdatedAt: product.UpdatedAt, Version: product.Version,
+		CreatedAt: pgtype.Timestamptz{Time: product.CreatedAt, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: product.UpdatedAt, Valid: true}, Version: product.Version,
 	})
 	return mapWriteError(err)
 }
@@ -54,7 +55,7 @@ func (s *Store) UpdateProduct(ctx context.Context, product domain.Product, expec
 	row, err := s.queries.UpdateProduct(ctx, sqlcgen.UpdateProductParams{
 		Name: product.Name, Description: product.Description, Brand: product.Brand,
 		ManufacturerPartNumber: product.ManufacturerPartNumber, Status: string(product.Status),
-		Attributes: attributes, UpdatedAt: product.UpdatedAt, Version: product.Version,
+		Attributes: attributes, UpdatedAt: pgtype.Timestamptz{Time: product.UpdatedAt, Valid: true}, Version: product.Version,
 		ID: product.ID, ExpectedVersion: expectedVersion,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -111,7 +112,7 @@ func (s *Store) CreateSKU(ctx context.Context, sku domain.SKU) error {
 	_, err = s.queries.CreateSKU(ctx, sqlcgen.CreateSKUParams{
 		ID: sku.ID, ProductID: sku.ProductID, Code: sku.Code, Gtin: sku.GTIN,
 		Status: string(sku.Status), OptionValues: optionValues, Attributes: attributes,
-		CreatedAt: sku.CreatedAt, UpdatedAt: sku.UpdatedAt, Version: sku.Version,
+		CreatedAt: pgtype.Timestamptz{Time: sku.CreatedAt, Valid: true}, UpdatedAt: pgtype.Timestamptz{Time: sku.UpdatedAt, Valid: true}, Version: sku.Version,
 	})
 	return mapWriteError(err)
 }
@@ -135,7 +136,7 @@ func (s *Store) UpdateSKU(ctx context.Context, sku domain.SKU, expectedVersion i
 	}
 	row, err := s.queries.UpdateSKU(ctx, sqlcgen.UpdateSKUParams{
 		Code: sku.Code, Gtin: sku.GTIN, Status: string(sku.Status),
-		OptionValues: optionValues, Attributes: attributes, UpdatedAt: sku.UpdatedAt,
+		OptionValues: optionValues, Attributes: attributes, UpdatedAt: pgtype.Timestamptz{Time: sku.UpdatedAt, Valid: true},
 		Version: sku.Version, ProductID: sku.ProductID, ID: sku.ID, ExpectedVersion: expectedVersion,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -233,7 +234,7 @@ func productFromRow(row sqlcgen.Product) (domain.Product, error) {
 	return domain.Product{
 		ID: row.ID, Name: row.Name, Description: row.Description, Brand: row.Brand,
 		ManufacturerPartNumber: row.ManufacturerPartNumber, Status: domain.ProductStatus(row.Status),
-		Attributes: attributes, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, Version: row.Version,
+		Attributes: attributes, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time, Version: row.Version,
 	}, nil
 }
 
@@ -253,7 +254,7 @@ func skuFromRow(row sqlcgen.Sku) (domain.SKU, error) {
 	return domain.SKU{
 		ID: row.ID, ProductID: row.ProductID, Code: row.Code, GTIN: row.Gtin,
 		Status: domain.SKUStatus(row.Status), OptionValues: optionValues, Attributes: attributes,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, Version: row.Version,
+		CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time, Version: row.Version,
 	}, nil
 }
 
