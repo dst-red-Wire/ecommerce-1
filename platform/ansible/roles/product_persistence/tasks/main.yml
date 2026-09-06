@@ -1,0 +1,57 @@
+---
+- name: Require Product persistence sources
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/services/product/sqlc.yaml"
+  register: product_sqlc_config
+  tags: [product_persistence]
+
+- name: Stop when Product persistence is not implemented
+  ansible.builtin.assert:
+    that: product_sqlc_config.stat.exists
+    fail_msg: "Product sqlc configuration is absent; persistence reconciliation is not applicable."
+  tags: [product_persistence]
+
+- name: Generate Product sqlc bindings
+  ansible.builtin.command:
+    argv: ["{{ ansible_env.HOME }}/.local/bin/sqlc", generate]
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  changed_when: true
+  tags: [product_persistence]
+
+- name: Validate Product SQL with sqlc
+  ansible.builtin.command:
+    argv: ["{{ ansible_env.HOME }}/.local/bin/sqlc", vet]
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  changed_when: false
+  tags: [product_persistence]
+
+- name: Reconcile exact Product persistence Go dependencies
+  ansible.builtin.command:
+    argv: ["{{ ansible_env.HOME }}/.local/bin/go", get, "{{ item }}"]
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  loop:
+    - github.com/jackc/pgx/v5@v5.10.0
+    - github.com/jackc/tern/v2@v2.4.3
+    - github.com/testcontainers/testcontainers-go@v0.44.0
+    - github.com/testcontainers/testcontainers-go/modules/postgres@v0.44.0
+  changed_when: false
+  tags: [product_persistence]
+
+- name: Tidy Product Go module
+  ansible.builtin.command:
+    argv: ["{{ ansible_env.HOME }}/.local/bin/go", mod, tidy]
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  changed_when: true
+  tags: [product_persistence]

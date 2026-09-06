@@ -76,9 +76,37 @@ component_classes:
     path: platform/ansible
     pipeline: platform
 
+developer_automation:
+  state_reconciliation: ansible
+  stateless_controller: python
+  specialized_validators: [ruby, python, go]
+  shell_policy: forbidden
+  shell_state_mutation_forbidden: true
+  tekton_remains_ci_authority: true
+
+developer_accelerators:
+  bazel:
+    role: local-verification-entrypoint
+    source_of_truth: false
+    ci_authority: false
+    may_deploy: false
+  nx:
+    role: derived-contract-graph-visualization
+    source_of_truth: false
+    ci_authority: false
+    may_deploy: false
+  turborepo:
+    role: frontend-task-scheduling-and-local-cache
+    source_of_truth: false
+    ci_authority: false
+    may_deploy: false
+
 rules:
   one_repository_does_not_imply_one_release: true
   independent_component_artifacts: true
   ci_must_not_deploy_workloads_directly: true
   gitops_digest_update_required: true
   immutable_oci_digests: true
+  developer_accelerators_must_not_be_ci_authority: true
+  developer_state_reconciliation_must_use_ansible: true
+  repository_shell_automation_forbidden: true

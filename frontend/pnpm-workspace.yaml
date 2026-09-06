@@ -2,8 +2,8 @@ packages:
   - apps/*
   - packages/*
 
+# Supply-chain policy: every dependency build script must be explicitly reviewed.
+# unrs-resolver is required; Scarf telemetry is intentionally disabled and must not run.
 allowBuilds:
   unrs-resolver: true
-
-onlyBuiltDependencies:
-  - unrs-resolver
+  '@scarf/scarf': false

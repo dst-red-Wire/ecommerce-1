@@ -86,3 +86,16 @@ Context escalation is automatic: L0 for local implementation, L1 for domain/cont
 ## Automated delivery
 
 Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
+<!-- BEGIN ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->
+## Ansible-first developer automation
+
+Use Ansible as the default owner of repeatable or stateful developer/workstation automation: package installation, toolchain reconciliation, Docker readiness, Git-local reconciliation, host/OS configuration, and repeatable bootstrap/generation workflows.
+
+Do not add repository Shell automation. No tracked `*.sh` file is allowed. Prefer direct Make/Tekton invocation of Ansible, Python, Ruby, Go, PNPM, Terraform, scanners, or other native tools. Stateful/repeatable workflows belong to Ansible; stateless fast checks belong to native tools or `scripts/repoctl.py`.
+
+When touching an existing Shell helper, migrate its stateful workflow to Ansible or its stateless algorithm to the repository controller in the same tranche. Tekton remains the sole CI authority; Ansible is an execution/reconciliation mechanism, not CI/CD.
+
+Optimize for fewer files and lower process overhead: consolidate stateless repository orchestration in `scripts/repoctl.py` and keep specialized Ruby/Python/Go validators/generators only where they add distinct deterministic logic.
+
+Parallelize only independent work. Use Ansible forks for multi-host fan-out, `strategy: free` where host ordering is irrelevant, `serial` for rolling/sensitive changes, `throttle` for heavy tasks, and `async` + `poll: 0` for independent localhost work. Keep dependency chains sequential: toolchain before tests, OpenAPI generation before drift/compatibility checks, sqlc/migrations before DB tests, and generation before consumers.
+<!-- END ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->

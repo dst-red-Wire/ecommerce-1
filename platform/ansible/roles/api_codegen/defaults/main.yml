@@ -1,0 +1,3 @@
+---
+api_versions_file: "{{ repo_root }}/config/toolchain/versions.env"
+oapi_codegen_runtime_version: "{{ lookup('ansible.builtin.ini', 'OAPI_CODEGEN_RUNTIME_VERSION type=properties file=' + api_versions_file) }}"

@@ -1,0 +1,41 @@
+---
+- name: Reconcile ecommerce-1 developer environment
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  pre_tasks:
+    - name: Require repository root input
+      ansible.builtin.assert:
+        that:
+          - repo_root is defined
+          - repo_root | length > 1
+        fail_msg: "Pass -e repo_root=/absolute/path/to/ecommerce-1."
+      tags: [always]
+
+    - name: Require Ubuntu on the supported WSL workstation
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.system == 'Linux'
+          - ansible_facts.distribution == 'Ubuntu'
+        fail_msg: "Developer reconciliation currently supports the Ubuntu WSL2 workstation only."
+      tags: [always]
+
+    - name: Read kernel release for WSL verification
+      ansible.builtin.command:
+        argv: [uname, -r]
+      register: developer_kernel
+      changed_when: false
+      tags: [always]
+
+    - name: Require WSL2 Microsoft kernel
+      ansible.builtin.assert:
+        that:
+          - "'microsoft' in developer_kernel.stdout | lower"
+        fail_msg: "Developer reconciliation must run from the supported WSL2 environment."
+      tags: [always]
+
+  roles:
+    - role: developer_workstation
+    - role: developer_toolchain
+    - role: api_codegen
+    - role: product_persistence

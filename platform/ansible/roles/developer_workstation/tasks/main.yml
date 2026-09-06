@@ -1,0 +1,121 @@
+---
+- name: Install baseline workstation packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - jq
+      - make
+      - pipx
+      - python3-venv
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [workstation, bootstrap]
+
+- name: Read repository Git defaults
+  ansible.builtin.set_fact:
+    developer_git_defaults: >-
+      {{ lookup('ansible.builtin.file', repo_root + '/config/workstation/git-local.conf').splitlines()
+         | reject('match', '^\\s*(#|$)') | list }}
+  tags: [workstation, git]
+
+- name: Read current repository-local Git defaults
+  ansible.builtin.command:
+    argv: [git, config, --local, --get, "{{ item.split('=', 1)[0] }}"]
+    chdir: "{{ repo_root }}"
+  loop: "{{ developer_git_defaults }}"
+  register: developer_git_current
+  failed_when: false
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Reconcile repository-local Git defaults
+  ansible.builtin.command:
+    argv:
+      - git
+      - config
+      - --local
+      - "{{ item.split('=', 1)[0] }}"
+      - "{{ item.split('=', 1)[1] }}"
+    chdir: "{{ repo_root }}"
+  loop: "{{ developer_git_defaults }}"
+  loop_control:
+    index_var: git_default_index
+  when: >-
+    developer_git_current.results[git_default_index].rc != 0 or
+    (developer_git_current.results[git_default_index].stdout | trim) != item.split('=', 1)[1]
+  changed_when: true
+  tags: [workstation, git]
+
+- name: Validate Git identity fields without inventing identity
+  ansible.builtin.command:
+    argv: [git, config, --get, "{{ item }}"]
+    chdir: "{{ repo_root }}"
+  loop: [user.name, user.email]
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Validate origin remote
+  ansible.builtin.command:
+    argv: [git, remote, get-url, origin]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Probe Docker daemon
+  ansible.builtin.command:
+    argv: [docker, info]
+  register: docker_probe
+  changed_when: false
+  failed_when: false
+  tags: [workstation, docker]
+
+- name: Start Docker Desktop through the supported Windows Docker CLI
+  ansible.builtin.command:
+    argv: [docker.exe, desktop, start]
+  register: docker_desktop_start
+  changed_when: true
+  failed_when: false
+  when: docker_probe.rc != 0
+  tags: [workstation, docker]
+
+- name: Fall back to the official Docker Desktop executable through PowerShell
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - "$p = Join-Path $Env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $p) { Start-Process -FilePath $p; exit 0 } else { exit 1 }"
+  when: docker_probe.rc != 0 and docker_desktop_start.rc != 0
+  changed_when: true
+  tags: [workstation, docker]
+
+- name: Wait until Docker daemon is reachable
+  ansible.builtin.command:
+    argv: [docker, info]
+  register: docker_ready
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: docker_ready.rc == 0
+  when: docker_probe.rc != 0
+  tags: [workstation, docker]
+
+- name: Install repository pre-commit hooks
+  ansible.builtin.command:
+    argv: [pre-commit, install, --install-hooks]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Install repository pre-push hook
+  ansible.builtin.command:
+    argv: [pre-commit, install, --hook-type, pre-push]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, bootstrap]

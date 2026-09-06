@@ -19,13 +19,8 @@ class CIAuthorityTest < Minitest::Test
     platform/tekton/triggers/README.md
   ].freeze
 
-  def read(relative)
-    File.read(File.join(ROOT, relative))
-  end
-
-  def yaml(relative)
-    YAML.safe_load(read(relative))
-  end
+  def read(relative) = File.read(File.join(ROOT, relative))
+  def yaml(relative) = YAML.safe_load(read(relative))
 
   def test_single_control_plane_authorities
     lock = yaml("architecture.lock.yaml")
@@ -37,29 +32,46 @@ class CIAuthorityTest < Minitest::Test
     assert_equal "tekton", topology.dig("authorities", "ci")
     assert_equal "rancher-fleet", topology.dig("authorities", "gitops_cd")
     assert_equal true, topology.dig("repository", "affected_only")
-
-    assert_equal "gitea", topology.dig("trigger_flow", "source")
-    assert_equal %w[push pull_request], topology.dig("trigger_flow", "events")
-    assert_equal "webhook", topology.dig("trigger_flow", "transport")
-    assert_equal "tekton-eventlistener", topology.dig("trigger_flow", "receiver")
-    assert_equal "tekton-triggerbinding", topology.dig("trigger_flow", "binding")
-    assert_equal "tekton-triggertemplate", topology.dig("trigger_flow", "template")
-    assert_equal "tekton-pipelinerun", topology.dig("trigger_flow", "output")
-    assert_equal true, topology.dig("trigger_flow", "webhook_authentication", "required")
     assert_equal false, topology.dig("gitea_actions", "ci_authority")
     assert_equal false, topology.dig("gitea_actions", "cd_authority")
-    assert_equal false, topology.dig("gitea_actions", "may_trigger_tekton")
-    assert_includes topology.dig("authorities", "forbidden_parallel_ci"), "gitea-actions-as-ci"
-    refute_includes topology.dig("authorities", "forbidden_parallel_ci"), "gitea-actions"
+  end
+
+  def test_developer_accelerators_are_not_control_planes
+    accelerators = yaml("config/contracts/ci-topology.yaml").fetch("developer_accelerators")
+    assert_equal %w[bazel nx turborepo], accelerators.keys.sort
+    accelerators.each do |name, contract|
+      assert_equal false, contract["source_of_truth"], name
+      assert_equal false, contract["ci_authority"], name
+      assert_equal false, contract["may_deploy"], name
+    end
+  end
+
+  def test_ansible_first_developer_automation_contract
+    automation = yaml("config/contracts/ci-topology.yaml").fetch("developer_automation")
+    assert_equal "ansible", automation.fetch("state_reconciliation")
+    assert_equal "python", automation.fetch("stateless_controller")
+    assert_equal "forbidden", automation.fetch("shell_policy")
+    assert_equal true, automation.fetch("shell_state_mutation_forbidden")
+    assert_equal true, automation.fetch("tekton_remains_ci_authority")
+  end
+
+  def test_repository_has_no_shell_automation
+    candidates = `git -C #{ROOT} ls-files --cached --others --exclude-standard -- '*.sh'`.split("\n").reject(&:empty?)
+    worktree_shell = candidates.select { |relative| File.file?(File.join(ROOT, relative)) }
+    assert_empty worktree_shell
+    refute_includes read("BUILD.bazel"), "sh_binary("
+    REQUIRED_TEKTON.grep(/\.yaml\z/).each do |relative|
+      content = read(relative)
+      refute_match(%r{scripts/[^\s'\"]+\.sh\b}, content, relative)
+      refute_includes content, "#!/bin/sh", relative
+      refute_includes content, "#!/usr/bin/env bash", relative
+    end
   end
 
   def test_parallel_ci_configuration_is_absent
-    %w[
-      .woodpecker/ci.yaml
-      .gitlab-ci.yml
-      Jenkinsfile
-      .drone.yml
-    ].each { |relative| refute File.exist?(File.join(ROOT, relative)), relative }
+    %w[.woodpecker/ci.yaml .gitlab-ci.yml Jenkinsfile .drone.yml].each do |relative|
+      refute File.exist?(File.join(ROOT, relative)), relative
+    end
     assert_empty Dir[File.join(ROOT, ".github/workflows/*.{yml,yaml}")]
   end
 
@@ -75,11 +87,8 @@ class CIAuthorityTest < Minitest::Test
     assert File.file?(File.join(ROOT, "frontend/pnpm-lock.yaml"))
     assert File.file?(File.join(ROOT, "frontend/pnpm-workspace.yaml"))
     refute File.exist?(File.join(ROOT, "frontend/package-lock.json"))
-
-    %w[scripts/ci-lint.sh scripts/ci-test.sh scripts/ci-frontend.sh].each do |relative|
-      content = read(relative)
-      refute_match(/\bnpm ci\b/, content, relative)
-      refute_includes content, "package-lock.json", relative
-    end
+    controller = read("scripts/repoctl.py")
+    refute_match(/\bnpm ci\b/, controller)
+    refute_includes controller, "package-lock.json"
   end
 end

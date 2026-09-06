@@ -1,0 +1,4 @@
+module(
+    name = "ecommerce_1",
+    version = "0.0.0",
+)
