@@ -51,3 +51,8 @@ diff-context: ## Build a compact diff-only context pack
 
 failure-context: ## Run one gate and retain only actionable failure context; use GATE=lint
 	@./scripts/failure-context.sh "$(GATE)"
+
+.PHONY: deliver
+
+deliver: ## Validate, publish the current feature branch and create/update its GitHub PR
+	@TITLE="$(TITLE)" MSG="$(MSG)" BASE="$(BASE)" ./scripts/git-deliver.sh
