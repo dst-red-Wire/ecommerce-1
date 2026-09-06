@@ -98,32 +98,38 @@
 
 - name: Select active repository Git defaults
   ansible.builtin.set_fact:
-    developer_git_defaults: "{{ developer_git_defaults + [item] }}"
+    developer_git_defaults: "{{ developer_git_defaults + [git_default_line] }}"
   loop: "{{ developer_git_default_lines }}"
+  loop_control:
+    loop_var: git_default_line
   when:
-    - item | trim | length > 0
-    - not (item | trim).startswith('#')
+    - git_default_line | trim | length > 0
+    - not (git_default_line | trim).startswith('#')
   tags: [workstation, git]
 
 - name: Validate repository Git defaults
   ansible.builtin.assert:
     that:
-      - "'=' in item"
-      - "item.split('=', 1)[0] | trim | length > 0"
-      - "item.split('=', 1) | length == 2"
+      - "'=' in git_default_entry"
+      - "git_default_entry.split('=', 1)[0] | trim | length > 0"
+      - "git_default_entry.split('=', 1) | length == 2"
     fail_msg: >-
-      Invalid repository Git default entry {{ item | to_json }}:
+      Invalid repository Git default entry {{ git_default_entry | to_json }}:
       expected a non-empty key and an accessible value in key=value form.
   loop: "{{ developer_git_defaults }}"
   loop_control:
-    label: "{{ item }}"
+    loop_var: git_default_entry
+    label: "{{ git_default_entry }}"
   tags: [workstation, git]
 
 - name: Read current repository-local Git defaults
   ansible.builtin.command:
-    argv: [git, config, --local, --get, "{{ item.split('=', 1)[0] }}"]
+    argv: [git, config, --local, --get, "{{ git_default_entry.split('=', 1)[0] }}"]
     chdir: "{{ repo_root }}"
   loop: "{{ developer_git_defaults }}"
+  loop_control:
+    loop_var: git_default_entry
+    label: "{{ git_default_entry }}"
   register: developer_git_current
   failed_when: false
   changed_when: false
@@ -135,23 +141,28 @@
       - git
       - config
       - --local
-      - "{{ item.split('=', 1)[0] }}"
-      - "{{ item.split('=', 1)[1] }}"
+      - "{{ git_default_result.git_default_entry.split('=', 1)[0] }}"
+      - "{{ git_default_result.git_default_entry.split('=', 1)[1] }}"
     chdir: "{{ repo_root }}"
   loop: "{{ developer_git_current.results }}"
   loop_control:
-    label: "{{ item.item }}"
+    loop_var: git_default_result
+    label: "{{ git_default_result.git_default_entry }}"
   when: >-
-    item.rc != 0 or
-    (item.stdout | trim) != item.item.split('=', 1)[1]
+    git_default_result.rc != 0 or
+    (git_default_result.stdout | trim) !=
+    git_default_result.git_default_entry.split('=', 1)[1]
   changed_when: true
   tags: [workstation, git]
 
 - name: Validate Git identity fields without inventing identity
   ansible.builtin.command:
-    argv: [git, config, --get, "{{ item }}"]
+    argv: [git, config, --get, "{{ git_identity_field }}"]
     chdir: "{{ repo_root }}"
   loop: [user.name, user.email]
+  loop_control:
+    loop_var: git_identity_field
+    label: "{{ git_identity_field }}"
   changed_when: false
   tags: [workstation, git]
 
