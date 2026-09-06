@@ -1,0 +1,36 @@
+$schema: https://raw.githubusercontent.com/PowerShell/DSC/main/schemas/2023/08/config/document.json
+metadata:
+  winget:
+    processor:
+      identifier: dscv3
+resources:
+  - type: Microsoft.WinGet/Package
+    name: Git
+    properties:
+      id: Git.Git
+      source: winget
+      useLatest: true
+  - type: Microsoft.WinGet/Package
+    name: PowerShell
+    properties:
+      id: Microsoft.PowerShell
+      source: winget
+      useLatest: true
+  - type: Microsoft.WinGet/Package
+    name: WindowsTerminal
+    properties:
+      id: Microsoft.WindowsTerminal
+      source: winget
+      useLatest: true
+  - type: Microsoft.WinGet/Package
+    name: VSCode
+    properties:
+      id: Microsoft.VisualStudioCode
+      source: winget
+      useLatest: true
+  - type: Microsoft.WinGet/Package
+    name: DockerDesktop
+    properties:
+      id: Docker.DockerDesktop
+      source: winget
+      useLatest: true

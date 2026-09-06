@@ -1,0 +1,5 @@
+[wsl2]
+networkingMode=nat
+firewall=true
+dnsTunneling=true
+autoProxy=true
