@@ -12,6 +12,7 @@ if [[ "$branch" == main || "$branch" == master ]]; then
     git switch -c "$branch"
   fi
 fi
+./scripts/ensure-docker-daemon.sh
 make workstation-doctor
 make governance
 make lint

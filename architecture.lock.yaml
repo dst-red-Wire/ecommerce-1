@@ -107,6 +107,7 @@ machine_contracts:
   service_ownership: config/contracts/service-ownership.yaml
   event_contracts: config/contracts/event-contracts.yaml
   dependency_map: config/contracts/dependency-map.yaml
+  public_api_contracts: config/contracts/public-api-contracts.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6

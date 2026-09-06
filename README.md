@@ -61,10 +61,15 @@ NOMA_DATA_ADAPTER=public make site
 ## Contrats
 
 - Externe : REST/JSON + OpenAPI 3.1.
+- Registre machine des APIs : [`config/contracts/public-api-contracts.yaml`](config/contracts/public-api-contracts.yaml).
+- Golden contract M2 Product : [`contracts/openapi/product.v1.yaml`](contracts/openapi/product.v1.yaml).
+- Composants REST partagés : [`contracts/openapi/common.v1.yaml`](contracts/openapi/common.v1.yaml).
+- Validation reproductible : `make contracts` (également inclus dans `make ci`).
 - Inter-services : gRPC + Protobuf + Buf.
 - Événements : Kafka + Protobuf + Apicurio Registry.
 - Jobs opérationnels : RabbitMQ Quorum Queues.
 - Patterns obligatoires selon le domaine : Outbox, idempotence, Saga, retry borné, DLQ, versioning et contract tests.
+- Convention détaillée : [`docs/api/README.md`](docs/api/README.md).
 
 ## Données
 

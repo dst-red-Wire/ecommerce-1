@@ -6,6 +6,12 @@ cd "$(repo_root)"
 
 require ruby
 ruby -Itest tests/architecture_validator_test.rb
+ruby -Itest tests/openapi_validator_test.rb
+
+if [ -d tests/delivery ]; then
+  require python3
+  python3 -m unittest discover -s tests/delivery -p 'test_*.py'
+fi
 
 modules=$(find . -name go.mod -not -path './vendor/*' -print 2>/dev/null || true)
 if [ -n "$modules" ]; then

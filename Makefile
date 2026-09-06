@@ -1,14 +1,17 @@
 SHELL := /bin/sh
 
-.PHONY: help ci governance lint test security terraform ansible
+.PHONY: help ci governance contracts lint test security terraform ansible
 
 help: ## Show the available checks
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "%-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-ci: governance lint test security terraform ansible ## Run every portable CI check
+ci: governance contracts lint test security terraform ansible ## Run every portable CI check
 
 governance: ## Validate canonical architecture contracts
 	@./scripts/ci-governance.sh
+
+contracts: ## Validate registered OpenAPI 3.1 contracts
+	@./scripts/ci-contracts.sh
 
 lint: ## Lint repository sources that are present
 	@./scripts/ci-lint.sh

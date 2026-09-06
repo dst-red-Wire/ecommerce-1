@@ -1,0 +1,21 @@
+version: 1
+status: exact
+protocol: rest-json
+openapi_version: 3.1.0
+json_schema_dialect: https://json-schema.org/draft/2020-12/schema
+current_milestone: M2-golden-service-product
+golden_service: product
+common_components: contracts/openapi/common.v1.yaml
+rules:
+  version_in_path: true
+  remote_refs_forbidden: true
+  problem_details_media_type: application/problem+json
+  security_scheme: bearerAuth
+  write_idempotency_header: Idempotency-Key
+  optimistic_concurrency_header: If-Match
+contracts:
+  product:
+    path: contracts/openapi/product.v1.yaml
+    api_version: 1.0.0
+    path_major: v1
+    audiences: [admin]
