@@ -77,6 +77,13 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn("export ANSIBLE_CONFIG", MAKEFILE)
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
 
+    def test_bootstrap_uses_only_the_ansible_core_stdout_callback(self):
+        self.assertNotIn("stdout_callback = yaml", ANSIBLE_CFG)
+        self.assertNotIn("stdout_callback = community.general.yaml", ANSIBLE_CFG)
+        self.assertIn("stdout_callback = default", ANSIBLE_CFG)
+        self.assertIn("callback_result_format = yaml", ANSIBLE_CFG)
+        self.assertIn("collections_path = ../../.ansible/collections", ANSIBLE_CFG)
+
 
 if __name__ == "__main__":
     unittest.main()
