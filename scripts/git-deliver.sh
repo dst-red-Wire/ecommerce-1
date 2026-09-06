@@ -47,13 +47,6 @@ fi
 
 head_sha="$(git rev-parse HEAD)"
 
-# A PR may already exist. Never create duplicates.
-existing="$("${GH[@]}" pr list --head "$branch" --base "$base" --state open --json number,url --jq '.[0] | select(.) | "\(.number) \(.url)"' 2>/dev/null || true)"
-if [[ -n "$existing" ]]; then
-  printf 'PASS deliver: PR already exists: %s\n' "$existing"
-  exit 0
-fi
-
 if [[ -z "$title" ]]; then
   title="$(git log -1 --pretty=%s)"
 fi
@@ -86,8 +79,30 @@ git diff --stat "origin/$base...HEAD" > "$stat"
   printf -- '- Head branch: %s%s%s\n' "\`" "$branch" "\`"
   printf -- '- Head SHA: %s%s%s\n' "\`" "$head_sha" "\`"
   printf -- '- Generated context remains under %s.context/%s and is not committed.\n\n' "\`" "\`"
-  printf '## Safety\n\nThis automation creates the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n'
+  printf '## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n'
 } > "$body"
+
+# A PR may already exist. Never create duplicates. Existing PRs are refreshed
+# through the REST endpoint instead of `gh pr edit`, which avoids deprecated
+# Projects Classic GraphQL fields and keeps the review SHA current.
+existing="$("${GH[@]}" pr list --head "$branch" --base "$base" --state open --json number,url --jq '.[0] | select(.) | "\(.number) \(.url)"' 2>/dev/null || true)"
+if [[ -n "$existing" ]]; then
+  existing_number="${existing%% *}"
+  existing_url="${existing#* }"
+  [[ "$existing_number" =~ ^[0-9]+$ ]] || fail 'unable to parse existing pull request number'
+
+  "${GH[@]}" api --method PATCH "repos/{owner}/{repo}/pulls/$existing_number" \
+    --raw-field title="$title" \
+    --raw-field body="$(cat "$body")" \
+    >/dev/null
+
+  refreshed_sha="$("${GH[@]}" api "repos/{owner}/{repo}/pulls/$existing_number" --jq '.head.sha')"
+  [[ "$refreshed_sha" == "$head_sha" ]] || \
+    fail "pull request head mismatch after refresh: expected $head_sha, got $refreshed_sha"
+
+  printf 'PASS deliver: refreshed PR %s at %s\n' "$existing_url" "$head_sha"
+  exit 0
+fi
 
 url="$("${GH[@]}" pr create --base "$base" --head "$branch" --title "$title" --body-file "$body")"
 printf 'PASS deliver: created PR %s\n' "$url"
