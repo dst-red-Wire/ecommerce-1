@@ -1131,3 +1131,29 @@ body {
     grid-template-columns: repeat(3, auto);
   }
 }
+
+
+/* Public demo media: constrained to Pexels and always retains source credit. */
+.product-card__media,
+.product-gallery__main {
+  position: relative;
+}
+
+.product-card__photo,
+.product-gallery__photo {
+  object-fit: cover;
+}
+
+.product-media-credit {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  z-index: 2;
+  max-width: calc(100% - 1rem);
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.25rem;
+  background: rgb(255 255 255 / 85%);
+  color: inherit;
+  font-size: 0.65rem;
+  text-decoration: none;
+}

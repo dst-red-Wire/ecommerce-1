@@ -8,28 +8,52 @@ Ce workspace contient un Storefront et un Backoffice NOMA exécutables localemen
 - Corepack, fourni avec la distribution Node.js retenue ;
 - pnpm `11.24.0`, automatiquement sélectionné par `packageManager`.
 
-## Installation et lancement
+## Prise en main locale
+
+Depuis la racine du dépôt, la commande canonique est :
 
 ```sh
-cd frontend
-corepack enable
-corepack pnpm install --frozen-lockfile
-corepack pnpm dev
+make site
 ```
 
-- Storefront : <http://127.0.0.1:3000>
-- Admin : <http://127.0.0.1:3001>
-- Vue Admin tablette : <http://127.0.0.1:3001/tablet>
-- Vue Admin mobile d'urgence : <http://127.0.0.1:3001/mobile>
+Elle exécute l'installation reproductible (`pnpm install --frozen-lockfile`) puis lance les deux applications en parallèle. Depuis le répertoire `frontend/`, la commande équivalente est également `make site`.
 
-Pour lancer une seule application :
+Ouvrir ensuite dans le navigateur Windows :
+
+- Storefront : <http://localhost:3000>
+- Admin : <http://localhost:3001>
+- Vue Admin tablette : <http://localhost:3001/tablet>
+- Vue Admin mobile d'urgence : <http://localhost:3001/mobile>
+
+Le terminal qui exécute `make site` doit rester ouvert. Utiliser `Ctrl+C` pour arrêter Storefront et Admin.
+
+Le mode par défaut reste déterministe et hors ligne :
 
 ```sh
-corepack pnpm dev:storefront
-corepack pnpm dev:admin
+make site
 ```
 
-Les mêmes commandes sont disponibles dans le `Makefile` local (`make dev`, `make check`). Le `Makefile` racine n'est volontairement pas modifié, car il contient déjà des changements utilisateur hors de cette milestone.
+Pour utiliser les produits de démonstration DummyJSON :
+
+```sh
+NOMA_DATA_ADAPTER=public make site
+```
+
+Les photos Pexels restent optionnelles. `PEXELS_API_KEY` doit être injectée uniquement côté serveur et hors Git ; elle ne doit jamais utiliser le préfixe `NEXT_PUBLIC_`. Sans cette clé, le mode public continue avec les illustrations locales NOMA.
+
+Pour lancer une seule application depuis `frontend/` :
+
+```sh
+make dev-storefront
+make dev-admin
+```
+
+Pour vérifier le frontend sans lancer les serveurs :
+
+```sh
+make check
+make e2e
+```
 
 ## Architecture
 
@@ -95,6 +119,10 @@ Les pages reproduisent les six références mobile/desktop du pack Storefront au
 
 Les autres entrées de navigation correspondent à l'architecture cible et aboutissent volontairement à l'état `not-found`; aucun workflow métier absent n'est inventé.
 
+## Références de conception
+
+Le design system exécutable est versionné dans [`packages/ui`](packages/ui/README.md). La provenance des packs NOMA, la politique d'archivage et les références Storefront/Admin sont versionnées dans [`../docs/design`](../docs/design/README.md). Les ZIP de maquettes bruts ne sont volontairement pas commités.
+
 ## Design system
 
 `packages/ui/src/tokens.css` centralise la palette NOMA, les espacements, rayons, ombres, couleurs fonctionnelles, focus et règles de mouvement. Les composants partagés incluent les boutons, badges, prix, notation et illustrations produit temporaires.
@@ -130,6 +158,15 @@ corepack pnpm test:e2e
 ```
 
 Les captures de validation sont écrites dans `frontend/screenshots/`. Ce répertoire est ignoré par Git et ne doit pas être commité.
+
+
+## Données publiques de démonstration
+
+Le mode par défaut reste `NOMA_DATA_ADAPTER=mock` afin que les builds, tests et démonstrations hors ligne soient déterministes. Pour tester des données publiques structurées, définir `NOMA_DATA_ADAPTER=public` dans un fichier local non commité. Le catalogue utilise alors DummyJSON comme source de données de démonstration.
+
+Les photos Pexels sont un enrichissement optionnel côté serveur. Définir `PEXELS_API_KEY` uniquement dans un secret local/de déploiement ; la clé ne doit jamais utiliser le préfixe `NEXT_PUBLIC_`. Sans clé ou si Pexels est indisponible, le catalogue public continue avec les illustrations NOMA locales. Les photos affichées conservent un lien de crédit vers leur page Pexels et leur photographe.
+
+Les profils clients, commandes, paiements et signaux fraude restent volontairement synthétiques : une photo ou un profil public ne doit pas être présenté comme un vrai client, acheteur ou fraudeur. Les fournisseurs publics sont des données de démonstration, pas des contrats métier ecommerce-1.
 
 ## Passage aux APIs réelles
 
