@@ -62,11 +62,28 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
 
             first = self.run_playbook(repo)
             self.assertEqual(0, first.returncode, first.stdout + first.stderr)
-            self.assertIn("changed=2", first.stdout)
+            self.assertIn(
+                "changed: [localhost] => (item=core.autocrlf=input)",
+                first.stdout,
+            )
+            self.assertIn(
+                "changed: [localhost] => (item=pull.ff=only)",
+                first.stdout,
+            )
+            # The recap counts changed tasks, not changed loop items.
+            self.assertIn("changed=1", first.stdout)
 
             second = self.run_playbook(repo)
             self.assertEqual(0, second.returncode, second.stdout + second.stderr)
             self.assertIn("changed=0", second.stdout)
+            self.assertNotIn(
+                "changed: [localhost] => (item=core.autocrlf=input)",
+                second.stdout,
+            )
+            self.assertNotIn(
+                "changed: [localhost] => (item=pull.ff=only)",
+                second.stdout,
+            )
 
     @unittest.skipUnless(ANSIBLE_PLAYBOOK, "ansible-playbook is required")
     def test_malformed_default_fails_with_its_entry(self):
