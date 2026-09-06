@@ -26,9 +26,13 @@ export default async function ProductPage({
 }: {
   params: Promise<{ slug: string }>;
 }) {
-  const product = await getProductView((await params).slug);
+  const slug = (await params).slug;
+  const [product, catalog] = await Promise.all([
+    getProductView(slug),
+    getCatalogView(),
+  ]);
   if (!product) notFound();
-  const recommendations = (await getCatalogView())
+  const recommendations = catalog
     .filter((item) => item.id !== product.id)
     .slice(0, 4);
   return (

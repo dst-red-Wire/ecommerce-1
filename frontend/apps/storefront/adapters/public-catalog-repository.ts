@@ -132,8 +132,15 @@ async function buildCatalog(): Promise<ProductViewModel[]> {
   }
 }
 
+let inFlightCatalog: Promise<ProductViewModel[]> | null = null;
+
 async function getCatalog() {
-  return buildCatalog();
+  if (inFlightCatalog) return inFlightCatalog;
+
+  inFlightCatalog = buildCatalog().finally(() => {
+    inFlightCatalog = null;
+  });
+  return inFlightCatalog;
 }
 
 export const publicCatalogRepository: CatalogRepository = {

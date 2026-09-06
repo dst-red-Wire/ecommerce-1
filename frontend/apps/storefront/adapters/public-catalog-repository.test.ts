@@ -98,6 +98,39 @@ describe("publicCatalogRepository", () => {
     });
   });
 
+  it("deduplicates concurrent catalog consumers", async () => {
+    delete process.env.PEXELS_API_KEY;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        products: [
+          {
+            id: 7,
+            title: "Demo Sneaker",
+            description: "Public demo product",
+            category: "mens-shoes",
+            price: 100,
+            rating: 4.5,
+            stock: 5,
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [products, categories, product] = await Promise.all([
+      publicCatalogRepository.listProducts(),
+      publicCatalogRepository.listCategories(),
+      publicCatalogRepository.findProductBySlug("demo-sneaker-7"),
+    ]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(products).toHaveLength(1);
+    expect(categories[0]?.id).toBe("mens-shoes");
+    expect(product?.id).toBe("dummyjson-7");
+  });
+
   it("falls back to deterministic fixtures when public product data fails", async () => {
     delete process.env.PEXELS_API_KEY;
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));

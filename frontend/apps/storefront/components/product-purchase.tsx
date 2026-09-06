@@ -29,6 +29,16 @@ export function ProductGallery({ product }: { product: ProductViewModel }) {
         ) : (
           <ProductArt kind={product.art} />
         )}
+        {product.media ? (
+          <a
+            className="product-media-credit"
+            href={product.media.sourceUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Photo: {product.media.creator} / {product.media.provider}
+          </a>
+        ) : null}
         <button
           type="button"
           className="favorite-button"
