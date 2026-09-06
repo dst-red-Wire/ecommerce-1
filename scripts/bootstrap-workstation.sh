@@ -68,6 +68,8 @@ install_cosign(){
 }
 install_cosign
 
+"$ROOT/scripts/bootstrap-context-tools.sh"
+
 "$ROOT/scripts/configure-git.sh"
 pre-commit install --install-hooks
 pre-commit install --hook-type pre-push

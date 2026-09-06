@@ -73,3 +73,12 @@ Do not implement the 17 services in parallel from empty scaffolding. Follow:
 `M1 bootstrap -> M2 golden product service -> M3 PREPROD infra -> M4 platform -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
 
 The `product` service is the first golden backend implementation and must validate the shared engineering conventions before they are replicated.
+## Token-efficient agent context
+
+Do not dump the repository, full CI logs, or broad architecture documentation into an agent prompt by default.
+
+Before implementation, use `make context TASK="<bounded task>"`. The generated `.context/codex-context.md` is the preferred handoff: it routes changes through repository contracts and enforces a bounded byte budget.
+
+Use `make diff-context` for review-oriented work and `make failure-context GATE=<gate>` for deterministic failures. Give the agent the reduced artifact plus the exact failing file/test, not the raw full log.
+
+Context escalation is automatic: L0 for local implementation, L1 for domain/contract work, and L2 for architecture/control-plane work. Do not manually escalate to broader context unless the reduced pack is insufficient or an exact contract requires it.
