@@ -24,3 +24,17 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 
 ansible: ## Validate Ansible sources when present
 	@./scripts/ci-ansible.sh
+
+.PHONY: workstation-doctor workstation-bootstrap git-sync publish
+
+workstation-doctor: ## Audit Windows/WSL/Docker/Git/tooling state
+	@./scripts/doctor-workstation.sh
+
+workstation-bootstrap: ## Reconcile the developer workstation automatically
+	@./scripts/bootstrap-workstation.sh
+
+git-sync: ## Fetch/prune and fast-forward the current branch
+	@./scripts/git-sync.sh
+
+publish: ## Validate, commit and push the current branch (never force; never direct-push main)
+	@./scripts/git-publish.sh
