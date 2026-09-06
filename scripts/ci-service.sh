@@ -25,13 +25,21 @@ export PATH="$HOME/.local/bin:$PATH"
 require go
 require gofmt
 
+# The Go race detector requires a working C compiler. Keep this in the generic
+# service gate so Product and future Go services do not grow parallel CI logic.
+[ -x ./scripts/ensure-cgo-toolchain.sh ] || fail "CGO toolchain reconciler is missing: scripts/ensure-cgo-toolchain.sh"
+./scripts/ensure-cgo-toolchain.sh
+
 unformatted=$(find "$module" -type f -name '*.go' -exec gofmt -l {} +)
 [ -z "$unformatted" ] || fail "gofmt required for:
 $unformatted"
 
 (
   cd "$module"
-  go test ./...
+  CGO_ENABLED=1 go test -race ./...
+  if [ -d ./internal/infrastructure/postgres ]; then
+  CGO_ENABLED=1 go test -race -tags=integration ./internal/infrastructure/postgres -count=1
+  fi
   go vet ./...
   go build ./...
 )

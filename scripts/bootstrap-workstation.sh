@@ -11,7 +11,7 @@ grep -qi microsoft /proc/version || { echo 'FAIL WSL2: Microsoft kernel not dete
 . "$ROOT/config/toolchain/versions.env"
 
 sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git jq make pipx python3-venv shellcheck
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential ca-certificates curl git jq make pipx python3-venv shellcheck
 export PATH="$HOME/.local/bin:$PATH"
 pipx ensurepath >/dev/null 2>&1 || true
 pipx_install(){

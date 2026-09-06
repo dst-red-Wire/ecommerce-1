@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,19 +16,40 @@ import (
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
 )
 
+type Readiness func(context.Context) error
+
 type Handler struct {
-	service *application.Service
+	service   *application.Service
+	readiness Readiness
 }
 
-func NewHandler(service *application.Service) *Handler { return &Handler{service: service} }
+func NewHandler(service *application.Service) *Handler {
+	return NewHandlerWithReadiness(service, nil)
+}
+
+func NewHandlerWithReadiness(service *application.Service, readiness Readiness) *Handler {
+	return &Handler{service: service, readiness: readiness}
+}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := requestID(r)
 	w.Header().Set("X-Request-ID", requestID)
 
-	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+	if r.URL.Path == "/healthz" {
 		if r.Method != http.MethodGet {
 			problem(w, requestID, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed", "")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	if r.URL.Path == "/readyz" {
+		if r.Method != http.MethodGet {
+			problem(w, requestID, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "Method not allowed", "")
+			return
+		}
+		if h.readiness != nil && h.readiness(r.Context()) != nil {
+			problem(w, requestID, http.StatusServiceUnavailable, "DEPENDENCY_UNAVAILABLE", "Service unavailable", "")
 			return
 		}
 		jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})

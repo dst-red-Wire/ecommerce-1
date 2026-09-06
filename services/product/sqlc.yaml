@@ -1,0 +1,15 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations/001_initial_schema.sql
+    queries: db/query.sql
+    gen:
+      go:
+        package: sqlcgen
+        out: internal/infrastructure/postgres/sqlcgen
+        sql_package: pgx/v5
+        emit_interface: true
+        emit_empty_slices: true
+        overrides:
+          - db_type: uuid
+            go_type: string
