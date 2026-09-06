@@ -54,11 +54,14 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
 
     def test_multiple_defaults_reconcile_once_then_are_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
-            repo = self.create_repo(Path(directory), "core.eol=lf\nfetch.prune=true\npull.ff=only\n")
+            repo = self.create_repo(
+                Path(directory),
+                "  # Repository-owned Git defaults\n\ncore.autocrlf=input\npull.ff=only\n",
+            )
 
             first = self.run_playbook(repo)
             self.assertEqual(0, first.returncode, first.stdout + first.stderr)
-            self.assertIn("changed=3", first.stdout)
+            self.assertIn("changed=2", first.stdout)
 
             second = self.run_playbook(repo)
             self.assertEqual(0, second.returncode, second.stdout + second.stderr)

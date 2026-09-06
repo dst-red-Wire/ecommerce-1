@@ -40,7 +40,7 @@
   ansible.builtin.set_fact:
     developer_git_defaults: >-
       {{ lookup('ansible.builtin.file', repo_root + '/config/workstation/git-local.conf').splitlines()
-         | reject('match', '^\\s*(#|$)') | list }}
+         | reject('match', '^[ \t]*(#|$)') | list }}
   tags: [workstation, git]
 
 - name: Validate repository Git defaults
