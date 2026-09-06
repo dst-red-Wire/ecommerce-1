@@ -52,11 +52,11 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
             subprocess.run(command, check=True, capture_output=True, text=True)
         return repo
 
-    def test_multiple_defaults_reconcile_once_then_are_idempotent(self):
+    def test_comments_are_filtered_before_validation_and_defaults_are_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = self.create_repo(
                 Path(directory),
-                "  # Repository-owned Git defaults\n\ncore.autocrlf=input\npull.ff=only\n",
+                "# Repository-owned Git defaults\n   # Indented comment\n\ncore.autocrlf=input\npull.ff=only\n",
             )
 
             first = self.run_playbook(repo)
@@ -76,6 +76,21 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("malformed-entry", result.stdout + result.stderr)
             self.assertIn("expected a non-empty key", result.stdout + result.stderr)
+
+    def test_validation_uses_only_explicitly_selected_active_defaults(self):
+        tasks = TASKS.read_text(encoding="utf-8")
+        selection = tasks.split("- name: Select active repository Git defaults", 1)[1].split(
+            "- name: Validate repository Git defaults", 1
+        )[0]
+        validation = tasks.split("- name: Validate repository Git defaults", 1)[1].split(
+            "- name: Read current repository-local Git defaults", 1
+        )[0]
+
+        self.assertIn("developer_git_default_lines", selection)
+        self.assertIn("item | trim | length > 0", selection)
+        self.assertIn("not (item | trim).startswith('#')", selection)
+        self.assertNotIn("reject('match'", selection)
+        self.assertIn('loop: "{{ developer_git_defaults }}"', validation)
 
 
 if __name__ == "__main__":

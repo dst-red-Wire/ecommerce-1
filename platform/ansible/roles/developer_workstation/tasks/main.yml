@@ -36,11 +36,20 @@
   changed_when: "'Nothing to do.' not in ansible_collection_install.stdout"
   tags: [workstation, bootstrap, ansible_collections]
 
-- name: Read repository Git defaults
+- name: Read repository Git default lines
   ansible.builtin.set_fact:
-    developer_git_defaults: >-
-      {{ lookup('ansible.builtin.file', repo_root + '/config/workstation/git-local.conf').splitlines()
-         | reject('match', '^[ \t]*(#|$)') | list }}
+    developer_git_default_lines: >-
+      {{ lookup('ansible.builtin.file', repo_root + '/config/workstation/git-local.conf').splitlines() }}
+    developer_git_defaults: []
+  tags: [workstation, git]
+
+- name: Select active repository Git defaults
+  ansible.builtin.set_fact:
+    developer_git_defaults: "{{ developer_git_defaults + [item] }}"
+  loop: "{{ developer_git_default_lines }}"
+  when:
+    - item | trim | length > 0
+    - not (item | trim).startswith('#')
   tags: [workstation, git]
 
 - name: Validate repository Git defaults
