@@ -15,7 +15,11 @@ else
   warn "shellcheck is unavailable; shell lint skipped"
 fi
 
-if have go && find . -name go.mod -not -path './vendor/*' -print -quit | grep -q .; then
+if find . -name go.mod -not -path './vendor/*' -print -quit | grep -q .; then
+  ./scripts/ensure-go-toolchain.sh
+  export PATH="$HOME/.local/bin:$PATH"
+  require go
+  require gofmt
   unformatted=$(find . -type f -name '*.go' -not -path './vendor/*' -exec gofmt -l {} +)
   [ -z "$unformatted" ] || fail "gofmt required for:\n$unformatted"
 else

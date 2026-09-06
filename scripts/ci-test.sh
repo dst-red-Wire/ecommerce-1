@@ -15,11 +15,13 @@ fi
 
 modules=$(find . -name go.mod -not -path './vendor/*' -print 2>/dev/null || true)
 if [ -n "$modules" ]; then
+  ./scripts/ensure-go-toolchain.sh
+  export PATH="$HOME/.local/bin:$PATH"
   require go
   printf '%s\n' "$modules" | while IFS= read -r module; do
     directory=${module%/*}
     info "testing Go module $directory"
-    (cd "$directory" && go test ./...)
+    (cd "$directory" && go test ./... && go vet ./...)
   done
 else
   info "no Go modules found; Go tests skipped"
