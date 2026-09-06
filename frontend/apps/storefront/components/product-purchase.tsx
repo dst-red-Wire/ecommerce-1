@@ -2,6 +2,7 @@
 
 import { Button, ProductArt } from "@noma/ui";
 import { Check, Heart, Minus, Plus, ShoppingBag } from "lucide-react";
+import Image from "next/image";
 import { useState } from "react";
 
 import type { ProductViewModel } from "@/domain/models";
@@ -16,7 +17,18 @@ export function ProductGallery({ product }: { product: ProductViewModel }) {
       <div
         className={`product-gallery__main product-gallery__variant-${active}`}
       >
-        <ProductArt kind={product.art} />
+        {product.media ? (
+          <Image
+            className="product-gallery__photo"
+            src={product.media.url}
+            alt={product.media.alt}
+            fill
+            sizes="(max-width: 900px) 100vw, 50vw"
+            priority
+          />
+        ) : (
+          <ProductArt kind={product.art} />
+        )}
         <button
           type="button"
           className="favorite-button"

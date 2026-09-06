@@ -1,7 +1,12 @@
 import { mockCatalogRepository } from "@/adapters/mock-catalog-repository";
+import { publicCatalogRepository } from "@/adapters/public-catalog-repository";
 
-// Composition root for Phase 1. A future BFF adapter will replace this binding.
-const catalogRepository = mockCatalogRepository;
+// Keep deterministic mock mode as the default for CI/offline development.
+// Public providers are an explicit demo mode and remain behind this composition root.
+const catalogRepository =
+  process.env.NOMA_DATA_ADAPTER === "public"
+    ? publicCatalogRepository
+    : mockCatalogRepository;
 
 export async function getHomeView() {
   const [products, categories] = await Promise.all([

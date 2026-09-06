@@ -2,6 +2,15 @@ import type { ProductArtKind } from "@noma/ui";
 
 export type ProductAvailability = "available" | "low" | "unavailable";
 
+export interface ProductMediaViewModel {
+  url: string;
+  alt: string;
+  sourceUrl: string;
+  provider: "Pexels";
+  creator: string;
+  creatorUrl: string;
+}
+
 export interface ProductViewModel {
   id: string;
   slug: string;
@@ -15,6 +24,7 @@ export interface ProductViewModel {
   badge?: string;
   art: ProductArtKind;
   description: string;
+  media?: ProductMediaViewModel;
   colors: readonly string[];
   sizes: readonly string[];
 }

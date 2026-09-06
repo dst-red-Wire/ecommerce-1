@@ -131,6 +131,15 @@ corepack pnpm test:e2e
 
 Les captures de validation sont écrites dans `frontend/screenshots/`. Ce répertoire est ignoré par Git et ne doit pas être commité.
 
+
+## Données publiques de démonstration
+
+Le mode par défaut reste `NOMA_DATA_ADAPTER=mock` afin que les builds, tests et démonstrations hors ligne soient déterministes. Pour tester des données publiques structurées, définir `NOMA_DATA_ADAPTER=public` dans un fichier local non commité. Le catalogue utilise alors DummyJSON comme source de données de démonstration.
+
+Les photos Pexels sont un enrichissement optionnel côté serveur. Définir `PEXELS_API_KEY` uniquement dans un secret local/de déploiement ; la clé ne doit jamais utiliser le préfixe `NEXT_PUBLIC_`. Sans clé ou si Pexels est indisponible, le catalogue public continue avec les illustrations NOMA locales. Les photos affichées conservent un lien de crédit vers leur page Pexels et leur photographe.
+
+Les profils clients, commandes, paiements et signaux fraude restent volontairement synthétiques : une photo ou un profil public ne doit pas être présenté comme un vrai client, acheteur ou fraudeur. Les fournisseurs publics sont des données de démonstration, pas des contrats métier ecommerce-1.
+
 ## Passage aux APIs réelles
 
 Avant de remplacer les mocks, fournir les contrats OpenAPI/BFF officiels, les règles d'erreur et de pagination, la configuration IAM exploitable, les URL par environnement et les règles de cache/fraîcheur. Aucun fichier OpenAPI ou DTO réseau provisoire n'est créé dans cette Phase 1.
