@@ -43,6 +43,20 @@
          | reject('match', '^\\s*(#|$)') | list }}
   tags: [workstation, git]
 
+- name: Validate repository Git defaults
+  ansible.builtin.assert:
+    that:
+      - "'=' in item"
+      - "item.split('=', 1)[0] | trim | length > 0"
+      - "item.split('=', 1) | length == 2"
+    fail_msg: >-
+      Invalid repository Git default entry {{ item | to_json }}:
+      expected a non-empty key and an accessible value in key=value form.
+  loop: "{{ developer_git_defaults }}"
+  loop_control:
+    label: "{{ item }}"
+  tags: [workstation, git]
+
 - name: Read current repository-local Git defaults
   ansible.builtin.command:
     argv: [git, config, --local, --get, "{{ item.split('=', 1)[0] }}"]
@@ -62,12 +76,12 @@
       - "{{ item.split('=', 1)[0] }}"
       - "{{ item.split('=', 1)[1] }}"
     chdir: "{{ repo_root }}"
-  loop: "{{ developer_git_defaults }}"
+  loop: "{{ developer_git_current.results }}"
   loop_control:
-    index_var: git_default_index
+    label: "{{ item.item }}"
   when: >-
-    developer_git_current.results[git_default_index].rc != 0 or
-    (developer_git_current.results[git_default_index].stdout | trim) != item.split('=', 1)[1]
+    item.rc != 0 or
+    (item.stdout | trim) != item.item.split('=', 1)[1]
   changed_when: true
   tags: [workstation, git]
 
