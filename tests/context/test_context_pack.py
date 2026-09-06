@@ -16,6 +16,10 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(MOD.route(["scripts/harmless-local-helper.sh"]), "L0")
     def test_detects_service_from_task(self):
         self.assertIn("inventory", MOD.detect_services("fix inventory reservation", []))
+    def test_service_contract_resolves_reverse_sync_consumers_without_yq_index(self):
+        contract = __import__("json").loads(MOD.service_contract("catalog"))
+        self.assertIn("direct_sync_consumers", contract)
+        self.assertIsInstance(contract["direct_sync_consumers"], list)
     def test_byte_budget(self):
         out = MOD.bounded("x" * 1000, 200)
         self.assertLessEqual(len(out.encode()), 220)
