@@ -77,7 +77,14 @@ def detect_services(task: str, files: list[str]) -> list[str]:
 def service_contract(name: str) -> str:
     owner = yq_json(f'.services."{name}"', OWNERSHIP)
     dep = yq_json(f'.services."{name}"', DEPS)
-    consumers = yq_json(f'[.services | to_entries[] | select((.value.sync // []) | index("{name}")) | .key]', DEPS)
+    # Keep yq usage to simple YAML->JSON selection. Compute reverse dependencies in
+    # Python so behavior does not depend on jq-only functions such as index().
+    services = yq_json(".services", DEPS) or {}
+    consumers = sorted(
+        service
+        for service, contract in services.items()
+        if name in ((contract or {}).get("sync") or [])
+    )
     return json.dumps({"ownership": owner, "dependency_map": dep, "direct_sync_consumers": consumers}, indent=2, sort_keys=True)
 
 
