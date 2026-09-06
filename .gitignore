@@ -427,3 +427,5 @@ mise.local.toml
 
 # Documentation
 !docs/**
+# Generated bounded context packs for Work/Codex
+.context/

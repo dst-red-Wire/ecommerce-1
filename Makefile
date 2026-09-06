@@ -38,3 +38,16 @@ git-sync: ## Fetch/prune and fast-forward the current branch
 
 publish: ## Validate, commit and push the current branch (never force; never direct-push main)
 	@./scripts/git-publish.sh
+.PHONY: context-tools context diff-context failure-context
+
+context-tools: ## Install/verify token-efficient local context tooling
+	@./scripts/bootstrap-context-tools.sh
+
+context: ## Build a bounded contract-routed context pack; use TASK="..."
+	@./scripts/context-pack.sh "$(TASK)"
+
+diff-context: ## Build a compact diff-only context pack
+	@./scripts/diff-context.sh
+
+failure-context: ## Run one gate and retain only actionable failure context; use GATE=lint
+	@./scripts/failure-context.sh "$(GATE)"

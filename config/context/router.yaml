@@ -1,0 +1,35 @@
+version: 1
+status: exact
+max_bytes: 32768
+max_diff_lines: 240
+max_excerpt_lines: 120
+levels:
+  L2:
+    description: architecture or control-plane change
+    patterns:
+      - architecture.lock.yaml
+      - AGENTS.md
+      - docs/architecture/**
+      - config/infrastructure/**
+      - config/contracts/review-policy.yaml
+      - platform/**
+      - gitops/**
+      - security/**
+      - tekton/**
+  L1:
+    description: domain or contract change
+    patterns:
+      - config/contracts/**
+      - backend/**
+      - services/**
+      - frontend/**
+  L0:
+    description: local implementation change
+canonical:
+  always:
+    - AGENTS.md
+    - architecture.lock.yaml
+  domain:
+    - config/contracts/service-ownership.yaml
+    - config/contracts/dependency-map.yaml
+    - config/contracts/event-contracts.yaml
