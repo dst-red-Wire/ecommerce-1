@@ -51,7 +51,6 @@ management_plane:
   ci: tekton
   registry: harbor
   gitops: rancher-fleet
-  woodpecker_runtime: false
   bootstrap:
     terraform_opentofu: true
     ansible: true
@@ -108,6 +107,7 @@ machine_contracts:
   event_contracts: config/contracts/event-contracts.yaml
   dependency_map: config/contracts/dependency-map.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
+  ci_topology: config/contracts/ci-topology.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
@@ -138,6 +138,7 @@ superseded:
   splunk: wazuh-opensearch
   prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
   rook-ceph-launch-baseline: no-default-ceph
+  woodpecker-ci: tekton
 
 build_milestones:
   - M0-architecture-sync

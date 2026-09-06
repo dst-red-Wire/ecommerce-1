@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - tasks/global-gates.yaml
+  - tasks/frontend-gates.yaml
+  - tasks/go-service-gates.yaml
+  - tasks/platform-gates.yaml
+  - pipelines/global.yaml
+  - pipelines/frontend.yaml
+  - pipelines/go-service.yaml
+  - pipelines/platform.yaml

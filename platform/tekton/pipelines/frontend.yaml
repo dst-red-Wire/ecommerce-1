@@ -1,0 +1,24 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ecommerce-frontend
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: scope
+      type: string
+  workspaces:
+    - name: source
+  tasks:
+    - name: frontend-gates
+      taskRef:
+        name: ecommerce-frontend-gates
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: scope
+          value: $(params.scope)
+      workspaces:
+        - name: source
+          workspace: source

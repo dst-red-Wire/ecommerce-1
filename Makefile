@@ -1,22 +1,27 @@
 SHELL := /bin/sh
 
-.PHONY: help ci governance contracts lint test security terraform ansible
+.PHONY: help ci ci-global governance contracts shell lint test security terraform ansible
 
 help: ## Show the available checks
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "%-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-ci: governance contracts lint test security terraform ansible ## Run every portable CI check
+ci: governance contracts lint test security terraform ansible ## Run every portable repository CI check
 
-governance: ## Validate canonical architecture contracts
+ci-global: governance contracts security shell ## Run global gates used by the Tekton global pipeline
+
+governance: ## Validate canonical architecture and CI authority contracts
 	@./scripts/ci-governance.sh
 
 contracts: ## Validate registered OpenAPI 3.1 contracts
 	@./scripts/ci-contracts.sh
 
-lint: ## Lint repository sources that are present
+shell: ## ShellCheck repository-owned shell automation
+	@./scripts/ci-shell.sh
+
+lint: shell ## Lint Go and frontend sources with their declared toolchains
 	@./scripts/ci-lint.sh
 
-test: ## Run test suites that are present
+test: ## Run repository, Go and frontend test suites
 	@./scripts/ci-test.sh
 
 security: ## Scan the working tree for secrets
@@ -27,6 +32,23 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 
 ansible: ## Validate Ansible sources when present
 	@./scripts/ci-ansible.sh
+
+.PHONY: affected frontend-check frontend-storefront frontend-admin service-check
+
+affected: ## Classify affected CI components; use BASE=<sha> [HEAD=<sha>]
+	@BASE="$(BASE)" HEAD="$(HEAD)" ./scripts/ci-affected.sh
+
+frontend-check: ## Run the complete Storefront + Admin frontend gate
+	@./scripts/ci-frontend.sh check all
+
+frontend-storefront: ## Run the complete Storefront gate
+	@./scripts/ci-frontend.sh check storefront
+
+frontend-admin: ## Run the complete Admin gate
+	@./scripts/ci-frontend.sh check admin
+
+service-check: ## Run the generic Go service gate; use SERVICE=product
+	@SERVICE="$(SERVICE)" ./scripts/ci-service.sh
 
 .PHONY: workstation-doctor workstation-bootstrap git-sync publish
 
@@ -41,6 +63,7 @@ git-sync: ## Fetch/prune and fast-forward the current branch
 
 publish: ## Validate, commit and push the current branch (never force; never direct-push main)
 	@./scripts/git-publish.sh
+
 .PHONY: context-tools context diff-context failure-context
 
 context-tools: ## Install/verify token-efficient local context tooling
@@ -67,8 +90,8 @@ site: ## Install pinned frontend dependencies and run Storefront + Admin locally
 
 .PHONY: product-check product-run
 
-product-check: ## Validate the M2A Product golden runtime
-	@./scripts/ci-product.sh
+product-check: ## Validate Product through the generic Go service gate
+	@SERVICE=product ./scripts/ci-service.sh
 
 product-run: ## Run the local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
 	@./scripts/ensure-go-toolchain.sh && PATH="$$HOME/.local/bin:$$PATH" go run ./services/product/cmd/product-api

@@ -6,4 +6,5 @@ cd "$(repo_root)"
 
 require ruby
 ruby scripts/validate-openapi.rb
+ruby -Itest tests/openapi_validator_test.rb
 info "OpenAPI contract checks completed"

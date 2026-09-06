@@ -5,36 +5,35 @@ set -eu
 cd "$(repo_root)"
 
 require ruby
-ruby -Itest tests/architecture_validator_test.rb
-ruby -Itest tests/openapi_validator_test.rb
+for test_file in tests/*_test.rb; do
+  [ -f "$test_file" ] || continue
+  ruby -Itest "$test_file"
+done
 
 if [ -d tests/delivery ]; then
   require python3
   python3 -m unittest discover -s tests/delivery -p 'test_*.py'
 fi
 
-modules=$(find . -name go.mod -not -path './vendor/*' -print 2>/dev/null || true)
+modules=$(find services -name go.mod -not -path '*/vendor/*' -print 2>/dev/null || true)
 if [ -n "$modules" ]; then
   ./scripts/ensure-go-toolchain.sh
   export PATH="$HOME/.local/bin:$PATH"
   require go
-  printf '%s\n' "$modules" | while IFS= read -r module; do
+  printf '%s
+' "$modules" | while IFS= read -r module; do
     directory=${module%/*}
     info "testing Go module $directory"
     (cd "$directory" && go test ./... && go vet ./...)
   done
 else
-  info "no Go modules found; Go tests skipped"
+  info "no Go service modules found; Go tests not applicable"
 fi
 
-if have npm; then
-  find . -name package.json -not -path '*/node_modules/*' -print | while IFS= read -r manifest; do
-    directory=${manifest%/*}
-    [ -f "$directory/package-lock.json" ] || { warn "$directory has no package-lock.json; npm tests skipped"; continue; }
-    (cd "$directory" && npm ci && npm test --if-present)
-  done
+if [ -f frontend/package.json ]; then
+  ./scripts/ci-frontend.sh test all
 else
-  info "npm unavailable; frontend tests skipped"
+  info "frontend package is absent; frontend tests not applicable"
 fi
 
 info "test checks completed"
