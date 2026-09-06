@@ -1,0 +1,37 @@
+{
+  "name": "noma-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @noma/storefront --filter @noma/admin dev",
+    "dev:storefront": "pnpm --filter @noma/storefront dev",
+    "dev:admin": "pnpm --filter @noma/admin dev",
+    "lint": "eslint apps packages",
+    "typecheck": "pnpm --filter @noma/ui typecheck && pnpm --filter @noma/storefront typecheck && pnpm --filter @noma/admin typecheck",
+    "test": "pnpm --filter @noma/storefront test && pnpm --filter @noma/admin test",
+    "test:watch": "pnpm --parallel --filter @noma/storefront --filter @noma/admin test:watch",
+    "test:e2e": "pnpm build && playwright test",
+    "build": "pnpm --filter @noma/storefront build && pnpm --filter @noma/admin build",
+    "format": "prettier --write \"{apps,packages,e2e}/**/*.{ts,tsx,css,md,json}\"",
+    "format:check": "prettier --check \"{apps,packages,e2e}/**/*.{ts,tsx,css,md,json}\""
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.11.1",
+    "@playwright/test": "1.62.1",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "24.10.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "jsdom": "30.0.1",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}
