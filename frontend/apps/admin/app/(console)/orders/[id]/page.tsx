@@ -1,5 +1,6 @@
 import { Button, ProductArt } from "@noma/ui";
 import { Check, MoreHorizontal, ShieldCheck, Truck } from "lucide-react";
+import { notFound } from "next/navigation";
 
 import { getOrders } from "@/application/admin";
 import { PageHeader, StatusBadge } from "@/components/admin-ui";
@@ -10,10 +11,9 @@ export default async function OrderDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const id = (await params).id;
-  const order =
-    (await getOrders()).find((item) => item.id === id) ??
-    (await getOrders())[0];
-  if (!order) return null;
+  const orders = await getOrders();
+  const order = orders.find((item) => item.id === id);
+  if (!order) notFound();
   return (
     <main className="admin-page order-detail" id="main">
       <PageHeader

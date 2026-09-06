@@ -44,6 +44,24 @@ test("Admin: stock et remboursement restent explicitement simulés", async ({
   ).toBeEnabled();
 });
 
+test("Admin: order et payment inconnus renvoient 404", async ({ page }) => {
+  const orderResponse = await page.goto(
+    "http://127.0.0.1:3001/orders/ORD-UNKNOWN",
+  );
+  expect(orderResponse?.status()).toBe(404);
+  await expect(
+    page.getByRole("heading", { name: "Vue non implémentée" }),
+  ).toBeVisible();
+
+  const paymentResponse = await page.goto(
+    "http://127.0.0.1:3001/payments/PAY-UNKNOWN",
+  );
+  expect(paymentResponse?.status()).toBe(404);
+  await expect(
+    page.getByRole("heading", { name: "Vue non implémentée" }),
+  ).toBeVisible();
+});
+
 test("Admin: vue mobile d’urgence et acquittement", async ({ page }) => {
   await page.goto("http://127.0.0.1:3001/mobile");
   await expect(
