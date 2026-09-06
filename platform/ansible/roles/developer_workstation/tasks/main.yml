@@ -22,7 +22,59 @@
     mode: '0755'
   tags: [workstation, bootstrap, ansible_collections]
 
-- name: Reconcile pinned project Ansible collections
+- name: Load pinned project Ansible collections
+  ansible.builtin.include_vars:
+    file: "{{ repo_root }}/platform/ansible/requirements.yml"
+    name: developer_collection_requirements
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Inspect project-owned Ansible collection manifests
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/.ansible/collections/ansible_collections/{{ item.name.split('.', 1)[0] }}/{{ item.name.split('.', 1)[1] }}/MANIFEST.json"
+  loop: "{{ developer_collection_requirements.collections }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: developer_collection_manifest_stats
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Read project-owned Ansible collection manifests
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ developer_collection_manifest_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: item.stat.exists
+  register: developer_collection_manifests
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Initialize project-owned Ansible collection state
+  ansible.builtin.set_fact:
+    developer_project_collection_versions: {}
+    developer_collection_drift: []
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Record project-owned Ansible collection versions
+  ansible.builtin.set_fact:
+    developer_project_collection_versions: >-
+      {{ developer_project_collection_versions | combine({
+           item.item.item.name: ((item.content | b64decode | from_json).collection_info.version | string)
+         }) }}
+  loop: "{{ developer_collection_manifests.results }}"
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  when: not (item.skipped | default(false))
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Identify project-owned Ansible collection drift
+  ansible.builtin.set_fact:
+    developer_collection_drift: "{{ developer_collection_drift + [item] }}"
+  loop: "{{ developer_collection_requirements.collections }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: developer_project_collection_versions[item.name] | default('') != item.version
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Reconcile drifted project-owned Ansible collections
   ansible.builtin.command:
     argv:
       - ansible-galaxy
@@ -32,8 +84,9 @@
       - "{{ repo_root }}/platform/ansible/requirements.yml"
       - --collections-path
       - "{{ repo_root }}/.ansible/collections"
-  register: ansible_collection_install
-  changed_when: "'Nothing to do.' not in ansible_collection_install.stdout"
+      - --force
+  when: developer_collection_drift | length > 0
+  changed_when: true
   tags: [workstation, bootstrap, ansible_collections]
 
 - name: Read repository Git default lines
