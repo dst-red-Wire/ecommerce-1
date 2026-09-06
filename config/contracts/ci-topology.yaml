@@ -1,0 +1,84 @@
+version: 1
+status: exact
+repository:
+  model: modular-monorepo
+  affected_only: true
+
+authorities:
+  forge: gitea
+  ci: tekton
+  gitops_cd: rancher-fleet
+  progressive_delivery: argo-rollouts
+  registry: harbor
+  forbidden_parallel_ci:
+    - woodpecker
+    - github-actions
+    - jenkins
+    - gitlab-ci
+    - drone
+    - gitea-actions-as-ci
+
+trigger_flow:
+  source: gitea
+  events:
+    - push
+    - pull_request
+  transport: webhook
+  receiver: tekton-eventlistener
+  binding: tekton-triggerbinding
+  template: tekton-triggertemplate
+  output: tekton-pipelinerun
+  implementation_root: platform/tekton/triggers
+  webhook_authentication:
+    required: true
+    algorithm: hmac-sha256
+    accepted_signature_headers:
+      - X-Gitea-Signature
+      - X-Hub-Signature-256
+    secret_source: openbao-via-eso
+
+gitea_actions:
+  allowed_for_forge_automation: true
+  ci_authority: false
+  cd_authority: false
+  may_trigger_tekton: false
+
+routing:
+  classifier: scripts/ci-affected.rb
+  dependency_contract: config/contracts/dependency-map.yaml
+  ownership_contract: config/contracts/service-ownership.yaml
+  public_api_contract: config/contracts/public-api-contracts.yaml
+
+pipelines:
+  global: platform/tekton/pipelines/global.yaml
+  frontend: platform/tekton/pipelines/frontend.yaml
+  go_service: platform/tekton/pipelines/go-service.yaml
+  platform: platform/tekton/pipelines/platform.yaml
+
+component_classes:
+  storefront:
+    path: frontend/apps/storefront
+    pipeline: frontend
+    artifact: storefront
+  admin:
+    path: frontend/apps/admin
+    pipeline: frontend
+    artifact: admin
+  go_services:
+    path_pattern: services/<service>
+    registry: config/contracts/service-ownership.yaml
+    pipeline: go_service
+    artifact_pattern: <service>
+  terraform:
+    path: platform/terraform
+    pipeline: platform
+  ansible:
+    path: platform/ansible
+    pipeline: platform
+
+rules:
+  one_repository_does_not_imply_one_release: true
+  independent_component_artifacts: true
+  ci_must_not_deploy_workloads_directly: true
+  gitops_digest_update_required: true
+  immutable_oci_digests: true

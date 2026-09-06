@@ -4,7 +4,7 @@ Plateforme e-commerce B2C mono-vendeur, cloud-native, self-hosted, multi-site A/
 
 ## Statut
 
-Le dépôt est en phase `ARCHITECTURE_SYNC -> BUILD`. L'architecture générale est verrouillée, mais le monorepo applicatif et l'IaC ne sont pas encore implémentés. Toute implémentation doit suivre `docs/architecture/BASELINE_V2.md` et `architecture.lock.yaml`.
+Le dépôt est en phase `BUILD`, avec `M2-golden-service-product` comme jalon applicatif courant. Le monorepo applicatif existe déjà (`frontend/`, `services/product/`) et l'IaC MGMT est amorcée sous `platform/terraform` et `platform/ansible`; les autres services et couches de plateforme sont ajoutés progressivement selon `architecture.lock.yaml`.
 
 ## Architecture métier — 17 microservices
 
@@ -124,14 +124,16 @@ cdn -> ATS -> S3/assets
 
 ## CI/CD
 
-- CI plateforme : Tekton.
-- Registry : Harbor.
-- CD GitOps : Rancher Fleet.
+- Forge cible : Gitea. Les push/PR déclenchent directement Tekton via webhook -> EventListener -> TriggerBinding -> TriggerTemplate -> PipelineRun.
+- Autorité CI unique : Tekton, avec les classes de pipeline sous [`platform/tekton`](platform/tekton/README.md).
+- Routage CI : affected-only à partir des chemins modifiés et des contrats machine (`make affected BASE=<sha> HEAD=<sha>`).
+- Registry : Harbor, avec un artefact OCI indépendant par composant déployable.
+- CD GitOps : Rancher Fleet; la CI ne déploie jamais directement les workloads.
 - Progressive delivery : Argo Rollouts.
-- Images : digests immuables, jamais `latest`.
+- Images : digests immuables, jamais `latest`, avec SBOM/provenance/signature.
 - Supply chain : Trivy, Syft SBOM, Cosign, admission policy.
 
-La CI Woodpecker présente dans le dépôt est uniquement un bootstrap transitoire du repository. Elle ne doit pas devenir une seconde CI applicative concurrente de Tekton.
+Les scripts `scripts/ci-*.sh` et les cibles Make sont des primitives déterministes appelées par Tekton, pas une seconde autorité CI. Les configurations de CI transitoires ou parallèles sont interdites par le contrat `config/contracts/ci-topology.yaml` et les tests de gouvernance. Gitea Actions n'est pas interdit comme fonctionnalité de forge, mais ne peut être une autorité CI/CD ni servir d'intermédiaire pour lancer Tekton.
 
 ## Observabilité
 

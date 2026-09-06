@@ -1,0 +1,24 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ecommerce-go-service
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: service
+      type: string
+  workspaces:
+    - name: source
+  tasks:
+    - name: service-gates
+      taskRef:
+        name: ecommerce-go-service-gates
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: service
+          value: $(params.service)
+      workspaces:
+        - name: source
+          workspace: source

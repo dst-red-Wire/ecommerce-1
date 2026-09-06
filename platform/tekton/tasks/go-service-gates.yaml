@@ -1,0 +1,20 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-go-service-gates
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: service
+      type: string
+  workspaces:
+    - name: source
+  steps:
+    - name: service-gates
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eu
+        SERVICE="$(params.service)" ./scripts/ci-service.sh

@@ -1,0 +1,20 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ecommerce-global
+spec:
+  params:
+    - name: runner-image
+      type: string
+  workspaces:
+    - name: source
+  tasks:
+    - name: global-gates
+      taskRef:
+        name: ecommerce-global-gates
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+      workspaces:
+        - name: source
+          workspace: source
