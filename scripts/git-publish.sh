@@ -20,6 +20,7 @@ make governance
 make contracts
 make lint
 make test
+make product-check
 make security
 make ansible
 make terraform

@@ -1,40 +1,46 @@
-# Product golden service - M2A runtime core
+# Product golden service - M2B PostgreSQL persistence
 
 This service is the first executable backend implementation for ecommerce-1 and is bound to `contracts/openapi/product.v1.yaml`.
 
-## Scope in this tranche
-
-Implemented now:
+## Implemented through M2B
 
 - product-owned base facts and SKUs only;
-- one application service shared by the HTTP transport and repository boundary;
+- one application service shared by transports and persistence adapters;
 - REST `/v1/products` and SKU routes matching the registered OpenAPI contract;
-- bearer-token presence gate for the local runtime boundary;
 - `Idempotency-Key` replay protection for writes;
 - ETag / `If-Match` optimistic concurrency;
 - RFC 7807-style `application/problem+json` errors;
-- health and readiness endpoints;
-- deterministic unit/HTTP contract tests;
-- an in-memory adapter used only for local development and tests.
+- PostgreSQL persistence through pgx v5 and sqlc-generated queries;
+- versioned forward-only Tern migrations under `migrations/`;
+- durable command-journal rows so idempotent responses survive process restarts;
+- PostgreSQL-backed readiness checks;
+- integration tests against a digest-pinned PostgreSQL container;
+- explicit in-memory adapter retained only for local/unit development.
 
-Not claimed complete in M2A:
+The authoritative runtime store is PostgreSQL. `PRODUCT_STORAGE` defaults to `postgres`; the process fails closed when `PRODUCT_DATABASE_URL` is missing. Memory mode must be selected explicitly.
 
-- PostgreSQL/pgx/sqlc persistence and migrations;
-- durable idempotency/outbox tables;
-- gRPC/Buf contract and transport;
-- Kafka Protobuf events/outbox publisher;
-- OpenTelemetry wiring;
-- immutable-digest Dockerfile and Kubernetes/Fleet manifests;
-- Keycloak signature/audience verification.
+## Database migration
 
-Those are the next M2 tranche. The in-memory adapter is not a production source of truth.
-
-## Local run
-
-From the repository root:
+Set a non-secret PostgreSQL connection URI through the runtime environment or approved secret injection path. Never commit it.
 
 ```sh
-make product-run
+PRODUCT_DATABASE_URL='postgres://...' make product-migrate
+```
+
+The initial schema creates `products`, `skus`, `command_journal`, and Tern's schema-version table. The migration is forward-only; rollback of the initial schema is database recreation/restore rather than an in-place destructive DOWN migration.
+
+## Run
+
+PostgreSQL-backed runtime:
+
+```sh
+PRODUCT_DATABASE_URL='postgres://...' make product-run
+```
+
+Explicit local memory fallback:
+
+```sh
+make product-run-memory
 ```
 
 The default bind address is `:8080`; override with `PRODUCT_HTTP_ADDR`.
@@ -46,7 +52,15 @@ GET /healthz
 GET /readyz
 ```
 
-Business endpoints require an `Authorization: Bearer <token>` header. M2A checks presence only; real Keycloak verification is intentionally deferred to the security integration tranche rather than faked here.
+`/readyz` probes PostgreSQL in the default runtime. Business endpoints still require an `Authorization: Bearer <token>` header. Signature/audience validation remains for the IAM/security tranche.
+
+## Persistence bootstrap
+
+After changing Product SQL, sqlc configuration, or persistence dependencies, reconcile generated code and exact module pins with:
+
+```sh
+make product-bootstrap-persistence
+```
 
 ## Validation
 
@@ -54,4 +68,13 @@ Business endpoints require an `Authorization: Bearer <token>` header. M2A checks
 make product-check
 ```
 
-This runs formatting verification and all Product Go tests. Repository-wide `make test` also discovers this module.
+This verifies formatting, sqlc generation/vet, Go race tests, a real PostgreSQL integration test, and `go vet`. The integration test uses a digest-pinned PostgreSQL image and verifies that data plus idempotency journal entries survive a new process/pool instance.
+
+## Still remaining in M2
+
+- atomic command + idempotency journal + transactional outbox boundary;
+- gRPC/Buf contract and transport;
+- Kafka Protobuf events/outbox publisher;
+- OpenTelemetry wiring;
+- immutable-digest service container and Kubernetes/Fleet manifests;
+- full Keycloak signature/audience/authorization enforcement.

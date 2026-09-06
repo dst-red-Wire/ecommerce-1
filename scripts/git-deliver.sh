@@ -73,6 +73,7 @@ git diff --stat "origin/$base...HEAD" > "$stat"
   printf -- '- contracts: PASS\n'
   printf -- '- lint: PASS\n'
   printf -- '- tests: PASS\n'
+  printf -- '- product-check: PASS\n'
   printf -- '- security: PASS\n'
   printf -- '- ansible: PASS/SKIP according to repository gate\n'
   printf -- '- terraform: PASS/SKIP according to repository gate\n\n'
