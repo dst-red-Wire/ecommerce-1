@@ -1,0 +1,530 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Ecommerce Product API
+  version: 1.0.0
+  description: >-
+    Golden M2 REST contract for product-owned base facts and SKUs. It intentionally
+    excludes catalog presentation/category data, prices, inventory/availability,
+    reviews, payment, and order state because those belong to other domains.
+servers:
+  - url: /
+    description: Environment-relative API gateway base URL.
+tags:
+  - name: Products
+  - name: SKUs
+x-ecommerce-service: product
+x-ecommerce-authoritative-store: product-db
+x-ecommerce-ownership: [products, skus, attributes, base-product-facts]
+x-ecommerce-audiences: [admin]
+security:
+  - bearerAuth: []
+paths:
+  /v1/products:
+    get:
+      tags: [Products]
+      operationId: listProducts
+      summary: List product base facts
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ProductStatus'
+      responses:
+        '200':
+          description: Product page.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+    post:
+      tags: [Products]
+      operationId: createProduct
+      summary: Create a product
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProductRequest'
+      responses:
+        '201':
+          description: Product created.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+  /v1/products/{productId}:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [Products]
+      operationId: getProduct
+      summary: Get product base facts
+      responses:
+        '200':
+          description: Product base facts.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+    patch:
+      tags: [Products]
+      operationId: updateProduct
+      summary: Update product base facts
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+        - $ref: './common.v1.yaml#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProductRequest'
+      responses:
+        '200':
+          description: Updated product.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '412':
+          $ref: './common.v1.yaml#/components/responses/PreconditionFailed'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+  /v1/products/{productId}/skus:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [SKUs]
+      operationId: listProductSkus
+      summary: List SKUs for a product
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/Limit'
+        - $ref: './common.v1.yaml#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: SKU page.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SkuListResponse'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+    post:
+      tags: [SKUs]
+      operationId: createProductSku
+      summary: Create a SKU for a product
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSkuRequest'
+      responses:
+        '201':
+          description: SKU created.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sku'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+  /v1/products/{productId}/skus/{skuId}:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+      - $ref: '#/components/parameters/SkuId'
+    get:
+      tags: [SKUs]
+      operationId: getProductSku
+      summary: Get a SKU
+      responses:
+        '200':
+          description: SKU.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sku'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+    patch:
+      tags: [SKUs]
+      operationId: updateProductSku
+      summary: Update a SKU
+      parameters:
+        - $ref: './common.v1.yaml#/components/parameters/IdempotencyKey'
+        - $ref: './common.v1.yaml#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSkuRequest'
+      responses:
+        '200':
+          description: Updated SKU.
+          headers:
+            X-Request-ID:
+              $ref: './common.v1.yaml#/components/headers/RequestId'
+            ETag:
+              $ref: './common.v1.yaml#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sku'
+        '400':
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+        '401':
+          $ref: './common.v1.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './common.v1.yaml#/components/responses/Forbidden'
+        '404':
+          $ref: './common.v1.yaml#/components/responses/NotFound'
+        '409':
+          $ref: './common.v1.yaml#/components/responses/Conflict'
+        '412':
+          $ref: './common.v1.yaml#/components/responses/PreconditionFailed'
+        '422':
+          $ref: './common.v1.yaml#/components/responses/UnprocessableEntity'
+        default:
+          $ref: './common.v1.yaml#/components/responses/BadRequest'
+components:
+  securitySchemes:
+    bearerAuth:
+      $ref: './common.v1.yaml#/components/securitySchemes/bearerAuth'
+  parameters:
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SkuId:
+      name: skuId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    ProductStatus:
+      type: string
+      enum: [draft, active, archived]
+    SkuStatus:
+      type: string
+      enum: [active, inactive, archived]
+    AttributeValue:
+      oneOf:
+        - type: string
+        - type: number
+        - type: integer
+        - type: boolean
+        - type: array
+          items:
+            type: string
+    AttributeMap:
+      type: object
+      additionalProperties:
+        $ref: '#/components/schemas/AttributeValue'
+    Product:
+      type: object
+      additionalProperties: false
+      required: [id, name, status, attributes, createdAt, updatedAt, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 10000
+        brand:
+          type: string
+          maxLength: 200
+        manufacturerPartNumber:
+          type: string
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+      example:
+        id: 018f2b65-6dc4-7d10-9f6f-49fc8f84eabb
+        name: Lampe de bureau NOMA
+        description: Lampe orientable en métal.
+        brand: NOMA
+        manufacturerPartNumber: NOMA-LAMP-01
+        status: active
+        attributes:
+          material: metal
+          adjustable: true
+        createdAt: '2026-09-06T10:00:00Z'
+        updatedAt: '2026-09-06T10:00:00Z'
+        version: 1
+    Sku:
+      type: object
+      additionalProperties: false
+      required: [id, productId, code, status, optionValues, attributes, createdAt, updatedAt, version]
+      properties:
+        id:
+          type: string
+          format: uuid
+        productId:
+          type: string
+          format: uuid
+        code:
+          type: string
+          minLength: 1
+          maxLength: 100
+        gtin:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+        status:
+          $ref: '#/components/schemas/SkuStatus'
+        optionValues:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+      example:
+        id: 018f2b66-3a39-7d2a-b93e-839061ebbb80
+        productId: 018f2b65-6dc4-7d10-9f6f-49fc8f84eabb
+        code: NOMA-LAMP-01-BLK
+        gtin: '12345678'
+        status: active
+        optionValues:
+          color: black
+        attributes:
+          voltage: 230V
+        createdAt: '2026-09-06T10:00:00Z'
+        updatedAt: '2026-09-06T10:00:00Z'
+        version: 1
+    CreateProductRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 10000
+        brand:
+          type: string
+          maxLength: 200
+        manufacturerPartNumber:
+          type: string
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+    UpdateProductRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 10000
+        brand:
+          type: string
+          maxLength: 200
+        manufacturerPartNumber:
+          type: string
+          maxLength: 200
+        status:
+          $ref: '#/components/schemas/ProductStatus'
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+    CreateSkuRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 100
+        gtin:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+        status:
+          $ref: '#/components/schemas/SkuStatus'
+        optionValues:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+    UpdateSkuRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 100
+        gtin:
+          type: string
+          pattern: '^[0-9]{8,14}$'
+        status:
+          $ref: '#/components/schemas/SkuStatus'
+        optionValues:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          $ref: '#/components/schemas/AttributeMap'
+    ProductListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+        nextCursor:
+          type: [string, 'null']
+    SkuListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Sku'
+        nextCursor:
+          type: [string, 'null']
