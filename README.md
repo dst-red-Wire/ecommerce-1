@@ -33,6 +33,29 @@ Il n'existe pas de microservice `checkout`. `Order` orchestre la Saga de command
 - `frontend/storefront` : Next.js, TypeScript, mobile-first, RSC/SSR privilégiés.
 - `frontend/admin` : Next.js, TypeScript, Tailwind CSS, shadcn/ui, Radix UI.
 
+## Prise en main locale du site
+
+Le frontend NOMA est directement consultable depuis le navigateur Windows lorsque le dépôt est lancé sous WSL2. Depuis la racine du dépôt :
+
+```sh
+make site
+```
+
+Cette commande installe les dépendances frontend verrouillées avec le lockfile, puis démarre simultanément le Storefront et l'Admin. Garder le terminal ouvert pendant la consultation et utiliser `Ctrl+C` pour arrêter les serveurs.
+
+- Storefront : <http://localhost:3000>
+- Admin : <http://localhost:3001>
+- Admin tablette : <http://localhost:3001/tablet>
+- Admin mobile : <http://localhost:3001/mobile>
+
+Le mode par défaut utilise les données mock déterministes. Pour tester le catalogue public DummyJSON :
+
+```sh
+NOMA_DATA_ADAPTER=public make site
+```
+
+`PEXELS_API_KEY` reste optionnelle et doit être injectée comme secret côté serveur, hors Git et sans préfixe `NEXT_PUBLIC_`. Les détails de développement, de validation et les limites fonctionnelles courantes sont documentés dans [`frontend/README.md`](frontend/README.md).
+
 ## Contrats
 
 - Externe : REST/JSON + OpenAPI 3.1.

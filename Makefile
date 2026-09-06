@@ -56,3 +56,8 @@ failure-context: ## Run one gate and retain only actionable failure context; use
 
 deliver: ## Validate, publish the current feature branch and create/update its GitHub PR
 	@TITLE="$(TITLE)" MSG="$(MSG)" BASE="$(BASE)" ./scripts/git-deliver.sh
+
+.PHONY: site
+
+site: ## Install pinned frontend dependencies and run Storefront + Admin locally
+	@$(MAKE) -C frontend site
