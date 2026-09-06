@@ -64,3 +64,11 @@ deliver: ## Validate, publish the current feature branch and create/update its G
 
 site: ## Install pinned frontend dependencies and run Storefront + Admin locally
 	@$(MAKE) -C frontend site
+
+.PHONY: product-check product-run
+
+product-check: ## Validate the M2A Product golden runtime
+	@./scripts/ci-product.sh
+
+product-run: ## Run the local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
+	@./scripts/ensure-go-toolchain.sh && PATH="$$HOME/.local/bin:$$PATH" go run ./services/product/cmd/product-api

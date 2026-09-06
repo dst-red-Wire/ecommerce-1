@@ -70,7 +70,9 @@ git diff --stat "origin/$base...HEAD" > "$stat"
   printf '%s\n\n## Validation\n\n' "\`\`\`"
   printf -- '- workstation doctor: PASS\n'
   printf -- '- governance: PASS\n'
+  printf -- '- contracts: PASS\n'
   printf -- '- lint: PASS\n'
+  printf -- '- tests: PASS\n'
   printf -- '- security: PASS\n'
   printf -- '- ansible: PASS/SKIP according to repository gate\n'
   printf -- '- terraform: PASS/SKIP according to repository gate\n\n'

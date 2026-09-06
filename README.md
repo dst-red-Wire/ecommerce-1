@@ -71,6 +71,14 @@ NOMA_DATA_ADAPTER=public make site
 - Patterns obligatoires selon le domaine : Outbox, idempotence, Saga, retry borné, DLQ, versioning et contract tests.
 - Convention détaillée : [`docs/api/README.md`](docs/api/README.md).
 
+
+### Golden Product runtime - M2A
+
+Le contrat `contracts/openapi/product.v1.yaml` possède maintenant un premier runtime Go exécutable sous `services/product`. Cette tranche implémente les routes REST Product/SKU, idempotence, ETag/`If-Match`, erreurs `application/problem+json`, health/readiness et tests contractuels. La persistance PostgreSQL/pgx/sqlc, gRPC, Outbox/Kafka, OpenTelemetry et les manifests immuables restent explicitement le palier M2 suivant ; l'adaptateur mémoire actuel est uniquement local/test.
+
+- Validation ciblée : `make product-check`
+- Exécution locale : `make product-run`
+
 ## Données
 
 - PostgreSQL / CloudNativePG : source de vérité transactionnelle des domaines concernés.

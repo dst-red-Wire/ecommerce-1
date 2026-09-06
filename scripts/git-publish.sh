@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
+export PATH="$HOME/.local/bin:$PATH"
 branch="$(git branch --show-current)"
 [[ -n "$branch" ]] || { echo 'FAIL publish: detached HEAD'; exit 3; }
 if [[ "$branch" == main || "$branch" == master ]]; then
@@ -13,9 +14,12 @@ if [[ "$branch" == main || "$branch" == master ]]; then
   fi
 fi
 ./scripts/ensure-docker-daemon.sh
+./scripts/ensure-go-toolchain.sh
 make workstation-doctor
 make governance
+make contracts
 make lint
+make test
 make security
 make ansible
 make terraform

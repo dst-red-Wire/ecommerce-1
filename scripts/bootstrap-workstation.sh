@@ -67,6 +67,7 @@ install_cosign(){
   echo "PASS cosign ${COSIGN_VERSION} installed and verified"
 }
 install_cosign
+"$ROOT/scripts/ensure-go-toolchain.sh"
 
 "$ROOT/scripts/bootstrap-context-tools.sh"
 
@@ -90,7 +91,9 @@ docker info >/dev/null 2>&1 || { echo 'FAIL Docker: daemon not reachable after a
 
 "$ROOT/scripts/doctor-workstation.sh"
 make governance
+make contracts
 make lint
+make test
 make security
 make ansible
 make terraform
