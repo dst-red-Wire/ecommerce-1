@@ -30,7 +30,7 @@ La validation échoue si un contrat enregistré :
 - expose une commande sans authentification, `Idempotency-Key`, ou sans `If-Match` pour un PATCH ;
 - utilise un chemin qui ne respecte pas le major versionné du contrat.
 
-Le gate `contracts` fait partie de `make ci` et du bootstrap CI Woodpecker. Les tests négatifs du validateur sont exécutés par `make test`.
+Le gate `contracts` fait partie de `make ci` et de la classe de pipeline Tekton globale. Les tests négatifs du validateur sont exécutés par `make test`.
 
 ## Convention Product v1
 

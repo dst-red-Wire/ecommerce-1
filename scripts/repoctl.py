@@ -21,6 +21,11 @@ import time
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
+# Every Ansible subprocess resolves collections from the project-owned path only.
+# This prevents a user or distro installation from silently changing execution.
+os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
+os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
 
 
@@ -70,6 +75,50 @@ def pinned_versions() -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return values
+
+
+def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
+    """Read the canonical Ansible collection lock without duplicating its pins."""
+    source = requirements or ROOT / "platform" / "ansible" / "requirements.yml"
+    result: dict[str, str] = {}
+    name: str | None = None
+    for raw in source.read_text(encoding="utf-8").splitlines():
+        if match := re.match(r"\s*-\s+name:\s*([\w.]+)\s*$", raw):
+            if name is not None:
+                raise RuntimeError(f"missing version for Ansible collection {name} in {source}")
+            name = match.group(1)
+        elif match := re.match(r"\s+version:\s*([\w.-]+)\s*$", raw):
+            if name is None or name in result:
+                raise RuntimeError(f"invalid Ansible collection requirement in {source}")
+            result[name] = match.group(1)
+            name = None
+    if name is not None or not result:
+        raise RuntimeError(f"invalid Ansible collection requirements in {source}")
+    return result
+
+
+def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
+    """Return the version Ansible can resolve from its isolated project path."""
+    namespace, collection = name.split(".", 1)
+    manifest = collections_root / "ansible_collections" / namespace / collection / "MANIFEST.json"
+    if not manifest.is_file():
+        return None
+    try:
+        return str(json.loads(manifest.read_text(encoding="utf-8")).get("collection_info", {}).get("version"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def ansible_collections_check() -> int:
+    rc = 0
+    for name, expected in required_ansible_collections().items():
+        actual = resolved_ansible_collection_version(name)
+        if actual == expected:
+            print(f"PASS ansible collection {name} {actual}")
+        else:
+            print(f"FAIL ansible collection {name}: expected {expected}, resolved {actual or 'missing'}", file=sys.stderr)
+            rc = 1
+    return rc
 
 
 def developer_state_ready(tags: str) -> bool:
@@ -122,6 +171,8 @@ def governance() -> int:
     require("ruby")
     run(["ruby", "scripts/validate-architecture.rb"])
     run_ruby_tests(["tests/architecture_validator_test.rb", "tests/ci_authority_test.rb", "tests/ci_affected_test.rb"])
+    if documentation_policy():
+        return 1
     print("PASS governance checks completed")
     return 0
 
@@ -380,6 +431,28 @@ def automation_policy() -> int:
     return 0
 
 
+def documentation_policy() -> int:
+    """Reject active documentation that contradicts the canonical automation model."""
+    rules = {
+        "AGENTS.md": [r"portable POSIX `sh`", r"repository shell helpers"],
+        "README.md": [r"scripts/ci-\*\.sh"],
+        "docs/project/CODEX_HANDOFFS.md": [r"shared POSIX `sh` helpers", r"shared repository scripts factored"],
+        "docs/api/README.md": [r"bootstrap CI Woodpecker"],
+    }
+    failures: list[str] = []
+    for relative, patterns in rules.items():
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        for pattern in patterns:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                failures.append(f"{relative}: {pattern}")
+    if failures:
+        print("FAIL documentation policy: active legacy automation references found", file=sys.stderr)
+        print("\n".join(f"  {item}" for item in failures), file=sys.stderr)
+        return 1
+    print("PASS documentation policy: active automation references are canonical")
+    return 0
+
+
 def frontend(action: str, scope: str) -> int:
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: action={check|lint|test|build} scope={all|storefront|admin}")
@@ -500,6 +573,8 @@ def ansible_check() -> int:
     if not files: print("SKIP ansible: no Ansible files found"); return 0
     run(["ansible-lint", *files])
     run(["ansible-playbook", "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "--syntax-check", "-e", f"repo_root={ROOT}"])
+    if ansible_collections_check():
+        return 1
     print("PASS ansible checks completed")
     return 0
 
@@ -657,6 +732,7 @@ def doctor() -> int:
         rc |= 0 if path else 1
     if shutil.which("docker") and run(["docker","info"], check=False, capture=True).returncode == 0: print("PASS docker-daemon reachable")
     else: print("FAIL docker-daemon unreachable"); rc = 1
+    rc |= ansible_collections_check()
     return rc
 
 
