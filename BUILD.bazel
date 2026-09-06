@@ -1,0 +1,16 @@
+py_binary(
+    name = "repoctl",
+    srcs = ["scripts/repoctl.py"],
+    main = "scripts/repoctl.py",
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "canonical-contracts",
+    srcs = glob([
+        "architecture.lock.yaml",
+        "config/contracts/*.yaml",
+        "contracts/**/*.yaml",
+    ]),
+    visibility = ["//visibility:public"],
+)

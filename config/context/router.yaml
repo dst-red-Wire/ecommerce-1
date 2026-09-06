@@ -1,35 +1,79 @@
-version: 1
+version: 2
 status: exact
-max_bytes: 32768
-max_diff_lines: 240
-max_excerpt_lines: 120
 levels:
   L2:
-    description: architecture or control-plane change
+    description: architecture, security, infrastructure or control-plane change
+    max_bytes: 32768
+    max_diff_lines: 240
+    max_excerpt_lines: 100
     patterns:
       - architecture.lock.yaml
       - AGENTS.md
       - docs/architecture/**
       - config/infrastructure/**
       - config/contracts/review-policy.yaml
+      - config/contracts/ci-topology.yaml
       - platform/**
       - gitops/**
       - security/**
       - tekton/**
+    task_keywords:
+      - architecture
+      - control-plane
+      - tekton
+      - fleet
+      - rancher
+      - terraform
+      - ansible
+      - kubernetes
+      - rke2
+      - iam
+      - keycloak
+      - security
+      - tls
+      - infrastructure
   L1:
-    description: domain or contract change
+    description: domain, API, service or frontend contract change
+    max_bytes: 24576
+    max_diff_lines: 180
+    max_excerpt_lines: 80
     patterns:
       - config/contracts/**
-      - backend/**
+      - contracts/**
       - services/**
       - frontend/**
+    task_keywords:
+      - openapi
+      - contract
+      - api
+      - grpc
+      - protobuf
+      - event
+      - service
+      - domain
+      - frontend
+      - storefront
+      - admin
+      - product
+      - inventory
+      - order
+      - payment
   L0:
-    description: local implementation change
+    description: local implementation or developer-helper change
+    max_bytes: 12288
+    max_diff_lines: 100
+    max_excerpt_lines: 40
+    patterns: []
+    task_keywords: []
 canonical:
-  always:
+  L2:
     - AGENTS.md
     - architecture.lock.yaml
-  domain:
+    - config/contracts/review-policy.yaml
+    - config/contracts/ci-topology.yaml
+  L1:
     - config/contracts/service-ownership.yaml
     - config/contracts/dependency-map.yaml
     - config/contracts/event-contracts.yaml
+    - config/contracts/public-api-contracts.yaml
+  L0: []

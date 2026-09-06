@@ -1,0 +1,40 @@
+---
+- name: Generate API bindings from canonical OpenAPI contracts
+  ansible.builtin.command:
+    argv: [python3, scripts/repoctl.py, api-generate, --target, all]
+    chdir: "{{ repo_root }}"
+  environment:
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  changed_when: true
+  tags: [api_codegen]
+
+- name: Check Product Go module for generated OpenAPI runtime dependency
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/services/product/go.mod"
+  register: product_go_module
+  tags: [api_codegen]
+
+- name: Reconcile oapi-codegen runtime in Product module
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_env.HOME }}/.local/bin/go"
+      - get
+      - "github.com/oapi-codegen/runtime@v{{ oapi_codegen_runtime_version }}"
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  when: product_go_module.stat.exists
+  changed_when: false
+  tags: [api_codegen]
+
+- name: Tidy Product module after API generation
+  ansible.builtin.command:
+    argv: ["{{ ansible_env.HOME }}/.local/bin/go", mod, tidy]
+    chdir: "{{ repo_root }}/services/product"
+  environment:
+    GOWORK: 'off'
+    PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"
+  when: product_go_module.stat.exists
+  changed_when: true
+  tags: [api_codegen]

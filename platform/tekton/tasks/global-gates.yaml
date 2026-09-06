@@ -12,7 +12,5 @@ spec:
     - name: global-gates
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
-      script: |
-        #!/bin/sh
-        set -eu
-        make ci-global
+      command: [make]
+      args: [ci-global]

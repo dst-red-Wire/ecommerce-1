@@ -1,97 +1,124 @@
-SHELL := /bin/sh
+PYTHON := python3
+ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-global governance contracts shell lint test security terraform ansible
+.PHONY: help ci ci-global governance contracts automation lint test security terraform ansible system
 
 help: ## Show the available checks
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "%-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@$(PYTHON) scripts/repoctl.py --help
 
-ci: governance contracts lint test security terraform ansible ## Run every portable repository CI check
+ci: governance contracts automation lint test security terraform ansible ## Run every portable repository CI check
 
-ci-global: governance contracts security shell ## Run global gates used by the Tekton global pipeline
+ci-global: governance contracts automation security ## Run global gates used by Tekton
 
 governance: ## Validate canonical architecture and CI authority contracts
-	@./scripts/ci-governance.sh
+	@$(PYTHON) scripts/repoctl.py governance
 
-contracts: ## Validate registered OpenAPI 3.1 contracts
-	@./scripts/ci-contracts.sh
+contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
+	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
 
-shell: ## ShellCheck repository-owned shell automation
-	@./scripts/ci-shell.sh
+automation: ## Enforce Ansible-first and zero repository Shell scripts
+	@$(PYTHON) scripts/repoctl.py automation-policy
 
-lint: shell ## Lint Go and frontend sources with their declared toolchains
-	@./scripts/ci-lint.sh
+lint: automation ## Lint Go and frontend sources with declared toolchains
+	@$(PYTHON) scripts/repoctl.py lint
 
 test: ## Run repository, Go and frontend test suites
-	@./scripts/ci-test.sh
+	@$(PYTHON) scripts/repoctl.py test
 
-security: ## Scan the working tree for secrets
-	@./scripts/ci-security.sh
+system: ## Run cross-system repository tests without replaying component suites
+	@$(PYTHON) scripts/repoctl.py system
+
+security: ## Scan working tree for secrets
+	@$(PYTHON) scripts/repoctl.py security
 
 terraform: ## Validate Terraform/OpenTofu sources when present
-	@./scripts/ci-terraform.sh
+	@$(PYTHON) scripts/repoctl.py terraform
 
-ansible: ## Validate Ansible sources when present
-	@./scripts/ci-ansible.sh
+ansible: ## Validate Ansible sources and local developer playbook syntax
+	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: affected frontend-check frontend-storefront frontend-admin service-check
+.PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 
-affected: ## Classify affected CI components; use BASE=<sha> [HEAD=<sha>]
-	@BASE="$(BASE)" HEAD="$(HEAD)" ./scripts/ci-affected.sh
+affected: ## Classify affected components; use BASE=<ref> [HEAD=<ref|WORKTREE>]
+	@$(PYTHON) scripts/repoctl.py affected --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 
-frontend-check: ## Run the complete Storefront + Admin frontend gate
-	@./scripts/ci-frontend.sh check all
+verify-change: ## Run global + affected component gates and write evidence JSON
+	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 
-frontend-storefront: ## Run the complete Storefront gate
-	@./scripts/ci-frontend.sh check storefront
+frontend-check: ## Run complete Storefront + Admin frontend gate
+	@$(PYTHON) scripts/repoctl.py frontend check all
 
-frontend-admin: ## Run the complete Admin gate
-	@./scripts/ci-frontend.sh check admin
+frontend-storefront: ## Run complete Storefront gate
+	@$(PYTHON) scripts/repoctl.py frontend check storefront
 
-service-check: ## Run the generic Go service gate; use SERVICE=product
-	@SERVICE="$(SERVICE)" ./scripts/ci-service.sh
+frontend-admin: ## Run complete Admin gate
+	@$(PYTHON) scripts/repoctl.py frontend check admin
 
-.PHONY: workstation-doctor workstation-bootstrap git-sync publish
+service-check: ## Run generic Go service gate; use SERVICE=product
+	@$(PYTHON) scripts/repoctl.py service "$(SERVICE)"
 
-workstation-doctor: ## Audit Windows/WSL/Docker/Git/tooling state
-	@./scripts/doctor-workstation.sh
+.PHONY: workstation-doctor workstation-bootstrap agent-tools context-tools product-bootstrap-persistence git-sync publish deliver
 
-workstation-bootstrap: ## Reconcile the developer workstation automatically
-	@./scripts/bootstrap-workstation.sh
+workstation-doctor: ## Audit local developer state without mutating it
+	@$(PYTHON) scripts/repoctl.py doctor
 
-git-sync: ## Fetch/prune and fast-forward the current branch
-	@./scripts/git-sync.sh
+workstation-bootstrap: ## Reconcile WSL workstation and developer toolchains with Ansible
+	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,toolchain,node,agent_tools,context_tools
 
-publish: ## Validate, commit and push the current branch (never force; never direct-push main)
-	@./scripts/git-publish.sh
+agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
+	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools
 
-.PHONY: context-tools context diff-context failure-context
+context-tools: ## Reconcile token-efficient context tooling with Ansible
+	@$(ANSIBLE_LOCAL) --tags context_tools
 
-context-tools: ## Install/verify token-efficient local context tooling
-	@./scripts/bootstrap-context-tools.sh
+product-bootstrap-persistence: ## Reconcile Product persistence generation/dependencies with Ansible
+	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
 
-context: ## Build a bounded contract-routed context pack; use TASK="..."
-	@./scripts/context-pack.sh "$(TASK)"
+git-sync: ## Fetch/prune and fast-forward current branch
+	@$(PYTHON) scripts/repoctl.py git-sync
 
-diff-context: ## Build a compact diff-only context pack
-	@./scripts/diff-context.sh
+publish: ## Commit, exact-SHA verify and push current feature branch
+	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
 
-failure-context: ## Run one gate and retain only actionable failure context; use GATE=lint
-	@./scripts/failure-context.sh "$(GATE)"
+deliver: ## Exact-SHA validate, publish and create/update GitHub PR
+	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-.PHONY: deliver
+.PHONY: context diff-context failure-context nx-graph bazel-verify
 
-deliver: ## Validate, publish the current feature branch and create/update its GitHub PR
-	@TITLE="$(TITLE)" MSG="$(MSG)" BASE="$(BASE)" ./scripts/git-deliver.sh
+context: ## Build bounded task-aware context pack; use TASK="..."
+	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
 
-.PHONY: site
+diff-context: ## Build compact diff-only context pack
+	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-origin/main}"
+
+failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
+	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
+
+nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
+	@$(PYTHON) scripts/repoctl.py nx-graph
+
+bazel-verify: ## Run affected-only verification through pinned Bazel
+	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+
+.PHONY: api-generate api-mock service-new
+
+api-generate: ## Generate Go and TypeScript bindings from registered OpenAPI contracts
+	@$(PYTHON) scripts/repoctl.py api-generate --target all $(if $(SERVICE),--service $(SERVICE),)
+
+api-mock: ## Start Prism mock; use SERVICE=product PORT=4010
+	@$(PYTHON) scripts/repoctl.py api-mock --service "$${SERVICE:-product}" --port "$${PORT:-4010}"
+
+service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
+	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)
+
+.PHONY: site product-check product-run
 
 site: ## Install pinned frontend dependencies and run Storefront + Admin locally
 	@$(MAKE) -C frontend site
 
-.PHONY: product-check product-run
+product-check: ## Validate Product through generic Go service gate
+	@$(PYTHON) scripts/repoctl.py service product
 
-product-check: ## Validate Product through the generic Go service gate
-	@SERVICE=product ./scripts/ci-service.sh
-
-product-run: ## Run the local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
-	@./scripts/ensure-go-toolchain.sh && PATH="$$HOME/.local/bin:$$PATH" go run ./services/product/cmd/product-api
+product-run: ## Run local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
+	@$(ANSIBLE_LOCAL) --tags go
+	@$(HOME)/.local/bin/go run ./services/product/cmd/product-api
