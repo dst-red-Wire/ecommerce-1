@@ -2,7 +2,7 @@
 
 require "fileutils"
 require "minitest/autorun"
-require "shellwords"
+require "open3"
 require "tmpdir"
 require_relative "../scripts/ci-affected"
 
@@ -11,6 +11,39 @@ class CIAffectedTest < Minitest::Test
   PUBLIC = {
     "contracts/openapi/product.v1.yaml" => {"service" => "product", "audiences" => ["admin"]}
   }.freeze
+  TEMPORARY_GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM" => "1",
+    "GIT_CONFIG_GLOBAL" => File::NULL
+  }.freeze
+
+  # Temporary repositories must not inherit workstation hooks, templates or identity.
+  def isolated_git(*args, chdir: nil)
+    command = ["git", "-c", "core.hooksPath=#{File::NULL}"]
+    command += ["-C", chdir] if chdir
+    system(TEMPORARY_GIT_ENV, *command, *args, exception: true)
+  end
+
+  def isolated_git_output(*args, chdir:)
+    command = ["git", "-c", "core.hooksPath=#{File::NULL}", "-C", chdir, *args]
+    stdout, stderr, status = Open3.capture3(TEMPORARY_GIT_ENV, *command)
+    raise "Command failed with exit #{status.exitstatus}: git #{args.join(' ')}: #{stderr.strip}" unless status.success?
+
+    stdout.strip
+  end
+
+  def with_isolated_git_environment
+    previous = TEMPORARY_GIT_ENV.to_h { |key, _value| [key, ENV[key]] }
+    ENV.update(TEMPORARY_GIT_ENV)
+    yield
+  ensure
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def initialize_temporary_git_repository(dir)
+    isolated_git("init", "-q", dir)
+    isolated_git("config", "user.email", "test@example.invalid", chdir: dir)
+    isolated_git("config", "user.name", "Test User", chdir: dir)
+  end
 
   def classify(*paths, contract_impact: {})
     AffectedComponents.classify(paths, services: SERVICES, public_contracts: PUBLIC,
@@ -92,32 +125,32 @@ class CIAffectedTest < Minitest::Test
 
   def test_changed_paths_reads_exact_git_range
     Dir.mktmpdir("ci-affected-git") do |dir|
-      system("git", "init", "-q", dir, exception: true)
-      system("git", "-C", dir, "config", "user.email", "ci@example.invalid", exception: true)
-      system("git", "-C", dir, "config", "user.name", "CI Test", exception: true)
-      File.write(File.join(dir, "a.txt"), "one\n")
-      system("git", "-C", dir, "add", "a.txt", exception: true)
-      system("git", "-C", dir, "commit", "-qm", "base", exception: true)
-      base = `git -C #{Shellwords.escape(dir)} rev-parse HEAD`.strip
-      File.write(File.join(dir, "b.txt"), "two\n")
-      system("git", "-C", dir, "add", "b.txt", exception: true)
-      system("git", "-C", dir, "commit", "-qm", "head", exception: true)
-      head = `git -C #{Shellwords.escape(dir)} rev-parse HEAD`.strip
-      assert_equal ["b.txt"], AffectedComponents.changed_paths(dir, base, head)
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "a.txt"), "one\n")
+        isolated_git("add", "a.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.write(File.join(dir, "b.txt"), "two\n")
+        isolated_git("add", "b.txt", chdir: dir)
+        isolated_git("commit", "-qm", "head", chdir: dir)
+        head = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        assert_equal ["b.txt"], AffectedComponents.changed_paths(dir, base, head)
+      end
     end
   end
 
   def test_worktree_mode_includes_untracked_files
     Dir.mktmpdir("ci-affected-worktree") do |dir|
-      system("git", "init", "-q", dir, exception: true)
-      system("git", "-C", dir, "config", "user.email", "ci@example.invalid", exception: true)
-      system("git", "-C", dir, "config", "user.name", "CI Test", exception: true)
-      File.write(File.join(dir, "a.txt"), "one\n")
-      system("git", "-C", dir, "add", "a.txt", exception: true)
-      system("git", "-C", dir, "commit", "-qm", "base", exception: true)
-      base = `git -C #{Shellwords.escape(dir)} rev-parse HEAD`.strip
-      File.write(File.join(dir, "new.txt"), "new\n")
-      assert_equal ["new.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "a.txt"), "one\n")
+        isolated_git("add", "a.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.write(File.join(dir, "new.txt"), "new\n")
+        assert_equal ["new.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+      end
     end
   end
 
