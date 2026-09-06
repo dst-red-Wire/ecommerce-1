@@ -1,0 +1,32 @@
+schema: ecommerce-1/design-sources/v1
+
+policy:
+  raw_design_archives_in_git: false
+  generated_playwright_screenshots_in_git: false
+  executable_design_system: frontend/packages/ui
+  archive_integrity_algorithm: sha256
+
+implementation_provenance:
+  historical_frontend_source_commit: a9e57e263be9e53d98227e8b3e20cdd3ec3ac60d
+  frontend_import_merge_commit: 3730d53675e71fd89854a30f6d8325594526f13d
+
+sources:
+  - id: noma-storefront-v1
+    product: storefront
+    artifact_name: design-pack-storefront-noma.zip
+    kind: design-reference-pack
+    binary_committed: false
+    sha256: null
+    integrity_status: pending_external_archive_checksum
+    implementation_path: frontend/apps/storefront
+    documentation: docs/design/storefront.md
+
+  - id: noma-admin-v1
+    product: admin
+    artifact_name: design-pack-admin-noma.zip
+    kind: design-reference-pack
+    binary_committed: false
+    sha256: null
+    integrity_status: pending_external_archive_checksum
+    implementation_path: frontend/apps/admin
+    documentation: docs/design/admin.md

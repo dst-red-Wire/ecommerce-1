@@ -119,6 +119,10 @@ Les pages reproduisent les six références mobile/desktop du pack Storefront au
 
 Les autres entrées de navigation correspondent à l'architecture cible et aboutissent volontairement à l'état `not-found`; aucun workflow métier absent n'est inventé.
 
+## Références de conception
+
+Le design system exécutable est versionné dans [`packages/ui`](packages/ui/README.md). La provenance des packs NOMA, la politique d'archivage et les références Storefront/Admin sont versionnées dans [`../docs/design`](../docs/design/README.md). Les ZIP de maquettes bruts ne sont volontairement pas commités.
+
 ## Design system
 
 `packages/ui/src/tokens.css` centralise la palette NOMA, les espacements, rayons, ombres, couleurs fonctionnelles, focus et règles de mouvement. Les composants partagés incluent les boutons, badges, prix, notation et illustrations produit temporaires.

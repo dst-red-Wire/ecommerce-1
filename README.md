@@ -30,8 +30,10 @@ Il n'existe pas de microservice `checkout`. `Order` orchestre la Saga de command
 
 ## Frontends
 
-- `frontend/storefront` : Next.js, TypeScript, mobile-first, RSC/SSR privilégiés.
-- `frontend/admin` : Next.js, TypeScript, Tailwind CSS, shadcn/ui, Radix UI.
+- `frontend/apps/storefront` : Next.js, TypeScript, mobile-first, RSC/SSR privilégiés.
+- `frontend/apps/admin` : Next.js, TypeScript, Tailwind CSS, shadcn/ui, Radix UI.
+- Design system partagé : [`frontend/packages/ui`](frontend/packages/ui/README.md).
+- Références et provenance NOMA : [`docs/design`](docs/design/README.md).
 
 ## Prise en main locale du site
 
