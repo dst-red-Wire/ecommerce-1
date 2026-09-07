@@ -102,7 +102,102 @@ class IncrementalDeliveryTests(unittest.TestCase):
         for gate in ["frontend:storefront", "platform:terraform", "system"]:
             self.assertEqual(self.PARENT, records[gate]["reused_from_sha"])
         self.assertEqual("incremental", captured["verification"]["mode"])
+        self.assertEqual(3, sum(1 for r in captured["records"] if r.get("reused_from_sha")))
         self.assertEqual(["global"], captured["verification"]["delta_components"])
+
+    def test_reuse_preserves_original_execution_duration_across_generations(self):
+        parent = self.parent_evidence()
+        source = parent["gates"][0]
+        source["duration_seconds"] = 0.0
+        source["source_duration_seconds"] = 12.5
+        source["reused_from_sha"] = "8" * 40
+        records = []
+        self.assertTrue(REPOCTL._reuse_gate("frontend:storefront", self.PARENT, parent, records))
+        self.assertEqual(12.5, records[0]["source_duration_seconds"])
+        self.assertEqual("8" * 40, records[0]["original_execution_sha"])
+        self.assertEqual(self.PARENT, records[0]["reused_from_sha"])
+
+    def test_merge_commit_parent_evidence_is_not_reused(self):
+        def merge_git(*args, check=True):
+            if args == ("rev-parse", "feature-head"):
+                return self.HEAD + "\n"
+            if args == ("rev-list", "--parents", "-n", "1", self.HEAD):
+                return f"{self.HEAD} {self.PARENT} {'7' * 40}\n"
+            raise AssertionError(args)
+        with mock.patch.object(REPOCTL, "git", side_effect=merge_git):
+            parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
+        self.assertIsNone(parent)
+        self.assertIsNone(data)
+
+    def test_missing_parent_evidence_falls_back_to_full_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context = Path(tmp)
+            (context / "evidence").mkdir()
+            with mock.patch.object(REPOCTL, "CONTEXT", context), \
+                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git):
+                parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
+        self.assertIsNone(parent)
+        self.assertIsNone(data)
+
+    def test_dirty_exact_checkout_fails_before_any_gate(self):
+        def dirty_git(*args, check=True):
+            if args == ("rev-parse", "feature-head"):
+                return self.HEAD + "\n"
+            if args == ("rev-parse", "HEAD"):
+                return self.HEAD + "\n"
+            if args == ("status", "--porcelain", "--untracked-files=all"):
+                return " M README.md\n"
+            raise AssertionError(args)
+        with mock.patch.object(REPOCTL, "git", side_effect=dirty_git), \
+             mock.patch.object(REPOCTL, "_run_gate") as run_gate:
+            self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
+        run_gate.assert_not_called()
+
+    def test_actually_changed_component_executes_while_other_component_reuses(self):
+        executed = []
+        captured = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            context = Path(tmp)
+            evidence_dir = context / "evidence"
+            evidence_dir.mkdir()
+            (evidence_dir / f"{self.PARENT}.json").write_text(json.dumps(self.parent_evidence()), encoding="utf-8")
+
+            def fake_changed_paths(base, head):
+                if base == "origin/main":
+                    return ["platform/terraform/main.tf", "scripts/resource-sizing.rb"]
+                if base == self.PARENT:
+                    return ["platform/terraform/main.tf"]
+                raise AssertionError((base, head))
+
+            def fake_affected(base, head, *, strict_unknown=False):
+                if base == "origin/main":
+                    return ["global", "platform:terraform", "system"]
+                if base == self.PARENT:
+                    self.assertTrue(strict_unknown)
+                    return ["global", "platform:terraform"]
+                raise AssertionError((base, head, strict_unknown))
+
+            def fake_run_gate(name, command, records, env=None):
+                executed.append(name)
+                records.append({"gate": name, "status": "PASS", "duration_seconds": 0.01})
+                return True
+
+            def fake_write(base, head, paths, components, records, verification=None):
+                captured["records"] = list(records)
+                return context / "evidence/current.json"
+
+            with mock.patch.object(REPOCTL, "CONTEXT", context), \
+                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git), \
+                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths), \
+                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected), \
+                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate), \
+                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write):
+                self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
+
+        self.assertIn("platform:terraform", executed)
+        records = {record["gate"]: record for record in captured["records"]}
+        self.assertNotIn("reused_from_sha", records["platform:terraform"])
+        self.assertEqual(self.PARENT, records["system"]["reused_from_sha"])
 
     def test_exact_verification_refuses_a_different_checked_out_head(self):
         checked_out = "4" * 40

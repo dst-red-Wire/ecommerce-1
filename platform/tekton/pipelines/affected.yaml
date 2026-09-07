@@ -1,0 +1,86 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ecommerce-affected
+  annotations:
+    ecommerce-1.io/tekton-api-fields: beta
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: base
+      type: string
+    - name: head
+      type: string
+  workspaces:
+    - name: source
+  tasks:
+    - name: classify
+      taskRef:
+        name: ecommerce-affected-components
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: base
+          value: $(params.base)
+        - name: head
+          value: $(params.head)
+        - name: record-dir
+          value: .context/tekton/$(context.pipelineRun.uid)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: global-gates
+      runAfter: [classify]
+      taskRef:
+        name: ecommerce-global-gates
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: base
+          value: $(params.base)
+        - name: head
+          value: $(params.head)
+        - name: record-dir
+          value: .context/tekton/$(context.pipelineRun.uid)
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: affected-component-gates
+      runAfter: [classify]
+      taskRef:
+        name: ecommerce-component-gate
+      matrix:
+        params:
+          - name: component
+            value: $(tasks.classify.results.components[*])
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: base
+          value: $(params.base)
+        - name: head
+          value: $(params.head)
+        - name: record-dir
+          value: .context/tekton/$(context.pipelineRun.uid)
+      workspaces:
+        - name: source
+          workspace: source
+  finally:
+    - name: finalize-evidence
+      taskRef:
+        name: ecommerce-finalize-evidence
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: base
+          value: $(params.base)
+        - name: head
+          value: $(params.head)
+        - name: record-dir
+          value: .context/tekton/$(context.pipelineRun.uid)
+      workspaces:
+        - name: source
+          workspace: source

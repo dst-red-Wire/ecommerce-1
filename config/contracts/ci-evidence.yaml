@@ -1,0 +1,47 @@
+version: 1
+status: exact
+
+evidence:
+  schema_version: 3
+  local_cache: .context/evidence/<sha>.json
+  exact_commit_required: true
+  pass_required_for_reuse: true
+  direct_parent_only: true
+  merge_commit_reuse: forbidden
+  wrong_base_reuse: forbidden
+  dirty_worktree_reuse: forbidden
+
+remote_store:
+  authority: harbor
+  transport: oci-distribution
+  artifact_type: application/vnd.ecommerce1.ci-evidence.v1
+  tag_pattern: sha-<full-sha>
+  immutable_digest_required_after_publish: true
+  files:
+    - evidence.json
+    - evidence.sigstore.json
+
+authentication:
+  signer: cosign
+  signature_required: true
+  accepted_verification_modes:
+    - public-key
+    - keyless-certificate-identity-and-oidc-issuer
+  verification_failure_behavior: full-reexecution
+  missing_remote_evidence_behavior: full-reexecution
+
+provenance:
+  bind_fields:
+    - base_sha
+    - head_sha
+    - exact_commit_evidence
+    - affected_components
+    - gates
+  remote_status_context: tekton/ecommerce-affected
+  forge_status_binds_exact_commit_sha: true
+
+metrics:
+  record_gate_duration_seconds: true
+  record_reused_source_duration_seconds: true
+  report_executed_reused_skipped_counts: true
+  compare_full_and_incremental_runs: true

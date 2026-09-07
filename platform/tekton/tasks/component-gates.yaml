@@ -1,25 +1,33 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: ecommerce-global-gates
+  name: ecommerce-component-gate
 spec:
   params:
     - name: runner-image
       type: string
+    - name: component
+      type: string
     - name: base
       type: string
-      default: origin/main
     - name: head
       type: string
-      default: HEAD
     - name: record-dir
       type: string
-      default: .context/tekton/manual
   workspaces:
     - name: source
   steps:
-    - name: global-gates
+    - name: component-gate
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
       command: [python3, scripts/repoctl.py]
-      args: [ci-global, --base, $(params.base), --head, $(params.head), --record-dir, $(params.record-dir)]
+      args:
+        - ci-component
+        - --component
+        - $(params.component)
+        - --base
+        - $(params.base)
+        - --head
+        - $(params.head)
+        - --record-dir
+        - $(params.record-dir)

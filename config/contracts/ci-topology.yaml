@@ -45,6 +45,7 @@ gitea_actions:
 
 routing:
   classifier: scripts/ci-affected.rb
+  evidence_contract: config/contracts/ci-evidence.yaml
   dependency_contract: config/contracts/dependency-map.yaml
   ownership_contract: config/contracts/service-ownership.yaml
   public_api_contract: config/contracts/public-api-contracts.yaml
@@ -54,6 +55,7 @@ pipelines:
   frontend: platform/tekton/pipelines/frontend.yaml
   go_service: platform/tekton/pipelines/go-service.yaml
   platform: platform/tekton/pipelines/platform.yaml
+  affected: platform/tekton/pipelines/affected.yaml
 
 component_classes:
   storefront:
@@ -110,3 +112,5 @@ rules:
   developer_accelerators_must_not_be_ci_authority: true
   developer_state_reconciliation_must_use_ansible: true
   repository_shell_automation_forbidden: true
+  distributed_evidence_must_be_authenticated: true
+  remote_ci_status_must_bind_exact_sha: true

@@ -228,6 +228,38 @@
     force: true
   tags: [toolchain, context_tools]
 
+
+- name: Download pinned ORAS archive
+  ansible.builtin.get_url:
+    url: "https://github.com/oras-project/oras/releases/download/v{{ oras_version }}/oras_{{ oras_version }}_linux_amd64.tar.gz"
+    dest: "{{ local_cache }}/oras-{{ oras_version }}.tar.gz"
+    checksum: "sha256:{{ oras_sha256 }}"
+    mode: '0644'
+  tags: [toolchain, agent_tools]
+
+- name: Create ORAS version directory
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/oras-{{ oras_version }}"
+    state: directory
+    mode: '0755'
+  tags: [toolchain, agent_tools]
+
+- name: Extract pinned ORAS
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/oras-{{ oras_version }}.tar.gz"
+    dest: "{{ local_share }}/tools/oras-{{ oras_version }}"
+    remote_src: true
+    creates: "{{ local_share }}/tools/oras-{{ oras_version }}/oras"
+  tags: [toolchain, agent_tools]
+
+- name: Link ORAS into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/oras-{{ oras_version }}/oras"
+    dest: "{{ local_bin }}/oras"
+    state: link
+    force: true
+  tags: [toolchain, agent_tools]
+
 - name: Download pinned Bazelisk
   ansible.builtin.get_url:
     url: "https://github.com/bazelbuild/bazelisk/releases/download/v{{ bazelisk_version }}/bazelisk-linux-amd64"
