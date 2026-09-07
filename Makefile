@@ -67,6 +67,11 @@ frontend-admin: ## Run complete Admin gate
 service-check: ## Run generic Go service gate; use SERVICE=product
 	@$(PYTHON) scripts/repoctl.py service "$(SERVICE)"
 
+.PHONY: tekton-trigger-readiness
+
+tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
+	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
+
 .PHONY: workstation-doctor workstation-bootstrap agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare
 
 workstation-doctor: ## Audit local developer state without mutating it

@@ -1470,6 +1470,14 @@ def prepush() -> int:
     return verify_change("origin/main", head)
 
 
+def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
+    """Run live trigger prerequisite checks without mutating Kubernetes state."""
+    if not runtime_config.strip():
+        return fail("tekton-trigger-readiness requires RUNTIME_CONFIG/--runtime-config")
+    from tekton_trigger_readiness import run_readiness
+    return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1489,6 +1497,7 @@ def main() -> int:
     pub = sub.add_parser("publish"); pub.add_argument("--base",default=os.environ.get("BASE","origin/main")); pub.add_argument("--message",default=os.environ.get("MSG",""))
     dlv = sub.add_parser("deliver"); dlv.add_argument("--base",default=os.environ.get("BASE","main")); dlv.add_argument("--title",default=os.environ.get("TITLE","")); dlv.add_argument("--message",default=os.environ.get("MSG",""))
     bdlv = sub.add_parser("bundle-deliver"); bdlv.add_argument("--bundle",required=True); bdlv.add_argument("--expected-head",required=True); bdlv.add_argument("--title",required=True); bdlv.add_argument("--base",default=os.environ.get("BASE","main"))
+    trr = sub.add_parser("tekton-trigger-readiness"); trr.add_argument("--runtime-config",required=True); trr.add_argument("--evidence",default=os.environ.get("TEKTON_TRIGGER_READINESS_EVIDENCE",".context/runtime/tekton-trigger-readiness.json"))
     tp = sub.add_parser("tekton-plan"); tp.add_argument("--base",required=True); tp.add_argument("--head",required=True); tp.add_argument("--record-dir",required=True); tp.add_argument("--result-path",required=True)
     cg = sub.add_parser("ci-global"); cg.add_argument("--base",required=True); cg.add_argument("--head",required=True); cg.add_argument("--record-dir",required=True)
     cc = sub.add_parser("ci-component"); cc.add_argument("--component",required=True); cc.add_argument("--base",required=True); cc.add_argument("--head",required=True); cc.add_argument("--record-dir",required=True)
@@ -1531,6 +1540,7 @@ def main() -> int:
         if args.cmd == "publish": return publish(args.base,args.message)
         if args.cmd == "deliver": return deliver(args.base,args.title,args.message)
         if args.cmd == "bundle-deliver": return isolated_bundle_deliver(ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable)
+        if args.cmd == "tekton-trigger-readiness": return tekton_trigger_readiness_command(args.runtime_config,args.evidence)
         if args.cmd == "tekton-plan": return tekton_plan(args.base,args.head,args.record_dir,args.result_path)
         if args.cmd == "ci-global": return ci_global(args.base,args.head,args.record_dir)
         if args.cmd == "ci-component": return ci_component(args.component,args.base,args.head,args.record_dir)
