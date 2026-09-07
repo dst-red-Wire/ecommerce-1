@@ -16,9 +16,11 @@ spec.loader.exec_module(module)
 
 
 class FakeExecutor:
-    def __init__(self, *, missing_crd: bool = False):
+    def __init__(self, *, missing_crd: bool = False, missing_quota: bool = False, runner_resources: bool = True):
         self.commands: list[list[str]] = []
         self.missing_crd = missing_crd
+        self.missing_quota = missing_quota
+        self.runner_resources = runner_resources
         self.runner = "harbor.internal/ecommerce/ci-runner@sha256:" + "a" * 64
 
     def done(self, cmd: list[str], code: int = 0, out: str = "", err: str = ""):
@@ -48,10 +50,25 @@ class FakeExecutor:
             return self.done(cmd, out=json.dumps({"status": {"phase": "Active"}}))
         if args[:2] == ["get", "serviceaccount"]:
             return self.done(cmd, out=json.dumps({"metadata": {"name": args[2]}}))
+        if args[:3] == ["get", "resourcequota", "ci-budget"]:
+            if self.missing_quota:
+                return self.done(cmd, 1, err="NotFound")
+            return self.done(cmd, out=json.dumps({
+                "status": {"hard": {
+                    "requests.cpu": "4",
+                    "requests.memory": "8Gi",
+                    "limits.cpu": "8",
+                    "limits.memory": "16Gi",
+                }}
+            }))
         if args[:3] == ["get", "pod", "runner-proof"]:
+            resources = {
+                "requests": {"cpu": "250m", "memory": "256Mi"},
+                "limits": {"cpu": "1", "memory": "1Gi"},
+            } if self.runner_resources else {}
             return self.done(cmd, out=json.dumps({
                 "metadata": {"annotations": {"ecommerce-1.io/readiness-proof": "runner-image-pull"}},
-                "spec": {"containers": [{"name": "runner", "image": self.runner}]},
+                "spec": {"containers": [{"name": "runner", "image": self.runner, "resources": resources}]},
                 "status": {"phase": "Succeeded", "containerStatuses": [{"name": "runner", "imageID": "docker-pullable://harbor.internal/ecommerce/ci-runner@sha256:" + "a" * 64}]},
             }))
         if args[:3] == ["get", "pod", "network-proof"]:
@@ -93,6 +110,9 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             "runner_image": "harbor.internal/ecommerce/ci-runner@sha256:" + "a" * 64,
             "event_listener_service_account": "tekton-eventlistener",
             "pipeline_service_account": "tekton-pipeline",
+            "execution_budget": {
+                "resource_quota_name": "ci-budget",
+            },
             "webhook": {
                 "external_secret_name": "gitea-webhook-signing",
                 "secret_name": "webhook-signing",
@@ -116,7 +136,7 @@ class TektonTriggerReadinessTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "immutable"):
             module.validate_runtime_config(config)
 
-    def test_all_six_live_proofs_pass_and_evidence_is_redacted(self):
+    def test_all_seven_live_proofs_pass_and_evidence_is_redacted(self):
         fake = FakeExecutor()
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -126,10 +146,15 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             self.assertEqual(0, rc)
             data = json.loads(evidence.read_text())
             self.assertEqual("PASS", data["status"])
-            self.assertEqual(6, len(data["proofs"]))
+            self.assertEqual(7, len(data["proofs"]))
             self.assertTrue(all(p["status"] == "PASS" for p in data["proofs"].values()))
             self.assertFalse(data["mutation_performed"])
             self.assertNotIn("SUPERSECRET", evidence.read_text())
+
+            contract = (ROOT / "config" / "contracts" / "tekton-trigger-runtime.yaml").read_text(encoding="utf-8")
+            proof_block = contract.split("  required_proofs:\n", 1)[1].split("  static_contract_is_runtime_proof:", 1)[0]
+            required = [line.strip()[2:] for line in proof_block.splitlines() if line.strip().startswith("- ")]
+            self.assertEqual(set(required), set(data["proofs"]))
 
         forbidden = module.FORBIDDEN_MUTATING_KUBECTL
         for cmd in fake.commands:
@@ -147,6 +172,29 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             data = json.loads(evidence.read_text())
             self.assertEqual("BLOCKED", data["status"])
             self.assertEqual("BLOCKED", data["proofs"]["triggers-crds-present"]["status"])
+
+    def test_missing_execution_budget_proof_returns_blocked_not_pass(self):
+        fake = FakeExecutor(missing_quota=True)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "platform" / "tekton").mkdir(parents=True)
+            evidence = root / "readiness.json"
+            rc = module.run_readiness(root, self.runtime_config(), evidence, executor=fake)
+            self.assertEqual(module.BLOCKED_EXIT, rc)
+            data = json.loads(evidence.read_text())
+            self.assertEqual("BLOCKED", data["status"])
+            self.assertEqual("BLOCKED", data["proofs"]["bounded-execution-budget-proven"]["status"])
+
+    def test_runner_without_resources_blocks_execution_budget_proof(self):
+        fake = FakeExecutor(runner_resources=False)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "platform" / "tekton").mkdir(parents=True)
+            evidence = root / "readiness.json"
+            rc = module.run_readiness(root, self.runtime_config(), evidence, executor=fake)
+            self.assertEqual(module.BLOCKED_EXIT, rc)
+            data = json.loads(evidence.read_text())
+            self.assertEqual("BLOCKED", data["proofs"]["bounded-execution-budget-proven"]["status"])
 
     def test_static_render_is_kustomize_only_and_no_helm_is_invented(self):
         fake = FakeExecutor()

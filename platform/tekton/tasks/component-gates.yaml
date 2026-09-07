@@ -16,10 +16,40 @@ spec:
       type: string
   workspaces:
     - name: source
+  volumes:
+    - name: isolated-checkout
+      emptyDir: {}
   steps:
-    - name: component-gate
+    - name: clone-isolated-checkout
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      command: [git]
+      args:
+        - clone
+        - --quiet
+        - --shared
+        - --no-checkout
+        - $(workspaces.source.path)
+        - /var/ecommerce-run/repository
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run
+    - name: checkout-exact-head
+      image: $(params.runner-image)
+      workingDir: /var/ecommerce-run/repository
+      command: [git]
+      args: [checkout, --quiet, --detach, $(params.head)]
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run
+    - name: component-gate
+      image: $(params.runner-image)
+      workingDir: /var/ecommerce-run/repository
+      env:
+        - name: GOCACHE
+          value: $(workspaces.source.path)/.context/cache/go-build
+        - name: GOMODCACHE
+          value: $(workspaces.source.path)/.context/cache/go-mod
       command: [python3, scripts/repoctl.py]
       args:
         - ci-component
@@ -30,4 +60,7 @@ spec:
         - --head
         - $(params.head)
         - --record-dir
-        - $(params.record-dir)
+        - $(workspaces.source.path)/$(params.record-dir)
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run

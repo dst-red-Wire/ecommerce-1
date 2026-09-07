@@ -31,6 +31,20 @@ runner_image:
   default_forbidden: true
   live_pull_proof_required: true
 
+execution_budget:
+  bounded_parallelism_required: true
+  enforcement: kubernetes-resourcequota-and-runner-pod-resources
+  values_source: management-plane-runtime-config
+  resource_quota_name_source: management-plane-runtime-config
+  resource_quota_required_hard_keys:
+    - requests.cpu
+    - requests.memory
+    - limits.cpu
+    - limits.memory
+  runner_pull_proof_must_set_requests_and_limits: true
+  hardcoded_concurrency_without_measurement_forbidden: true
+  performance_evidence_required_before_tuning: true
+
 identity:
   event_listener_service_account:
     required: true
@@ -70,6 +84,7 @@ activation:
     - triggers-crds-present
     - dedicated-namespace-provisioned
     - runner-image-digest-pullable
+    - bounded-execution-budget-proven
     - least-privilege-rbac-proven
     - webhook-secret-synced-from-openbao-via-eso
     - ingress-tls-and-network-policy-proven

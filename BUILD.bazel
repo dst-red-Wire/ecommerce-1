@@ -5,6 +5,13 @@ py_binary(
     visibility = ["//visibility:public"],
 )
 
+py_binary(
+    name = "performance-audit",
+    srcs = ["scripts/performance_audit.py"],
+    main = "scripts/performance_audit.py",
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "canonical-contracts",
     srcs = glob([

@@ -82,6 +82,15 @@ def validate_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         "default_deny_policy": _require_string(network, "default_deny_policy", "network"),
     }
 
+    execution_budget = config.get("execution_budget")
+    if not isinstance(execution_budget, dict):
+        raise ValueError("runtime config requires execution_budget mapping")
+    normalized["execution_budget"] = {
+        "resource_quota_name": _require_string(
+            execution_budget, "resource_quota_name", "execution_budget"
+        ),
+    }
+
     proofs = config.get("proofs")
     if not isinstance(proofs, dict):
         raise ValueError("runtime config requires proofs mapping")
@@ -190,6 +199,73 @@ def _check_runner_pull(kube: ReadOnlyKubectl, namespace: str, runner_image: str,
     if not pulled:
         return _result(BLOCKED, "kubelet imageID does not prove the configured runner digest was pulled")
     return _result(PASS, "exact Harbor runner digest has live kubelet pull evidence", pod=pod_name)
+
+
+ZERO_QUANTITY_RE = re.compile(
+    r"^[+-]?0+(?:\.0+)?(?:e[+-]?\d+)?(?:[EPTGMK]i?|m|u|n)?$",
+    re.IGNORECASE,
+)
+
+
+def _positive_resource_quantity(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and ZERO_QUANTITY_RE.fullmatch(text) is None
+
+
+def _check_execution_budget(
+    kube: ReadOnlyKubectl,
+    namespace: str,
+    quota_name: str,
+    runner_image: str,
+    pod_name: str,
+) -> dict[str, Any]:
+    quota, err = kube.json(["get", "resourcequota", quota_name, "-n", namespace])
+    if quota is None:
+        return _result(BLOCKED, f"execution ResourceQuota {quota_name} unavailable: {err}")
+    hard = quota.get("status", {}).get("hard", {}) or {}
+    required_hard = {"requests.cpu", "requests.memory", "limits.cpu", "limits.memory"}
+    missing_hard = sorted(key for key in required_hard if not _positive_resource_quantity(hard.get(key)))
+    if missing_hard:
+        return _result(
+            BLOCKED,
+            f"execution ResourceQuota {quota_name} lacks positive hard limits for {missing_hard}",
+        )
+
+    pod, err = kube.json(["get", "pod", pod_name, "-n", namespace])
+    if pod is None:
+        return _result(BLOCKED, f"runner resource proof pod {pod_name} unavailable: {err}")
+    containers = [
+        item for item in (pod.get("spec", {}).get("containers", []) or [])
+        if isinstance(item, dict) and item.get("image") == runner_image
+    ]
+    if not containers:
+        return _result(BLOCKED, "runner resource proof pod does not use the exact configured runner digest")
+    for container in containers:
+        resources = container.get("resources", {}) or {}
+        requests = resources.get("requests", {}) or {}
+        limits = resources.get("limits", {}) or {}
+        missing = [
+            name
+            for name, value in (
+                ("requests.cpu", requests.get("cpu")),
+                ("requests.memory", requests.get("memory")),
+                ("limits.cpu", limits.get("cpu")),
+                ("limits.memory", limits.get("memory")),
+            )
+            if not _positive_resource_quantity(value)
+        ]
+        if not missing:
+            return _result(
+                PASS,
+                "namespace ResourceQuota and runner proof pod enforce a positive CPU/memory execution budget",
+                resource_quota=quota_name,
+                runner_pod=pod_name,
+                required_hard_keys=sorted(required_hard),
+            )
+    return _result(
+        BLOCKED,
+        f"runner resource proof pod {pod_name} lacks positive requests/limits for {missing}",
+    )
 
 
 def _can_i(kube: ReadOnlyKubectl, namespace: str, service_account: str, verb: str, resource: str) -> tuple[bool | None, str]:
@@ -346,6 +422,13 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
         "triggers-crds-present": _check_crds(kube),
         "dedicated-namespace-provisioned": _check_namespace(kube, namespace),
         "runner-image-digest-pullable": _check_runner_pull(kube, namespace, runtime["runner_image"], runtime["proofs"]["runner_pull_pod"]),
+        "bounded-execution-budget-proven": _check_execution_budget(
+            kube,
+            namespace,
+            runtime["execution_budget"]["resource_quota_name"],
+            runtime["runner_image"],
+            runtime["proofs"]["runner_pull_pod"],
+        ),
         "least-privilege-rbac-proven": _check_rbac(kube, namespace, runtime["event_listener_service_account"], runtime["pipeline_service_account"]),
         "webhook-secret-synced-from-openbao-via-eso": _check_webhook_secret(kube, namespace, runtime["webhook"]),
         "ingress-tls-and-network-policy-proven": _check_network(kube, namespace, runtime["network"], runtime["proofs"]["network_probe_pod"]),
@@ -375,5 +458,7 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
         print("PASS Tekton trigger runtime readiness")
         return 0
     missing = sum(1 for item in proofs.values() if item["status"] != PASS)
-    print(f"BLOCKED Tekton trigger runtime readiness: {missing}/6 required proofs are not satisfied")
+    print(
+        f"BLOCKED Tekton trigger runtime readiness: {missing}/{len(proofs)} required proofs are not satisfied"
+    )
     return BLOCKED_EXIT
