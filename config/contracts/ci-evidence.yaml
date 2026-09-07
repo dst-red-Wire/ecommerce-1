@@ -2,7 +2,7 @@ version: 1
 status: exact
 
 evidence:
-  schema_version: 3
+  schema_version: 4
   local_cache: .context/evidence/<sha>.json
   exact_commit_required: true
   pass_required_for_reuse: true
@@ -10,6 +10,7 @@ evidence:
   merge_commit_reuse: forbidden
   wrong_base_reuse: forbidden
   dirty_worktree_reuse: forbidden
+  content_cache_authorizes_pass_reuse: false
 
 remote_store:
   authority: harbor
@@ -45,3 +46,9 @@ metrics:
   record_reused_source_duration_seconds: true
   report_executed_reused_skipped_counts: true
   compare_full_and_incremental_runs: true
+  report_evidence_reuse_hit_ratio: true
+  report_critical_path_estimate: true
+  report_parallelization_headroom: true
+  report_amdahl_priorities: true
+  performance_audit_output: .context/performance/<sha>.json
+  performance_audit_is_authoritative_for_pass: false

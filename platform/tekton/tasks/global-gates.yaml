@@ -17,9 +17,44 @@ spec:
       default: .context/tekton/manual
   workspaces:
     - name: source
+  volumes:
+    - name: isolated-checkout
+      emptyDir: {}
   steps:
-    - name: global-gates
+    - name: clone-isolated-checkout
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      command: [git]
+      args:
+        - clone
+        - --quiet
+        - --shared
+        - --no-checkout
+        - $(workspaces.source.path)
+        - /var/ecommerce-run/repository
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run
+    - name: checkout-exact-head
+      image: $(params.runner-image)
+      workingDir: /var/ecommerce-run/repository
+      command: [git]
+      args: [checkout, --quiet, --detach, $(params.head)]
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run
+    - name: global-gates
+      image: $(params.runner-image)
+      workingDir: /var/ecommerce-run/repository
       command: [python3, scripts/repoctl.py]
-      args: [ci-global, --base, $(params.base), --head, $(params.head), --record-dir, $(params.record-dir)]
+      args:
+        - ci-global
+        - --base
+        - $(params.base)
+        - --head
+        - $(params.head)
+        - --record-dir
+        - $(workspaces.source.path)/$(params.record-dir)
+      volumeMounts:
+        - name: isolated-checkout
+          mountPath: /var/ecommerce-run
