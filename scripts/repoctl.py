@@ -606,7 +606,17 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     require("gitleaks")
-    if run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+    if os.environ.get("HEAD", "").strip() == "WORKTREE":
+        tree_sha = worktree_tree_sha()
+        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+            temp_root = Path(temp_dir)
+            archive = temp_root / "tree.tar"
+            scan_root = temp_root / "tree"
+            scan_root.mkdir()
+            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+            shutil.unpack_archive(str(archive), str(scan_root), "tar")
+            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
+    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
         run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
     else:
         run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
@@ -690,6 +700,135 @@ def changed_paths(base: str, head: str) -> list[str]:
         untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
         return sorted(set(filter(None, tracked + untracked)))
     return sorted(set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines())))
+
+
+def worktree_tree_sha() -> str:
+    """Hash the commit tree represented by the current worktree without mutating the real index."""
+    index_path = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
+    with tempfile.TemporaryDirectory(prefix="ecommerce-worktree-index-") as temp_dir:
+        temporary_index = Path(temp_dir) / "index"
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(temporary_index)
+        if index_path.is_file():
+            shutil.copy2(index_path, temporary_index)
+        else:
+            run(["git", "read-tree", "--empty"], env=env)
+        run(["git", "add", "-A", "--"], env=env)
+        tree_sha = output(["git", "write-tree"], env=env).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree_sha):
+        raise RuntimeError(f"invalid worktree tree SHA: {tree_sha!r}")
+    return tree_sha
+
+
+def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
+    path = CONTEXT / "evidence" / "worktree.json"
+    if not path.is_file():
+        return None
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    current_head = git("rev-parse", "HEAD").strip()
+    base_sha = git("rev-parse", base_ref).strip()
+    current_tree = worktree_tree_sha()
+    if (
+        evidence.get("schema_version", 0) < 4
+        or evidence.get("evidence_kind") != "worktree"
+        or evidence.get("status") != "PASS"
+        or evidence.get("exact_commit_evidence") is not False
+        or evidence.get("head_ref") != "WORKTREE"
+        or evidence.get("head_sha") != current_head
+        or evidence.get("source_head_sha") != current_head
+        or evidence.get("source_tree_sha") != current_tree
+        or evidence.get("base_sha") != base_sha
+        or evidence.get("verification", {}).get("tree_stable") is not True
+        or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
+        or not isinstance(evidence.get("gates"), list)
+        or any(record.get("status") not in {"PASS", "SKIP"} for record in evidence.get("gates", []))
+    ):
+        return None
+    return evidence
+
+
+def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path | None:
+    requested = git("rev-parse", head).strip()
+    current = git("rev-parse", "HEAD").strip()
+    if requested != current or git("status", "--porcelain", "--untracked-files=all").strip():
+        return None
+    base_sha = git("rev-parse", base_ref).strip()
+    parents = git("rev-list", "--parents", "-n", "1", requested).split()
+    source_head = str(source.get("source_head_sha", ""))
+    source_tree = str(source.get("source_tree_sha", ""))
+    commit_tree = git("rev-parse", f"{requested}^{{tree}}").strip()
+    if (
+        source.get("schema_version", 0) < 4
+        or source.get("status") != "PASS"
+        or source.get("exact_commit_evidence") is not False
+        or source.get("base_sha") != base_sha
+        or len(parents) != 2
+        or parents[1] != source_head
+        or commit_tree != source_tree
+    ):
+        return None
+
+    records: list[dict] = []
+    for record in source.get("gates", []):
+        promoted = copy.deepcopy(record)
+        if promoted.get("status") == "PASS":
+            source_duration = float(
+                promoted.get("source_duration_seconds", promoted.get("duration_seconds", 0.0)) or 0.0
+            )
+            promoted["source_duration_seconds"] = source_duration
+            promoted["duration_seconds"] = 0.0
+            promoted["promoted_from_worktree"] = True
+            promoted["promotion_source_tree_sha"] = source_tree
+        records.append(promoted)
+
+    payload = copy.deepcopy(source)
+    payload.update({
+        "schema_version": 4,
+        "evidence_kind": "exact_commit",
+        "head_ref": requested,
+        "head_sha": requested,
+        "exact_commit_evidence": True,
+        "gates": records,
+        "metrics": evidence_metrics(records),
+        "verification": {
+            "mode": "promoted-worktree",
+            "source_head_sha": source_head,
+            "source_tree_sha": source_tree,
+            "commit_tree_sha": commit_tree,
+        },
+    })
+    destination = CONTEXT / "evidence" / f"{requested}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    saved = float(payload["metrics"].get("estimated_saved_seconds", 0.0) or 0.0)
+    print(f"PASS | promoted worktree evidence | {requested} | tree {commit_tree} | saved~{saved:.3f}s")
+    return destination
+
+
+def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
+    requested = git("rev-parse", head).strip()
+    if requested != git("rev-parse", "HEAD").strip():
+        return None
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return None
+    path = CONTEXT / "evidence" / f"{requested}.json"
+    if not path.is_file():
+        return None
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        evidence.get("status") != "PASS"
+        or evidence.get("exact_commit_evidence") is not True
+        or evidence.get("head_sha") != requested
+        or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+    ):
+        return None
+    return path
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
@@ -1050,19 +1189,36 @@ def write_evidence(base: str, head: str, paths: list[str], components: list[str]
     head_sha = current_head_sha if head == "WORKTREE" else git("rev-parse", head).strip()
     clean = not git("status", "--porcelain", "--untracked-files=all").strip()
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
-    payload = {"schema_version": 3, "base_ref": base, "base_sha": base_sha, "head_ref": head, "head_sha": head_sha,
-               "exact_commit_evidence": exact, "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
-               "changed_paths": paths, "affected_components": components, "gates": records,
-               "metrics": evidence_metrics(records),
-               "verification": verification or {"mode": "full"}}
+    verification_data = verification or {"mode": "full"}
+    payload = {
+        "schema_version": 4,
+        "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
+        "base_ref": base,
+        "base_sha": base_sha,
+        "head_ref": head,
+        "head_sha": head_sha,
+        "exact_commit_evidence": exact,
+        "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
+        "changed_paths": paths,
+        "affected_components": components,
+        "gates": records,
+        "metrics": evidence_metrics(records),
+        "verification": verification_data,
+    }
+    if head == "WORKTREE":
+        payload["source_head_sha"] = verification_data.get("source_head_sha", current_head_sha)
+        payload["source_tree_sha"] = verification_data.get("source_tree_sha")
     identity = head_sha if head != "WORKTREE" else "worktree"
-    destination = CONTEXT / "evidence" / f"{identity}.json"; destination.parent.mkdir(parents=True, exist_ok=True)
+    destination = CONTEXT / "evidence" / f"{identity}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"EVIDENCE {destination.relative_to(ROOT)}")
     return destination
 
 
 def verify_change(base: str, head: str) -> int:
+    source_head_sha: str | None = None
+    source_tree_sha: str | None = None
     if head != "WORKTREE":
         requested_head_sha = git("rev-parse", head).strip()
         current_head_sha = git("rev-parse", "HEAD").strip()
@@ -1072,17 +1228,27 @@ def verify_change(base: str, head: str) -> int:
             )
         if git("status", "--porcelain", "--untracked-files=all").strip():
             return fail("verify-change exact head requires a clean worktree")
+    else:
+        source_head_sha = git("rev-parse", "HEAD").strip()
+        source_tree_sha = worktree_tree_sha()
 
-    paths = changed_paths(base, head); components = affected(base, head); records: list[dict] = []
-    env = os.environ.copy(); env.update({"BASE": base, "HEAD": head})
+    paths = changed_paths(base, head)
+    components = affected(base, head)
+    records: list[dict] = []
+    env = os.environ.copy()
+    env.update({"BASE": base, "HEAD": head})
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
     verification: dict = {"mode": "full"}
-    if parent_sha and parent_evidence:
+    if head == "WORKTREE":
+        verification = {
+            "mode": "worktree",
+            "source_head_sha": source_head_sha,
+            "source_tree_sha": source_tree_sha,
+        }
+    elif parent_sha and parent_evidence:
         delta_paths = changed_paths(parent_sha, head)
-        # Strict mode fails closed: an unknown path expands to every component, so
-        # stale PASS evidence can never cross an unclassified delta.
         delta_components = set(affected(parent_sha, head, strict_unknown=True))
         verification = {
             "mode": "incremental",
@@ -1092,20 +1258,24 @@ def verify_change(base: str, head: str) -> int:
         }
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
-    # Cheap/global guards always execute on the new exact SHA. Only expensive
-    # component gates are eligible for direct-parent evidence reuse.
     global_commands = _global_gate_commands(base, head)
     for name, command in global_commands:
         if not _run_gate(name, command, records, env):
-            write_evidence(base, head, paths, components, records, verification); return 1
+            write_evidence(base, head, paths, components, records, verification)
+            return 1
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
         frontend_delta = bool({"frontend:storefront", "frontend:admin"} & delta_components)
-        reused = bool(parent_evidence and parent_sha and not frontend_delta
-                      and _reuse_gate("frontend:all", parent_sha, parent_evidence, records))
-        if not reused and not _run_gate("frontend:all", _controller_command("frontend", "check", "all"), records, env):
-            write_evidence(base, head, paths, components, records, verification); return 1
+        reused = bool(
+            parent_evidence and parent_sha and not frontend_delta
+            and _reuse_gate("frontend:all", parent_sha, parent_evidence, records)
+        )
+        if not reused and not _run_gate(
+            "frontend:all", _controller_command("frontend", "check", "all"), records, env
+        ):
+            write_evidence(base, head, paths, components, records, verification)
+            return 1
 
     for component in components:
         if component == "global" or (combined and component.startswith("frontend:")):
@@ -1114,12 +1284,27 @@ def verify_change(base: str, head: str) -> int:
         if command is None:
             records.append({"gate": component, "status": "SKIP", "reason": skip_reason, "duration_seconds": 0.0})
             continue
-
         if parent_evidence and parent_sha and component not in delta_components:
             if _reuse_gate(component, parent_sha, parent_evidence, records):
                 continue
         if not _run_gate(component, command, records, env):
-            write_evidence(base, head, paths, components, records, verification); return 1
+            write_evidence(base, head, paths, components, records, verification)
+            return 1
+
+    if head == "WORKTREE":
+        final_tree_sha = worktree_tree_sha()
+        verification["final_tree_sha"] = final_tree_sha
+        verification["tree_stable"] = final_tree_sha == source_tree_sha
+        if final_tree_sha != source_tree_sha:
+            records.append({
+                "gate": "worktree-stability",
+                "status": "FAIL",
+                "exit_code": 1,
+                "duration_seconds": 0.0,
+                "reason": "tracked/untracked commit tree changed during verification",
+            })
+            write_evidence(base, head, paths, components, records, verification)
+            return fail("worktree changed during verification; evidence is not promotable", 1)
 
     ev = write_evidence(base, head, paths, components, records, verification)
     if head != "WORKTREE" and git("status", "--porcelain", "--untracked-files=all").strip():
@@ -1184,24 +1369,49 @@ def git_sync() -> int:
 
 
 def publish(base: str, message: str) -> int:
-    branch = git("branch","--show-current").strip()
-    if not branch or branch in {"main","master"}: return fail("publish refuses detached/default branch")
-    run(["git","fetch","origin","--prune"])
+    branch = git("branch", "--show-current").strip()
+    if not branch or branch in {"main", "master"}:
+        return fail("publish refuses detached/default branch")
+    run(["git", "fetch", "origin", "--prune"])
     base_ref = base if base.startswith("origin/") else f"origin/{base}"
-    if run(["git","merge-base","--is-ancestor",base_ref,"HEAD"],check=False).returncode:
+    if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
         return fail(f"branch is not based on current {base_ref}")
-    if git("status","--porcelain","--untracked-files=all").strip():
-        if not message: return fail("dirty tree requires MSG/TITLE")
-        run(["git","add","-A"])
+
+    dirty = bool(git("status", "--porcelain", "--untracked-files=all").strip())
+    promotable = _load_promotable_worktree_evidence(base_ref) if dirty else None
+    if dirty:
+        if not message:
+            return fail("dirty tree requires MSG/TITLE")
+        if promotable:
+            print(
+                "INFO exact worktree PASS matches current parent/base/tree; "
+                "commit will attempt evidence promotion"
+            )
+        else:
+            print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
+        run(["git", "add", "-A"])
         commit_env = os.environ.copy()
-        # publish performs the stronger exact-SHA affected gate immediately after
-        # commit; avoid replaying the worktree pre-commit gate for the same change.
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git","commit","-m",message], env=commit_env)
-    head = git("rev-parse","HEAD").strip()
-    if verify_change(base_ref, head): return 1
-    run(["git","push","-u","origin","HEAD"])
-    print(f"PASS publish: pushed {branch} at {head} without force"); return 0
+        commit_env["SKIP"] = ",".join(
+            filter(None, [commit_env.get("SKIP", ""), "affected-precommit"])
+        )
+        run(["git", "commit", "-m", message], env=commit_env)
+
+    head = git("rev-parse", "HEAD").strip()
+    exact_evidence: Path | None = None
+    if promotable is not None:
+        exact_evidence = _promote_worktree_evidence(base_ref, head, promotable)
+        if exact_evidence is None:
+            print("INFO worktree evidence promotion invariants changed; falling back to exact-SHA verification")
+    if exact_evidence is None:
+        exact_evidence = _valid_exact_evidence(base_ref, head)
+        if exact_evidence is not None:
+            print(f"PASS publish: reusing existing exact evidence {exact_evidence.relative_to(ROOT)}")
+    if exact_evidence is None and verify_change(base_ref, head):
+        return 1
+
+    run(["git", "push", "-u", "origin", "HEAD"])
+    print(f"PASS publish: pushed {branch} at {head} without force")
+    return 0
 
 
 def deliver(base: str, title: str, message: str) -> int:
@@ -1220,6 +1430,8 @@ def deliver(base: str, title: str, message: str) -> int:
     remote_ci = github_exact_ci_status(gh, head)
     body = CONTEXT / "pr-body.md"; body.parent.mkdir(exist_ok=True)
     def gate_source(gate: dict) -> str:
+        if gate.get("promoted_from_worktree"):
+            return "promoted from validated worktree tree"
         if gate.get("reused_from_sha"):
             return f"reused `{gate['reused_from_sha'][:12]}`"
         if gate.get("status") == "SKIP":

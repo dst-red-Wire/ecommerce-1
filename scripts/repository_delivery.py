@@ -46,17 +46,24 @@ def require_command(name: str) -> str:
 
 
 def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize actual work and conservative time saved by exact evidence reuse."""
-    executed = [r for r in records if r.get("status") != "SKIP" and not r.get("reused_from_sha")]
-    reused = [r for r in records if r.get("reused_from_sha")]
+    """Summarize actual work and conservative time saved by exact evidence reuse/promotion."""
+    def reused(record: dict[str, Any]) -> bool:
+        return bool(
+            record.get("reused_from_sha")
+            or record.get("promoted_from_worktree")
+            or record.get("reused_from_worktree_tree_sha")
+        )
+
+    executed = [r for r in records if r.get("status") != "SKIP" and not reused(r)]
+    reused_records = [r for r in records if reused(r)]
     skipped = [r for r in records if r.get("status") == "SKIP"]
     executed_seconds = round(sum(float(r.get("duration_seconds", 0.0) or 0.0) for r in executed), 3)
-    saved_seconds = round(sum(float(r.get("source_duration_seconds", 0.0) or 0.0) for r in reused), 3)
+    saved_seconds = round(sum(float(r.get("source_duration_seconds", 0.0) or 0.0) for r in reused_records), 3)
     equivalent_full = round(executed_seconds + saved_seconds, 3)
     savings_percent = round((saved_seconds / equivalent_full) * 100.0, 1) if equivalent_full else 0.0
     return {
         "executed_gates": len(executed),
-        "reused_gates": len(reused),
+        "reused_gates": len(reused_records),
         "skipped_gates": len(skipped),
         "executed_seconds": executed_seconds,
         "estimated_saved_seconds": saved_seconds,

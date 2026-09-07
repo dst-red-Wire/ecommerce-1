@@ -5,12 +5,15 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-global governance runtime-efficiency contracts automation lint test security terraform ansible system
+.PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint test security terraform ansible system
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 
-ci: governance contracts automation lint test security terraform ansible ## Run every portable repository CI check
+ci: ## Run global + affected repository CI and cache promotable worktree evidence
+	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+
+ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks
 
 ci-global: governance contracts automation security ## Run global gates used by Tekton
 
