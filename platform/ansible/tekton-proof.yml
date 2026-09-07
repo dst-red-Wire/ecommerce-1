@@ -26,6 +26,54 @@
           tekton-proof requires RUNTIME_CONFIG plus full immutable BASE_SHA,
           PARENT_SHA and HEAD_SHA.
 
+    - name: Read the exact direct parent of the proof head before any runtime mutation
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ effective_repo_root }}"
+          - rev-list
+          - --parents
+          - -n
+          - '1'
+          - "{{ proof_head_sha }}"
+      register: proof_head_parents
+      changed_when: false
+
+    - name: Require HEAD to be exactly the child of PARENT before any runtime mutation
+      ansible.builtin.assert:
+        that:
+          - proof_head_parents.stdout.split() | length == 2
+          - proof_head_parents.stdout.split()[0] == proof_head_sha
+          - proof_head_parents.stdout.split()[1] == proof_parent_sha
+        fail_msg: >-
+          HEAD_SHA must resolve locally and have exactly PARENT_SHA as its sole direct parent.
+          Refuse runtime mutation for a stale or malformed proof pair.
+
+    - name: Read the exact direct parent of the proof parent before any runtime mutation
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ effective_repo_root }}"
+          - rev-list
+          - --parents
+          - -n
+          - '1'
+          - "{{ proof_parent_sha }}"
+      register: proof_parent_parents
+      changed_when: false
+
+    - name: Require PARENT to be exactly the child of BASE before any runtime mutation
+      ansible.builtin.assert:
+        that:
+          - proof_parent_parents.stdout.split() | length == 2
+          - proof_parent_parents.stdout.split()[0] == proof_parent_sha
+          - proof_parent_parents.stdout.split()[1] == proof_base_sha
+        fail_msg: >-
+          PARENT_SHA must resolve locally and have exactly BASE_SHA as its sole direct parent.
+          The distributed two-commit proof is blocked before any management-plane mutation.
+
     - name: Load non-secret management-plane runtime coordinates
       ansible.builtin.set_fact:
         runtime: "{{ lookup('ansible.builtin.file', tekton_runtime_config) | from_yaml }}"
@@ -154,7 +202,9 @@
                'GITHUB_TOKEN' in (status_secret.resources[0].data | default({})) and
                (status_secret.resources[0].data['GITHUB_REPOSITORY'] | length) > 0 and
                (status_secret.resources[0].data['GITHUB_TOKEN'] | length) > 0 and
-               'GITEA_API_URL' not in (status_secret.resources[0].data | default({})))
+               'GITEA_API_URL' not in (status_secret.resources[0].data | default({})) and
+               'GITEA_REPOSITORY' not in (status_secret.resources[0].data | default({})) and
+               'GITEA_TOKEN' not in (status_secret.resources[0].data | default({})))
               or
               ('GITEA_API_URL' in (status_secret.resources[0].data | default({})) and
                'GITEA_REPOSITORY' in (status_secret.resources[0].data | default({})) and
@@ -162,7 +212,8 @@
                (status_secret.resources[0].data['GITEA_API_URL'] | length) > 0 and
                (status_secret.resources[0].data['GITEA_REPOSITORY'] | length) > 0 and
                (status_secret.resources[0].data['GITEA_TOKEN'] | length) > 0 and
-               'GITHUB_REPOSITORY' not in (status_secret.resources[0].data | default({})))
+               'GITHUB_REPOSITORY' not in (status_secret.resources[0].data | default({})) and
+               'GITHUB_TOKEN' not in (status_secret.resources[0].data | default({})))
             )
         fail_msg: >-
           Status Secret must configure exactly one existing repository_delivery provider:
@@ -179,6 +230,21 @@
       register: tekton_render
       changed_when: false
 
+    - name: Parse rendered Tekton resources before any runtime mutation
+      ansible.builtin.set_fact:
+        tekton_objects: "{{ tekton_render.stdout | from_yaml_all | list }}"
+
+    - name: Restrict this proof operation to reviewed Tekton v1 Tasks and Pipelines
+      ansible.builtin.assert:
+        that:
+          - tekton_objects | length > 0
+          - (tekton_objects | map(attribute='kind') | list | difference(['Task', 'Pipeline']) | length) == 0
+          - (tekton_objects | map(attribute='apiVersion') | list | difference(['tekton.dev/v1']) | length) == 0
+        fail_msg: >-
+          tekton-proof may reconcile only tekton.dev/v1 Task/Pipeline resources.
+          Trigger, secret, RBAC, network, namespace, or other resources require their own
+          reviewed activation boundary and must never be applied implicitly by this proof.
+
   tasks:
     - name: Reconcile reviewed Tekton Tasks and Pipelines into the approved namespace
       kubernetes.core.k8s:
@@ -186,7 +252,7 @@
         namespace: "{{ runtime.namespace }}"
         state: present
         apply: true
-        definition: "{{ tekton_render.stdout | from_yaml_all | list }}"
+        definition: "{{ tekton_objects }}"
 
     - name: Look for the deterministic parent proof PipelineRun
       kubernetes.core.k8s_info:

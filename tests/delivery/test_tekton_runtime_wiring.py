@@ -56,6 +56,10 @@ class TektonRuntimeWiringTests(unittest.TestCase):
         self.assertIn("proof_base_sha", playbook)
         self.assertIn("proof_parent_sha", playbook)
         self.assertIn("proof_head_sha", playbook)
+        self.assertIn("proof_head_parents", playbook)
+        self.assertIn("proof_parent_parents", playbook)
+        self.assertIn("rev-list", playbook)
+        self.assertIn("difference(['Task', 'Pipeline'])", playbook)
         self.assertIn("ecommerce-proof-parent-", playbook)
         self.assertIn("ecommerce-proof-child-", playbook)
         self.assertIn("kubernetes.core.k8s_exec:", playbook)
@@ -66,6 +70,14 @@ class TektonRuntimeWiringTests(unittest.TestCase):
         self.assertNotIn("ansible.builtin.shell", playbook)
         self.assertNotIn("kubectl apply", playbook)
         self.assertNotIn("force", playbook.lower())
+        self.assertIn("'GITEA_REPOSITORY' not in", playbook)
+        self.assertIn("'GITEA_TOKEN' not in", playbook)
+        self.assertIn("'GITHUB_TOKEN' not in", playbook)
+
+    def test_documented_invocation_includes_exact_parent_sha(self):
+        doc = self.read("docs/project/TEKTON_RUNTIME_PROOF.md")
+        self.assertIn("PARENT_SHA=<full-parent-sha>", doc)
+        self.assertIn("BASE_SHA -> PARENT_SHA -> HEAD_SHA", doc)
 
     def test_make_exposes_one_thin_runtime_proof_launcher(self):
         makefile = self.read("Makefile")

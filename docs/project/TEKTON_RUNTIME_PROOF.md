@@ -46,8 +46,13 @@ After review/merge and the explicit human activation gate:
 make tekton-proof \\
   RUNTIME_CONFIG=/absolute/path/to/non-secret-runtime.yaml \\
   BASE_SHA=<full-base-sha> \\
+  PARENT_SHA=<full-parent-sha> \\
   HEAD_SHA=<full-head-sha>
 ```
+
+Before any management-plane mutation, the playbook proves the exact two-commit
+relationship `BASE_SHA -> PARENT_SHA -> HEAD_SHA` from local Git objects. A mismatch
+blocks the operation before Tekton reconciliation or PipelineRun creation.
 
 A successful playbook means the exact `PipelineRun` completed successfully. Final proof
 still requires reading back the exact forge status and authenticated Harbor evidence for
