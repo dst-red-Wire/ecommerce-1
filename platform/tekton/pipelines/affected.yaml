@@ -14,6 +14,14 @@ spec:
       type: string
     - name: head
       type: string
+    - name: evidence-repository
+      type: string
+    - name: evidence-signing-secret
+      type: string
+    - name: registry-auth-secret
+      type: string
+    - name: status-secret
+      type: string
   workspaces:
     - name: source
   tasks:
@@ -46,6 +54,12 @@ spec:
           value: $(params.head)
         - name: record-dir
           value: .context/tekton/$(context.pipelineRun.uid)
+        - name: evidence-repository
+          value: $(params.evidence-repository)
+        - name: evidence-signing-secret
+          value: $(params.evidence-signing-secret)
+        - name: registry-auth-secret
+          value: $(params.registry-auth-secret)
       workspaces:
         - name: source
           workspace: source
@@ -100,6 +114,14 @@ spec:
           value: $(params.head)
         - name: record-dir
           value: .context/tekton/$(context.pipelineRun.uid)
+        - name: evidence-repository
+          value: $(params.evidence-repository)
+        - name: evidence-signing-secret
+          value: $(params.evidence-signing-secret)
+        - name: registry-auth-secret
+          value: $(params.registry-auth-secret)
+        - name: status-secret
+          value: $(params.status-secret)
       workspaces:
         - name: source
           workspace: source

@@ -167,3 +167,8 @@ product-benchmark: ## Benchmark the Product HTTP hot path with allocations; not 
 
 resource-candidate: ## Derive a deterministic candidate from representative preprod evidence; use EVIDENCE=path.json
 	@ruby scripts/resource-sizing.rb "$(EVIDENCE)"
+
+.PHONY: tekton-proof
+
+tekton-proof: ## Reconcile Tekton and run one exact remote proof; RUNTIME_CONFIG/BASE_SHA/PARENT_SHA/HEAD_SHA required
+	@ansible-playbook -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"
