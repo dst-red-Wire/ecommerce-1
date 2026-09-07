@@ -1,0 +1,133 @@
+version: 1
+status: exact
+purpose: minimize cloud CPU, memory and ephemeral disk without weakening SLOs or certified topology contracts
+
+scope:
+  application_components:
+    - frontend/apps/storefront
+    - frontend/apps/admin
+    - services/*
+  certified_node_topology_changes: forbidden
+  production_resource_values_without_measurement: forbidden
+
+measurement:
+  source_environment: preprod
+  representative_load_required: true
+  minimum_window_seconds: 1800
+  exact_source_sha_required: true
+  required_series:
+    - cpu_p50_millicores
+    - cpu_p95_millicores
+    - cpu_p99_millicores
+    - memory_rss_p95_mib
+    - memory_rss_peak_mib
+    - ephemeral_storage_p95_mib
+    - ephemeral_storage_peak_mib
+    - request_rate
+    - latency_p95_ms
+    - latency_p99_ms
+    - error_rate
+
+right_sizing:
+  output: candidate-only
+  promotion_requires:
+    - representative-preprod-load-test-pass
+    - latency-and-error-slo-pass
+    - exact-sha-evidence
+  factors:
+    cpu_request_from_p95: 1.15
+    cpu_limit_from_p99: 1.20
+    memory_request_from_rss_p95: 1.10
+    memory_limit_from_rss_peak: 1.20
+    ephemeral_request_from_p95: 1.10
+    ephemeral_limit_from_peak: 1.25
+  rounding:
+    cpu_request_millicores: 10
+    cpu_limit_millicores: 1000
+    memory_mib: 16
+    ephemeral_storage_mib: 32
+
+resources:
+  cpu:
+    request_required: true
+    request_basis: measured-p95
+    limit_policy: whole-core-measured-p99-candidate-then-slo-qualification
+  memory:
+    request_required: true
+    request_basis: measured-rss-p95
+    limit_required: true
+    limit_basis: measured-rss-peak-plus-headroom
+  ephemeral_storage:
+    request_required: true
+    limit_required: true
+    durable_business_state_on_worker_filesystem: forbidden
+
+go_runtime:
+  minimum_language_version: "1.25"
+  gomaxprocs:
+    mode: runtime-container-aware
+    explicit_override: benchmark-only
+  gomemlimit:
+    required_in_kubernetes: true
+    source: kubernetes-memory-limit
+    default_fraction: 0.90
+    override: benchmark-only
+  pgo:
+    allowed: true
+    profile_source: representative-preprod-load
+    exact_source_sha_required: true
+    synthetic_profile_for_production: forbidden
+
+pod_autoscaling:
+  synchronous_http:
+    controller: kubernetes-hpa
+    scale_to_zero: forbidden
+    production_single_replica: exception-only
+  event_driven:
+    controller: keda
+    scale_to_zero: allowed
+    scale_to_zero_requires_non_cpu_memory_trigger: true
+
+node_capacity:
+  mgmt: fixed-exact-contract
+  preprod_certified_baseline: fixed-exact-contract
+  prod: fixed-exact-contract
+  preprod_perf_burst: existing-gate-only
+
+images:
+  required_platforms:
+    - linux/amd64
+    - linux/arm64
+  immutable_builder_digest_required: true
+  immutable_release_digest_required: true
+  runtime_user: non-root
+  runtime_package_manager: forbidden
+  runtime_compiler: forbidden
+  runtime_source_tree: forbidden
+  sbom_required: true
+  provenance_required: true
+  signature_required: true
+  go_builder:
+    image: docker.io/library/golang
+    tag: 1.26.6-bookworm
+    digest: sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
+
+frontend:
+  nextjs_output: standalone
+  output_file_tracing_root: frontend-workspace
+  cache_policy: semantic-contract-only
+  price_inventory_or_auth_cache_without_contract: forbidden
+
+service_mesh:
+  mode: istio-sidecar
+  workload_identity: spire
+  ambient_mode: forbidden-until-spire-support-and-lock-change
+  sidecar_resources: measured-and-explicit
+  unused_telemetry: disable-when-proven-unneeded
+
+storage:
+  worker_local_disk_role: ephemeral-only
+  durable_business_state: platform-stateful-contracts-only
+  bounded_application_logs: required
+  bounded_emptydir: required-when-used
+  image_garbage_collection: rke2-kubelet-managed
