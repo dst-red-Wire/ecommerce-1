@@ -22,7 +22,7 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
 
         # include_role does not accept throttle as a sibling task keyword.
         # Apply throttle to the tasks inside the included role via apply:.
-        throttles = []
+        throttles = {}
         for play in data:
             for task in play.get("tasks", []):
                 include_role = task.get("ansible.builtin.include_role")
@@ -31,9 +31,19 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
                 self.assertNotIn("throttle", task)
                 apply = include_role.get("apply", {})
                 if "throttle" in apply:
-                    throttles.append(apply["throttle"])
+                    role_name = include_role.get("name")
+                    self.assertIsInstance(role_name, str)
+                    self.assertNotIn(role_name, throttles)
+                    throttles[role_name] = apply["throttle"]
 
-        self.assertEqual([10, 5], throttles)
+        self.assertEqual(
+            {
+                "rocky_baseline": 10,
+                "mgmt_private_network": 10,
+                "rke2_agent": 5,
+            },
+            throttles,
+        )
 
     def test_apply_parallelizes_only_post_reconciliation_checks(self):
         text = (ROOT.parent / "apply.yml").read_text() if (ROOT.parent / "apply.yml").exists() else ""

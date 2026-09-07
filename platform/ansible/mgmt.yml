@@ -13,6 +13,12 @@
         apply:
           throttle: 10
 
+    - name: Reconcile canonical Hetzner private-network aliases before RKE2
+      ansible.builtin.include_role:
+        name: mgmt_private_network
+        apply:
+          throttle: 10
+
 - name: Bootstrap first RKE2 control plane
   hosts: cp-01
   become: true
