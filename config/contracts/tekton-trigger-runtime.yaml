@@ -35,6 +35,13 @@ execution_budget:
   bounded_parallelism_required: true
   enforcement: kubernetes-resourcequota-and-runner-pod-resources
   values_source: management-plane-runtime-config
+  resource_quota_name_source: management-plane-runtime-config
+  resource_quota_required_hard_keys:
+    - requests.cpu
+    - requests.memory
+    - limits.cpu
+    - limits.memory
+  runner_pull_proof_must_set_requests_and_limits: true
   hardcoded_concurrency_without_measurement_forbidden: true
   performance_evidence_required_before_tuning: true
 
