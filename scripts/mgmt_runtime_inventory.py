@@ -166,7 +166,11 @@ def terraform_servers_from_state(terraform_dir: Path, state_path: Path) -> dict[
     return extract_servers_from_show(show_doc)
 
 
-def write_overlay(output: Path, hosts: dict[str, str], source: str) -> None:
+def write_overlay(
+    output: Path,
+    hosts: dict[str, str],
+    source: str = "terraform-output:servers",
+) -> None:
     if source not in {"terraform-output:servers", "terraform-state:show", "servers-json"}:
         raise ValueError(f"unsupported MGMT transport provenance source: {source}")
     output.parent.mkdir(parents=True, exist_ok=True)

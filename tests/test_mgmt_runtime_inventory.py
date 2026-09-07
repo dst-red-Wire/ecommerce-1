@@ -105,6 +105,14 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsupported MGMT transport provenance"):
                 module.write_overlay(output, {"cp-01": "198.51.100.11"}, "unknown")
 
+    def test_overlay_keeps_historical_default_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "transport.json"
+            module.write_overlay(output, {"cp-01": "198.51.100.11"})
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual("terraform-output:servers", payload["source"])
+        self.assertFalse(payload["contains_secrets"])
+
 
 if __name__ == "__main__":
     unittest.main()
