@@ -8,10 +8,12 @@ business:
     - product
     - inventory
     - cart
+    - checkout
     - pricing
     - tax
     - order
     - payment
+    - fulfillment
     - shipping
     - tracking
     - returns
@@ -24,8 +26,7 @@ business:
   frontends:
     - storefront
     - admin
-  forbidden_services:
-    - checkout
+  forbidden_services: []
 
 platform:
   kubernetes: rke2

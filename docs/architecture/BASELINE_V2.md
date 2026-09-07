@@ -6,11 +6,11 @@ This document is the canonical execution baseline for repository implementation.
 
 ## 1. Business topology
 
-17 backend services:
+19 backend services:
 
-`catalog, product, inventory, cart, pricing, tax, order, payment, shipping, tracking, returns, billing, fraud-risk, search, review, user-profile, notification`.
+`catalog, product, inventory, cart, checkout, pricing, tax, order, payment, fulfillment, shipping, tracking, returns, billing, fraud-risk, search, review, user-profile, notification`.
 
-No `checkout` service. `order` owns checkout orchestration and immutable order snapshot.
+`cart`, `checkout`, `order`, `payment` and `fulfillment` are autonomous services. Checkout owns pre-order validation/orchestration, Order owns the durable immutable order snapshot, Payment owns PSP money movement, and Fulfillment owns physical execution orchestration before Shipping/Tracking.
 
 Two Next.js frontends: `storefront` and `admin`.
 
@@ -195,7 +195,7 @@ References in historical ADRs/issues may remain if clearly marked `SUPERSEDED`.
 - M3 PREPROD Infrastructure.
 - M4 Platform Baseline.
 - M5 Commerce Vertical Slice.
-- M6 Remaining 17 services + 2 frontends.
+- M6 Full application — 19 services + 2 frontends.
 - M7 QA/Security/PERF/Chaos/DR.
 - M8 PREPROD certification.
 - M9 PROD A/B rollout.

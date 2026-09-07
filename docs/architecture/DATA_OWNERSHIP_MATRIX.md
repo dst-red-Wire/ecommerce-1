@@ -10,11 +10,13 @@ Status: `EXACT`
 | product | products, SKUs, attributes, base product facts | `product-db` PostgreSQL | OpenSearch/search projection |
 | inventory | stock, reservations, adjustments | `inventory-db` PostgreSQL | Redis availability cache where used |
 | cart | persisted cart intent/state | `cart-db` PostgreSQL | Redis hot cart cache |
+| checkout | checkout session, validation/orchestration state, final purchase context before order creation | `checkout-db` PostgreSQL | Redis checkout cache where justified |
 | pricing | price rules, promotion rules, rule versions | `pricing-db` PostgreSQL | Redis calculation cache |
 | tax | tax rules/versioned tax configuration | `tax-db` PostgreSQL or approved versioned config-backed store | calculation cache |
-| order | order aggregate, Saga state, immutable checkout snapshot | `order-db` PostgreSQL | CQRS/OpenSearch read model |
+| order | durable order aggregate, immutable confirmed commercial snapshot, order lifecycle | `order-db` PostgreSQL | CQRS/OpenSearch read model |
 | payment | PSP transaction state, auth/capture/refund records | `payment-db` PostgreSQL | operational read model |
-| shipping | shipment/order-to-carrier state | `shipping-db` PostgreSQL | carrier/cache projection |
+| fulfillment | fulfillment order, allocation, pick/pack and execution lifecycle | `fulfillment-db` PostgreSQL | operational fulfillment read model |
+| shipping | shipment/carrier handoff state | `shipping-db` PostgreSQL | carrier/cache projection |
 | tracking | tracking timeline normalized from carrier updates | `tracking-db` PostgreSQL | OpenSearch/read projection |
 | returns | return/RMA lifecycle | `returns-db` PostgreSQL | admin projection |
 | billing | invoices, credit notes, e-invoicing state, immutable object references | `billing-db` PostgreSQL + SeaweedFS object refs | reporting projection |

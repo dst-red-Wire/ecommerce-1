@@ -27,32 +27,35 @@ events:
   product.SKUUpdated.v1: {consumers: [catalog, search, inventory]}
   catalog.CatalogPublished.v1: {consumers: [search]}
   catalog.CatalogEntryChanged.v1: {consumers: [search]}
-  pricing.PriceRuleChanged.v1: {consumers: [cart, order]}
+  pricing.PriceRuleChanged.v1: {consumers: [cart, checkout]}
   pricing.PriceCalculated.v1: {consumers: []}
-  inventory.StockReserved.v1: {consumers: [order]}
-  inventory.StockReleased.v1: {consumers: [order]}
+  inventory.StockReserved.v1: {consumers: [checkout]}
+  inventory.StockReleased.v1: {consumers: [checkout]}
   inventory.StockAdjusted.v1: {consumers: [catalog, search]}
   inventory.OutOfStock.v1: {consumers: [catalog, search, notification]}
   cart.CartUpdated.v1: {consumers: []}
-  cart.CartExpired.v1: {consumers: [notification]}
+  cart.CartExpired.v1: {consumers: [checkout, notification]}
   tax.TaxCalculated.v1: {consumers: []}
-  tax.TaxRuleChanged.v1: {consumers: [pricing, order]}
-  order.OrderCreated.v1: {consumers: [inventory, fraud-risk, notification]}
-  fraud-risk.FraudApproved.v1: {consumers: [order]}
-  fraud-risk.FraudRejected.v1: {consumers: [order, notification]}
-  fraud-risk.FraudReviewRequired.v1: {consumers: [order, notification]}
+  tax.TaxRuleChanged.v1: {consumers: [pricing, checkout]}
+  order.OrderCreated.v1: {consumers: [inventory, payment, notification]}
+  fraud-risk.FraudApproved.v1: {consumers: [checkout]}
+  fraud-risk.FraudRejected.v1: {consumers: [checkout, notification]}
+  fraud-risk.FraudReviewRequired.v1: {consumers: [checkout, notification]}
   search.SearchIndexUpdated.v1: {consumers: []}
   payment.PaymentAuthorized.v1: {consumers: [order, billing]}
   payment.PaymentFailed.v1: {consumers: [order, notification]}
   payment.PaymentCaptured.v1: {consumers: [order, billing, notification]}
-  order.OrderConfirmed.v1: {consumers: [shipping, billing, notification]}
-  order.OrderCancelled.v1: {consumers: [inventory, payment, notification]}
+  order.OrderConfirmed.v1: {consumers: [fulfillment, billing, notification]}
+  order.OrderCancelled.v1: {consumers: [inventory, payment, fulfillment, notification]}
   order.OrderFailed.v1: {consumers: [notification]}
+  fulfillment.FulfillmentStarted.v1: {consumers: []}
+  fulfillment.FulfillmentCompleted.v1: {consumers: [order]}
+  fulfillment.FulfillmentFailed.v1: {consumers: [order, notification]}
   shipping.ShipmentCreated.v1: {consumers: [tracking, notification]}
   shipping.ShipmentDispatched.v1: {consumers: [tracking, notification]}
-  shipping.DeliveryException.v1: {consumers: [order, notification]}
+  shipping.DeliveryException.v1: {consumers: [fulfillment, notification]}
   tracking.TrackingUpdated.v1: {consumers: [notification]}
-  tracking.Delivered.v1: {consumers: [order, notification, returns]}
+  tracking.Delivered.v1: {consumers: [fulfillment, notification, returns]}
   returns.ReturnRequested.v1: {consumers: [notification]}
   returns.ReturnApproved.v1: {consumers: [shipping, notification]}
   returns.ReturnReceived.v1: {consumers: [inventory, payment, notification]}
