@@ -35,7 +35,7 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {})
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
@@ -94,8 +94,18 @@ module AffectedComponents
           Array(impact).each { |component| components << component }
           components << "system" unless impact.empty?
         end
-      when %r{\Atests/(?:e2e|integration|performance|security|resilience|chaos)/}
+      when "config/contracts/runtime-efficiency.yaml",
+           "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
+           "tests/resource_sizing_test.rb", "tests/runtime_efficiency_test.rb"
+        # The runtime-efficiency gate is globally authoritative and always runs on
+        # the new SHA, so these inputs do not require the broad system suite.
+      when %r{\Atests/}, %r{\Ascripts/}
+        # Other repository-level tests and native helpers are exercised by system.
         components << "system"
+      else
+        # Incremental reuse needs stronger guarantees than ordinary affected routing.
+        # Unknown deltas may not inherit component PASS evidence.
+        force_all!(components, services) if strict_unknown
       end
     end
 
@@ -276,12 +286,13 @@ module AffectedComponents
 end
 
 if $PROGRAM_NAME == __FILE__
-  options = {head: ENV["HEAD"].to_s.empty? ? "HEAD" : ENV["HEAD"], format: "lines"}
+  options = {head: ENV["HEAD"].to_s.empty? ? "HEAD" : ENV["HEAD"], format: "lines", strict_unknown: false}
   parser = OptionParser.new do |opts|
     opts.banner = "Usage: ci-affected.rb --base REF [--head REF|WORKTREE] [--format lines|json]"
     opts.on("--base REF") { |value| options[:base] = value }
     opts.on("--head REF") { |value| options[:head] = value }
     opts.on("--format FORMAT") { |value| options[:format] = value }
+    opts.on("--strict-unknown") { options[:strict_unknown] = true }
   end
   parser.parse!(ARGV)
   options[:base] ||= ENV["BASE"] unless ENV["BASE"].to_s.empty?
@@ -299,7 +310,8 @@ if $PROGRAM_NAME == __FILE__
     services: services,
     public_contracts: public_contracts,
     common_openapi: common_openapi,
-    contract_impact: contract_impact
+    contract_impact: contract_impact,
+    strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"
     puts JSON.generate(affected)

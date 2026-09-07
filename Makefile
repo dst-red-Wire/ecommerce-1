@@ -18,7 +18,7 @@ governance: runtime-efficiency ## Validate canonical architecture and CI authori
 	@$(PYTHON) scripts/repoctl.py governance
 
 runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
-	@ruby scripts/validate-runtime-efficiency.rb
+	@$(PYTHON) scripts/repoctl.py runtime-efficiency
 
 contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
 	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
