@@ -72,10 +72,10 @@ class CIAffectedTest < Minitest::Test
     previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
-  def classify(*paths, contract_impact: {})
+  def classify(*paths, contract_impact: {}, strict_unknown: false)
     AffectedComponents.classify(paths, services: SERVICES, public_contracts: PUBLIC,
                                  common_openapi: "contracts/openapi/common.v1.yaml",
-                                 contract_impact: contract_impact)
+                                 contract_impact: contract_impact, strict_unknown: strict_unknown)
   end
 
   def test_storefront_change_is_component_scoped
@@ -142,6 +142,36 @@ class CIAffectedTest < Minitest::Test
 
   def test_ci_control_change_fails_closed_to_all_component_classes
     affected = classify("scripts/repoctl.py")
+    assert_includes affected, "frontend:storefront"
+    assert_includes affected, "frontend:admin"
+    SERVICES.each { |service| assert_includes affected, "service:#{service}" }
+    assert_includes affected, "platform:terraform"
+    assert_includes affected, "platform:ansible"
+    assert_includes affected, "system"
+  end
+
+  def test_runtime_efficiency_inputs_are_owned_by_global_runtime_gate
+    %w[
+      config/contracts/runtime-efficiency.yaml
+      scripts/resource-sizing.rb
+      scripts/validate-runtime-efficiency.rb
+      tests/resource_sizing_test.rb
+      tests/runtime_efficiency_test.rb
+    ].each do |path|
+      assert_equal %w[global], classify(path), path
+    end
+  end
+
+  def test_other_repository_native_helper_change_routes_to_system
+    assert_equal %w[global system], classify("scripts/context-pack.py")
+  end
+
+  def test_other_repository_level_test_change_routes_to_system
+    assert_equal %w[global system], classify("tests/test_agent_efficiency.py")
+  end
+
+  def test_strict_unknown_delta_fails_closed_to_all_component_classes
+    affected = classify("docs/unclassified-note.md", strict_unknown: true)
     assert_includes affected, "frontend:storefront"
     assert_includes affected, "frontend:admin"
     SERVICES.each { |service| assert_includes affected, "service:#{service}" }
