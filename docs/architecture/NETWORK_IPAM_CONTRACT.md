@@ -1,4 +1,4 @@
-# NETWORK / IPAM CONTRACT V2 — EXACT
+# NETWORK / IPAM CONTRACT V2 - EXACT
 
 Status: `EXACT CONFIG CONTRACT`
 
@@ -71,19 +71,35 @@ To prevent site overlap:
 
 If RKE2/Cilium compatibility or provider routing requires different ranges, Codex may change these only in a single versioned network-plan change with automated overlap validation and no architecture redesign.
 
-## WireGuard
+## WireGuard MGMT operator access
 
-Use a dedicated non-overlapping pool under MGMT coordination. The implementation must derive it from versioned config and validate against all ranges above. Do not reuse Pod, Service, storage or replication CIDRs.
+Permanent operator access to Z5 uses the exact `wireguard.mgmt` block in `config/infrastructure/network-plan.yaml`:
+
+- dedicated access gateway `wg-01`, reserved at `10.243.1.41` on MGMT segment 401;
+- tunnel CIDR `10.246.0.0/24`;
+- gateway tunnel address `10.246.0.1`;
+- workforce operator pool `10.246.0.16/28`;
+- separately controlled break-glass pool `10.246.0.240/29`;
+- provider-assigned public endpoint injected at runtime only;
+- UDP port `51820`;
+- allowed route `10.243.0.0/16` only.
+
+The WireGuard tunnel is a separate address domain for operator transport. It must not overlap PREPROD, PROD-A, PROD-B, permanent MGMT underlay, or any Kubernetes Pod/Service CIDR. The operator and break-glass sub-pools must be contained by the tunnel CIDR and must not overlap each other. The gateway tunnel address must not belong to either peer pool.
+
+No Kubernetes Pod/Service route is exposed to operator peers. Kubernetes API access is reached through an approved MGMT underlay address in `10.243.0.0/16`.
+
+`wg-01` is an access gateway rather than the default L3 gateway for segment 401, so its private address is reserved in the infrastructure-VM allocation range. The complete security/ownership/threat-model contract is `MGMT_WIREGUARD_ACCESS.md` plus `config/contracts/mgmt-wireguard-access.yaml`.
 
 ## Validation requirements
 
 Codex must provide automated checks for:
 
 - duplicate IPs;
-- overlapping CIDRs;
+- overlapping CIDRs, including the WireGuard tunnel against every versioned network;
+- WireGuard operator/break-glass pools outside the tunnel or overlapping each other;
 - address outside declared subnet;
 - static address inside provider-reserved gateway/network/broadcast range;
 - same node assigned conflicting identities;
 - PROD A/B overlap;
-- Pod/Service overlap with underlay;
+- Pod/Service overlap with underlay or operator routes;
 - public IP slots present only when provider values are injected.

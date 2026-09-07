@@ -1,4 +1,4 @@
-# EXACT TOPOLOGY V2 — AUTHORITATIVE INDEX
+# EXACT TOPOLOGY V2 - AUTHORITATIVE INDEX
 
 Status: `EXACT`
 
@@ -63,6 +63,8 @@ Private blocks:
 
 VLAN functions 401-406 and exact allocations are in `NETWORK_IPAM_CONTRACT.md` and `config/infrastructure/network-plan.yaml`.
 
+Permanent operator access to Z5 is defined by `MGMT_WIREGUARD_ACCESS.md`. WireGuard CIDRs, reservations and routes remain machine-canonical only in `config/infrastructure/network-plan.yaml`; access policy and threat controls are machine-canonical in `config/contracts/mgmt-wireguard-access.yaml`.
+
 ## Storage
 
 PREPROD worker:
@@ -99,7 +101,7 @@ Exactly 17 Go services. No checkout service. `order` orchestrates checkout.
 
 ## Security
 
-Trust zones and IAM/workload identity boundaries: `SECURITY_TRUST_ZONES.md`.
+Trust zones and IAM/workload identity boundaries: `SECURITY_TRUST_ZONES.md`. The exact Z0-to-Z5 WireGuard operator-access boundary, ownership and threat-model delta are defined by `MGMT_WIREGUARD_ACCESS.md`.
 
 ## Delivery
 

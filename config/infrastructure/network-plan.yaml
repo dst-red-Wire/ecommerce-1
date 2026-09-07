@@ -46,9 +46,24 @@ kubernetes:
   prod-a: {pod_cidr: 10.252.0.0/16, service_cidr: 10.253.0.0/16}
   prod-b: {pod_cidr: 10.254.0.0/16, service_cidr: 10.255.0.0/16}
   mgmt: {pod_cidr: 10.244.0.0/16, service_cidr: 10.245.0.0/16}
+wireguard:
+  mgmt:
+    gateway_node: wg-01
+    gateway_mgmt_ip: 10.243.1.41
+    tunnel_cidr: 10.246.0.0/24
+    gateway_tunnel_ip: 10.246.0.1
+    operator_pool: 10.246.0.16/28
+    break_glass_pool: 10.246.0.240/29
+    endpoint:
+      address_source: provider-runtime-output
+      protocol: udp
+      listen_port: 51820
+    allowed_routes:
+      - 10.243.0.0/16
 static_allocations:
   mgmt:
     401:
+      wg-01: 10.243.1.41
       cp-01: 10.243.1.61
       cp-02: 10.243.1.62
       cp-03: 10.243.1.63
