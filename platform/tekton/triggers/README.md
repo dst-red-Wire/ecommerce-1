@@ -17,6 +17,8 @@ Runtime manifests must be added here only when all prerequisites are represented
 
 The exact prerequisite contract is `config/contracts/tekton-trigger-runtime.yaml`. Namespace selection, the Harbor runner digest, and secret coordinates remain management-plane runtime inputs rather than guessed repository literals. Static contract validation is not runtime proof: EventListener/TriggerBinding/TriggerTemplate manifests remain blocked until every live proof listed by that contract is satisfied.
 
+Run `make tekton-trigger-readiness RUNTIME_CONFIG=<path>` to collect those proofs without mutating the cluster. The gate renders `platform/tekton` with Kustomize, then uses read-only `kubectl` calls against the explicit management-plane context. Helm remains available for chart-owned components but is not invoked merely as a second renderer when no chart owns the trigger resources. A missing proof returns `BLOCKED`, never a fabricated PASS.
+
 Source checkout is already owned by `ecommerce-affected`: the Pipeline initializes the workspace and fetches/checks out the immutable base/head SHAs before any gate runs. Trigger resources must pass those authenticated immutable SHAs and the repository clone URL; they must not prepopulate or mutate the source workspace themselves.
 
 The receiver must authenticate Gitea webhook deliveries before creating a PipelineRun. Gitea signs the raw body with HMAC-SHA256 and exposes the digest in `X-Gitea-Signature`; it also emits the GitHub-compatible `X-Hub-Signature-256`. Filter only the canonical `push` and `pull_request` event classes required by `config/contracts/ci-topology.yaml`.

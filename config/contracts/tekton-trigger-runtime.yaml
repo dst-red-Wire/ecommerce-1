@@ -74,3 +74,21 @@ activation:
     - webhook-secret-synced-from-openbao-via-eso
     - ingress-tls-and-network-policy-proven
   static_contract_is_runtime_proof: false
+
+readiness_gate:
+  controller: scripts/repoctl.py
+  command: tekton-trigger-readiness
+  mode: read-only
+  runtime_config_input: required-non-secret-management-plane-yaml
+  evidence_output: .context/runtime/tekton-trigger-readiness.json
+  static_render:
+    tool: kustomize
+    root: platform/tekton
+  helm_usage: only-when-a-runtime-component-is-chart-owned
+  blocked_exit_code: 3
+  pass_requires_all_required_proofs: true
+  mutation_performed_must_be: false
+  proof_pod_annotations:
+    runner_pull: ecommerce-1.io/readiness-proof=runner-image-pull
+    network_egress: ecommerce-1.io/readiness-proof=network-egress
+    network_targets: ecommerce-1.io/readiness-targets=gitea,harbor,kubernetes-api
