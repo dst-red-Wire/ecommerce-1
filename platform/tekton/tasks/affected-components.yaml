@@ -12,6 +12,12 @@ spec:
       type: string
     - name: record-dir
       type: string
+    - name: evidence-repository
+      type: string
+    - name: evidence-signing-secret
+      type: string
+    - name: registry-auth-secret
+      type: string
   results:
     - name: components
       type: array
@@ -22,6 +28,20 @@ spec:
     - name: classify
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: CI_EVIDENCE_REPOSITORY
+          value: $(params.evidence-repository)
+        - name: CI_EVIDENCE_COSIGN_PUBLIC_KEY
+          value: /var/run/ecommerce-evidence/cosign.pub
+      volumeMounts:
+        - name: evidence-signing
+          mountPath: /var/run/ecommerce-evidence
+          readOnly: true
+        - name: registry-auth
+          mountPath: /tekton/home/.docker
+          readOnly: true
       command: [python3, scripts/repoctl.py]
       args:
         - tekton-plan
@@ -33,3 +53,16 @@ spec:
         - $(params.record-dir)
         - --result-path
         - $(results.components.path)
+  volumes:
+    - name: evidence-signing
+      secret:
+        secretName: $(params.evidence-signing-secret)
+        items:
+          - key: cosign.pub
+            path: cosign.pub
+    - name: registry-auth
+      secret:
+        secretName: $(params.registry-auth-secret)
+        items:
+          - key: .dockerconfigjson
+            path: config.json

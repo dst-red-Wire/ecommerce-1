@@ -1,0 +1,482 @@
+---
+- name: Execute exact distributed ecommerce Tekton proof on the management plane
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    effective_repo_root: "{{ repo_root | default(playbook_dir ~ '/../..') }}"
+    parent_run_name: "ecommerce-proof-parent-{{ proof_parent_sha[:12] }}"
+    child_run_name: "ecommerce-proof-child-{{ proof_head_sha[:12] }}"
+    verifier_pod_name: "ecommerce-proof-verify-{{ proof_head_sha[:12] }}"
+
+  pre_tasks:
+    - name: Require the non-secret runtime config path and exact immutable SHAs
+      ansible.builtin.assert:
+        that:
+          - tekton_runtime_config is defined
+          - tekton_runtime_config | length > 0
+          - proof_base_sha is defined
+          - proof_base_sha is match('^[0-9a-f]{40}$')
+          - proof_parent_sha is defined
+          - proof_parent_sha is match('^[0-9a-f]{40}$')
+          - proof_head_sha is defined
+          - proof_head_sha is match('^[0-9a-f]{40}$')
+          - proof_parent_sha != proof_head_sha
+        fail_msg: >-
+          tekton-proof requires RUNTIME_CONFIG plus full immutable BASE_SHA,
+          PARENT_SHA and HEAD_SHA.
+
+    - name: Load non-secret management-plane runtime coordinates
+      ansible.builtin.set_fact:
+        runtime: "{{ lookup('ansible.builtin.file', tekton_runtime_config) | from_yaml }}"
+
+    - name: Validate required runtime coordinates without reading secret values
+      ansible.builtin.assert:
+        that:
+          - runtime.kube_context | default('') | length > 0
+          - runtime.namespace | default('') | length > 0
+          - (runtime.runner_image | default('')) is match('^.+@sha256:[0-9a-f]{64}$')
+          - runtime.pipeline_service_account | default('') | length > 0
+          - runtime.repo_url | default('') | length > 0
+          - runtime.evidence_repository | default('') | length > 0
+          - runtime.evidence_signing_secret | default('') | length > 0
+          - runtime.registry_auth_secret | default('') | length > 0
+          - runtime.status_secret | default('') | length > 0
+        fail_msg: >-
+          Runtime config must provide kube_context, namespace, immutable runner_image,
+          pipeline_service_account, repo_url, evidence_repository and the three
+          OpenBao/ESO-produced Secret names used for signing, registry auth and status.
+
+    - name: Verify Tekton Pipelines CRD exists before any mutation
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: pipelines.tekton.dev
+      register: pipelines_crd
+
+    - name: Require a live Tekton Pipelines API
+      ansible.builtin.assert:
+        that:
+          - pipelines_crd.resources | length == 1
+        fail_msg: Tekton Pipelines CRD is absent; runtime proof activation is blocked.
+
+    - name: Verify the target namespace exists
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Namespace
+        name: "{{ runtime.namespace }}"
+      register: runtime_namespace
+
+    - name: Require an active pre-existing namespace
+      ansible.builtin.assert:
+        that:
+          - runtime_namespace.resources | length == 1
+          - runtime_namespace.resources[0].status.phase == 'Active'
+        fail_msg: The configured Tekton namespace is absent or not Active.
+
+    - name: Verify the pipeline service account exists
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: ServiceAccount
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ runtime.pipeline_service_account }}"
+      register: pipeline_sa
+
+    - name: Require the pre-existing pipeline service account
+      ansible.builtin.assert:
+        that:
+          - pipeline_sa.resources | length == 1
+        fail_msg: Configured pipeline service account is absent; activation is blocked.
+
+    - name: Read only the evidence-signing Secret metadata/data keys
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Secret
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ runtime.evidence_signing_secret }}"
+      register: evidence_secret
+      no_log: true
+
+    - name: Require signing public/private material from the approved secret path
+      ansible.builtin.assert:
+        that:
+          - evidence_secret.resources | length == 1
+          - "'cosign.key' in (evidence_secret.resources[0].data | default({}))"
+          - "'cosign.pub' in (evidence_secret.resources[0].data | default({}))"
+          - "'cosign.password' in (evidence_secret.resources[0].data | default({}))"
+          - "(evidence_secret.resources[0].data['cosign.key'] | length) > 0"
+          - "(evidence_secret.resources[0].data['cosign.pub'] | length) > 0"
+          - "(evidence_secret.resources[0].data['cosign.password'] | length) > 0"
+        fail_msg: >-
+          Evidence signing Secret is missing non-empty cosign.key/cosign.pub/cosign.password keys.
+      no_log: true
+
+    - name: Read only the Harbor registry-auth Secret metadata/data keys
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Secret
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ runtime.registry_auth_secret }}"
+      register: registry_secret
+      no_log: true
+
+    - name: Require Docker config auth for ORAS against Harbor
+      ansible.builtin.assert:
+        that:
+          - registry_secret.resources | length == 1
+          - "'.dockerconfigjson' in (registry_secret.resources[0].data | default({}))"
+          - "(registry_secret.resources[0].data['.dockerconfigjson'] | length) > 0"
+        fail_msg: Registry auth Secret must expose a non-empty .dockerconfigjson.
+      no_log: true
+
+    - name: Read only the forge-status Secret metadata/data keys
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Secret
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ runtime.status_secret }}"
+      register: status_secret
+      no_log: true
+
+    - name: Require exactly one supported non-empty forge status credential shape
+      ansible.builtin.assert:
+        that:
+          - status_secret.resources | length == 1
+          - >-
+            (
+              ('GITHUB_REPOSITORY' in (status_secret.resources[0].data | default({})) and
+               'GITHUB_TOKEN' in (status_secret.resources[0].data | default({})) and
+               (status_secret.resources[0].data['GITHUB_REPOSITORY'] | length) > 0 and
+               (status_secret.resources[0].data['GITHUB_TOKEN'] | length) > 0 and
+               'GITEA_API_URL' not in (status_secret.resources[0].data | default({})))
+              or
+              ('GITEA_API_URL' in (status_secret.resources[0].data | default({})) and
+               'GITEA_REPOSITORY' in (status_secret.resources[0].data | default({})) and
+               'GITEA_TOKEN' in (status_secret.resources[0].data | default({})) and
+               (status_secret.resources[0].data['GITEA_API_URL'] | length) > 0 and
+               (status_secret.resources[0].data['GITEA_REPOSITORY'] | length) > 0 and
+               (status_secret.resources[0].data['GITEA_TOKEN'] | length) > 0 and
+               'GITHUB_REPOSITORY' not in (status_secret.resources[0].data | default({})))
+            )
+        fail_msg: >-
+          Status Secret must configure exactly one existing repository_delivery provider:
+          GitHub (GITHUB_REPOSITORY/GITHUB_TOKEN) or Gitea
+          (GITEA_API_URL/GITEA_REPOSITORY/GITEA_TOKEN).
+      no_log: true
+
+    - name: Render the versioned Tekton control-plane definitions
+      ansible.builtin.command:
+        argv:
+          - kustomize
+          - build
+          - "{{ effective_repo_root }}/platform/tekton"
+      register: tekton_render
+      changed_when: false
+
+  tasks:
+    - name: Reconcile reviewed Tekton Tasks and Pipelines into the approved namespace
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        namespace: "{{ runtime.namespace }}"
+        state: present
+        apply: true
+        definition: "{{ tekton_render.stdout | from_yaml_all | list }}"
+
+    - name: Look for the deterministic parent proof PipelineRun
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ parent_run_name }}"
+      register: existing_parent_run
+
+    - name: Create the exact parent PipelineRun once so Harbor receives full PASS evidence
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        state: present
+        definition:
+          apiVersion: tekton.dev/v1
+          kind: PipelineRun
+          metadata:
+            name: "{{ parent_run_name }}"
+            namespace: "{{ runtime.namespace }}"
+            labels:
+              ecommerce-1.io/proof-run: parent
+              ecommerce-1.io/proof-head: "{{ proof_parent_sha }}"
+          spec:
+            pipelineRef:
+              name: ecommerce-affected
+            taskRunTemplate:
+              serviceAccountName: "{{ runtime.pipeline_service_account }}"
+            params:
+              - name: runner-image
+                value: "{{ runtime.runner_image }}"
+              - name: repo-url
+                value: "{{ runtime.repo_url }}"
+              - name: base
+                value: "{{ proof_base_sha }}"
+              - name: head
+                value: "{{ proof_parent_sha }}"
+              - name: evidence-repository
+                value: "{{ runtime.evidence_repository }}"
+              - name: evidence-signing-secret
+                value: "{{ runtime.evidence_signing_secret }}"
+              - name: registry-auth-secret
+                value: "{{ runtime.registry_auth_secret }}"
+              - name: status-secret
+                value: "{{ runtime.status_secret }}"
+            workspaces:
+              - name: source
+                emptyDir: {}
+      when: existing_parent_run.resources | length == 0
+
+    - name: Wait for the exact parent PipelineRun to terminate
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ parent_run_name }}"
+      register: parent_run_state
+      until: >-
+        parent_run_state.resources | length == 1 and
+        (parent_run_state.resources[0].status.conditions | default([]) | length) > 0 and
+        parent_run_state.resources[0].status.conditions[0].status in ['True', 'False']
+      retries: 180
+      delay: 5
+
+    - name: Require successful parent execution and remote evidence publication
+      ansible.builtin.assert:
+        that:
+          - parent_run_state.resources[0].status.conditions[0].status == 'True'
+        fail_msg: >-
+          Parent PipelineRun failed. Do not run the child proof until exact parent evidence
+          has been signed and published by Tekton.
+
+    - name: Look for the deterministic child proof PipelineRun
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ child_run_name }}"
+      register: existing_child_run
+
+    - name: Create the child PipelineRun that must fetch and reuse authenticated parent evidence
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        state: present
+        definition:
+          apiVersion: tekton.dev/v1
+          kind: PipelineRun
+          metadata:
+            name: "{{ child_run_name }}"
+            namespace: "{{ runtime.namespace }}"
+            labels:
+              ecommerce-1.io/proof-run: child
+              ecommerce-1.io/proof-head: "{{ proof_head_sha }}"
+          spec:
+            pipelineRef:
+              name: ecommerce-affected
+            taskRunTemplate:
+              serviceAccountName: "{{ runtime.pipeline_service_account }}"
+            params:
+              - name: runner-image
+                value: "{{ runtime.runner_image }}"
+              - name: repo-url
+                value: "{{ runtime.repo_url }}"
+              - name: base
+                value: "{{ proof_base_sha }}"
+              - name: head
+                value: "{{ proof_head_sha }}"
+              - name: evidence-repository
+                value: "{{ runtime.evidence_repository }}"
+              - name: evidence-signing-secret
+                value: "{{ runtime.evidence_signing_secret }}"
+              - name: registry-auth-secret
+                value: "{{ runtime.registry_auth_secret }}"
+              - name: status-secret
+                value: "{{ runtime.status_secret }}"
+            workspaces:
+              - name: source
+                emptyDir: {}
+      when: existing_child_run.resources | length == 0
+
+    - name: Wait for the exact child PipelineRun to terminate
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ child_run_name }}"
+      register: child_run_state
+      until: >-
+        child_run_state.resources | length == 1 and
+        (child_run_state.resources[0].status.conditions | default([]) | length) > 0 and
+        child_run_state.resources[0].status.conditions[0].status in ['True', 'False']
+      retries: 180
+      delay: 5
+
+    - name: Require a successful exact child Tekton PipelineRun
+      ansible.builtin.assert:
+        that:
+          - child_run_state.resources[0].status.conditions[0].status == 'True'
+        fail_msg: >-
+          Exact child PipelineRun failed or was cancelled. Inspect PipelineRun/TaskRun
+          logs; never publish or synthesize PASS outside Tekton.
+
+    - name: Create a clean verifier Pod for signed Harbor round-trip evidence
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "{{ verifier_pod_name }}"
+            namespace: "{{ runtime.namespace }}"
+            labels:
+              ecommerce-1.io/proof-verifier: "true"
+              ecommerce-1.io/proof-head: "{{ proof_head_sha }}"
+          spec:
+            restartPolicy: Never
+            initContainers:
+              - name: clone-source
+                image: "{{ runtime.runner_image }}"
+                command: [git]
+                args: [clone, --quiet, --no-checkout, "{{ runtime.repo_url }}", /workspace/repository]
+                volumeMounts:
+                  - name: source
+                    mountPath: /workspace
+              - name: checkout-source
+                image: "{{ runtime.runner_image }}"
+                command: [git]
+                args: [-C, /workspace/repository, checkout, --quiet, --detach, "{{ proof_head_sha }}"]
+                volumeMounts:
+                  - name: source
+                    mountPath: /workspace
+            containers:
+              - name: verifier
+                image: "{{ runtime.runner_image }}"
+                command: [sleep]
+                args: ['3600']
+                workingDir: /workspace/repository
+                env:
+                  - name: HOME
+                    value: /tekton/home
+                  - name: CI_EVIDENCE_REPOSITORY
+                    value: "{{ runtime.evidence_repository }}"
+                  - name: CI_EVIDENCE_COSIGN_PUBLIC_KEY
+                    value: /var/run/ecommerce-evidence/cosign.pub
+                volumeMounts:
+                  - name: source
+                    mountPath: /workspace
+                  - name: evidence-signing
+                    mountPath: /var/run/ecommerce-evidence
+                    readOnly: true
+                  - name: registry-auth
+                    mountPath: /tekton/home/.docker
+                    readOnly: true
+            volumes:
+              - name: source
+                emptyDir: {}
+              - name: evidence-signing
+                secret:
+                  secretName: "{{ runtime.evidence_signing_secret }}"
+                  items:
+                    - key: cosign.pub
+                      path: cosign.pub
+              - name: registry-auth
+                secret:
+                  secretName: "{{ runtime.registry_auth_secret }}"
+                  items:
+                    - key: .dockerconfigjson
+                      path: config.json
+
+    - name: Wait for the clean verifier Pod to be ready
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Pod
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ verifier_pod_name }}"
+      register: verifier_pod_state
+      until: >-
+        verifier_pod_state.resources | length == 1 and
+        verifier_pod_state.resources[0].status.phase == 'Running' and
+        (verifier_pod_state.resources[0].status.containerStatuses | default([]) | length) > 0 and
+        verifier_pod_state.resources[0].status.containerStatuses[0].ready | default(false)
+      retries: 60
+      delay: 5
+
+    - name: Fetch and authenticate the child evidence from Harbor in the clean verifier Pod
+      kubernetes.core.k8s_exec:
+        context: "{{ runtime.kube_context }}"
+        namespace: "{{ runtime.namespace }}"
+        pod: "{{ verifier_pod_name }}"
+        container: verifier
+        command: >-
+          python3 scripts/repoctl.py evidence-fetch --sha {{ proof_head_sha }}
+      register: verifier_fetch
+
+    - name: Read the authenticated non-secret evidence payload from the verifier Pod
+      kubernetes.core.k8s_exec:
+        context: "{{ runtime.kube_context }}"
+        namespace: "{{ runtime.namespace }}"
+        pod: "{{ verifier_pod_name }}"
+        container: verifier
+        command: >-
+          cat .context/evidence/{{ proof_head_sha }}.json
+      register: verifier_evidence
+
+    - name: Parse the authenticated remote evidence
+      ansible.builtin.set_fact:
+        remote_evidence: "{{ verifier_evidence.stdout | from_json }}"
+        product_records: >-
+          {{ (verifier_evidence.stdout | from_json).gates
+             | selectattr('gate', 'equalto', 'service:product') | list }}
+
+    - name: Require distributed direct-parent Product reuse from signed remote evidence
+      ansible.builtin.assert:
+        that:
+          - remote_evidence.status == 'PASS'
+          - remote_evidence.exact_commit_evidence | bool
+          - remote_evidence.base_sha == proof_base_sha
+          - remote_evidence.head_sha == proof_head_sha
+          - remote_evidence.verification.mode == 'incremental'
+          - product_records | length == 1
+          - product_records[0].status == 'PASS'
+          - product_records[0].reused_from_sha == proof_parent_sha
+          - (remote_evidence.metrics.reused_gates | int) >= 1
+        fail_msg: >-
+          Signed Harbor evidence is valid but does not prove direct-parent Product reuse;
+          the distributed proof remains BLOCKED.
+
+    - name: Report the exact successful distributed runtime proof without secret data
+      ansible.builtin.debug:
+        msg:
+          - "PASS parent PipelineRun {{ parent_run_name }}"
+          - "PASS child PipelineRun {{ child_run_name }}"
+          - "PASS signed Harbor evidence round-trip for {{ proof_head_sha }}"
+          - "PASS service:product reused exact parent {{ proof_parent_sha }}"
+          - "base={{ proof_base_sha }}"
+          - "head={{ proof_head_sha }}"
+          - "evidence_repository={{ runtime.evidence_repository }}"
+
+  post_tasks:
+    - name: Remove only the automation-owned verifier Pod
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Pod
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ verifier_pod_name }}"
+        state: absent
+      failed_when: false

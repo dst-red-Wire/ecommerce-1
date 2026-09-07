@@ -12,12 +12,42 @@ spec:
       type: string
     - name: record-dir
       type: string
+    - name: evidence-repository
+      type: string
+    - name: evidence-signing-secret
+      type: string
+    - name: registry-auth-secret
+      type: string
+    - name: status-secret
+      type: string
   workspaces:
     - name: source
   steps:
     - name: finalize
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      envFrom:
+        - secretRef:
+            name: $(params.status-secret)
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: CI_EVIDENCE_REPOSITORY
+          value: $(params.evidence-repository)
+        - name: CI_EVIDENCE_COSIGN_KEY
+          value: /var/run/ecommerce-evidence/cosign.key
+        - name: COSIGN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.evidence-signing-secret)
+              key: cosign.password
+      volumeMounts:
+        - name: evidence-signing
+          mountPath: /var/run/ecommerce-evidence
+          readOnly: true
+        - name: registry-auth
+          mountPath: /tekton/home/.docker
+          readOnly: true
       command: [python3, scripts/repoctl.py]
       args:
         - ci-finalize
@@ -27,3 +57,16 @@ spec:
         - $(params.head)
         - --record-dir
         - $(params.record-dir)
+  volumes:
+    - name: evidence-signing
+      secret:
+        secretName: $(params.evidence-signing-secret)
+        items:
+          - key: cosign.key
+            path: cosign.key
+    - name: registry-auth
+      secret:
+        secretName: $(params.registry-auth-secret)
+        items:
+          - key: .dockerconfigjson
+            path: config.json
