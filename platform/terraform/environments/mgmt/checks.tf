@@ -25,8 +25,9 @@ check "private_block_consistency" {
 check "mgmt_ips_inside_segment" {
   assert {
     condition = alltrue([
-      for node in values(local.nodes) :
-      cidrcontains(local.mgmt_segments["401"].cidr, node.mgmt_ip)
+      for node in values(local.node_ipv4_numbers) :
+      node.mgmt >= local.mgmt_segment_ipv4_bounds["401"].first &&
+      node.mgmt <= local.mgmt_segment_ipv4_bounds["401"].last
     ])
     error_message = "Every MGMT management IP must belong to VLAN/segment 401."
   }
@@ -35,8 +36,9 @@ check "mgmt_ips_inside_segment" {
 check "k8s_ips_inside_segment" {
   assert {
     condition = alltrue([
-      for node in values(local.nodes) :
-      cidrcontains(local.mgmt_segments["402"].cidr, node.k8s_ip)
+      for node in values(local.node_ipv4_numbers) :
+      node.k8s >= local.mgmt_segment_ipv4_bounds["402"].first &&
+      node.k8s <= local.mgmt_segment_ipv4_bounds["402"].last
     ])
     error_message = "Every MGMT Kubernetes node IP must belong to VLAN/segment 402."
   }
@@ -45,8 +47,9 @@ check "k8s_ips_inside_segment" {
 check "worker_storage_ips_inside_segment" {
   assert {
     condition = alltrue([
-      for node in values(local.workers) :
-      cidrcontains(local.mgmt_segments["403"].cidr, node.storage_ip)
+      for name in keys(local.workers) :
+      local.node_ipv4_numbers[name].storage >= local.mgmt_segment_ipv4_bounds["403"].first &&
+      local.node_ipv4_numbers[name].storage <= local.mgmt_segment_ipv4_bounds["403"].last
     ])
     error_message = "Every MGMT worker storage IP must belong to VLAN/segment 403."
   }
@@ -55,8 +58,9 @@ check "worker_storage_ips_inside_segment" {
 check "worker_backup_ips_inside_segment" {
   assert {
     condition = alltrue([
-      for node in values(local.workers) :
-      cidrcontains(local.mgmt_segments["405"].cidr, node.backup_ip)
+      for name in keys(local.workers) :
+      local.node_ipv4_numbers[name].backup >= local.mgmt_segment_ipv4_bounds["405"].first &&
+      local.node_ipv4_numbers[name].backup <= local.mgmt_segment_ipv4_bounds["405"].last
     ])
     error_message = "Every MGMT worker backup IP must belong to VLAN/segment 405."
   }
