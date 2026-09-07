@@ -444,6 +444,16 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_autoscaling_contract_corruption
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["platform"]["autoscaling"]["synchronous_pods"] = "custom-autoscaler"
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("platform.autoscaling") }
+    end
+  end
+
   def test_network_policy_invariants_independently
     %w[require_unique_ips require_non_overlapping_cidrs require_site_isolation require_underlay_pod_service_separation public_ips_runtime_injected_only].each do |field|
       with_contract_copy do |root|

@@ -5,7 +5,7 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-global governance contracts automation lint test security terraform ansible system
+.PHONY: help ci ci-global governance runtime-efficiency contracts automation lint test security terraform ansible system
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
@@ -14,8 +14,11 @@ ci: governance contracts automation lint test security terraform ansible ## Run 
 
 ci-global: governance contracts automation security ## Run global gates used by Tekton
 
-governance: ## Validate canonical architecture and CI authority contracts
+governance: runtime-efficiency ## Validate canonical architecture and CI authority contracts
 	@$(PYTHON) scripts/repoctl.py governance
+
+runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
+	@ruby scripts/validate-runtime-efficiency.rb
 
 contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
 	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
@@ -115,7 +118,7 @@ api-mock: ## Start Prism mock; use SERVICE=product PORT=4010
 service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)
 
-.PHONY: site product-check product-run
+.PHONY: site product-check product-run product-benchmark resource-candidate
 
 site: ## Install pinned frontend dependencies and run Storefront + Admin locally
 	@$(MAKE) -C frontend site
@@ -126,3 +129,10 @@ product-check: ## Validate Product through generic Go service gate
 product-run: ## Run local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
 	@$(ANSIBLE_LOCAL) --tags go
 	@$(HOME)/.local/bin/go run ./services/product/cmd/product-api
+
+product-benchmark: ## Benchmark the Product HTTP hot path with allocations; not production sizing evidence
+	@$(ANSIBLE_LOCAL) --tags go
+	@cd services/product && $(HOME)/.local/bin/go test -run '^$$' -bench '^BenchmarkListProductsEmpty$$' -benchmem ./internal/transport/rest
+
+resource-candidate: ## Derive a deterministic candidate from representative preprod evidence; use EVIDENCE=path.json
+	@ruby scripts/resource-sizing.rb "$(EVIDENCE)"

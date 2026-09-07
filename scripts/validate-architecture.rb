@@ -345,7 +345,11 @@ module ArchitectureValidator
         "kubernetes" => "rke2", "node_os" => "rocky-linux-9", "cni" => "cilium", "mesh" => "istio",
         "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
         "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
-        "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon"
+        "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon",
+        "autoscaling" => {
+          "synchronous_pods" => "kubernetes-hpa", "event_driven_pods" => "keda",
+          "certified_nodes" => "fixed", "preprod_perf_burst" => "gate-only"
+        }
       },
       "stateful" => {
         "database" => "cloudnativepg-postgresql", "events" => "strimzi-kafka-kraft",
