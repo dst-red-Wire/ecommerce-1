@@ -37,6 +37,15 @@ trigger_flow:
       - X-Hub-Signature-256
     secret_source: openbao-via-eso
 
+source_checkout:
+  owner: tekton-affected-pipeline
+  task: platform/tekton/tasks/source-checkout.yaml
+  repository_url_input: authenticated-webhook-repository-clone-url
+  base_input: immutable-commit-sha
+  head_input: immutable-commit-sha
+  workspace_initial_state: empty
+  exact_head_guard: repoctl-tekton-plan
+
 gitea_actions:
   allowed_for_forge_automation: true
   ci_authority: false
