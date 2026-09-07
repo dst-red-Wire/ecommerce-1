@@ -1,0 +1,76 @@
+version: 1
+status: exact-prerequisites
+scope: management-plane-tekton-trigger-runtime
+
+api_contract:
+  pipelines: tekton.dev/v1
+  triggers: triggers.tekton.dev/v1beta1
+  required_trigger_resources:
+    - EventListener
+    - TriggerBinding
+    - TriggerTemplate
+  crds_must_be_proven_before_activation: true
+
+namespace:
+  dedicated_required: true
+  value_source: management-plane-runtime-config
+  hardcoded_in_trigger_manifests: false
+
+source_checkout:
+  owner: tekton-affected-pipeline
+  initial_workspace: empty
+  immutable_base_head_required: true
+  trigger_may_populate_workspace: false
+
+runner_image:
+  parameter: runner-image
+  registry_authority: harbor
+  value_source: management-plane-runtime-config
+  immutable_digest_required: true
+  digest_pattern: '@sha256:[0-9a-f]{64}$'
+  default_forbidden: true
+  live_pull_proof_required: true
+
+identity:
+  event_listener_service_account:
+    required: true
+    least_privilege: true
+    wildcard_rbac_forbidden: true
+  pipeline_service_account:
+    required: true
+    least_privilege: true
+    wildcard_rbac_forbidden: true
+
+webhook_authentication:
+  forge: gitea
+  algorithm: hmac-sha256
+  accepted_signature_header: X-Hub-Signature-256
+  strategy: github-compatible-hmac-interceptor
+  reject_unsigned: true
+  secret:
+    source: openbao-via-eso
+    plaintext_in_git_forbidden: true
+    kubernetes_secret_name_source: management-plane-runtime-config
+    secret_key_source: management-plane-runtime-config
+
+network:
+  default_deny_required: true
+  ingress:
+    public_target: eventlistener-only
+    tls_required: true
+  egress_required:
+    - gitea
+    - harbor
+    - kubernetes-api
+  live_network_policy_proof_required: true
+
+activation:
+  trigger_manifests: blocked-until-prerequisites-proven
+  required_proofs:
+    - triggers-crds-present
+    - dedicated-namespace-provisioned
+    - runner-image-digest-pullable
+    - least-privilege-rbac-proven
+    - webhook-secret-synced-from-openbao-via-eso
+    - ingress-tls-and-network-policy-proven
+  static_contract_is_runtime_proof: false

@@ -86,6 +86,27 @@ class CIAuthorityTest < Minitest::Test
     refute_match(/image:\s*\S+:latest\b/, manifests)
   end
 
+  def test_tekton_trigger_runtime_prerequisites_are_fail_closed
+    topology = yaml("config/contracts/ci-topology.yaml")
+    runtime_path = topology.dig("trigger_flow", "runtime_prerequisites_contract")
+    assert_equal "config/contracts/tekton-trigger-runtime.yaml", runtime_path
+    runtime = yaml(runtime_path)
+    assert_equal "exact-prerequisites", runtime.fetch("status")
+    assert_equal "tekton.dev/v1", runtime.dig("api_contract", "pipelines")
+    assert_equal "triggers.tekton.dev/v1beta1", runtime.dig("api_contract", "triggers")
+    assert_equal true, runtime.dig("api_contract", "crds_must_be_proven_before_activation")
+    assert_equal "harbor", runtime.dig("runner_image", "registry_authority")
+    assert_equal true, runtime.dig("runner_image", "immutable_digest_required")
+    assert_equal true, runtime.dig("runner_image", "default_forbidden")
+    assert_equal true, runtime.dig("identity", "event_listener_service_account", "least_privilege")
+    assert_equal true, runtime.dig("identity", "event_listener_service_account", "wildcard_rbac_forbidden")
+    assert_equal "openbao-via-eso", runtime.dig("webhook_authentication", "secret", "source")
+    assert_equal true, runtime.dig("webhook_authentication", "secret", "plaintext_in_git_forbidden")
+    assert_equal true, runtime.dig("network", "default_deny_required")
+    assert_equal "blocked-until-prerequisites-proven", runtime.dig("activation", "trigger_manifests")
+    assert_equal false, runtime.dig("activation", "static_contract_is_runtime_proof")
+  end
+
   def test_frontend_ci_uses_declared_pnpm_workspace
     package = JSON.parse(read("frontend/package.json"))
     assert_match(/\Apnpm@\d/, package.fetch("packageManager"))

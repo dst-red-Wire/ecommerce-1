@@ -29,6 +29,7 @@ trigger_flow:
   template: tekton-triggertemplate
   output: tekton-pipelinerun
   implementation_root: platform/tekton/triggers
+  runtime_prerequisites_contract: config/contracts/tekton-trigger-runtime.yaml
   webhook_authentication:
     required: true
     algorithm: hmac-sha256
