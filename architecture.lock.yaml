@@ -92,6 +92,7 @@ topology_contracts:
   preprod: docs/architecture/PREPROD_TOPOLOGY_V2.md
   prod: docs/architecture/PROD_TOPOLOGY_V2.md
   network_ipam: docs/architecture/NETWORK_IPAM_CONTRACT.md
+  mgmt_wireguard_access: docs/architecture/MGMT_WIREGUARD_ACCESS.md
   storage: docs/architecture/STORAGE_TOPOLOGY_V2.md
   service_ownership: docs/architecture/SERVICE_OWNERSHIP_MATRIX.md
   data_ownership: docs/architecture/DATA_OWNERSHIP_MATRIX.md
@@ -107,6 +108,8 @@ machine_contracts:
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
+  mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
+  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   storage_plan: config/infrastructure/storage-plan.yaml
   deployment_waves: config/infrastructure/deployment-waves.yaml
   service_ownership: config/contracts/service-ownership.yaml

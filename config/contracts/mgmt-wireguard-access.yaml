@@ -1,0 +1,103 @@
+version: 1
+status: exact
+purpose: operator-access-to-permanent-mgmt
+
+gateway:
+  node: wg-01
+  trust_zone: Z5
+  lifecycle: persistent
+  provider: hetzner-cloud
+  kubernetes_member: false
+  inventory_source: config/infrastructure/mgmt-access-gateways.yaml#access_gateways.wg-01
+  profile_source: config/infrastructure/mgmt-access-gateways.yaml#vm_profiles.wireguard-gateway
+
+network:
+  source: config/infrastructure/network-plan.yaml#wireguard.mgmt
+  public_endpoint_address: provider-runtime-output
+  protocol: udp
+  listen_port_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.endpoint.listen_port
+  return_path_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.return_path
+
+access:
+  identity_realm: workforce
+  customer_identity: forbidden
+  privileged_authentication: hardware-backed-webauthn-passkeys
+  default_forwarding: deny
+  route_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.allowed_routes
+  break_glass: separately-controlled
+
+secrets:
+  git: forbidden
+  authority: openbao
+  delivery:
+    owner: ansible
+    mode: runtime-openbao-read
+    kubernetes_eso: forbidden
+    gateway_target_permissions: root-0600
+    openbao_auth: runtime-injected-nonpersisted
+  gateway_private_key:
+    material: runtime-only
+    mount: kv
+    path: mgmt/wireguard/wg-01
+    field: private_key
+  peer_public_keys:
+    material: runtime-only
+    mount: kv
+    path_prefix: mgmt/wireguard/peers/
+    field: public_key
+  operator_peer_private_keys:
+    authority: operator-device
+    central_storage: forbidden
+    git: forbidden
+  break_glass_private_keys:
+    authority: openbao
+    mount: kv
+    path_prefix: mgmt/wireguard/break-glass/
+    access: separately-controlled
+
+ownership:
+  provider_vm_network_firewall: terraform
+  rocky_wireguard_routing_firewall: ansible
+  secret_retrieval_and_host_render: ansible
+  secret_authority: openbao
+  kubernetes: none
+
+human_gates:
+  provider_apply: required
+  public_ingress_activation: required
+  routing_change: required
+  peer_or_key_change: required
+
+threat_model:
+  internet_scanning:
+    boundary: Z0-to-Z5
+    controls:
+      - single-udp-wireguard-endpoint
+      - default-deny-provider-firewall
+      - no-public-management-services
+  stolen_operator_key:
+    boundary: operator-to-Z5
+    controls:
+      - per-operator-peer-identity
+      - revocation-by-peer-removal
+      - workforce-iam-authorized-issuance
+  overbroad_routes:
+    boundary: WireGuard-to-MGMT
+    controls:
+      - mgmt-only-allowed-routes
+      - default-deny-forwarding
+      - no-pod-service-route
+  gateway_compromise:
+    boundary: wg-01-to-Z5
+    controls:
+      - dedicated-non-kubernetes-gateway
+      - least-privilege-host
+      - audited-operator-actions
+      - rebuild-not-clean
+  break_glass_misuse:
+    boundary: break-glass-to-Z5
+    controls:
+      - separate-address-pool
+      - separate-control
+      - audited-activation
+      - human-authorization
