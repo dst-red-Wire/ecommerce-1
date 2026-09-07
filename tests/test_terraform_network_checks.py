@@ -10,6 +10,7 @@ LOCALS = ROOT / "platform/terraform/environments/mgmt/locals.tf"
 CHECKS = ROOT / "platform/terraform/environments/mgmt/checks.tf"
 ENV_MAIN = ROOT / "platform/terraform/environments/mgmt/main.tf"
 ENV_VARIABLES = ROOT / "platform/terraform/environments/mgmt/variables.tf"
+ENV_OUTPUTS = ROOT / "platform/terraform/environments/mgmt/outputs.tf"
 MODULE_MAIN = ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf"
 INVENTORY = ROOT / "config/infrastructure/mgmt-inventory.yaml"
 NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
@@ -59,6 +60,16 @@ class TerraformNetworkChecksTest(unittest.TestCase):
         self.assertIn("network_zone = var.hcloud_network_zone", main_text)
         self.assertIn('variable "hcloud_network_zone"', variables_text)
         self.assertNotIn('network_zone = "eu-central"', main_text)
+
+    def test_environment_reexports_management_provider_outputs(self):
+        outputs_text = ENV_OUTPUTS.read_text(encoding="utf-8")
+
+        self.assertIn('output "network_id"', outputs_text)
+        self.assertIn("module.hcloud_mgmt.network_id", outputs_text)
+        self.assertIn('output "servers"', outputs_text)
+        self.assertIn("module.hcloud_mgmt.servers", outputs_text)
+        self.assertIn('output "private_networks"', outputs_text)
+        self.assertIn("module.hcloud_mgmt.private_networks", outputs_text)
 
     def test_provider_aliases_match_inventory_roles(self):
         inventory = yaml.safe_load(INVENTORY.read_text(encoding="utf-8"))
