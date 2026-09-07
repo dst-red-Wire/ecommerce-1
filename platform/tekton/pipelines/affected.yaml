@@ -8,6 +8,8 @@ spec:
   params:
     - name: runner-image
       type: string
+    - name: repo-url
+      type: string
     - name: base
       type: string
     - name: head
@@ -15,7 +17,24 @@ spec:
   workspaces:
     - name: source
   tasks:
+    - name: source-checkout
+      taskRef:
+        name: ecommerce-source-checkout
+      params:
+        - name: runner-image
+          value: $(params.runner-image)
+        - name: repo-url
+          value: $(params.repo-url)
+        - name: base
+          value: $(params.base)
+        - name: head
+          value: $(params.head)
+      workspaces:
+        - name: source
+          workspace: source
+
     - name: classify
+      runAfter: [source-checkout]
       taskRef:
         name: ecommerce-affected-components
       params:

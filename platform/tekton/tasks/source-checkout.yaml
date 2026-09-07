@@ -1,0 +1,44 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-source-checkout
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: repo-url
+      type: string
+    - name: base
+      type: string
+      description: Immutable base commit SHA supplied by the authenticated trigger.
+    - name: head
+      type: string
+      description: Immutable head commit SHA supplied by the authenticated trigger.
+  workspaces:
+    - name: source
+  steps:
+    - name: initialize
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [git]
+      args: [init, --quiet, .]
+    - name: configure-origin
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [git]
+      args: [remote, add, origin, $(params.repo-url)]
+    - name: fetch-base
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [git]
+      args: [fetch, --no-tags, --depth=1, origin, $(params.base)]
+    - name: fetch-head
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [git]
+      args: [fetch, --no-tags, --depth=2, origin, $(params.head)]
+    - name: checkout-head
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [git]
+      args: [checkout, --detach, $(params.head)]

@@ -8,6 +8,7 @@ class CIAuthorityTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
   REQUIRED_TEKTON = %w[
     platform/tekton/kustomization.yaml
+    platform/tekton/tasks/source-checkout.yaml
     platform/tekton/tasks/global-gates.yaml
     platform/tekton/tasks/affected-components.yaml
     platform/tekton/tasks/component-gates.yaml

@@ -17,7 +17,7 @@ Remote PASS evidence is published as a signed OCI artifact in Harbor according t
 
 ## Runtime contract
 
-Each Pipeline receives a `source` workspace containing the exact commit SHA being reviewed. Runner images are supplied as Pipeline parameters because their immutable Harbor digests belong to the management-plane runtime configuration, not to an unverified public tag in these manifests. Admission policy must require `@sha256:` runner references before the Tekton control plane is certified.
+The authoritative `ecommerce-affected` Pipeline owns population of its `source` workspace. Its first Task initializes an empty workspace, fetches the immutable base/head commit SHAs supplied by the authenticated trigger, and checks out the head detached before classification. `repoctl tekton-plan` then fails closed unless the requested head resolves to the clean checked-out `HEAD`. Runner images are supplied as Pipeline parameters because their immutable Harbor digests belong to the management-plane runtime configuration, not to an unverified public tag in these manifests. Admission policy must require `@sha256:` runner references before the Tekton control plane is certified.
 
 CI may build, test, scan, attest and publish immutable artifacts. It must not deploy workloads directly. Promotion remains `Tekton -> Harbor digest -> reviewed GitOps update -> Fleet -> cluster`, with Argo Rollouts used only for rollout strategy.
 
