@@ -47,32 +47,35 @@ This is the complete active durable-event catalogue. `config/contracts/event-con
 | product | SKUUpdated.v1 | catalog, search, inventory | event_id |
 | catalog | CatalogPublished.v1 | search | event_id |
 | catalog | CatalogEntryChanged.v1 | search | event_id |
-| pricing | PriceRuleChanged.v1 | cart, order | event_id |
+| pricing | PriceRuleChanged.v1 | cart, checkout | event_id |
 | pricing | PriceCalculated.v1 | none | event_id/calculation_id |
-| inventory | StockReserved.v1 | order | event_id/reservation_id |
-| inventory | StockReleased.v1 | order | event_id/reservation_id |
+| inventory | StockReserved.v1 | checkout | event_id/reservation_id |
+| inventory | StockReleased.v1 | checkout | event_id/reservation_id |
 | inventory | StockAdjusted.v1 | catalog, search | event_id |
 | inventory | OutOfStock.v1 | catalog, search, notification | event_id/sku_id |
 | cart | CartUpdated.v1 | none | event_id/cart_id |
-| cart | CartExpired.v1 | notification | event_id/cart_id |
+| cart | CartExpired.v1 | checkout, notification | event_id/cart_id |
 | tax | TaxCalculated.v1 | none | event_id/calculation_id |
-| tax | TaxRuleChanged.v1 | pricing, order | event_id |
-| order | OrderCreated.v1 | inventory, fraud-risk, notification | event_id/order_id |
-| fraud-risk | FraudApproved.v1 | order | event_id/order_id |
-| fraud-risk | FraudRejected.v1 | order, notification | event_id/order_id |
-| fraud-risk | FraudReviewRequired.v1 | order, notification | event_id/order_id |
+| tax | TaxRuleChanged.v1 | pricing, checkout | event_id |
+| order | OrderCreated.v1 | inventory, payment, notification | event_id/order_id |
+| fraud-risk | FraudApproved.v1 | checkout | event_id/order_id |
+| fraud-risk | FraudRejected.v1 | checkout, notification | event_id/order_id |
+| fraud-risk | FraudReviewRequired.v1 | checkout, notification | event_id/order_id |
 | search | SearchIndexUpdated.v1 | none | event_id |
 | payment | PaymentAuthorized.v1 | order, billing | event_id/payment_id |
 | payment | PaymentFailed.v1 | order, notification | event_id/payment_id |
 | payment | PaymentCaptured.v1 | order, billing, notification | event_id/payment_id |
-| order | OrderConfirmed.v1 | shipping, billing, notification | event_id/order_id |
-| order | OrderCancelled.v1 | inventory, payment, notification | event_id/order_id |
+| order | OrderConfirmed.v1 | fulfillment, billing, notification | event_id/order_id |
+| order | OrderCancelled.v1 | inventory, payment, fulfillment, notification | event_id/order_id |
 | order | OrderFailed.v1 | notification | event_id/order_id |
+| fulfillment | FulfillmentStarted.v1 | none | event_id/fulfillment_id |
+| fulfillment | FulfillmentCompleted.v1 | order | event_id/fulfillment_id |
+| fulfillment | FulfillmentFailed.v1 | order, notification | event_id/fulfillment_id |
 | shipping | ShipmentCreated.v1 | tracking, notification | event_id/shipment_id |
 | shipping | ShipmentDispatched.v1 | tracking, notification | event_id/shipment_id |
-| shipping | DeliveryException.v1 | order, notification | event_id/shipment_id |
+| shipping | DeliveryException.v1 | fulfillment, notification | event_id/shipment_id |
 | tracking | TrackingUpdated.v1 | notification | event_id/tracking_id |
-| tracking | Delivered.v1 | order, notification, returns | event_id/tracking_id |
+| tracking | Delivered.v1 | fulfillment, notification, returns | event_id/tracking_id |
 | returns | ReturnRequested.v1 | notification | event_id/return_id |
 | returns | ReturnApproved.v1 | shipping, notification | event_id/return_id |
 | returns | ReturnReceived.v1 | inventory, payment, notification | event_id/return_id |

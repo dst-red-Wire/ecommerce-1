@@ -173,10 +173,19 @@ module ArchitectureValidator
       "SERVICE_OWNERSHIP_MATRIX.md" => service_rows.map(&:first)
     }
     canonical_services = service_sets.values.first.sort
-    service_sets.each { |name, names| check_equal(errors, "17 services in #{name}", canonical_services, names.sort) }
-    errors << "architecture must contain exactly 17 services" unless canonical_services.length == 17
-    service_sets.each do |name, names|
-      errors << "checkout service is forbidden in #{name}" if names.include?("checkout")
+    expected_service_count = 19
+    service_sets.each { |name, names| check_equal(errors, "19 services in #{name}", canonical_services, names.sort) }
+    errors << "architecture must contain exactly 19 services" unless canonical_services.length == expected_service_count
+    %w[checkout fulfillment].each do |required_service|
+      service_sets.each do |name, names|
+        errors << "#{required_service} service is required in #{name}" unless names.include?(required_service)
+      end
+    end
+    lock_forbidden = expect_array(lock.dig("business", "forbidden_services"), "architecture.lock.yaml business.forbidden_services")
+    ownership_forbidden = expect_array(ownership.dig("forbidden", "services"), "#{ownership_path} forbidden.services")
+    %w[checkout fulfillment].each do |required_service|
+      errors << "#{required_service} must not be forbidden in architecture.lock.yaml" if lock_forbidden.include?(required_service)
+      errors << "#{required_service} must not be forbidden in #{File.basename(ownership_path)}" if ownership_forbidden.include?(required_service)
     end
 
     markdown_sync = service_rows.to_h { |row| [row[0], list(row[3]).map { |value| value.split(";").first.strip }] }

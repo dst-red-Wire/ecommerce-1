@@ -6,16 +6,18 @@ Plateforme e-commerce B2C mono-vendeur, cloud-native, self-hosted, multi-site A/
 
 Le dépôt est en phase `BUILD`, avec `M2-golden-service-product` comme jalon applicatif courant. Le monorepo applicatif existe déjà (`frontend/`, `services/product/`) et l'IaC MGMT est amorcée sous `platform/terraform` et `platform/ansible`; les autres services et couches de plateforme sont ajoutés progressivement selon `architecture.lock.yaml`.
 
-## Architecture métier — 17 microservices
+## Architecture métier — 19 microservices
 
 - `catalog`
 - `product`
 - `inventory`
 - `cart`
+- `checkout`
 - `pricing`
 - `tax`
 - `order`
 - `payment`
+- `fulfillment`
 - `shipping`
 - `tracking`
 - `returns`
@@ -26,7 +28,7 @@ Le dépôt est en phase `BUILD`, avec `M2-golden-service-product` comme jalon ap
 - `user-profile`
 - `notification`
 
-Il n'existe pas de microservice `checkout`. `Order` orchestre la Saga de commande et conserve le snapshot immuable du checkout.
+La chaîne transactionnelle centrale est `Cart -> Checkout -> Order -> Payment -> Fulfillment`. Ces cinq domaines sont autonomes. `Fulfillment` reste distinct de `Shipping` et `Tracking`, et `Order` conserve le snapshot commercial immuable de la commande confirmée.
 
 ## Frontends
 

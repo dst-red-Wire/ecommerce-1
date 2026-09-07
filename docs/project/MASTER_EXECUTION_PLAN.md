@@ -34,12 +34,12 @@ Only these statuses are allowed:
 | Milestone | Primary owner | Objective | Entry gate | Exit gate | Current status |
 |---|---|---|---|---|---|
 | M0 Architecture Sync | ChatGPT | lock canonical V2 baseline and remove architecture collisions | validated project decisions | baseline, lock, agent rules and merged sync PR | DONE |
-| M1 Monorepo Bootstrap | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 17 services + 2 frontends represented, repo checks green | READY FOR CODEX |
+| M1 Monorepo Bootstrap | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | READY FOR CODEX |
 | M2 Golden Service Product | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | BLOCKED by M1 |
 | M3 PREPROD Infrastructure | Codex | provision reproducible JIT infrastructure foundation | M1 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M1 |
 | M4 Platform Baseline | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | BLOCKED by M3 |
 | M5 Commerce Vertical Slice | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | BLOCKED by M2/M4 |
-| M6 Full Application | Codex | complete 17 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | BLOCKED by M5 |
+| M6 Full Application | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | BLOCKED by M5 |
 | M7 Qualification | Codex | run full QA/security/supply-chain/perf/chaos/DR gates | M6 feature complete and platform stable | qualification evidence complete; no unresolved release blocker | BLOCKED by M6 |
 | M8 PREPROD Certification | Codex execution + Work reporting; release governance authority | execute three PREPROD campaigns and certify material equivalence | M7 PROVEN | standard + endurance + PROD-equivalent PASS; evidence archived; test state destroyed; READY_FOR_PROD | BLOCKED by M7 |
 | M9 PROD A/B Rollout | Codex execution; release governance authority; Work launch pack | build trusted PROD A/B and progressive rollout | M8 READY_FOR_PROD | controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete | BLOCKED by M8 |
@@ -137,8 +137,8 @@ Stateful components follow the locked architecture: CNPG/PostgreSQL, Strimzi Kaf
 Implement in bounded slices:
 
 - M5-A discovery: Storefront -> Catalog/Product/Search/Pricing/Inventory.
-- M5-B checkout/order: Cart -> Order -> Tax -> Fraud/Risk -> Payment.
-- M5-C fulfilment: Shipping -> Tracking -> Returns -> Billing -> Notification.
+- M5-B checkout/order/payment: Cart -> Checkout -> Order -> Payment, with Checkout using Pricing, Tax, Inventory, Fraud/Risk and Shipping delivery options as supporting contracts.
+- M5-C fulfillment: Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification.
 - M5-D trust/content: Review + User Profile.
 
 M5 is complete only when the user-visible path is exercised through actual contracts, persistence, events and observability in PREPROD.
@@ -179,7 +179,7 @@ Use signed immutable release manifests, controlled rollout, explicit fencing/hom
 - Stripe payment integration with SCA/3DS where applicable.
 - Payment and Billing remain separate domains.
 - Qonto PA integration is owned by Billing through an adapter for French e-invoicing readiness.
-- immutable Order checkout snapshot.
+- immutable Order commercial snapshot created from validated Checkout input.
 - fraud review workflow with the validated operational SLA.
 - privacy-by-design and data minimization.
 

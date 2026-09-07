@@ -28,9 +28,9 @@ class ArchitectureValidatorTest < Minitest::Test
   end
 
   SERVICE_MUTATIONS = {
-    "checkout in dependency map" => lambda { |root|
+    "missing checkout in dependency map" => lambda { |root|
       mutate_yaml(root, "config/contracts/dependency-map.yaml") do |data|
-        data["services"]["checkout"] = {"sync" => [], "events_in" => []}
+        data["services"].delete("checkout")
       end
     },
     "arbitrary service in dependency map" => lambda { |root|
@@ -49,15 +49,33 @@ class ArchitectureValidatorTest < Minitest::Test
         mutation.call(root)
         errors = ArchitectureValidator.validate(root)
         refute_empty errors
-        assert errors.any? { |error| error.include?("17 services in dependency-map.yaml") }
+        assert errors.any? { |error| error.include?("19 services in dependency-map.yaml") }
       end
     end
   end
 
-  def test_checkout_error_identifies_the_active_machine_contract
+  def test_required_autonomous_services_are_enforced
     with_contract_copy do |root|
-      SERVICE_MUTATIONS.fetch("checkout in dependency map").call(root)
-      assert_includes ArchitectureValidator.validate(root), "checkout service is forbidden in dependency-map.yaml"
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["business"]["services"].delete("fulfillment")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("architecture must contain exactly 19 services") }
+      assert errors.any? { |error| error.include?("fulfillment service is required in architecture.lock.yaml") }
+    end
+  end
+
+  def test_checkout_and_fulfillment_cannot_be_forbidden
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["business"]["forbidden_services"] = ["checkout"]
+      end
+      mutate_yaml(root, "config/contracts/service-ownership.yaml") do |data|
+        data["forbidden"]["services"] = ["fulfillment"]
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors, "checkout must not be forbidden in architecture.lock.yaml"
+      assert_includes errors, "fulfillment must not be forbidden in service-ownership.yaml"
     end
   end
 

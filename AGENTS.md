@@ -22,6 +22,7 @@ Validated architecture is not to be redesigned during implementation unless an e
 - Every backend service owns its `go.mod`, migrations, tests and container build.
 - REST and gRPC transports call the same application use cases.
 - No service reads another service's database directly.
+- `cart`, `checkout`, `order`, `payment` and `fulfillment` are separate autonomous domains; do not collapse their lifecycle or persistence ownership.
 
 ## Active platform choices
 
@@ -70,7 +71,7 @@ Prefer small reviewable PRs over monolithic changes.
 
 ## Build sequence
 
-Do not implement the 17 services in parallel from empty scaffolding. Follow:
+Do not implement the 19 services in parallel from empty scaffolding. Follow:
 
 `M1 bootstrap -> M2 golden product service -> M3 PREPROD infra -> M4 platform -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
 

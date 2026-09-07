@@ -17,11 +17,11 @@ En cas de contradiction, arrêter la partie concernée et signaler précisément
 
 ## Objectif du bootstrap
 
-Créer une structure minimale, compilable/testable progressivement, qui servira de base aux étapes suivantes. Le bootstrap ne doit pas implémenter les 17 domaines métier en profondeur.
+Créer une structure minimale, compilable/testable progressivement, qui servira de base aux étapes suivantes. Le bootstrap ne doit pas implémenter les 19 domaines métier en profondeur.
 
 ## 1. Services
 
-Créer exactement les 17 répertoires backend :
+Créer exactement les 19 répertoires backend :
 
 ```text
 services/
@@ -29,10 +29,12 @@ services/
   product/
   inventory/
   cart/
+  checkout/
   pricing/
   tax/
   order/
   payment/
+  fulfillment/
   shipping/
   tracking/
   returns/
@@ -44,7 +46,7 @@ services/
   notification/
 ```
 
-Ne pas créer `checkout`. `order` possède l'orchestration du checkout et la Saga de commande.
+Préserver l'autonomie de `cart`, `checkout`, `order`, `payment` et `fulfillment`. Ne pas réabsorber Checkout dans Order ni Fulfillment dans Shipping.
 
 Chaque service garde son autonomie :
 
@@ -66,13 +68,13 @@ services/<service>/
   README.md
 ```
 
-Le bootstrap peut créer des placeholders minimaux et des README, mais ne doit pas copier une fausse logique métier dans les 17 services.
+Le bootstrap peut créer des placeholders minimaux et des README, mais ne doit pas copier une fausse logique métier dans les 19 services.
 
 ## 2. Golden service
 
 Le premier service réellement implémenté après ce bootstrap sera `product`.
 
-Ne pas tenter de générer simultanément une implémentation complète des 17 services. Le golden service doit d'abord valider :
+Ne pas tenter de générer simultanément une implémentation complète des 19 services. Le golden service doit d'abord valider :
 
 - structure Go ;
 - REST + gRPC partageant les mêmes use cases ;
@@ -356,8 +358,8 @@ Ne pas y construire une seconde plateforme CI complète. Les pipelines applicati
 Après modification :
 
 1. afficher/résumer l'arborescence créée ;
-2. vérifier exactement 17 services et 2 frontends ;
-3. vérifier absence de `checkout` ;
+2. vérifier exactement 19 services et 2 frontends ;
+3. vérifier présence de `checkout` et `fulfillment` comme services autonomes ;
 4. vérifier absence de `platform/flux` ;
 5. rechercher les composants supersédés dans les nouveaux fichiers ;
 6. vérifier qu'aucune image utilise `latest` ;
@@ -371,7 +373,7 @@ Après modification :
 Le bootstrap est terminé lorsque :
 
 - la structure cible existe sans duplication ;
-- les 17 services sont représentés sans logique métier inventée ;
+- les 19 services sont représentés sans logique métier inventée ;
 - les deux frontends sont initialisés minimalement ;
 - les contrats et espaces platform/tests/docs existent ;
 - Fleet/Tekton sont les seules cibles actives GitOps/CI plateforme ;

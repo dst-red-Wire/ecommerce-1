@@ -2,7 +2,7 @@
 
 Status: `EXACT`
 
-No service may read another service's database directly. Cross-domain access uses versioned REST/gRPC contracts or durable events. `order` owns checkout orchestration; no `checkout` service exists.
+No service may read another service's database directly. Cross-domain access uses versioned REST/gRPC contracts or durable events. `checkout`, `order`, `payment` and `fulfillment` are autonomous bounded contexts with separate persistence and lifecycle ownership.
 
 | Service | Owns | Authoritative store | Outbound synchronous dependencies | Event/context relationships | Durable events emitted |
 |---|---|---|---|---|---|
@@ -10,11 +10,13 @@ No service may read another service's database directly. Cross-domain access use
 | product | SKU/product attributes, base commercial product data | product-db | none | none | ProductCreated, ProductUpdated, SKUUpdated |
 | inventory | available/reserved stock, reservations | inventory-db | none | consumes order/return events; reservation correlation is received through contracts | StockReserved, StockReleased, StockAdjusted, OutOfStock |
 | cart | active cart state and persisted cart intent | cart-db; Redis may accelerate only | pricing, inventory, product | consumes price-rule changes | CartUpdated, CartExpired |
+| checkout | checkout session, final validation and checkout orchestration state | checkout-db | cart, pricing, tax, inventory, fraud-risk, shipping, order | consumes cart expiry, pricing/tax, reservation and fraud-decision events | none |
 | pricing | computed prices, promotions/rules/version | pricing-db | product | tax context is request input, not an outbound call | PriceRuleChanged, PriceCalculated |
 | tax | tax rules/calculation result/version | tax-db/config | none | calculation context is received from callers | TaxCalculated, TaxRuleChanged |
-| order | checkout orchestration, Saga state, immutable order snapshot, order lifecycle | order-db | pricing, tax, inventory, fraud-risk, payment, shipping | consumes reservation, risk, payment and delivery events | OrderCreated, OrderConfirmed, OrderCancelled, OrderFailed |
+| order | durable order aggregate, immutable commercial snapshot, order lifecycle | order-db | none | consumes payment and fulfillment outcome events | OrderCreated, OrderConfirmed, OrderCancelled, OrderFailed |
 | payment | PSP authorization/capture/refund state | payment-db | stripe | order callback/correlation is inbound; consumes order/return events | PaymentAuthorized, PaymentCaptured, PaymentFailed, RefundCompleted |
-| shipping | shipment creation/options/carrier handoff | shipping-db | order, inventory, carrier-adapters | consumes order/return events | ShipmentCreated, ShipmentDispatched, DeliveryException |
+| fulfillment | fulfillment order, allocation, pick/pack and execution lifecycle | fulfillment-db | inventory, shipping | consumes confirmed/cancelled orders and physical delivery outcomes | FulfillmentStarted, FulfillmentCompleted, FulfillmentFailed |
+| shipping | shipment creation/options/carrier handoff | shipping-db | carrier-adapters | consumes return events and inbound fulfillment requests | ShipmentCreated, ShipmentDispatched, DeliveryException |
 | tracking | shipment tracking timeline/projection | tracking-db + rebuildable projection | shipping | consumes shipment events and inbound carrier updates | TrackingUpdated, Delivered |
 | returns | return request/RMA lifecycle | returns-db | order, shipping | inventory/payment actions are event-driven; consumes delivery/refund events | ReturnRequested, ReturnApproved, ReturnReceived, RefundRequested |
 | billing | invoices, credit notes, e-invoicing adapter state | billing-db + immutable document/object refs | order, payment, qonto-pa | consumes order/payment/refund events | InvoiceIssued, CreditNoteIssued, EInvoiceSubmitted |
@@ -32,11 +34,12 @@ No service may read another service's database directly. Cross-domain access use
 - `catalog` owns navigation/presentation/assortment composition.
 - Search indexes are projections, never product/catalog authority.
 
-### Pricing / Tax / Order
+### Pricing / Tax / Checkout / Order
 
 - Cart prices are indicative.
-- Order requests final calculation from Pricing and Tax.
-- Order persists an immutable snapshot of price, discount, tax, total and version identifiers.
+- Checkout requests the final Pricing and Tax calculation, validates stock, fraud/risk and delivery context, then owns the checkout workflow until order creation.
+- Order accepts validated checkout input and persists an immutable snapshot of price, discount, tax, total, delivery selection and version identifiers.
+- Checkout state never becomes the source of truth for a confirmed order.
 
 ### Payment / Billing
 
@@ -44,8 +47,9 @@ No service may read another service's database directly. Cross-domain access use
 - Billing owns invoices/credit notes/e-invoicing artifacts.
 - Billing never mutates Payment state directly.
 
-### Shipping / Tracking
+### Fulfillment / Shipping / Tracking
 
+- Fulfillment owns allocation, pick/pack and physical execution orchestration after order confirmation.
 - Shipping owns shipment creation and carrier handoff.
 - Tracking owns the tracking timeline/read model.
 

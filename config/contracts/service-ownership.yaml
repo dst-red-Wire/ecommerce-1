@@ -17,6 +17,10 @@ services:
     db: cart-db
     owns: [cart-state, cart-intent]
     sync_dependencies: [pricing, inventory, product]
+  checkout:
+    db: checkout-db
+    owns: [checkout-session, checkout-validation-state, checkout-orchestration]
+    sync_dependencies: [cart, pricing, tax, inventory, fraud-risk, shipping, order]
   pricing:
     db: pricing-db
     owns: [price-rules, promotion-rules, rule-versions]
@@ -27,16 +31,20 @@ services:
     sync_dependencies: []
   order:
     db: order-db
-    owns: [orders, checkout-snapshot, saga-state, order-lifecycle]
-    sync_dependencies: [pricing, tax, inventory, fraud-risk, payment, shipping]
+    owns: [orders, immutable-order-snapshot, order-lifecycle]
+    sync_dependencies: []
   payment:
     db: payment-db
     owns: [psp-authorization, capture-state, refund-state]
     sync_dependencies: [stripe]
+  fulfillment:
+    db: fulfillment-db
+    owns: [fulfillment-orders, allocation-state, pick-pack-state, fulfillment-lifecycle]
+    sync_dependencies: [inventory, shipping]
   shipping:
     db: shipping-db
     owns: [shipment-creation, carrier-handoff]
-    sync_dependencies: [order, inventory, carrier-adapters]
+    sync_dependencies: [carrier-adapters]
   tracking:
     db: tracking-db
     owns: [tracking-timeline]
@@ -71,7 +79,7 @@ services:
     owns: [notification-intent, delivery-attempts, delivery-status]
     sync_dependencies: []
 forbidden:
-  services: [checkout]
+  services: []
   cross_database_reads: true
   cross_service_foreign_keys: true
 rules:
@@ -79,4 +87,6 @@ rules:
   redis_authoritative: false
   rabbitmq_authoritative_business_state: false
   keycloak_owns_authentication_identity: true
-  order_owns_checkout_orchestration: true
+  checkout_owns_checkout_orchestration: true
+  order_owns_durable_order_lifecycle: true
+  fulfillment_owns_fulfillment_orchestration: true
