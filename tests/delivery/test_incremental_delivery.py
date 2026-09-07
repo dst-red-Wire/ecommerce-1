@@ -36,6 +36,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
     def fake_git(self, *args, check=True):
         if args == ("rev-parse", "feature-head"):
             return self.HEAD + "\n"
+        if args == ("rev-parse", "HEAD"):
+            return self.HEAD + "\n"
         if args == ("rev-list", "--parents", "-n", "1", self.HEAD):
             return f"{self.HEAD} {self.PARENT}\n"
         if args == ("rev-parse", "origin/main"):
@@ -101,6 +103,21 @@ class IncrementalDeliveryTests(unittest.TestCase):
             self.assertEqual(self.PARENT, records[gate]["reused_from_sha"])
         self.assertEqual("incremental", captured["verification"]["mode"])
         self.assertEqual(["global"], captured["verification"]["delta_components"])
+
+    def test_exact_verification_refuses_a_different_checked_out_head(self):
+        checked_out = "4" * 40
+
+        def mismatched_git(*args, check=True):
+            if args == ("rev-parse", "feature-head"):
+                return self.HEAD + "\n"
+            if args == ("rev-parse", "HEAD"):
+                return checked_out + "\n"
+            raise AssertionError(f"unexpected git call before fail-closed mismatch: {args}")
+
+        with mock.patch.object(REPOCTL, "git", side_effect=mismatched_git), \
+             mock.patch.object(REPOCTL, "_run_gate") as run_gate:
+            self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
+        run_gate.assert_not_called()
 
     def test_wrong_base_parent_evidence_is_not_reused(self):
         evidence = self.parent_evidence()

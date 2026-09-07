@@ -698,9 +698,11 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
 
 def write_evidence(base: str, head: str, paths: list[str], components: list[str], records: list[dict],
                    verification: dict | None = None) -> Path:
-    base_sha = git("rev-parse", base).strip(); head_sha = git("rev-parse", "HEAD" if head == "WORKTREE" else head).strip()
+    base_sha = git("rev-parse", base).strip()
+    current_head_sha = git("rev-parse", "HEAD").strip()
+    head_sha = current_head_sha if head == "WORKTREE" else git("rev-parse", head).strip()
     clean = not git("status", "--porcelain", "--untracked-files=all").strip()
-    exact = head != "WORKTREE" and clean and head_sha == git("rev-parse", head).strip()
+    exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     payload = {"schema_version": 2, "base_ref": base, "base_sha": base_sha, "head_ref": head, "head_sha": head_sha,
                "exact_commit_evidence": exact, "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
                "changed_paths": paths, "affected_components": components, "gates": records,
@@ -713,6 +715,14 @@ def write_evidence(base: str, head: str, paths: list[str], components: list[str]
 
 
 def verify_change(base: str, head: str) -> int:
+    if head != "WORKTREE":
+        requested_head_sha = git("rev-parse", head).strip()
+        current_head_sha = git("rev-parse", "HEAD").strip()
+        if requested_head_sha != current_head_sha:
+            return fail(
+                f"verify-change head mismatch: requested {requested_head_sha}, checked out {current_head_sha}"
+            )
+
     paths = changed_paths(base, head); components = affected(base, head); records: list[dict] = []
     env = os.environ.copy(); env.update({"BASE": base, "HEAD": head})
 
