@@ -39,7 +39,7 @@ Codex must never infer or redesign architecture when these sources are explicit.
 
 ## Global Codex prompt
 
-You are implementing the E-COMMERCE platform from a locked architecture baseline and exact topology contracts. Work only inside the scope of the assigned milestone/issue. Before changing files, inventory the current repository and reuse existing structure. Do not create duplicate ownership, duplicate helpers, duplicate pipelines or duplicate source-of-truth files. Keep diffs small and reviewable. All reusable shell logic belongs in shared POSIX `sh` helpers under `scripts/`; do not repeat logic across scripts. Do not commit secrets, credentials, generated evidence, state files or runtime artifacts. Never use `latest`. Preserve rollback/rebuild paths. Run the repository's required validation commands and report exact PASS/FAIL/SKIP results. A milestone is not complete because files exist; it is complete only when its acceptance criteria are demonstrated.
+You are implementing the E-COMMERCE platform from a locked architecture baseline and exact topology contracts. Work only inside the scope of the assigned milestone/issue. Before changing files, inventory the current repository and reuse existing structure. Do not create duplicate ownership, duplicate helpers, duplicate pipelines or duplicate source-of-truth files. Keep diffs small and reviewable. Repeatable state changes belong in Ansible; stateless orchestration belongs in `scripts/repoctl.py` or a justified native tool. Do not commit secrets, credentials, generated evidence, state files or runtime artifacts. Never use `latest`. Preserve rollback/rebuild paths. Run the repository's required validation commands and report exact PASS/FAIL/SKIP results. A milestone is not complete because files exist; it is complete only when its acceptance criteria are demonstrated.
 
 When exact config exists, consume it as data rather than rewriting the same constants in Terraform, Ansible, Helm, scripts or documentation. Add automated consistency checks instead of copy/paste.
 
@@ -57,7 +57,7 @@ Required result:
 - Fleet/Tekton paths, never Flux/Flagger;
 - no MinIO CE/Loki/Splunk active defaults;
 - no image using `latest`;
-- shared repository scripts factored, POSIX compatible;
+- no tracked repository Shell automation;
 - preserve `config/infrastructure/*` and `config/contracts/*` as single config sources;
 - `make ci` green.
 

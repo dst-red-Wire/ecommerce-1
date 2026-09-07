@@ -44,9 +44,11 @@ Historical references may remain only when explicitly labelled superseded.
 
 ## Development
 
-- Keep CI entry points in `scripts/` runnable both locally and in containers.
-- Write portable POSIX `sh` for repository shell helpers unless a task explicitly requires another runtime.
-- Factor common shell behavior into reusable functions; do not copy helpers between scripts.
+- Repeatable or stateful workstation and host changes belong to Ansible.
+- Stateless repository orchestration belongs to `scripts/repoctl.py`.
+- Specialized deterministic validation belongs to Python, Ruby, Go, or a native CLI.
+- CI belongs to Tekton; GitHub/Gitea are forge and review transports, not CI authorities.
+- Do not add repository Shell automation: no tracked `*.sh` files are permitted.
 - A missing optional project area must be reported as `SKIP`, not treated as a failure.
 - Never print secrets, credentials, kubeconfigs, Terraform state, private keys or local environment files.
 - Never commit generated reports, caches, binaries, archives or scanner output unless the repository explicitly defines them as source artifacts.

@@ -1,4 +1,8 @@
 PYTHON := python3
+ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
+ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
+export ANSIBLE_CONFIG
+export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
 .PHONY: help ci ci-global governance contracts automation lint test security terraform ansible system
@@ -62,8 +66,8 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
-workstation-bootstrap: ## Reconcile WSL workstation and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,toolchain,node,agent_tools,context_tools
+workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
+	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
 	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools

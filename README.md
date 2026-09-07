@@ -133,7 +133,7 @@ cdn -> ATS -> S3/assets
 - Images : digests immuables, jamais `latest`, avec SBOM/provenance/signature.
 - Supply chain : Trivy, Syft SBOM, Cosign, admission policy.
 
-Les scripts `scripts/ci-*.sh` et les cibles Make sont des primitives déterministes appelées par Tekton, pas une seconde autorité CI. Les configurations de CI transitoires ou parallèles sont interdites par le contrat `config/contracts/ci-topology.yaml` et les tests de gouvernance. Gitea Actions n'est pas interdit comme fonctionnalité de forge, mais ne peut être une autorité CI/CD ni servir d'intermédiaire pour lancer Tekton.
+Les cibles Make restent des façades courtes : elles appellent `scripts/repoctl.py`, les outils natifs ou Ansible selon la responsabilité. Tekton est l’unique autorité CI ; les contrats canoniques sont [`config/contracts/ci-topology.yaml`](config/contracts/ci-topology.yaml) et [`config/contracts/review-policy.yaml`](config/contracts/review-policy.yaml). Gitea Actions n'est pas interdit comme fonctionnalité de forge, mais ne peut être une autorité CI/CD ni servir d'intermédiaire pour lancer Tekton.
 
 ## Observabilité
 
@@ -187,29 +187,22 @@ isoler -> acquérir les preuves -> détruire -> reconstruire via GitOps/IaC
 - DFIR = comprendre et préserver.
 - PRI = reconstruire et restaurer.
 
-## Structure cible du monorepo
+## Structure du monorepo
 
 ```text
 services/
 frontend/
 contracts/
 platform/
-  kubernetes/
-  helm/
-  fleet/
   tekton/
   terraform/
   ansible/
-  rancher/
-  policies/
-observability/
 tests/
 docs/
 scripts/
-tools/
 ```
 
-Aucun ancien chemin `platform/flux/` ne doit être créé. Aucun nouveau code ne doit dépendre de MinIO CE, Flagger, Loki ou Splunk comme composants actifs de l'architecture cible.
+Les répertoires de plateforme supplémentaires apparaissent uniquement lorsqu’ils portent un contenu de jalon réel. Aucun ancien chemin `platform/flux/` ne doit être créé. Aucun nouveau code ne doit dépendre de MinIO CE, Flagger, Loki ou Splunk comme composants actifs de l'architecture cible.
 
 ## Autorités documentaires
 

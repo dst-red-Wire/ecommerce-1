@@ -1,0 +1,25 @@
+---
+collections:
+  - name: ansible.posix
+    version: 1.5.4
+
+  - name: community.general
+    version: 8.3.0
+
+  - name: community.docker
+    version: 3.7.0
+
+  - name: community.crypto
+    version: 2.17.1
+
+  - name: community.sops
+    version: 1.6.7
+
+  - name: containers.podman
+    version: 1.11.0
+
+  - name: hetzner.hcloud
+    version: 2.4.1
+
+  - name: kubernetes.core
+    version: 2.4.0
