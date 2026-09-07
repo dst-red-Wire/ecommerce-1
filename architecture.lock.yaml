@@ -41,6 +41,11 @@ platform:
   workload_identity: spire
   iam: keycloak
   runtime_security: tetragon
+  autoscaling:
+    synchronous_pods: kubernetes-hpa
+    event_driven_pods: keda
+    certified_nodes: fixed
+    preprod_perf_burst: gate-only
 
 management_plane:
   provider: hetzner-cloud
@@ -108,6 +113,7 @@ machine_contracts:
   dependency_map: config/contracts/dependency-map.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
   ci_topology: config/contracts/ci-topology.yaml
+  runtime_efficiency: config/contracts/runtime-efficiency.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6

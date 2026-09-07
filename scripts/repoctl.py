@@ -167,6 +167,14 @@ def run_ruby_tests(paths: list[str]) -> None:
         run(["ruby", "-Itest", path])
 
 
+def runtime_efficiency_check() -> int:
+    require("ruby")
+    run(["ruby", "scripts/validate-runtime-efficiency.rb"])
+    run_ruby_tests(["tests/runtime_efficiency_test.rb", "tests/resource_sizing_test.rb"])
+    print("PASS runtime efficiency checks completed")
+    return 0
+
+
 def governance() -> int:
     require("ruby")
     run(["ruby", "scripts/validate-architecture.rb"])
@@ -622,8 +630,11 @@ def changed_paths(base: str, head: str) -> list[str]:
     return sorted(set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines())))
 
 
-def affected(base: str, head: str) -> list[str]:
-    p = run(["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"], capture=True)
+def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
+    command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
+    if strict_unknown:
+        command.append("--strict-unknown")
+    p = run(command, capture=True)
     return json.loads(p.stdout)
 
 
@@ -642,13 +653,60 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     return p.returncode == 0
 
 
-def write_evidence(base: str, head: str, paths: list[str], components: list[str], records: list[dict]) -> Path:
-    base_sha = git("rev-parse", base).strip(); head_sha = git("rev-parse", "HEAD" if head == "WORKTREE" else head).strip()
+def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
+    """Return direct-parent evidence only when every exactness invariant holds."""
+    if head == "WORKTREE":
+        return None, None
+    head_sha = git("rev-parse", head).strip()
+    parents = git("rev-list", "--parents", "-n", "1", head_sha).split()
+    if len(parents) != 2:
+        return None, None
+    parent_sha = parents[1]
+    evidence_path = CONTEXT / "evidence" / f"{parent_sha}.json"
+    if not evidence_path.is_file():
+        return None, None
+    try:
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    base_sha = git("rev-parse", base).strip()
+    if (evidence.get("schema_version", 0) < 2
+            or evidence.get("status") != "PASS"
+            or evidence.get("exact_commit_evidence") is not True
+            or evidence.get("head_sha") != parent_sha
+            or evidence.get("base_sha") != base_sha
+            or not isinstance(evidence.get("gates"), list)):
+        return None, None
+    return parent_sha, evidence
+
+
+def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list[dict]) -> bool:
+    source = next((gate for gate in parent_evidence.get("gates", []) if gate.get("gate") == name), None)
+    if not source or source.get("status") != "PASS":
+        return False
+    records.append({
+        "gate": name,
+        "status": "PASS",
+        "exit_code": 0,
+        "duration_seconds": 0.0,
+        "reused_from_sha": parent_sha,
+        "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
+    })
+    print(f"PASS {name} (reused exact evidence from {parent_sha[:12]})")
+    return True
+
+
+def write_evidence(base: str, head: str, paths: list[str], components: list[str], records: list[dict],
+                   verification: dict | None = None) -> Path:
+    base_sha = git("rev-parse", base).strip()
+    current_head_sha = git("rev-parse", "HEAD").strip()
+    head_sha = current_head_sha if head == "WORKTREE" else git("rev-parse", head).strip()
     clean = not git("status", "--porcelain", "--untracked-files=all").strip()
-    exact = head != "WORKTREE" and clean and head_sha == git("rev-parse", head).strip()
+    exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     payload = {"schema_version": 2, "base_ref": base, "base_sha": base_sha, "head_ref": head, "head_sha": head_sha,
                "exact_commit_evidence": exact, "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
-               "changed_paths": paths, "affected_components": components, "gates": records}
+               "changed_paths": paths, "affected_components": components, "gates": records,
+               "verification": verification or {"mode": "full"}}
     identity = head_sha if head != "WORKTREE" else "worktree"
     destination = CONTEXT / "evidence" / f"{identity}.json"; destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -657,33 +715,80 @@ def write_evidence(base: str, head: str, paths: list[str], components: list[str]
 
 
 def verify_change(base: str, head: str) -> int:
+    if head != "WORKTREE":
+        requested_head_sha = git("rev-parse", head).strip()
+        current_head_sha = git("rev-parse", "HEAD").strip()
+        if requested_head_sha != current_head_sha:
+            return fail(
+                f"verify-change head mismatch: requested {requested_head_sha}, checked out {current_head_sha}"
+            )
+
     paths = changed_paths(base, head); components = affected(base, head); records: list[dict] = []
     env = os.environ.copy(); env.update({"BASE": base, "HEAD": head})
+
+    parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
+    delta_components: set[str] = set()
+    verification: dict = {"mode": "full"}
+    if parent_sha and parent_evidence:
+        delta_paths = changed_paths(parent_sha, head)
+        # Strict mode fails closed: an unknown path expands to every component, so
+        # stale PASS evidence can never cross an unclassified delta.
+        delta_components = set(affected(parent_sha, head, strict_unknown=True))
+        verification = {
+            "mode": "incremental",
+            "parent_sha": parent_sha,
+            "delta_paths": delta_paths,
+            "delta_components": sorted(delta_components),
+        }
+        print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
+
+    # Cheap/global guards always execute on the new exact SHA. Only expensive
+    # component gates are eligible for direct-parent evidence reuse.
     global_commands = [
         ("governance", [sys.executable, "scripts/repoctl.py", "governance"]),
+        ("runtime-efficiency", [sys.executable, "scripts/repoctl.py", "runtime-efficiency"]),
         ("contracts", [sys.executable, "scripts/repoctl.py", "contracts", "--base", base, "--head", head]),
         ("automation", [sys.executable, "scripts/repoctl.py", "automation-policy"]),
         ("security", [sys.executable, "scripts/repoctl.py", "security"]),
     ]
     for name, command in global_commands:
-        if not _run_gate(name, command, records, env): write_evidence(base, head, paths, components, records); return 1
+        if not _run_gate(name, command, records, env):
+            write_evidence(base, head, paths, components, records, verification); return 1
+
     combined = "frontend:storefront" in components and "frontend:admin" in components
-    if combined and not _run_gate("frontend:all", [sys.executable, "scripts/repoctl.py", "frontend", "check", "all"], records, env):
-        write_evidence(base, head, paths, components, records); return 1
+    if combined:
+        frontend_delta = bool({"frontend:storefront", "frontend:admin"} & delta_components)
+        reused = bool(parent_evidence and parent_sha and not frontend_delta
+                      and _reuse_gate("frontend:all", parent_sha, parent_evidence, records))
+        if not reused and not _run_gate("frontend:all", [sys.executable, "scripts/repoctl.py", "frontend", "check", "all"], records, env):
+            write_evidence(base, head, paths, components, records, verification); return 1
+
     for component in components:
-        if component == "global" or (combined and component.startswith("frontend:")): continue
+        if component == "global" or (combined and component.startswith("frontend:")):
+            continue
         if component.startswith("service:"):
             service = component.split(":", 1)[1]
             if not (ROOT / "services" / service / "go.mod").is_file():
                 records.append({"gate": component, "status": "SKIP", "reason": "canonical service not implemented", "duration_seconds": 0.0}); continue
             command = [sys.executable, "scripts/repoctl.py", "service", service]
-        elif component.startswith("frontend:"): command = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":",1)[1]]
-        elif component == "platform:terraform": command = [sys.executable, "scripts/repoctl.py", "terraform"]
-        elif component == "platform:ansible": command = [sys.executable, "scripts/repoctl.py", "ansible"]
-        elif component == "system": command = [sys.executable, "scripts/repoctl.py", "system"]
-        else: raise RuntimeError(f"unsupported affected component: {component}")
-        if not _run_gate(component, command, records, env): write_evidence(base, head, paths, components, records); return 1
-    ev = write_evidence(base, head, paths, components, records)
+        elif component.startswith("frontend:"):
+            command = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":",1)[1]]
+        elif component == "platform:terraform":
+            command = [sys.executable, "scripts/repoctl.py", "terraform"]
+        elif component == "platform:ansible":
+            command = [sys.executable, "scripts/repoctl.py", "ansible"]
+        elif component == "system":
+            command = [sys.executable, "scripts/repoctl.py", "system"]
+        else:
+            raise RuntimeError(f"unsupported affected component: {component}")
+
+        if parent_evidence and parent_sha and component not in delta_components:
+            if _reuse_gate(component, parent_sha, parent_evidence, records):
+                continue
+        if not _run_gate(component, command, records, env):
+            write_evidence(base, head, paths, components, records, verification); return 1
+
+    ev = write_evidence(base, head, paths, components, records, verification)
     if head != "WORKTREE" and git("status", "--porcelain", "--untracked-files=all").strip():
         return fail(f"exact evidence requires a clean tree: {ev.relative_to(ROOT)}", 2)
     return 0
@@ -708,7 +813,7 @@ def failure_context(gate: str, component: str) -> int:
         else: return fail(f"unsupported COMPONENT: {component}")
         name = component.replace(":", "-")
     else:
-        allowed = {"governance", "contracts", "lint", "test", "security", "terraform", "ansible", "system", "automation-policy"}
+        allowed = {"governance", "runtime-efficiency", "contracts", "lint", "test", "security", "terraform", "ansible", "system", "automation-policy"}
         if gate not in allowed: return fail(f"unsupported GATE: {gate}")
         cmd = [sys.executable, "scripts/repoctl.py", gate]; name = gate
     p = run(cmd, check=False, capture=True)
@@ -778,8 +883,17 @@ def deliver(base: str, title: str, message: str) -> int:
     stat = git("diff","--stat",f"origin/{base}...HEAD") if not base.startswith("origin/") else git("diff","--stat",f"{base}...HEAD")
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     body = CONTEXT / "pr-body.md"; body.parent.mkdir(exist_ok=True)
-    rows = "\n".join(f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds',0)} |" for g in ev["gates"])
-    body.write_text(f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) |\n| --- | --- | ---: |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Exact commit evidence: `.context/evidence/{head}.json` (local generated artifact, not committed)\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n", encoding="utf-8")
+    def gate_source(gate: dict) -> str:
+        if gate.get("reused_from_sha"):
+            return f"reused `{gate['reused_from_sha'][:12]}`"
+        if gate.get("status") == "SKIP":
+            return gate.get("reason", "not applicable")
+        return "executed"
+    rows = "\n".join(
+        f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds',0)} | {gate_source(g)} |"
+        for g in ev["gates"]
+    )
+    body.write_text(f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence: `.context/evidence/{head}.json` (local generated artifact, not committed)\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n", encoding="utf-8")
     existing = output([gh,"pr","list","--head",branch,"--base",base.replace("origin/",""),"--state","open","--json","number,url","--jq",'.[0] | select(.) | "\\(.number) \\(.url)"']).strip()
     if existing:
         num, url = existing.split(" ",1)
@@ -809,7 +923,7 @@ def prepush() -> int:
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ["governance","automation-policy","lint","test","security","terraform","ansible","system","doctor","git-sync","precommit","prepush"]: sub.add_parser(name)
+    for name in ["governance","runtime-efficiency","automation-policy","lint","test","security","terraform","ansible","system","doctor","git-sync","precommit","prepush"]: sub.add_parser(name)
     c = sub.add_parser("contracts"); c.add_argument("--base",default=os.environ.get("BASE","")); c.add_argument("--head",default=os.environ.get("HEAD","WORKTREE")); c.add_argument("--generate",action="store_true")
     f = sub.add_parser("frontend"); f.add_argument("action"); f.add_argument("scope")
     s = sub.add_parser("service"); s.add_argument("service")
@@ -827,6 +941,7 @@ def main() -> int:
     args = p.parse_args()
     try:
         if args.cmd == "governance": return governance()
+        if args.cmd == "runtime-efficiency": return runtime_efficiency_check()
         if args.cmd == "contracts": return contracts(args.base,args.head,args.generate)
         if args.cmd == "automation-policy": return automation_policy()
         if args.cmd == "lint": return lint_all()

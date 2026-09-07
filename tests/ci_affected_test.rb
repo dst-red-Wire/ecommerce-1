@@ -16,27 +16,35 @@ class CIAffectedTest < Minitest::Test
     "GIT_CONFIG_GLOBAL" => File::NULL
   }.freeze
 
-  # Temporary repositories must not inherit workstation hooks, templates or identity.
+  # Temporary repositories must not inherit any repository context from a
+  # pre-commit/pre-push hook. Clearing every inherited GIT_* variable is more
+  # robust than maintaining a version-specific list of Git local env names.
+  def temporary_git_env
+    ENV.keys.grep(/\AGIT_/).to_h { |key| [key, nil] }.merge(TEMPORARY_GIT_ENV)
+  end
+
   def isolated_git(*args, chdir: nil)
     command = ["git", "-c", "core.hooksPath=#{File::NULL}"]
     command += ["-C", chdir] if chdir
-    system(TEMPORARY_GIT_ENV, *command, *args, exception: true)
+    system(temporary_git_env, *command, *args, exception: true)
   end
 
   def isolated_git_output(*args, chdir:)
     command = ["git", "-c", "core.hooksPath=#{File::NULL}", "-C", chdir, *args]
-    stdout, stderr, status = Open3.capture3(TEMPORARY_GIT_ENV, *command)
+    stdout, stderr, status = Open3.capture3(temporary_git_env, *command)
     raise "Command failed with exit #{status.exitstatus}: git #{args.join(' ')}: #{stderr.strip}" unless status.success?
 
     stdout.strip
   end
 
   def with_isolated_git_environment
-    previous = TEMPORARY_GIT_ENV.to_h { |key, _value| [key, ENV[key]] }
+    previous = ENV.to_h.select { |key, _value| key.start_with?("GIT_") }
+    ENV.keys.grep(/\AGIT_/).each { |key| ENV.delete(key) }
     ENV.update(TEMPORARY_GIT_ENV)
     yield
   ensure
-    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    ENV.keys.grep(/\AGIT_/).each { |key| ENV.delete(key) }
+    ENV.update(previous)
   end
 
   def initialize_temporary_git_repository(dir)
@@ -45,10 +53,29 @@ class CIAffectedTest < Minitest::Test
     isolated_git("config", "user.name", "Test User", chdir: dir)
   end
 
-  def classify(*paths, contract_impact: {})
+  def test_isolated_git_environment_clears_inherited_repository_context
+    inherited = {
+      "GIT_DIR" => "/tmp/outer-repository/.git",
+      "GIT_WORK_TREE" => "/tmp/outer-repository",
+      "GIT_INDEX_FILE" => "/tmp/outer-repository/.git/index"
+    }
+    previous = inherited.keys.to_h { |key| [key, ENV[key]] }
+    ENV.update(inherited)
+
+    with_isolated_git_environment do
+      inherited.each_key { |key| refute ENV.key?(key), "#{key} leaked into isolated Git context" }
+      assert_equal "1", ENV["GIT_CONFIG_NOSYSTEM"]
+      assert_equal File::NULL, ENV["GIT_CONFIG_GLOBAL"]
+    end
+  ensure
+    inherited.each_key { |key| ENV.delete(key) }
+    previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def classify(*paths, contract_impact: {}, strict_unknown: false)
     AffectedComponents.classify(paths, services: SERVICES, public_contracts: PUBLIC,
                                  common_openapi: "contracts/openapi/common.v1.yaml",
-                                 contract_impact: contract_impact)
+                                 contract_impact: contract_impact, strict_unknown: strict_unknown)
   end
 
   def test_storefront_change_is_component_scoped
@@ -115,6 +142,36 @@ class CIAffectedTest < Minitest::Test
 
   def test_ci_control_change_fails_closed_to_all_component_classes
     affected = classify("scripts/repoctl.py")
+    assert_includes affected, "frontend:storefront"
+    assert_includes affected, "frontend:admin"
+    SERVICES.each { |service| assert_includes affected, "service:#{service}" }
+    assert_includes affected, "platform:terraform"
+    assert_includes affected, "platform:ansible"
+    assert_includes affected, "system"
+  end
+
+  def test_runtime_efficiency_inputs_are_owned_by_global_runtime_gate
+    %w[
+      config/contracts/runtime-efficiency.yaml
+      scripts/resource-sizing.rb
+      scripts/validate-runtime-efficiency.rb
+      tests/resource_sizing_test.rb
+      tests/runtime_efficiency_test.rb
+    ].each do |path|
+      assert_equal %w[global], classify(path), path
+    end
+  end
+
+  def test_other_repository_native_helper_change_routes_to_system
+    assert_equal %w[global system], classify("scripts/context-pack.py")
+  end
+
+  def test_other_repository_level_test_change_routes_to_system
+    assert_equal %w[global system], classify("tests/test_agent_efficiency.py")
+  end
+
+  def test_strict_unknown_delta_fails_closed_to_all_component_classes
+    affected = classify("docs/unclassified-note.md", strict_unknown: true)
     assert_includes affected, "frontend:storefront"
     assert_includes affected, "frontend:admin"
     SERVICES.each { |service| assert_includes affected, "service:#{service}" }
