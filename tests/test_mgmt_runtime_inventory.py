@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,12 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
             "index": name,
             "values": {
                 "id": f"id-{name}",
+                "name": name,
+                "labels": {
+                    "project": "ecommerce-1",
+                    "site": "mgmt",
+                    "role": "server",
+                },
                 "ipv4_address": ipv4,
                 "ipv6_address": "2001:db8::1",
             },
@@ -70,6 +78,32 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
                 ["mgmt-cp-1", "mgmt-worker-1"],
                 {"mgmt-cp-1": {"ipv4": "198.51.100.11"}},
             )
+
+    def test_recovered_server_requires_exact_resource_name(self):
+        resource = self.server("mgmt-cp-1")
+        resource["values"]["name"] = "other-node"
+        with self.assertRaisesRegex(ValueError, "resource name mismatch"):
+            module.extract_servers_from_show(self.show_doc([resource]))
+
+    def test_recovered_server_requires_ecommerce_mgmt_ownership_labels(self):
+        resource = self.server("mgmt-cp-1")
+        resource["values"]["labels"]["site"] = "other"
+        with self.assertRaisesRegex(ValueError, "ownership labels"):
+            module.extract_servers_from_show(self.show_doc([resource]))
+
+    def test_overlay_records_exact_recovery_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "transport.json"
+            module.write_overlay(output, {"cp-01": "198.51.100.11"}, "terraform-state:show")
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual("terraform-state:show", payload["source"])
+        self.assertFalse(payload["contains_secrets"])
+
+    def test_overlay_rejects_unknown_provenance(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "transport.json"
+            with self.assertRaisesRegex(ValueError, "unsupported MGMT transport provenance"):
+                module.write_overlay(output, {"cp-01": "198.51.100.11"}, "unknown")
 
 
 if __name__ == "__main__":

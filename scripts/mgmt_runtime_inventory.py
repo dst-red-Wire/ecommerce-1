@@ -23,6 +23,8 @@ import yaml
 MGMT_MODULE_ADDRESS = "module.hcloud_mgmt"
 MGMT_SERVER_TYPE = "hcloud_server"
 MGMT_SERVER_NAME = "node"
+MGMT_PROJECT_LABEL = "ecommerce-1"
+MGMT_SITE_LABEL = "mgmt"
 
 
 def load_canonical_nodes(root: Path) -> list[str]:
@@ -115,6 +117,18 @@ def extract_servers_from_show(show_doc: Any) -> dict[str, Any]:
             raise ValueError(f"MGMT hcloud_server {index} requires values mapping")
         if index in servers:
             raise ValueError(f"duplicate MGMT hcloud_server index {index}")
+        resource_name = resource_values.get("name")
+        if resource_name != index:
+            raise ValueError(
+                f"MGMT hcloud_server {index} resource name mismatch: expected {index!r}, got {resource_name!r}"
+            )
+        labels = resource_values.get("labels")
+        if not isinstance(labels, dict):
+            raise ValueError(f"MGMT hcloud_server {index} requires labels mapping")
+        if labels.get("project") != MGMT_PROJECT_LABEL or labels.get("site") != MGMT_SITE_LABEL:
+            raise ValueError(
+                f"MGMT hcloud_server {index} ownership labels do not match ecommerce-1/mgmt"
+            )
         ipv4 = resource_values.get("ipv4_address")
         ipv6 = resource_values.get("ipv6_address")
         resource_id = resource_values.get("id")
@@ -152,11 +166,13 @@ def terraform_servers_from_state(terraform_dir: Path, state_path: Path) -> dict[
     return extract_servers_from_show(show_doc)
 
 
-def write_overlay(output: Path, hosts: dict[str, str]) -> None:
+def write_overlay(output: Path, hosts: dict[str, str], source: str) -> None:
+    if source not in {"terraform-output:servers", "terraform-state:show", "servers-json"}:
+        raise ValueError(f"unsupported MGMT transport provenance source: {source}")
     output.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
-        "source": "terraform-output:servers",
+        "source": source,
         "contains_secrets": False,
         "hosts": hosts,
     }
@@ -191,18 +207,21 @@ def main() -> int:
         terraform_dir = root / args.terraform_dir
         if args.servers_json:
             servers = json.loads(Path(args.servers_json).read_text(encoding="utf-8"))
+            provenance = "servers-json"
         elif args.terraform_state:
             state_path = Path(args.terraform_state).expanduser()
             if not state_path.is_absolute():
                 raise ValueError("--terraform-state must be an absolute path")
             servers = terraform_servers_from_state(terraform_dir, state_path.resolve())
+            provenance = "terraform-state:show"
         else:
             servers = terraform_servers(terraform_dir)
+            provenance = "terraform-output:servers"
         hosts = validate_servers(canonical_nodes, servers)
         output = Path(args.output)
         if not output.is_absolute():
             output = root / output
-        write_overlay(output, hosts)
+        write_overlay(output, hosts, provenance)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
         print(f"FAIL mgmt-runtime-inventory: {exc}", file=sys.stderr)
         return 2
