@@ -8,12 +8,15 @@ gateway:
   lifecycle: persistent
   provider: hetzner-cloud
   kubernetes_member: false
+  inventory_source: config/infrastructure/mgmt-access-gateways.yaml#access_gateways.wg-01
+  profile_source: config/infrastructure/mgmt-access-gateways.yaml#vm_profiles.wireguard-gateway
 
 network:
   source: config/infrastructure/network-plan.yaml#wireguard.mgmt
   public_endpoint_address: provider-runtime-output
   protocol: udp
   listen_port_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.endpoint.listen_port
+  return_path_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.return_path
 
 access:
   identity_realm: workforce
@@ -25,13 +28,38 @@ access:
 
 secrets:
   git: forbidden
-  gateway_private_key: runtime-only
-  peer_key_material: runtime-only
-  injection: approved-secret-channel
+  authority: openbao
+  delivery:
+    owner: ansible
+    mode: runtime-openbao-read
+    kubernetes_eso: forbidden
+    gateway_target_permissions: root-0600
+    openbao_auth: runtime-injected-nonpersisted
+  gateway_private_key:
+    material: runtime-only
+    mount: kv
+    path: mgmt/wireguard/wg-01
+    field: private_key
+  peer_public_keys:
+    material: runtime-only
+    mount: kv
+    path_prefix: mgmt/wireguard/peers/
+    field: public_key
+  operator_peer_private_keys:
+    authority: operator-device
+    central_storage: forbidden
+    git: forbidden
+  break_glass_private_keys:
+    authority: openbao
+    mount: kv
+    path_prefix: mgmt/wireguard/break-glass/
+    access: separately-controlled
 
 ownership:
   provider_vm_network_firewall: terraform
   rocky_wireguard_routing_firewall: ansible
+  secret_retrieval_and_host_render: ansible
+  secret_authority: openbao
   kubernetes: none
 
 human_gates:

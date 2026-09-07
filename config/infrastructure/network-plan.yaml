@@ -60,6 +60,14 @@ wireguard:
       listen_port: 51820
     allowed_routes:
       - 10.243.0.0/16
+    return_path:
+      mode: snat-on-wg01
+      source_cidr: 10.246.0.0/24
+      destination_cidr: 10.243.0.0/16
+      translated_source_ip: 10.243.1.41
+      downstream_source_identity: wg-01
+      operator_attribution: wireguard-peer-audit-on-wg01
+      stateful_return: required
 static_allocations:
   mgmt:
     401:

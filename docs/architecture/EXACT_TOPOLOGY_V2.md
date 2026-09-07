@@ -63,7 +63,7 @@ Private blocks:
 
 VLAN functions 401-406 and exact allocations are in `NETWORK_IPAM_CONTRACT.md` and `config/infrastructure/network-plan.yaml`.
 
-Permanent operator access to Z5 is defined by `MGMT_WIREGUARD_ACCESS.md`. WireGuard CIDRs, reservations and routes remain machine-canonical only in `config/infrastructure/network-plan.yaml`; access policy and threat controls are machine-canonical in `config/contracts/mgmt-wireguard-access.yaml`.
+Permanent operator access to Z5 is defined by `MGMT_WIREGUARD_ACCESS.md`. WireGuard CIDRs, reservations and routes remain machine-canonical only in `config/infrastructure/network-plan.yaml`; access policy and threat controls are machine-canonical in `config/contracts/mgmt-wireguard-access.yaml`. Dedicated gateway identity/sizing is machine-canonical in `config/infrastructure/mgmt-access-gateways.yaml`.
 
 ## Storage
 

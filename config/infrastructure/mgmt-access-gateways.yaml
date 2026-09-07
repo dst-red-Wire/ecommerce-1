@@ -1,0 +1,24 @@
+version: 1
+status: exact
+site: mgmt
+provider: hetzner-cloud
+lifecycle:
+  mode: persistent
+vm_profiles:
+  wireguard-gateway:
+    vcpu: 2
+    ram_gib: 2
+    os_disk_gib: 40
+access_gateways:
+  wg-01:
+    profile: wireguard-gateway
+    role: wireguard-operator-access
+    trust_zone: Z5
+    mgmt_vlan: 401
+    mgmt_ip: 10.243.1.41
+    kubernetes_member: false
+    public_endpoint: provider-runtime-output
+implementation:
+  terraform_wiring: future-pr-after-contract-merge
+  ansible_wiring: future-pr-after-contract-merge
+  human_apply_gate: true

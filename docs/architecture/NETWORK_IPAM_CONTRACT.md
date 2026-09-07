@@ -83,10 +83,13 @@ Permanent operator access to Z5 uses the exact `wireguard.mgmt` block in `config
 - provider-assigned public endpoint injected at runtime only;
 - UDP port `51820`;
 - allowed route `10.243.0.0/16` only.
+- return path: stateful SNAT on `wg-01`, translating `10.246.0.0/24 -> 10.243.0.0/16` to source `10.243.1.41`; no MGMT static route to the tunnel.
 
 The WireGuard tunnel is a separate address domain for operator transport. It must not overlap PREPROD, PROD-A, PROD-B, permanent MGMT underlay, or any Kubernetes Pod/Service CIDR. The operator and break-glass sub-pools must be contained by the tunnel CIDR and must not overlap each other. The gateway tunnel address must not belong to either peer pool.
 
 No Kubernetes Pod/Service route is exposed to operator peers. Kubernetes API access is reached through an approved MGMT underlay address in `10.243.0.0/16`.
+
+The return path is machine-canonical under `wireguard.mgmt.return_path`. Only tunnel-source traffic destined to permanent MGMT is SNATed, and the translated source is exactly the gateway MGMT address. Downstream services therefore identify the network source as `wg-01`; per-peer attribution is retained in gateway audit records.
 
 `wg-01` is an access gateway rather than the default L3 gateway for segment 401, so its private address is reserved in the infrastructure-VM allocation range. The complete security/ownership/threat-model contract is `MGMT_WIREGUARD_ACCESS.md` plus `config/contracts/mgmt-wireguard-access.yaml`.
 
@@ -102,4 +105,6 @@ Codex must provide automated checks for:
 - same node assigned conflicting identities;
 - PROD A/B overlap;
 - Pod/Service overlap with underlay or operator routes;
+- return-path source/destination/translated-address drift or NAT outside the exact MGMT scope;
+- dedicated `wg-01` inventory/profile drift from its network reservation;
 - public IP slots present only when provider values are injected.

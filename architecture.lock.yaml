@@ -109,6 +109,7 @@ machine_contracts:
   prod_inventory: config/infrastructure/prod-inventory.yaml
   network_plan: config/infrastructure/network-plan.yaml
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
+  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   storage_plan: config/infrastructure/storage-plan.yaml
   deployment_waves: config/infrastructure/deployment-waves.yaml
   service_ownership: config/contracts/service-ownership.yaml

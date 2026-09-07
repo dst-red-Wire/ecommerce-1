@@ -9,6 +9,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
 POLICY = ROOT / "config/contracts/mgmt-wireguard-access.yaml"
+ACCESS_GATEWAYS = ROOT / "config/infrastructure/mgmt-access-gateways.yaml"
 DOC = ROOT / "docs/architecture/MGMT_WIREGUARD_ACCESS.md"
 LOCK = ROOT / "architecture.lock.yaml"
 EXACT_INDEX = ROOT / "docs/architecture/EXACT_TOPOLOGY_V2.md"
@@ -19,6 +20,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.network = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))
         cls.policy = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
+        cls.gateway_inventory = yaml.safe_load(ACCESS_GATEWAYS.read_text(encoding="utf-8"))
         cls.wg = cls.network["wireguard"]["mgmt"]
 
     def test_tunnel_is_disjoint_from_every_versioned_network(self):
@@ -65,6 +67,30 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertGreaterEqual(host_offset, 40)
         self.assertLessEqual(host_offset, 99)
 
+    def test_dedicated_gateway_inventory_and_profile_are_exact(self):
+        self.assertEqual("exact", self.gateway_inventory["status"])
+        self.assertEqual("mgmt", self.gateway_inventory["site"])
+        self.assertEqual("hetzner-cloud", self.gateway_inventory["provider"])
+        self.assertEqual({"wireguard-gateway"}, set(self.gateway_inventory["vm_profiles"]))
+        self.assertEqual(
+            {"vcpu": 2, "ram_gib": 2, "os_disk_gib": 40},
+            self.gateway_inventory["vm_profiles"]["wireguard-gateway"],
+        )
+        self.assertEqual({"wg-01"}, set(self.gateway_inventory["access_gateways"]))
+        gateway = self.gateway_inventory["access_gateways"]["wg-01"]
+        self.assertEqual("wireguard-gateway", gateway["profile"])
+        self.assertEqual("wireguard-operator-access", gateway["role"])
+        self.assertEqual("Z5", gateway["trust_zone"])
+        self.assertEqual(401, gateway["mgmt_vlan"])
+        self.assertEqual(self.wg["gateway_mgmt_ip"], gateway["mgmt_ip"])
+        self.assertFalse(gateway["kubernetes_member"])
+        self.assertEqual("provider-runtime-output", gateway["public_endpoint"])
+        self.assertTrue(self.gateway_inventory["implementation"]["human_apply_gate"])
+        self.assertEqual(
+            "future-pr-after-contract-merge",
+            self.gateway_inventory["implementation"]["terraform_wiring"],
+        )
+
     def test_operator_routes_are_mgmt_only(self):
         self.assertEqual([self.network["address_domains"]["mgmt"]], self.wg["allowed_routes"])
         allowed = [ipaddress.ip_network(cidr) for cidr in self.wg["allowed_routes"]]
@@ -72,6 +98,18 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
             for cidr in cidrs.values():
                 k8s = ipaddress.ip_network(cidr)
                 self.assertTrue(all(not route.overlaps(k8s) for route in allowed))
+
+    def test_return_path_is_exact_stateful_snat_on_wg01(self):
+        policy = self.wg["return_path"]
+        self.assertEqual("snat-on-wg01", policy["mode"])
+        self.assertEqual(self.wg["tunnel_cidr"], policy["source_cidr"])
+        self.assertEqual(self.network["address_domains"]["mgmt"], policy["destination_cidr"])
+        self.assertEqual(self.wg["gateway_mgmt_ip"], policy["translated_source_ip"])
+        self.assertEqual("wg-01", policy["downstream_source_identity"])
+        self.assertEqual("wireguard-peer-audit-on-wg01", policy["operator_attribution"])
+        self.assertEqual("required", policy["stateful_return"])
+        translated = ipaddress.ip_address(policy["translated_source_ip"])
+        self.assertIn(translated, ipaddress.ip_network(self.network["vlans"]["mgmt"][401]["cidr"]))
 
     def test_public_endpoint_is_runtime_only_udp_wireguard(self):
         endpoint = self.wg["endpoint"]
@@ -86,6 +124,10 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("exact", self.policy["status"])
         self.assertEqual("Z5", self.policy["gateway"]["trust_zone"])
         self.assertFalse(self.policy["gateway"]["kubernetes_member"])
+        self.assertEqual(
+            "config/infrastructure/mgmt-access-gateways.yaml#access_gateways.wg-01",
+            self.policy["gateway"]["inventory_source"],
+        )
         self.assertEqual("workforce", self.policy["access"]["identity_realm"])
         self.assertEqual("forbidden", self.policy["access"]["customer_identity"])
         self.assertEqual("deny", self.policy["access"]["default_forwarding"])
@@ -102,6 +144,22 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
             },
             self.policy["human_gates"],
         )
+
+    def test_non_kubernetes_secret_delivery_is_exact(self):
+        secrets = self.policy["secrets"]
+        self.assertEqual("openbao", secrets["authority"])
+        self.assertEqual("ansible", secrets["delivery"]["owner"])
+        self.assertEqual("runtime-openbao-read", secrets["delivery"]["mode"])
+        self.assertEqual("forbidden", secrets["delivery"]["kubernetes_eso"])
+        self.assertEqual("root-0600", secrets["delivery"]["gateway_target_permissions"])
+        self.assertEqual("runtime-injected-nonpersisted", secrets["delivery"]["openbao_auth"])
+        self.assertEqual("kv", secrets["gateway_private_key"]["mount"])
+        self.assertEqual("mgmt/wireguard/wg-01", secrets["gateway_private_key"]["path"])
+        self.assertEqual("private_key", secrets["gateway_private_key"]["field"])
+        self.assertEqual("operator-device", secrets["operator_peer_private_keys"]["authority"])
+        self.assertEqual("forbidden", secrets["operator_peer_private_keys"]["central_storage"])
+        self.assertEqual("openbao", secrets["break_glass_private_keys"]["authority"])
+        self.assertEqual("separately-controlled", secrets["break_glass_private_keys"]["access"])
 
     def test_threat_model_has_all_required_boundaries_and_controls(self):
         expected = {
@@ -128,16 +186,23 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
             "config/contracts/mgmt-wireguard-access.yaml",
             lock["machine_contracts"]["mgmt_wireguard_access"],
         )
+        self.assertEqual(
+            "config/infrastructure/mgmt-access-gateways.yaml",
+            lock["machine_contracts"]["mgmt_access_gateways"],
+        )
         index = EXACT_INDEX.read_text(encoding="utf-8")
         self.assertIn("MGMT_WIREGUARD_ACCESS.md", index)
         self.assertIn("config/contracts/mgmt-wireguard-access.yaml", index)
+        self.assertIn("config/infrastructure/mgmt-access-gateways.yaml", index)
 
     def test_exact_document_records_no_active_implementation(self):
         text = DOC.read_text(encoding="utf-8")
         self.assertIn("This architecture PR does not create a VM", text)
+        self.assertIn("SNAT on `wg-01`", text)
         self.assertIn("Terraform/OpenTofu owns provider resources", text)
         self.assertIn("Ansible owns Rocky Linux state", text)
-        self.assertIn("No WireGuard key material is stored in Git", text)
+        self.assertIn("OpenBao is the secret authority", text)
+        self.assertIn("operator peer private keys", text)
 
 
 if __name__ == "__main__":
