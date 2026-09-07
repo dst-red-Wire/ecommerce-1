@@ -1,0 +1,35 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-affected-components
+spec:
+  params:
+    - name: runner-image
+      type: string
+    - name: base
+      type: string
+    - name: head
+      type: string
+    - name: record-dir
+      type: string
+  results:
+    - name: components
+      type: array
+      description: Component gates that must execute; "none" is a no-op sentinel.
+  workspaces:
+    - name: source
+  steps:
+    - name: classify
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args:
+        - tekton-plan
+        - --base
+        - $(params.base)
+        - --head
+        - $(params.head)
+        - --record-dir
+        - $(params.record-dir)
+        - --result-path
+        - $(results.components.path)

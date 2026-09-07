@@ -86,6 +86,23 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
             )
 
     @unittest.skipUnless(ANSIBLE_PLAYBOOK, "ansible-playbook is required")
+    def test_core_bare_true_is_repaired_before_normal_git_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = self.create_repo(Path(directory), "core.autocrlf=input\npull.ff=only\n")
+            subprocess.run(["git", "-C", str(repo), "config", "core.bare", "true"], check=True)
+
+            result = self.run_playbook(repo)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            repaired = subprocess.check_output(
+                ["git", "-C", str(repo), "config", "--local", "--get", "core.bare"], text=True
+            ).strip()
+            self.assertEqual("false", repaired)
+            self.assertEqual(
+                "true",
+                subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"], text=True).strip(),
+            )
+
+    @unittest.skipUnless(ANSIBLE_PLAYBOOK, "ansible-playbook is required")
     def test_malformed_default_fails_with_its_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = self.create_repo(Path(directory), "valid.key=value\nmalformed-entry\n")

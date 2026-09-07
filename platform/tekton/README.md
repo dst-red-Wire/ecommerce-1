@@ -11,6 +11,10 @@
 
 Changed paths are classified with `scripts/ci-affected.rb` (`make affected BASE=<sha> HEAD=<sha>`). The classifier uses the canonical ownership/API contracts and fails closed for unknown service or OpenAPI paths. CI-control changes fan out to every component class.
 
+`ecommerce-affected` is the authoritative affected-only orchestration pipeline. It always executes the global guards, consumes the classifier result, and fans out only component gates that require execution. Exact direct-parent PASS evidence may suppress an unaffected expensive component gate only after signature/provenance verification. The Matrix/array-result fan-out requires Tekton `enable-api-fields=beta`; management-plane admission must keep that feature enabled before this pipeline is certified.
+
+Remote PASS evidence is published as a signed OCI artifact in Harbor according to `config/contracts/ci-evidence.yaml`. Missing or unverifiable evidence is an optimization miss and forces execution; it is never converted into PASS. The finalizer publishes `tekton/ecommerce-affected` against the exact reviewed SHA when Gitea status credentials are present.
+
 ## Runtime contract
 
 Each Pipeline receives a `source` workspace containing the exact commit SHA being reviewed. Runner images are supplied as Pipeline parameters because their immutable Harbor digests belong to the management-plane runtime configuration, not to an unverified public tag in these manifests. Admission policy must require `@sha256:` runner references before the Tekton control plane is certified.

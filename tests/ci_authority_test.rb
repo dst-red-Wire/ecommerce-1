@@ -9,6 +9,9 @@ class CIAuthorityTest < Minitest::Test
   REQUIRED_TEKTON = %w[
     platform/tekton/kustomization.yaml
     platform/tekton/tasks/global-gates.yaml
+    platform/tekton/tasks/affected-components.yaml
+    platform/tekton/tasks/component-gates.yaml
+    platform/tekton/tasks/finalize-evidence.yaml
     platform/tekton/tasks/frontend-gates.yaml
     platform/tekton/tasks/go-service-gates.yaml
     platform/tekton/tasks/platform-gates.yaml
@@ -16,6 +19,7 @@ class CIAuthorityTest < Minitest::Test
     platform/tekton/pipelines/frontend.yaml
     platform/tekton/pipelines/go-service.yaml
     platform/tekton/pipelines/platform.yaml
+    platform/tekton/pipelines/affected.yaml
     platform/tekton/triggers/README.md
   ].freeze
 

@@ -3,6 +3,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -76,6 +77,22 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn("ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg", MAKEFILE)
         self.assertIn("export ANSIBLE_CONFIG", MAKEFILE)
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
+
+    def test_ansible_gate_reconciles_missing_project_collections_once(self):
+        with mock.patch.object(MOD, "ansible_collections_ready", side_effect=[False, True]):
+            with mock.patch.object(MOD, "require") as require_mock:
+                with mock.patch.object(MOD, "run") as run_mock:
+                    MOD.reconcile_ansible_collections()
+        require_mock.assert_any_call("ansible-playbook")
+        require_mock.assert_any_call("ansible-galaxy")
+        command = run_mock.call_args.args[0]
+        self.assertIn("platform/ansible/developer.yml", command)
+        self.assertEqual("ansible_collections", command[command.index("--tags") + 1])
+
+        with mock.patch.object(MOD, "ansible_collections_ready", return_value=True):
+            with mock.patch.object(MOD, "run") as second_run:
+                MOD.reconcile_ansible_collections()
+        second_run.assert_not_called()
 
     def test_bootstrap_uses_only_the_ansible_core_stdout_callback(self):
         self.assertNotIn("stdout_callback = yaml", ANSIBLE_CFG)

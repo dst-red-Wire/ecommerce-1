@@ -89,6 +89,38 @@
   changed_when: true
   tags: [workstation, bootstrap, ansible_collections]
 
+- name: Resolve repository Git common directory before worktree-dependent validation
+  ansible.builtin.command:
+    argv: [git, rev-parse, --path-format=absolute, --git-common-dir]
+    chdir: "{{ repo_root }}"
+  register: developer_git_common_dir
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Read repository core.bare directly from the common Git config
+  ansible.builtin.command:
+    argv: [git, config, --file, "{{ developer_git_common_dir.stdout | trim }}/config", --get, core.bare]
+  register: developer_git_core_bare
+  failed_when: developer_git_core_bare.rc not in [0, 1]
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Repair abnormal core.bare on a checkout
+  ansible.builtin.command:
+    argv: [git, config, --file, "{{ developer_git_common_dir.stdout | trim }}/config", core.bare, 'false']
+  when: developer_git_core_bare.rc == 0 and (developer_git_core_bare.stdout | trim | lower) == 'true'
+  changed_when: true
+  tags: [workstation, git]
+
+- name: Verify repository is usable as a worktree after Git repair
+  ansible.builtin.command:
+    argv: [git, rev-parse, --is-inside-work-tree]
+    chdir: "{{ repo_root }}"
+  register: developer_git_is_worktree
+  changed_when: false
+  failed_when: (developer_git_is_worktree.stdout | trim) != 'true'
+  tags: [workstation, git]
+
 - name: Read repository Git default lines
   ansible.builtin.set_fact:
     developer_git_default_lines: >-

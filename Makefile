@@ -64,7 +64,7 @@ frontend-admin: ## Run complete Admin gate
 service-check: ## Run generic Go service gate; use SERVICE=product
 	@$(PYTHON) scripts/repoctl.py service "$(SERVICE)"
 
-.PHONY: workstation-doctor workstation-bootstrap agent-tools context-tools product-bootstrap-persistence git-sync publish deliver
+.PHONY: workstation-doctor workstation-bootstrap agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -81,6 +81,9 @@ context-tools: ## Reconcile token-efficient context tooling with Ansible
 product-bootstrap-persistence: ## Reconcile Product persistence generation/dependencies with Ansible
 	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
 
+git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target another checkout
+	@ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
+
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
 
@@ -89,6 +92,18 @@ publish: ## Commit, exact-SHA verify and push current feature branch
 
 deliver: ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
+
+bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
+	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"
+
+evidence-publish: ## Sign and publish exact PASS evidence to the configured OCI evidence repository
+	@$(PYTHON) scripts/repoctl.py evidence-publish --path "$(EVIDENCE)"
+
+evidence-fetch: ## Fetch and authenticate exact evidence; SHA=<full-sha>
+	@$(PYTHON) scripts/repoctl.py evidence-fetch --sha "$(SHA)"
+
+evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/INCREMENTAL_EVIDENCE required
+	@$(PYTHON) scripts/repoctl.py evidence-compare --full "$(FULL_EVIDENCE)" --incremental "$(INCREMENTAL_EVIDENCE)"
 
 .PHONY: context diff-context failure-context nx-graph bazel-verify
 
