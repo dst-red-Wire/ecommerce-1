@@ -74,10 +74,23 @@ class TektonRuntimeWiringTests(unittest.TestCase):
         self.assertIn("'GITEA_TOKEN' not in", playbook)
         self.assertIn("'GITHUB_TOKEN' not in", playbook)
 
+    def test_runtime_proof_recovery_is_exact_and_automation_owned(self):
+        playbook = self.read("platform/ansible/tekton-proof.yml")
+        self.assertIn("ecommerce-1.io/proof-controller", playbook)
+        self.assertIn("Recycle only a failed automation-owned exact parent proof run", playbook)
+        self.assertIn("Recycle only a failed automation-owned exact child proof run", playbook)
+        self.assertIn("Require any existing parent proof run to be automation-owned and exact", playbook)
+        self.assertIn("Require any existing child proof run to be automation-owned and exact", playbook)
+        self.assertIn("Remove only an automation-owned stale verifier Pod before a clean retry", playbook)
+        self.assertIn("wait_timeout: 120", playbook)
+        self.assertIn("status.conditions[0].status == 'False'", playbook)
+
     def test_documented_invocation_includes_exact_parent_sha(self):
         doc = self.read("docs/project/TEKTON_RUNTIME_PROOF.md")
         self.assertIn("PARENT_SHA=<full-parent-sha>", doc)
         self.assertIn("BASE_SHA -> PARENT_SHA -> HEAD_SHA", doc)
+        normalized_doc = " ".join(doc.split())
+        self.assertIn("retries require no manual resource deletion", normalized_doc)
 
     def test_make_exposes_one_thin_runtime_proof_launcher(self):
         makefile = self.read("Makefile")

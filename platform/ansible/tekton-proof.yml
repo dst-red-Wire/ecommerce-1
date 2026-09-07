@@ -263,6 +263,65 @@
         name: "{{ parent_run_name }}"
       register: existing_parent_run
 
+    - name: Require any existing parent proof run to be automation-owned and exact
+      ansible.builtin.assert:
+        that:
+          - (existing_parent_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-controller', '') == 'tekton-proof-v1'
+          - (existing_parent_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-run', '') == 'parent'
+          - (existing_parent_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-head', '') == proof_parent_sha
+          - existing_parent_run.resources[0].spec.taskRunTemplate.serviceAccountName == runtime.pipeline_service_account
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'runner-image')
+            | map(attribute='value') | list) == [runtime.runner_image]
+          - (existing_parent_run.resources[0].spec.params | selectattr('name', 'equalto', 'repo-url') | map(attribute='value') | list) == [runtime.repo_url]
+          - (existing_parent_run.resources[0].spec.params | selectattr('name', 'equalto', 'base') | map(attribute='value') | list) == [proof_base_sha]
+          - (existing_parent_run.resources[0].spec.params | selectattr('name', 'equalto', 'head') | map(attribute='value') | list) == [proof_parent_sha]
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'evidence-repository')
+            | map(attribute='value') | list) == [runtime.evidence_repository]
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'evidence-signing-secret')
+            | map(attribute='value') | list) == [runtime.evidence_signing_secret]
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'registry-auth-secret')
+            | map(attribute='value') | list) == [runtime.registry_auth_secret]
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'status-secret')
+            | map(attribute='value') | list) == [runtime.status_secret]
+        fail_msg: >-
+          Existing parent PipelineRun name collides with non-owned or non-exact state.
+          Refuse deletion or reuse; inspect the management plane manually.
+      when: existing_parent_run.resources | length == 1
+
+    - name: Recycle only a failed automation-owned exact parent proof run
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ parent_run_name }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      when:
+        - existing_parent_run.resources | length == 1
+        - (existing_parent_run.resources[0].status.conditions | default([]) | length) > 0
+        - existing_parent_run.resources[0].status.conditions[0].status == 'False'
+
+    - name: Re-read the parent proof run after safe recovery handling
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ parent_run_name }}"
+      register: parent_run_after_recycle
+
     - name: Create the exact parent PipelineRun once so Harbor receives full PASS evidence
       kubernetes.core.k8s:
         context: "{{ runtime.kube_context }}"
@@ -274,6 +333,7 @@
             name: "{{ parent_run_name }}"
             namespace: "{{ runtime.namespace }}"
             labels:
+              ecommerce-1.io/proof-controller: tekton-proof-v1
               ecommerce-1.io/proof-run: parent
               ecommerce-1.io/proof-head: "{{ proof_parent_sha }}"
           spec:
@@ -301,7 +361,12 @@
             workspaces:
               - name: source
                 emptyDir: {}
-      when: existing_parent_run.resources | length == 0
+      when: >-
+        existing_parent_run.resources | length == 0 or
+        (
+          (existing_parent_run.resources[0].status.conditions | default([]) | length) > 0 and
+          existing_parent_run.resources[0].status.conditions[0].status == 'False'
+        )
 
     - name: Wait for the exact parent PipelineRun to terminate
       kubernetes.core.k8s_info:
@@ -335,6 +400,65 @@
         name: "{{ child_run_name }}"
       register: existing_child_run
 
+    - name: Require any existing child proof run to be automation-owned and exact
+      ansible.builtin.assert:
+        that:
+          - (existing_child_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-controller', '') == 'tekton-proof-v1'
+          - (existing_child_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-run', '') == 'child'
+          - (existing_child_run.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-head', '') == proof_head_sha
+          - existing_child_run.resources[0].spec.taskRunTemplate.serviceAccountName == runtime.pipeline_service_account
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'runner-image')
+            | map(attribute='value') | list) == [runtime.runner_image]
+          - (existing_child_run.resources[0].spec.params | selectattr('name', 'equalto', 'repo-url') | map(attribute='value') | list) == [runtime.repo_url]
+          - (existing_child_run.resources[0].spec.params | selectattr('name', 'equalto', 'base') | map(attribute='value') | list) == [proof_base_sha]
+          - (existing_child_run.resources[0].spec.params | selectattr('name', 'equalto', 'head') | map(attribute='value') | list) == [proof_head_sha]
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'evidence-repository')
+            | map(attribute='value') | list) == [runtime.evidence_repository]
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'evidence-signing-secret')
+            | map(attribute='value') | list) == [runtime.evidence_signing_secret]
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'registry-auth-secret')
+            | map(attribute='value') | list) == [runtime.registry_auth_secret]
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'status-secret')
+            | map(attribute='value') | list) == [runtime.status_secret]
+        fail_msg: >-
+          Existing child PipelineRun name collides with non-owned or non-exact state.
+          Refuse deletion or reuse; inspect the management plane manually.
+      when: existing_child_run.resources | length == 1
+
+    - name: Recycle only a failed automation-owned exact child proof run
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ child_run_name }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      when:
+        - existing_child_run.resources | length == 1
+        - (existing_child_run.resources[0].status.conditions | default([]) | length) > 0
+        - existing_child_run.resources[0].status.conditions[0].status == 'False'
+
+    - name: Re-read the child proof run after safe recovery handling
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ child_run_name }}"
+      register: child_run_after_recycle
+
     - name: Create the child PipelineRun that must fetch and reuse authenticated parent evidence
       kubernetes.core.k8s:
         context: "{{ runtime.kube_context }}"
@@ -346,6 +470,7 @@
             name: "{{ child_run_name }}"
             namespace: "{{ runtime.namespace }}"
             labels:
+              ecommerce-1.io/proof-controller: tekton-proof-v1
               ecommerce-1.io/proof-run: child
               ecommerce-1.io/proof-head: "{{ proof_head_sha }}"
           spec:
@@ -373,7 +498,12 @@
             workspaces:
               - name: source
                 emptyDir: {}
-      when: existing_child_run.resources | length == 0
+      when: >-
+        existing_child_run.resources | length == 0 or
+        (
+          (existing_child_run.resources[0].status.conditions | default([]) | length) > 0 and
+          existing_child_run.resources[0].status.conditions[0].status == 'False'
+        )
 
     - name: Wait for the exact child PipelineRun to terminate
       kubernetes.core.k8s_info:
@@ -398,6 +528,37 @@
           Exact child PipelineRun failed or was cancelled. Inspect PipelineRun/TaskRun
           logs; never publish or synthesize PASS outside Tekton.
 
+    - name: Look for a stale deterministic verifier Pod
+      kubernetes.core.k8s_info:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Pod
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ verifier_pod_name }}"
+      register: existing_verifier_pod
+
+    - name: Require any stale verifier Pod to be automation-owned and exact
+      ansible.builtin.assert:
+        that:
+          - (existing_verifier_pod.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-controller', '') == 'tekton-proof-v1'
+          - (existing_verifier_pod.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-verifier', '') == 'true'
+          - (existing_verifier_pod.resources[0].metadata.labels | default({})).get('ecommerce-1.io/proof-head', '') == proof_head_sha
+        fail_msg: >-
+          Verifier Pod name collides with non-owned or non-exact state. Refuse deletion.
+      when: existing_verifier_pod.resources | length == 1
+
+    - name: Remove only an automation-owned stale verifier Pod before a clean retry
+      kubernetes.core.k8s:
+        context: "{{ runtime.kube_context }}"
+        api_version: v1
+        kind: Pod
+        namespace: "{{ runtime.namespace }}"
+        name: "{{ verifier_pod_name }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      when: existing_verifier_pod.resources | length == 1
+
     - name: Create a clean verifier Pod for signed Harbor round-trip evidence
       kubernetes.core.k8s:
         context: "{{ runtime.kube_context }}"
@@ -409,6 +570,7 @@
             name: "{{ verifier_pod_name }}"
             namespace: "{{ runtime.namespace }}"
             labels:
+              ecommerce-1.io/proof-controller: tekton-proof-v1
               ecommerce-1.io/proof-verifier: "true"
               ecommerce-1.io/proof-head: "{{ proof_head_sha }}"
           spec:

@@ -54,6 +54,13 @@ Before any management-plane mutation, the playbook proves the exact two-commit
 relationship `BASE_SHA -> PARENT_SHA -> HEAD_SHA` from local Git objects. A mismatch
 blocks the operation before Tekton reconciliation or PipelineRun creation.
 
+Recovery is fail-closed and automation-owned. Successful exact parent/child `PipelineRun`
+objects are preserved. A terminal failed run is recycled only after its controller label,
+full proof SHA, service account, repository, evidence coordinates, and secret-name inputs
+match the requested proof exactly. A stale verifier Pod is likewise deleted only after
+its automation ownership and exact head SHA are proven, so retries require no manual
+resource deletion.
+
 A successful playbook means the exact `PipelineRun` completed successfully. Final proof
 still requires reading back the exact forge status and authenticated Harbor evidence for
 the same head SHA; absence of either remains BLOCKED rather than PASS.
