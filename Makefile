@@ -47,6 +47,11 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
+.PHONY: mgmt-runtime-inventory
+
+mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from Terraform MGMT outputs
+	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
+
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 
 affected: ## Classify affected components; use BASE=<ref> [HEAD=<ref|WORKTREE>]

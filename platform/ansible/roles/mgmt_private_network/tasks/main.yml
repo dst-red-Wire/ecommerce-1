@@ -1,0 +1,153 @@
+---
+- name: Assert canonical private-network inputs
+  ansible.builtin.assert:
+    that:
+      - mgmt_ip is string
+      - mgmt_ip | length > 0
+      - mgmt_private_alias_cidrs is sequence
+      - mgmt_private_alias_cidrs | length >= 1
+      - mgmt_private_alias_cidrs | unique | list | length == mgmt_private_alias_cidrs | length
+    fail_msg: >-
+      MGMT private-network reconciliation requires one canonical DHCP primary mgmt_ip
+      and a non-empty unique mgmt_private_alias_cidrs list from the dynamic inventory.
+
+- name: Discover the private interface carrying the provider DHCP primary
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -o
+      - -4
+      - addr
+      - show
+      - to
+      - "{{ mgmt_ip }}/32"
+  register: mgmt_private_primary_probe
+  changed_when: false
+  check_mode: false
+
+- name: Require exactly one interface for the canonical MGMT primary address
+  ansible.builtin.assert:
+    that:
+      - mgmt_private_primary_probe.stdout_lines | length == 1
+      - mgmt_private_primary_probe.stdout_lines[0].split() | length >= 2
+    fail_msg: >-
+      Could not identify exactly one interface carrying canonical mgmt_ip={{ mgmt_ip }}.
+      Hetzner DHCP must configure the segment-401 primary before alias reconciliation.
+
+- name: Select the private interface without guessing a device name
+  ansible.builtin.set_fact:
+    mgmt_private_interface: >-
+      {{ mgmt_private_primary_probe.stdout_lines[0].split()[1].split('@')[0] }}
+
+- name: Discover the active NetworkManager connection for the private interface
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - --get-values
+      - GENERAL.CONNECTION
+      - device
+      - show
+      - "{{ mgmt_private_interface }}"
+  register: mgmt_private_connection_probe
+  changed_when: false
+  check_mode: false
+
+- name: Require an active NetworkManager connection
+  ansible.builtin.assert:
+    that:
+      - mgmt_private_connection_probe.stdout | trim | length > 0
+      - mgmt_private_connection_probe.stdout | trim != "--"
+    fail_msg: >-
+      The private interface {{ mgmt_private_interface }} has no active NetworkManager
+      connection; refusing to create or guess a replacement profile.
+
+- name: Record the active private NetworkManager connection
+  ansible.builtin.set_fact:
+    mgmt_private_connection: "{{ mgmt_private_connection_probe.stdout | trim }}"
+
+- name: Probe each canonical alias on the selected private interface
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -o
+      - -4
+      - addr
+      - show
+      - dev
+      - "{{ mgmt_private_interface }}"
+      - to
+      - "{{ item.split('/')[0] }}/32"
+  loop: "{{ mgmt_private_alias_cidrs }}"
+  loop_control:
+    label: "{{ item }}"
+  register: mgmt_private_alias_probe
+  changed_when: false
+  check_mode: false
+
+- name: Report alias changes in Ansible check mode
+  ansible.builtin.debug:
+    msg: >-
+      Private-network aliases requiring reconciliation: {{ mgmt_private_alias_probe.results
+      | selectattr('stdout', 'equalto', '') | map(attribute='item') | list }}
+  changed_when: >-
+    (mgmt_private_alias_probe.results | selectattr('stdout', 'equalto', '') | list | length) > 0
+  when: ansible_check_mode
+
+- name: Persist missing canonical aliases on the existing private connection
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ mgmt_private_connection }}"
+      - +ipv4.addresses
+      - "{{ item.item }}"
+  loop: "{{ mgmt_private_alias_probe.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  register: mgmt_private_alias_updates
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - item.stdout | trim == ""
+
+- name: Reapply the existing private connection after alias changes
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - device
+      - reapply
+      - "{{ mgmt_private_interface }}"
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - mgmt_private_alias_updates is changed
+
+- name: Verify every canonical alias after reconciliation
+  ansible.builtin.command:
+    argv:
+      - ip
+      - -o
+      - -4
+      - addr
+      - show
+      - dev
+      - "{{ mgmt_private_interface }}"
+      - to
+      - "{{ item.split('/')[0] }}/32"
+  loop: "{{ mgmt_private_alias_cidrs }}"
+  loop_control:
+    label: "{{ item }}"
+  register: mgmt_private_alias_verify
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Require all canonical aliases to be active
+  ansible.builtin.assert:
+    that:
+      - item.stdout | trim | length > 0
+    fail_msg: "Private-network alias {{ item.item }} is still absent after reconciliation."
+  loop: "{{ mgmt_private_alias_verify.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('check-mode') }}"
+  when: not ansible_check_mode
