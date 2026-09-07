@@ -3,6 +3,16 @@ variable "hcloud_location" {
   type        = string
 }
 
+variable "hcloud_network_zone" {
+  description = "Hetzner Cloud network zone matching hcloud_location; runtime input, never guessed from repository state."
+  type        = string
+
+  validation {
+    condition     = length(trimspace(var.hcloud_network_zone)) > 0
+    error_message = "hcloud_network_zone must be an explicit non-empty value such as the provider-reported network zone."
+  }
+}
+
 variable "hcloud_image" {
   description = "Pinned Rocky Linux 9 image identifier/name."
   type        = string
