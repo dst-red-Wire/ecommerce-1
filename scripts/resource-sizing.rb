@@ -32,6 +32,12 @@ module ResourceSizing
     component = evidence.fetch("component")
     raise ArgumentError, "component must be a non-empty string" unless component.is_a?(String) && !component.strip.empty?
 
+    source_environment = evidence.fetch("source_environment")
+    expected_environment = policy.dig("measurement", "source_environment")
+    unless source_environment == expected_environment
+      raise ArgumentError, "source_environment must match policy source #{expected_environment.inspect}"
+    end
+
     sha = evidence.fetch("source_sha")
     raise ArgumentError, "source_sha must be a full 40 character Git SHA" unless sha.is_a?(String) && sha.match?(/\A[0-9a-f]{40}\z/)
     raise ArgumentError, "representative must be true" unless evidence["representative"] == true
@@ -93,6 +99,7 @@ module ResourceSizing
       "version" => 1,
       "candidate_only" => true,
       "component" => evidence.fetch("component"),
+      "source_environment" => evidence.fetch("source_environment"),
       "source_sha" => evidence.fetch("source_sha"),
       "window_seconds" => Integer(evidence.fetch("window_seconds")),
       "resources" => {
