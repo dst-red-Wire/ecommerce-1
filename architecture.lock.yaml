@@ -26,6 +26,14 @@ business:
   frontends:
     - storefront
     - admin
+  frontend_runtime:
+    language: go
+    module: frontend
+    module_file: frontend/go.mod
+    rendering: templ
+    interactions: htmx
+    runtime_nodejs: false
+    migration_source: nextjs-react-node
   forbidden_services: []
 
 platform:
@@ -150,6 +158,7 @@ prod_certified_topology:
         - b-host-03
 
 superseded:
+  nextjs-frontend-runtime: go-templ-htmx
   fluxcd: rancher-fleet
   flagger: argo-rollouts
   minio-community: seaweedfs-s3

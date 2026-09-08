@@ -12,7 +12,7 @@ This document is the canonical execution baseline for repository implementation.
 
 `cart`, `checkout`, `order`, `payment` and `fulfillment` are autonomous services. Checkout owns pre-order validation/orchestration, Order owns the durable immutable order snapshot, Payment owns PSP money movement, and Fulfillment owns physical execution orchestration before Shipping/Tracking.
 
-Two Next.js frontends: `storefront` and `admin`.
+Two Go frontend applications keep the canonical paths `frontend/apps/storefront` and `frontend/apps/admin`. Server-side rendering/components use Go + templ; HTMX provides server-driven interactions where appropriate. Both applications belong to the single `frontend/go.mod` module. Next.js/React/Node.js is the migration source; Node.js remains temporary tooling only until migration is proven. See [ADR-0001](../adr/ADR-0001-frontend-go-templ-htmx.md).
 
 ## 2. Protocol ownership
 

@@ -93,13 +93,15 @@ Ne pas tenter de générer simultanément une implémentation complète des 19 s
 Créer :
 
 ```text
-frontend/storefront/
-frontend/admin/
+frontend/apps/storefront/
+frontend/apps/admin/
 ```
 
-Storefront : Next.js + TypeScript, mobile-first, RSC/SSR privilégiés, design tokens et JavaScript client limité.
+Runtime serveur cible commun : Go + templ + HTMX, dans le module `frontend/go.mod`.
 
-Admin : Next.js + TypeScript + Tailwind CSS + shadcn/ui + Radix UI.
+Storefront et Admin restent des applications déployables distinctes. Ne pas créer un `go.mod` séparé dans chaque application. Le changement de runtime ne justifie pas de renommer ou déplacer leurs chemins canoniques.
+
+Next.js/React/Node.js est la source de migration historique. Node.js peut rester temporairement pour Playwright, le tooling CSS/build, les tests et la compatibilité de migration ; il n'est plus le runtime frontend PROD cible.
 
 Ne pas générer tous les écrans pendant le bootstrap.
 

@@ -32,8 +32,10 @@ La chaîne transactionnelle centrale est `Cart -> Checkout -> Order -> Payment -
 
 ## Frontends
 
-- `frontend/apps/storefront` : Next.js, TypeScript, mobile-first, RSC/SSR privilégiés.
-- `frontend/apps/admin` : Next.js, TypeScript, Tailwind CSS, shadcn/ui, Radix UI.
+- `frontend/apps/storefront` : cible Go + templ + HTMX, mobile-first.
+- `frontend/apps/admin` : cible Go + templ + HTMX.
+- Module unique : `frontend/go.mod`; les applications restent déployables séparément.
+- Next.js/React/Node.js est la source de migration. Node.js peut rester temporairement pour Playwright, CSS/build tooling et compatibilité, mais n’est plus le runtime frontend PROD cible.
 - Design system partagé : [`frontend/packages/ui`](frontend/packages/ui/README.md).
 - Références et provenance NOMA : [`docs/design`](docs/design/README.md).
 

@@ -1,6 +1,12 @@
-# Frontend NOMA - Phase 1
+# Frontend NOMA — migration vers Go + templ + HTMX
 
-Ce workspace contient un Storefront et un Backoffice NOMA exécutables localement avec des données simulées déterministes. Il ne se connecte à aucun microservice, aucune API métier ni aucun fournisseur IAM.
+## Cible et état actuel
+
+La cible PROD est constituée de deux applications Go + templ + HTMX, conservées dans `apps/storefront` et `apps/admin`, sous un module Go commun `frontend/go.mod`. Elles restent déployables séparément. Aucun `go.mod` par application ne doit être créé.
+
+L'implémentation actuelle Next.js/React/Node.js est **LEGACY / MIGRATION SOURCE** : elle reste exécutable pendant la migration et conserve les écrans, parcours, mocks et références NOMA décrits ci-dessous. La migration Go n'est ni implémentée, ni qualifiée en PREPROD, ni déployée en PROD.
+
+## Exécution de l'implémentation legacy actuelle
 
 ## Prérequis
 
@@ -55,7 +61,7 @@ make check
 make e2e
 ```
 
-## Architecture
+## Architecture legacy actuelle
 
 ```text
 frontend/
@@ -89,7 +95,7 @@ L'intégration future remplacera uniquement le binding du mock adapter :
 ```text
 OpenAPI officiel
   -> client généré
-  -> adapter BFF côté serveur Next.js
+  -> adapter BFF côté serveur (actuellement Next.js, cible Go)
   -> application
   -> UI existante
 ```
