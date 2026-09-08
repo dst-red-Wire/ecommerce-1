@@ -5,6 +5,7 @@ require "minitest/autorun"
 require "tmpdir"
 require "yaml"
 require_relative "../scripts/validate-architecture"
+require_relative "../scripts/validate-observability"
 
 class ArchitectureValidatorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -34,6 +35,16 @@ class ArchitectureValidatorTest < Minitest::Test
       end
       errors = ArchitectureValidator.validate(root)
       assert_includes errors, "deployment waves include lakefs: expected true, got false"
+    end
+  end
+
+  def test_rejects_hyperdx_metadata_deployment_drift
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/contracts/observability-topology.yaml") do |data|
+        data["hyperdx"]["metadata_deployment"] = "mongodb-atlas"
+      end
+      errors = ObservabilityTopologyValidator.validate(root)
+      assert_includes errors, "HyperDX metadata MongoDB must be internal-only"
     end
   end
 

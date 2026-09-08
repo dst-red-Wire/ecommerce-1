@@ -399,7 +399,7 @@ module ArchitectureValidator
     wave_components = deployment_waves.fetch("waves").flat_map do |wave|
       Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
     end
-    %w[mongodb-oss-self-hosted lakefs lakefs-metadata-cnpg mlflow mlflow-metadata-cnpg].each do |component|
+    %w[rotel opentelemetry-collector vmagent victoriametrics victorialogs vmalert alertmanager grafana clickhouse mongodb-oss-self-hosted hyperdx data-prepper-security opensearch-security wazuh lakefs lakefs-metadata-cnpg mlflow mlflow-metadata-cnpg].each do |component|
       check_equal(errors, "deployment waves include #{component}", true, wave_components.include?(component))
     end
 

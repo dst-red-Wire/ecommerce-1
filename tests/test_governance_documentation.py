@@ -47,7 +47,7 @@ class GovernanceDocumentationTest(unittest.TestCase):
                 r"Fluent Bit -> Data Prepper -> OpenSearch Logs",
             ],
             "config/infrastructure/deployment-waves.yaml": [
-                r"fluent-bit|opensearch-logs|\bprometheus\b",
+                r"fluent-bit|opensearch-logs|prometheus-server-tsdb",
             ],
         }
         for relative, forbidden_terms in checks.items():

@@ -104,6 +104,7 @@ module ObservabilityTopologyValidator
     hyperdx = contract["hyperdx"] || {}
     errors << "HyperDX telemetry must use ClickHouse" unless hyperdx["telemetry_storage"] == "clickhouse"
     errors << "HyperDX metadata MongoDB must be internal-only" unless hyperdx["metadata_store"] == "mongodb" &&
+      hyperdx["metadata_deployment"] == "mongodb-oss-self-hosted" &&
       hyperdx["metadata_scope"] == "hyperdx-internal-only" && hyperdx["business_data_forbidden"] == true
 
     forbidden = Array(contract.dig("anti_duplication", "forbidden_active_components"))
