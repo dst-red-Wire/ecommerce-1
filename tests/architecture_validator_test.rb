@@ -27,6 +27,16 @@ class ArchitectureValidatorTest < Minitest::Test
     assert_empty ArchitectureValidator.validate(ROOT)
   end
 
+  def test_rejects_missing_active_stateful_or_observability_component_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "60-stateful" }["parallel_groups"][0].delete("lakefs")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors, "deployment waves include lakefs expected=true actual=false"
+    end
+  end
+
   SERVICE_MUTATIONS = {
     "missing checkout in dependency map" => lambda { |root|
       mutate_yaml(root, "config/contracts/dependency-map.yaml") do |data|

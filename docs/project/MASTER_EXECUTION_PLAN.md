@@ -37,7 +37,7 @@ Only these statuses are allowed:
 | M1 Monorepo Bootstrap | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | READY FOR CODEX |
 | M2 Golden Service Product | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | BLOCKED by M1 |
 | M2.5 Persistent MGMT Bootstrap IaC | Codex | establish the permanent management plane required by real PREPROD CREATE | M1 PROVEN | MGMT Terraform/Ansible/RKE2/Gitea/Harbor/Tekton/Fleet/OpenBao prerequisites PROVEN | BLOCKED by M1 |
-| M3 PREPROD Infrastructure | Codex | provision reproducible JIT infrastructure foundation | M1 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M1 |
+| M3 PREPROD Infrastructure | Codex | provision reproducible JIT infrastructure foundation | M1 PROVEN; M2.5 PROVEN for real PREPROD CREATE; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M1/M2.5 for real PREPROD CREATE |
 | M4 Platform Baseline | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | BLOCKED by M3 |
 | M5 Commerce Vertical Slice | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | BLOCKED by M2/M4 |
 | M6 Full Application | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | BLOCKED by M5 |
@@ -47,7 +47,7 @@ Only these statuses are allowed:
 
 ## 4. Critical path
 
-`M0 -> M1 -> { M2, M2.5 }`
+`M0 -> M1 -> { M2, M2.5 } -> M3`
 
 After M1 is PROVEN, M2 and M2.5 may proceed in parallel. M3's architecture/topology/network/storage specifications are already merged, but real `PREPROD CREATE` also requires the M2.5 management-plane prerequisites. Offline/static preparation may proceed before provider access.
 

@@ -395,6 +395,14 @@ module ArchitectureValidator
       end
     end
 
+    waves = YAML.safe_load(File.read(File.join(root, "config/infrastructure/deployment-waves.yaml")))
+    wave_components = waves.fetch("waves").flat_map do |wave|
+      Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
+    end
+    %w[mongodb-oss-self-hosted lakefs lakefs-metadata-cnpg mlflow-metadata-cnpg].each do |component|
+      check_equal(errors, "deployment waves include #{component}", true, wave_components.include?(component))
+    end
+
     mgmt_control_planes = expect_mapping(mgmt["control_planes"], "mgmt-inventory.yaml control_planes")
     mgmt_workers = expect_mapping(mgmt["workers"], "mgmt-inventory.yaml workers")
     mgmt_profiles = expect_mapping(mgmt["vm_profiles"], "mgmt-inventory.yaml vm_profiles")

@@ -22,7 +22,7 @@ waves:
   - id: 60-stateful
     requires: [40-secrets-registry-ci, 20-network-security]
     parallel_groups:
-      - [cloudnativepg, strimzi-kafka, rabbitmq, redis, seaweedfs]
+      - [cloudnativepg, lakefs-metadata-cnpg, mlflow-metadata-cnpg, lakefs, strimzi-kafka, rabbitmq, redis, seaweedfs]
       - [opensearch-business, apicurio]
   - id: 70-iam-edge
     requires: [60-stateful, 30-gitops-identity]
