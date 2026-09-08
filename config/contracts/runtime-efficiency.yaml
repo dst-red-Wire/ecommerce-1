@@ -113,8 +113,9 @@ images:
     digest: sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
 
 frontend:
-  nextjs_output: standalone
-  output_file_tracing_root: frontend-workspace
+  production_runtime: go-templ-htmx
+  module: frontend/go.mod
+  nodejs: temporary-tooling-only
   cache_policy: semantic-contract-only
   price_inventory_or_auth_cache_without_contract: forbidden
 
