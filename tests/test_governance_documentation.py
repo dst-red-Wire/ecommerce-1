@@ -56,6 +56,32 @@ class GovernanceDocumentationTest(unittest.TestCase):
                 with self.subTest(relative=relative, forbidden=forbidden):
                     self.assertIsNone(re.search(forbidden, text, flags=re.IGNORECASE))
 
+    def test_milestone_security_and_promotion_contracts_stay_aligned(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("M2.5 persistent MGMT bootstrap", agents)
+        self.assertIn("M2.5 PROVEN -> M3 PREPROD infra", agents)
+        self.assertIn("M2 + M4 -> M5 vertical slice", agents)
+
+        master = (ROOT / "docs/project/MASTER_EXECUTION_PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("M1 PROVEN; M2.5 PROVEN for real PREPROD CREATE", master)
+
+        security = (ROOT / "docs/architecture/SECURITY_TRUST_ZONES.md").read_text(encoding="utf-8")
+        self.assertIn("Exactly 19 Go backend services", security)
+        self.assertNotIn("17 Go services + Storefront/Admin workloads", security)
+
+        mlops = (ROOT / "docs/architecture/MLOPS_TOPOLOGY_V1.md").read_text(encoding="utf-8")
+        self.assertIn("no automatic model promotion", mlops.lower())
+        self.assertIn("a human approval is required", mlops.lower())
+
+    def test_executable_handoffs_read_lock_before_baseline(self):
+        for relative in [
+            "docs/project/CODEX_HANDOFFS.md",
+            "instruction/dev/PROMPT_IA_00_BOOTSTRAP_MONOREPO.md",
+        ]:
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(relative=relative):
+                self.assertLess(text.index("architecture.lock.yaml"), text.index("BASELINE_V2.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -28,10 +28,13 @@ waves:
   - id: 55-observability-services
     requires: [50-observability-stateful]
     components: [rotel, opentelemetry-collector, vmagent, vmalert, alertmanager, grafana, hyperdx, data-prepper-security, wazuh]
-  - id: 60-stateful
+  - id: 58-stateful-operators
     requires: [45-object-storage, 40-secrets-registry-ci, 20-network-security]
+    components: [cloudnativepg]
+  - id: 60-stateful
+    requires: [58-stateful-operators, 45-object-storage, 40-secrets-registry-ci, 20-network-security]
     parallel_groups:
-      - [cloudnativepg, lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis]
+      - [lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis]
       - [opensearch-business, apicurio]
     serial_after_parallel: [lakefs, mlflow]
   - id: 70-iam-edge

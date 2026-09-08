@@ -48,6 +48,31 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_forbidden_observability_component_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "55-observability-services" }["components"] <<
+          "opensearch-general-log-store"
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors,
+                      "deployment waves include forbidden observability component opensearch-general-log-store"
+    end
+  end
+
+  def test_rejects_cnpg_metadata_without_operator_readiness_dependency
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "60-stateful" }["requires"].delete("58-stateful-operators")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors,
+                      "deployment wave for lakefs-metadata-cnpg must require CloudNativePG operator wave 58-stateful-operators"
+      assert_includes errors,
+                      "deployment wave for mlflow-metadata-cnpg must require CloudNativePG operator wave 58-stateful-operators"
+    end
+  end
+
   def test_rejects_hyperdx_metadata_deployment_drift
     with_contract_copy do |root|
       mutate_yaml(root, "config/contracts/observability-topology.yaml") do |data|

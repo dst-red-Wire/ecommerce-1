@@ -74,11 +74,15 @@ Gate W5 requires storage binding, anti-affinity, engine quorum where applicable,
 reachability, latest backup age within the declared RPO, restore procedure presence, registry pull-by-digest and
 telemetry/log/security event-flow checks. Static validation does not claim that a backup has actually succeeded.
 
-## Wave 6 — Stateful platform
+## Waves 5.8-6 — Stateful platform
 
-May run in parallel after storage/network prerequisites:
+The CloudNativePG operator is a separate readiness boundary before any CNPG custom resource:
 
-- CNPG/PostgreSQL;
+1. `58-stateful-operators`: install CloudNativePG and prove its CRDs/controller ready.
+2. `60-stateful`: only after `58-stateful-operators` is healthy, create the dedicated lakeFS/MLflow CNPG metadata clusters and the remaining stateful services.
+
+Within `60-stateful`, independent engines may run in parallel after their declared prerequisites:
+
 - dedicated CNPG metadata databases for lakeFS and MLflow;
 - after healthy SeaweedFS and dedicated CNPG metadata databases: lakeFS dataset version authority, then MLflow experiments, lineage and champion/challenger service;
 - Strimzi Kafka KRaft;
@@ -88,7 +92,7 @@ May run in parallel after storage/network prerequisites:
 - SeaweedFS S3 is already established by `45-object-storage`; Wave 6 consumes it rather than redeploying it;
 - Apicurio Registry.
 
-Gate W6 requires health, anti-affinity, storage binding, operator readiness and backup/restore prerequisites.
+Gate W6 requires health, anti-affinity, storage binding, operator readiness and backup/restore prerequisites. No CNPG `Cluster` resource may be applied before the `58-stateful-operators` readiness gate passes.
 
 ## Wave 7 — IAM and Edge/API
 

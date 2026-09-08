@@ -75,9 +75,13 @@ Prefer small reviewable PRs over monolithic changes.
 
 ## Build sequence
 
-Do not implement the 19 services in parallel from empty scaffolding. Follow:
+Do not implement the 19 services in parallel from empty scaffolding. After M1, M2 and M2.5 may proceed in parallel. Real PREPROD `CREATE` in M3 is gated by M2.5 PROVEN:
 
-`M1 bootstrap -> M2 golden product service -> M3 PREPROD infra -> M4 platform -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
+`M1 bootstrap -> { M2 golden product service, M2.5 persistent MGMT bootstrap }`
+
+`M2.5 PROVEN -> M3 PREPROD infra -> M4 platform`
+
+`M2 + M4 -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
 
 The `product` service is the first golden backend implementation and must validate the shared engineering conventions before they are replicated.
 ## Token-efficient agent context
