@@ -10,13 +10,8 @@ import type { ProductViewModel } from "@/domain/models";
 export function ProductGallery({ product }: { product: ProductViewModel }) {
   const [active, setActive] = useState(0);
   return (
-    <section
-      className="product-gallery"
-      aria-label={`Galerie de ${product.name}`}
-    >
-      <div
-        className={`product-gallery__main product-gallery__variant-${active}`}
-      >
+    <section className="product-gallery" aria-label={`Galerie de ${product.name}`}>
+      <div className={`product-gallery__main product-gallery__variant-${active}`}>
         {product.media ? (
           <Image
             className="product-gallery__photo"
@@ -140,17 +135,15 @@ export function ProductPurchase({ product }: { product: ProductViewModel }) {
         className="add-to-cart"
         disabled={product.availability === "unavailable" || !size}
         onClick={() =>
-          setMessage(
-            `${quantity} × ${product.name} ajouté au panier de démonstration`,
-          )
+          setMessage(`${quantity} × ${product.name} ajouté au panier de démonstration`)
         }
       >
         <ShoppingBag aria-hidden="true" /> Ajouter au panier
       </Button>
       {message ? (
-        <p className="cart-toast" role="status">
+        <output className="cart-toast">
           <Check aria-hidden="true" /> {message}
-        </p>
+        </output>
       ) : null}
     </div>
   );

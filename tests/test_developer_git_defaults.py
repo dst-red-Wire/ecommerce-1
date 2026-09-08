@@ -99,7 +99,9 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
             self.assertEqual("false", repaired)
             self.assertEqual(
                 "true",
-                subprocess.check_output(["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"], text=True).strip(),
+                subprocess.check_output(
+                    ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"], text=True
+                ).strip(),
             )
 
     @unittest.skipUnless(ANSIBLE_PLAYBOOK, "ansible-playbook is required")
@@ -125,9 +127,9 @@ class DeveloperGitDefaultsTest(unittest.TestCase):
         self.assertIn("git_default_line | trim | length > 0", workflow)
         self.assertIn("not (git_default_line | trim).startswith('#')", workflow)
         self.assertNotIn("reject('match'", workflow)
-        self.assertIn('loop_var: git_default_line', workflow)
-        self.assertIn('loop_var: git_default_entry', workflow)
-        self.assertIn('loop_var: git_default_result', workflow)
+        self.assertIn("loop_var: git_default_line", workflow)
+        self.assertIn("loop_var: git_default_entry", workflow)
+        self.assertIn("loop_var: git_default_result", workflow)
         self.assertIn("git_default_result.git_default_entry", workflow)
         self.assertNotIn("item.item", workflow)
         self.assertNotIn("{{ item", workflow)

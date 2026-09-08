@@ -47,11 +47,7 @@ export function AdminNavigation() {
               ? pathname === "/"
               : pathname.startsWith(href.split("/").slice(0, 2).join("/"));
           return (
-            <Link
-              key={href}
-              href={href}
-              aria-current={active ? "page" : undefined}
-            >
+            <Link key={href} href={href} aria-current={active ? "page" : undefined}>
               <Icon aria-hidden="true" />
               <span>{label}</span>
               {"count" in item ? <b>{item.count}</b> : null}

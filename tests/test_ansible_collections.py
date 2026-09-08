@@ -57,7 +57,9 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as project_tmp, tempfile.TemporaryDirectory() as user_tmp:
             self.write_manifest(pathlib.Path(project_tmp), "community.docker", "3.7.0")
             self.write_manifest(pathlib.Path(user_tmp), "community.docker", "5.2.2")
-            self.assertEqual("3.7.0", MOD.resolved_ansible_collection_version("community.docker", pathlib.Path(project_tmp)))
+            self.assertEqual(
+                "3.7.0", MOD.resolved_ansible_collection_version("community.docker", pathlib.Path(project_tmp))
+            )
 
     def test_bootstrap_repairs_only_when_project_collections_drift(self):
         self.assertIn("Identify project-owned Ansible collection drift", WORKSTATION_TASKS)

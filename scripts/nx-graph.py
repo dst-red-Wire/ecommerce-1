@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Materialize an ignored Nx visualization workspace from canonical contracts."""
+
 from __future__ import annotations
 
 import json
@@ -27,7 +28,9 @@ def main() -> int:
     frontends = ["storefront", "admin"]
 
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "package.json").write_text(json.dumps({"name": "ecommerce-1-derived-nx-graph", "private": True}, indent=2) + "\n")
+    (OUT / "package.json").write_text(
+        json.dumps({"name": "ecommerce-1-derived-nx-graph", "private": True}, indent=2) + "\n"
+    )
     (OUT / "nx.json").write_text(json.dumps({"defaultBase": "main", "plugins": []}, indent=2) + "\n")
 
     for service in services:

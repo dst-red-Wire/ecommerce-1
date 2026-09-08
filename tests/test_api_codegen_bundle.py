@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("repoctl_api_codegen", ROOT / "scripts/repoctl.py")
@@ -104,6 +105,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
         )
 
         refs = []
+
         def collect(node):
             if isinstance(node, dict):
                 if isinstance(node.get("$ref"), str):
@@ -113,6 +115,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
             elif isinstance(node, list):
                 for value in node:
                     collect(value)
+
         collect(bundled)
         self.assertTrue(refs)
         self.assertTrue(all(ref.startswith("#") for ref in refs), refs)
@@ -149,9 +152,9 @@ class ApiCodegenBundleTest(unittest.TestCase):
 
     def test_codegen_runs_from_service_module_against_bundled_document(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('bundled_doc = bundle_openapi_with_common(spec, common_spec)', source)
+        self.assertIn("bundled_doc = bundle_openapi_with_common(spec, common_spec)", source)
         self.assertIn('run(["oapi-codegen", "--config", str(config_path), str(bundled_spec)], cwd=module)', source)
-        self.assertNotIn('import-mapping:', source[source.index('def api_generate'):source.index('def api_compat')])
+        self.assertNotIn("import-mapping:", source[source.index("def api_generate") : source.index("def api_compat")])
 
     def test_api_generate_go_integration_uses_self_contained_bundle_and_service_cwd(self):
         with tempfile.TemporaryDirectory() as temp_name:
@@ -220,6 +223,55 @@ class ApiCodegenBundleTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("PASS generated API bindings target=go", result.stdout)
             self.assertTrue((root / "services/product/api/generated/openapi.gen.go").is_file())
+
+    def test_typescript_codegen_check_is_read_only_and_fails_on_drift(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = pathlib.Path(temp_name)
+            (root / "config/contracts").mkdir(parents=True)
+            (root / "contracts/openapi").mkdir(parents=True)
+            (root / "frontend/packages/api-client/src/generated").mkdir(parents=True)
+            common = root / "contracts/openapi/common.v1.yaml"
+            product = root / "contracts/openapi/product.v1.yaml"
+            common.write_text("openapi: 3.1.0\n", encoding="utf-8")
+            product.write_text("openapi: 3.1.0\n", encoding="utf-8")
+            generated = root / "frontend/packages/api-client/src/generated/product.ts"
+            raw = "export   type Product=string;\n"
+            canonical = "export type Product = string;\n"
+            generated.write_text(canonical, encoding="utf-8")
+            registry = {
+                "common_components": "contracts/openapi/common.v1.yaml",
+                "contracts": {"product": {"path": "contracts/openapi/product.v1.yaml"}},
+            }
+
+            def fake_run(command, *_args, **_kwargs):
+                if command and command[0] == "oxfmt":
+                    candidate = pathlib.Path(command[-1])
+                    self.assertEqual(raw, candidate.read_text(encoding="utf-8"))
+                    candidate.write_text(canonical, encoding="utf-8")
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 0, raw, "")
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "ruby_yaml", return_value=registry),
+                mock.patch.object(MOD, "bundle_openapi_with_common", return_value={"openapi": "3.1.0"}),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+            ):
+                self.assertEqual(0, MOD.api_generate("ts", check=True))
+                self.assertEqual(canonical, generated.read_text(encoding="utf-8"))
+                generated.write_text(raw, encoding="utf-8")
+                self.assertEqual(1, MOD.api_generate("ts", check=True))
+                self.assertEqual(raw, generated.read_text(encoding="utf-8"))
+                generated.write_text("stale\n", encoding="utf-8")
+                self.assertEqual(0, MOD.api_generate("ts"))
+                self.assertEqual(canonical, generated.read_text(encoding="utf-8"))
+
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        self.assertIn('api_generate("ts", check=True)', source)
+        self.assertIn('require("oxfmt")', source)
+        self.assertIn('gen.add_argument("--check", action="store_true")', source)
+        self.assertIn('"mutated_paths"', source)
 
 
 if __name__ == "__main__":

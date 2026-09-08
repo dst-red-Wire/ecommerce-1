@@ -21,20 +21,11 @@ export async function generateMetadata({
   };
 }
 
-export default async function ProductPage({
-  params,
-}: {
-  params: Promise<{ slug: string }>;
-}) {
+export default async function ProductPage({ params }: { params: Promise<{ slug: string }> }) {
   const slug = (await params).slug;
-  const [product, catalog] = await Promise.all([
-    getProductView(slug),
-    getCatalogView(),
-  ]);
+  const [product, catalog] = await Promise.all([getProductView(slug), getCatalogView()]);
   if (!product) notFound();
-  const recommendations = catalog
-    .filter((item) => item.id !== product.id)
-    .slice(0, 4);
+  const recommendations = catalog.filter((item) => item.id !== product.id).slice(0, 4);
   return (
     <main id="main" className="store-main product-page">
       <nav className="breadcrumb" aria-label="Fil d’Ariane">
@@ -46,10 +37,7 @@ export default async function ProductPage({
       </nav>
       <div className="product-layout">
         <ProductGallery product={product} />
-        <section
-          className="purchase-panel noma-panel"
-          aria-labelledby="product-title"
-        >
+        <section className="purchase-panel noma-panel" aria-labelledby="product-title">
           <h1 id="product-title">{product.name}</h1>
           <div className="product-rating">
             <Rating value={product.rating} />
@@ -60,9 +48,7 @@ export default async function ProductPage({
           <div className="product-price">
             <Price
               amount={product.price}
-              {...(product.previousPrice !== undefined
-                ? { previous: product.previousPrice }
-                : {})}
+              {...(product.previousPrice !== undefined ? { previous: product.previousPrice } : {})}
             />
             <small>TVA incluse</small>
           </div>
@@ -82,10 +68,7 @@ export default async function ProductPage({
         </section>
       </div>
       <div className="product-detail-grid">
-        <section
-          className="product-accordions"
-          aria-label="Informations produit"
-        >
+        <section className="product-accordions" aria-label="Informations produit">
           <details open>
             <summary>Description</summary>
             <p>{product.description}</p>
@@ -93,16 +76,13 @@ export default async function ProductPage({
           <details>
             <summary>Caractéristiques</summary>
             <p>
-              Données de démonstration. Les caractéristiques définitives
-              nécessitent un contenu validé.
+              Données de démonstration. Les caractéristiques définitives nécessitent un contenu
+              validé.
             </p>
           </details>
           <details>
             <summary>Livraison et retours</summary>
-            <p>
-              Modalités illustratives, à confirmer avant intégration
-              commerciale.
-            </p>
+            <p>Modalités illustratives, à confirmer avant intégration commerciale.</p>
           </details>
         </section>
         <section id="reviews" className="review-summary noma-panel">
@@ -117,10 +97,7 @@ export default async function ProductPage({
           ))}
         </section>
       </div>
-      <section
-        className="recommendations"
-        aria-labelledby="recommendations-title"
-      >
+      <section className="recommendations" aria-labelledby="recommendations-title">
         <h2 id="recommendations-title">Vous aimerez aussi</h2>
         <div className="product-grid featured-grid">
           {recommendations.map((item) => (

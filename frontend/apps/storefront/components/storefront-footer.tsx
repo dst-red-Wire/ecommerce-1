@@ -11,10 +11,7 @@ export function StorefrontFooter() {
         <span>CGV</span>
         <span>Contact</span>
       </nav>
-      <div
-        className="footer-social"
-        aria-label="Réseaux sociaux de démonstration"
-      >
+      <div className="footer-social" aria-label="Réseaux sociaux de démonstration">
         <span aria-label="Instagram">◎</span>
         <span aria-label="Pinterest">Ⓟ</span>
         <span aria-label="Facebook">ⓕ</span>

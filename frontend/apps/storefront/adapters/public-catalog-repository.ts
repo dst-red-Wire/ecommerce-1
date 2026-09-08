@@ -91,9 +91,7 @@ async function buildCatalog(): Promise<ProductViewModel[]> {
     return products.map((product, index) => {
       const discount = Math.max(0, product.discountPercentage ?? 0);
       const previousPrice =
-        discount > 0
-          ? Number((product.price / (1 - discount / 100)).toFixed(2))
-          : undefined;
+        discount > 0 ? Number((product.price / (1 - discount / 100)).toFixed(2)) : undefined;
       const photo = photos[index % Math.max(photos.length, 1)];
 
       return {

@@ -7,5 +7,4 @@ export const getDashboardMetrics = () => adminRepository.getDashboardMetrics();
 export const getAdminProducts = () => adminRepository.listProducts();
 export const getOrders = () => adminRepository.listOrders();
 export const getInventory = () => adminRepository.listInventory();
-export const getOperationalAlerts = () =>
-  adminRepository.listOperationalAlerts();
+export const getOperationalAlerts = () => adminRepository.listOperationalAlerts();

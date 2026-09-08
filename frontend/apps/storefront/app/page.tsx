@@ -21,10 +21,7 @@ export default async function HomePage() {
             Découvrir la sélection
           </Button>
         </div>
-        <div
-          className="home-hero__art"
-          aria-label="Illustrations temporaires de produits NOMA"
-        >
+        <div className="home-hero__art" aria-label="Illustrations temporaires de produits NOMA">
           <ProductArt kind="shoe" />
           <ProductArt kind="lamp" />
         </div>
@@ -36,11 +33,7 @@ export default async function HomePage() {
           {categories.map((category) => (
             <Link
               key={category.id}
-              href={
-                category.id === "all"
-                  ? "/catalogue"
-                  : `/catalogue?category=${category.label}`
-              }
+              href={category.id === "all" ? "/catalogue" : `/catalogue?category=${category.label}`}
             >
               <span aria-hidden="true">{category.symbol}</span>
               {category.label}
@@ -90,19 +83,13 @@ export default async function HomePage() {
             <br />
             des objets durables
           </h2>
-          <p>
-            Une esthétique épurée et intemporelle, pensée pour vous accompagner
-            au quotidien.
-          </p>
+          <p>Une esthétique épurée et intemporelle, pensée pour vous accompagner au quotidien.</p>
           <Link href="/catalogue">
             En savoir plus <ArrowRight aria-hidden="true" />
           </Link>
         </div>
-        <div
-          className="editorial-art"
-          role="img"
-          aria-label="Illustration temporaire d’un intérieur aux tons naturels"
-        >
+        <div className="editorial-art">
+          <span className="sr-only">Illustration temporaire d’un intérieur aux tons naturels</span>
           <span aria-hidden="true">⌇</span>
           <span aria-hidden="true">☘</span>
           <span aria-hidden="true">▱</span>

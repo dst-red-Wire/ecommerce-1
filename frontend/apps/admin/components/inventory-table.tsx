@@ -8,25 +8,18 @@ import type { InventoryItemViewModel } from "@/domain/models";
 import { AdminPagination, StatusBadge } from "./admin-ui";
 
 function inventoryStatus(item: InventoryItemViewModel) {
-  if (item.available === 0 || item.available < item.reorderLevel * 0.15)
-    return "Rupture";
+  if (item.available === 0 || item.available < item.reorderLevel * 0.15) return "Rupture";
   if (item.available < item.reorderLevel) return "Stock faible";
   return "En stock";
 }
 
-export function InventoryTable({
-  inventory,
-}: {
-  inventory: readonly InventoryItemViewModel[];
-}) {
+export function InventoryTable({ inventory }: { inventory: readonly InventoryItemViewModel[] }) {
   const [selected, setSelected] = useState(inventory[0] ?? null);
   const [quantity, setQuantity] = useState("20");
   const [confirmed, setConfirmed] = useState(false);
   return (
     <>
-      <section
-        className={`inventory-content ${selected ? "inventory-content--drawer" : ""}`}
-      >
+      <section className={`inventory-content ${selected ? "inventory-content--drawer" : ""}`}>
         <div className="inventory-filters">
           <label>
             Entrepôt / site
@@ -69,11 +62,7 @@ export function InventoryTable({
             <strong>{selected ? "1 sélectionné" : "0 sélectionné"}</strong>
             <button type="button">Ajustement groupé⌄</button>
           </div>
-          <div
-            className="table-scroll"
-            tabIndex={0}
-            aria-label="Inventaire, défilement horizontal"
-          >
+          <div className="table-scroll" aria-label="Inventaire, défilement horizontal">
             <table className="admin-table">
               <thead>
                 <tr>
@@ -143,7 +132,6 @@ export function InventoryTable({
           <h2>Historique des mouvements</h2>
           <div
             className="table-scroll"
-            tabIndex={0}
             aria-label="Historique des mouvements, défilement horizontal"
           >
             <table className="admin-table">
@@ -189,17 +177,10 @@ export function InventoryTable({
         </section>
       </section>
       {selected ? (
-        <aside
-          className="inventory-drawer"
-          aria-labelledby="stock-drawer-title"
-        >
+        <aside className="inventory-drawer" aria-labelledby="stock-drawer-title">
           <div className="drawer-header">
             <h2 id="stock-drawer-title">Ajuster le stock</h2>
-            <button
-              type="button"
-              onClick={() => setSelected(null)}
-              aria-label="Fermer"
-            >
+            <button type="button" onClick={() => setSelected(null)} aria-label="Fermer">
               <X aria-hidden="true" />
             </button>
           </div>
@@ -274,16 +255,12 @@ export function InventoryTable({
             </p>
           </div>
           {confirmed ? (
-            <p className="saved-banner" role="status">
+            <output className="saved-banner">
               Ajustement simulé — aucune donnée backend modifiée.
-            </p>
+            </output>
           ) : null}
           <div className="drawer-actions">
-            <Button
-              variant="secondary"
-              type="button"
-              onClick={() => setSelected(null)}
-            >
+            <Button variant="secondary" type="button" onClick={() => setSelected(null)}>
               Annuler
             </Button>
             <Button type="button" onClick={() => setConfirmed(true)}>

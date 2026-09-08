@@ -57,7 +57,6 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
             self.assertIn("Run focused Ansible lint before expensive verification", text)
         self.assertTrue(True if not agents else "Parallelize only independent work" in agents)
 
-
     def test_nx_version_validation_matches_real_multiline_cli_output(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         self.assertNotIn("nx_current.stdout | trim != nx_version", tasks)

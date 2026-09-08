@@ -1132,7 +1132,6 @@ body {
   }
 }
 
-
 /* Public demo media: constrained to Pexels and always retains source credit. */
 .product-card__media,
 .product-gallery__main {
@@ -1156,4 +1155,28 @@ body {
   color: inherit;
   font-size: 0.65rem;
   text-decoration: none;
+}
+
+/* ecommerce-1: native HTML5 semantic wrapper compatibility */
+.header-search-container {
+  grid-column: 1 / -1;
+}
+
+dialog.filter-dialog {
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+
+@media (min-width: 980px) {
+  .header-search-container {
+    grid-column: auto;
+    grid-row: 1;
+  }
 }

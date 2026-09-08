@@ -18,8 +18,9 @@ SIGSTORE_BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json"
 REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 
-def _run(cmd: list[str], *, cwd: Path, check: bool = True, capture: bool = False,
-         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], *, cwd: Path, check: bool = True, capture: bool = False, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         cmd,
         cwd=cwd,
@@ -47,6 +48,7 @@ def require_command(name: str) -> str:
 
 def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize actual work and conservative time saved by exact evidence reuse/promotion."""
+
     def reused(record: dict[str, Any]) -> bool:
         return bool(
             record.get("reused_from_sha")
@@ -196,8 +198,9 @@ def _gitea_config() -> tuple[str, str, str] | None:
     return api, repository, token
 
 
-def publish_gitea_status(head_sha: str, state: str, description: str, target_url: str = "",
-                          context: str = REMOTE_STATUS_CONTEXT) -> bool:
+def publish_gitea_status(
+    head_sha: str, state: str, description: str, target_url: str = "", context: str = REMOTE_STATUS_CONTEXT
+) -> bool:
     """Publish a status for the exact SHA. Returns False only when status publishing is unconfigured."""
     config = _gitea_config()
     if config is None:
@@ -208,10 +211,7 @@ def publish_gitea_status(head_sha: str, state: str, description: str, target_url
         raise RuntimeError(f"invalid Gitea status state: {state}")
     api, repository, token = config
     owner, repo = repository.split("/", 1)
-    url = (
-        f"{api}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
-        f"/statuses/{head_sha}"
-    )
+    url = f"{api}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/statuses/{head_sha}"
     payload = {"context": context, "description": description, "state": state}
     if target_url:
         payload["target_url"] = target_url
@@ -279,8 +279,9 @@ def _worktree_snapshot(root: Path) -> tuple[str, str, str]:
     return branch, head, status
 
 
-def bundle_deliver(root: Path, trusted_controller: Path, bundle: str, expected_head: str,
-                   title: str, base: str, python_executable: str) -> int:
+def bundle_deliver(
+    root: Path, trusted_controller: Path, bundle: str, expected_head: str, title: str, base: str, python_executable: str
+) -> int:
     """Deliver from an isolated clone without mutating refs/files in the caller worktree."""
     bundle_path = Path(bundle).expanduser().resolve()
     if not title.strip():
@@ -354,16 +355,19 @@ def compare_evidence(full_evidence: Path, incremental_evidence: Path) -> dict[st
         after = inc_records.get(name, {})
         full_seconds = float(before.get("duration_seconds", 0.0) or 0.0)
         incremental_seconds = float(after.get("duration_seconds", 0.0) or 0.0)
-        gate_rows.append({
-            "gate": name,
-            "full_seconds": round(full_seconds, 3),
-            "incremental_seconds": round(incremental_seconds, 3),
-            "measured_delta_seconds": round(full_seconds - incremental_seconds, 3),
-            "incremental_source": (
-                f"reused {after.get('reused_from_sha')}" if after.get("reused_from_sha")
-                else ("skipped" if after.get("status") == "SKIP" else "executed")
-            ),
-        })
+        gate_rows.append(
+            {
+                "gate": name,
+                "full_seconds": round(full_seconds, 3),
+                "incremental_seconds": round(incremental_seconds, 3),
+                "measured_delta_seconds": round(full_seconds - incremental_seconds, 3),
+                "incremental_source": (
+                    f"reused {after.get('reused_from_sha')}"
+                    if after.get("reused_from_sha")
+                    else ("skipped" if after.get("status") == "SKIP" else "executed")
+                ),
+            }
+        )
     full_metrics = evidence_metrics(list(full_records.values()))
     inc_metrics = evidence_metrics(list(inc_records.values()))
     full_seconds = float(full_metrics["executed_seconds"])
@@ -379,13 +383,16 @@ def compare_evidence(full_evidence: Path, incremental_evidence: Path) -> dict[st
         "incremental_total_gate_seconds": inc_seconds,
         "measured_time_saved_seconds": round(full_seconds - inc_seconds, 3),
         "measured_savings_percent": round(((full_seconds - inc_seconds) / full_seconds) * 100.0, 1)
-        if full_seconds else 0.0,
+        if full_seconds
+        else 0.0,
         "full_deliver_wall_seconds": full_wall,
         "incremental_deliver_wall_seconds": inc_wall,
         "measured_deliver_time_saved_seconds": round(float(full_wall) - float(inc_wall), 3)
-        if full_wall is not None and inc_wall is not None else None,
+        if full_wall is not None and inc_wall is not None
+        else None,
         "measured_deliver_savings_percent": round(((float(full_wall) - float(inc_wall)) / float(full_wall)) * 100.0, 1)
-        if full_wall not in (None, 0, 0.0) and inc_wall is not None else None,
+        if full_wall not in (None, 0, 0.0) and inc_wall is not None
+        else None,
         "full_executed_gates": full_metrics["executed_gates"],
         "incremental_executed_gates": inc_metrics["executed_gates"],
         "incremental_reused_gates": inc_metrics["reused_gates"],
@@ -407,17 +414,13 @@ def _github_config() -> tuple[str, str, str] | None:
     return api, repository, token
 
 
-def _publish_github_status(head_sha: str, state: str, description: str, target_url: str,
-                           context: str) -> None:
+def _publish_github_status(head_sha: str, state: str, description: str, target_url: str, context: str) -> None:
     config = _github_config()
     if config is None:
         raise RuntimeError("GitHub status publishing is not configured")
     api, repository, token = config
     owner, repo = repository.split("/", 1)
-    url = (
-        f"{api}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
-        f"/statuses/{head_sha}"
-    )
+    url = f"{api}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/statuses/{head_sha}"
     payload = {"context": context, "description": description, "state": state}
     if target_url:
         payload["target_url"] = target_url
@@ -443,8 +446,9 @@ def _publish_github_status(head_sha: str, state: str, description: str, target_u
         raise RuntimeError(f"GitHub status publish failed: {exc.reason}") from exc
 
 
-def publish_remote_status(head_sha: str, state: str, description: str, target_url: str = "",
-                          context: str = REMOTE_STATUS_CONTEXT) -> bool:
+def publish_remote_status(
+    head_sha: str, state: str, description: str, target_url: str = "", context: str = REMOTE_STATUS_CONTEXT
+) -> bool:
     """Publish to the single configured forge provider, always against the exact SHA."""
     has_gitea = _gitea_config() is not None
     has_github = _github_config() is not None

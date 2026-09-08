@@ -1,0 +1,86 @@
+version: 1
+status: exact
+purpose: separate application observability, SRE telemetry, and security analytics without overlapping active control planes
+
+authorities:
+  application_telemetry_gateway: rotel
+  infrastructure_telemetry_collector: opentelemetry-collector
+  metrics_scraper: vmagent
+  metrics_storage: victoriametrics
+  infrastructure_log_storage: victorialogs
+  application_observability_storage: clickhouse
+  application_observability_ui: hyperdx
+  sre_dashboards: grafana
+  rule_evaluation: vmalert
+  notification_routing: alertmanager
+  security_ingest_pipeline: data-prepper
+  security_analytics: wazuh
+  security_search_storage: opensearch
+
+application_telemetry:
+  instrumentation: opentelemetry
+  transport: otlp
+  gateway: rotel
+  pipelines:
+    traces: [rotel, clickhouse, hyperdx]
+    logs: [rotel, clickhouse, hyperdx]
+    metrics: [rotel, vmagent, victoriametrics]
+  dashboard_consumer: hyperdx
+
+sre_metrics:
+  exposition_protocol: prometheus
+  scraper: vmagent
+  storage: victoriametrics
+  rule_evaluator: vmalert
+  notification_router: alertmanager
+  dashboard_consumer: grafana
+  source_policy: native-metrics-first
+  sources:
+    - rke2
+    - nodes
+    - cilium
+    - istio
+    - strimzi-kafka
+    - cloudnativepg
+    - tekton
+    - rabbitmq
+    - redis
+  exporters:
+    node: node-exporter
+    kubernetes_objects: kube-state-metrics
+    policy: add-only-when-native-metrics-are-insufficient
+
+infrastructure_logs:
+  sources: [rke2, nodes, pods, journald, kubernetes-events]
+  collector: opentelemetry-collector
+  storage: victorialogs
+  rule_evaluator: vmalert
+  notification_router: alertmanager
+  dashboard_consumer: grafana
+
+security_telemetry:
+  pipeline: data-prepper
+  storage: opensearch
+  analytics: wazuh
+  allowed_purposes: [security-enrichment, siem]
+  forbidden_purposes: [general-application-logs, general-infrastructure-logs]
+
+hyperdx:
+  telemetry_storage: clickhouse
+  metadata_store: mongodb
+  metadata_scope: hyperdx-internal-only
+  business_data_forbidden: true
+
+anti_duplication:
+  forbidden_active_components:
+    - prometheus-server-tsdb
+    - fluent-bit-general-log-shipper
+    - opensearch-general-log-store
+    - data-prepper-general-log-pipeline
+  rules:
+    - prometheus-is-an-exposition-protocol-and-exporter-ecosystem-not-the-primary-tsdb
+    - application-otlp-uses-rotel-as-the-edge-gateway
+    - kubernetes-and-host-telemetry-uses-opentelemetry-collector
+    - data-prepper-is-security-only
+    - grafana-is-sre-visualization-not-alert-rule-authority
+    - vmalert-evaluates-rules-and-alertmanager-routes-notifications

@@ -4,593 +4,593 @@
  */
 
 export interface paths {
-    "/v1/products": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List product base facts */
-        get: operations["listProducts"];
-        put?: never;
-        /** Create a product */
-        post: operations["createProduct"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
+  "/v1/products": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
     };
-    "/v1/products/{productId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
-        };
-        /** Get product base facts */
-        get: operations["getProduct"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /** Update product base facts */
-        patch: operations["updateProduct"];
-        trace?: never;
+    /** List product base facts */
+    get: operations["listProducts"];
+    put?: never;
+    /** Create a product */
+    post: operations["createProduct"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/products/{productId}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
     };
-    "/v1/products/{productId}/skus": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
-        };
-        /** List SKUs for a product */
-        get: operations["listProductSkus"];
-        put?: never;
-        /** Create a SKU for a product */
-        post: operations["createProductSku"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
+    /** Get product base facts */
+    get: operations["getProduct"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update product base facts */
+    patch: operations["updateProduct"];
+    trace?: never;
+  };
+  "/v1/products/{productId}/skus": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
     };
-    "/v1/products/{productId}/skus/{skuId}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-                skuId: components["parameters"]["SkuId"];
-            };
-            cookie?: never;
-        };
-        /** Get a SKU */
-        get: operations["getProductSku"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        /** Update a SKU */
-        patch: operations["updateProductSku"];
-        trace?: never;
+    /** List SKUs for a product */
+    get: operations["listProductSkus"];
+    put?: never;
+    /** Create a SKU for a product */
+    post: operations["createProductSku"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/products/{productId}/skus/{skuId}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+        skuId: components["parameters"]["SkuId"];
+      };
+      cookie?: never;
     };
+    /** Get a SKU */
+    get: operations["getProductSku"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update a SKU */
+    patch: operations["updateProductSku"];
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-    schemas: {
-        AttributeMap: {
-            [key: string]: components["schemas"]["AttributeValue"];
-        };
-        AttributeValue: string | number | boolean | string[];
-        CreateProductRequest: {
-            attributes?: components["schemas"]["AttributeMap"];
-            brand?: string;
-            description?: string;
-            manufacturerPartNumber?: string;
-            name: string;
-            status?: components["schemas"]["ProductStatus"];
-        };
-        CreateSkuRequest: {
-            attributes?: components["schemas"]["AttributeMap"];
-            code: string;
-            gtin?: string;
-            optionValues?: {
-                [key: string]: string;
-            };
-            status?: components["schemas"]["SkuStatus"];
-        };
-        Problem: {
-            code: string;
-            detail?: string;
-            errors?: components["schemas"]["ValidationIssue"][];
-            /** Format: uri-reference */
-            instance?: string;
-            requestId: string;
-            status: number;
-            title: string;
-            /** Format: uri-reference */
-            type: string;
-        };
-        /**
-         * @example {
-         *       "attributes": {
-         *         "adjustable": true,
-         *         "material": "metal"
-         *       },
-         *       "brand": "NOMA",
-         *       "createdAt": "2026-09-06T10:00:00Z",
-         *       "description": "Lampe orientable en métal.",
-         *       "id": "018f2b65-6dc4-7d10-9f6f-49fc8f84eabb",
-         *       "manufacturerPartNumber": "NOMA-LAMP-01",
-         *       "name": "Lampe de bureau NOMA",
-         *       "status": "active",
-         *       "updatedAt": "2026-09-06T10:00:00Z",
-         *       "version": 1
-         *     }
-         */
-        Product: {
-            attributes: components["schemas"]["AttributeMap"];
-            brand?: string;
-            /** Format: date-time */
-            createdAt: string;
-            description?: string;
-            /** Format: uuid */
-            id: string;
-            manufacturerPartNumber?: string;
-            name: string;
-            status: components["schemas"]["ProductStatus"];
-            /** Format: date-time */
-            updatedAt: string;
-            version: number;
-        };
-        ProductListResponse: {
-            items: components["schemas"]["Product"][];
-            nextCursor?: string | null;
-        };
-        /** @enum {string} */
-        ProductStatus: "draft" | "active" | "archived";
-        /**
-         * @example {
-         *       "attributes": {
-         *         "voltage": "230V"
-         *       },
-         *       "code": "NOMA-LAMP-01-BLK",
-         *       "createdAt": "2026-09-06T10:00:00Z",
-         *       "gtin": "12345678",
-         *       "id": "018f2b66-3a39-7d2a-b93e-839061ebbb80",
-         *       "optionValues": {
-         *         "color": "black"
-         *       },
-         *       "productId": "018f2b65-6dc4-7d10-9f6f-49fc8f84eabb",
-         *       "status": "active",
-         *       "updatedAt": "2026-09-06T10:00:00Z",
-         *       "version": 1
-         *     }
-         */
-        Sku: {
-            attributes: components["schemas"]["AttributeMap"];
-            code: string;
-            /** Format: date-time */
-            createdAt: string;
-            gtin?: string;
-            /** Format: uuid */
-            id: string;
-            optionValues: {
-                [key: string]: string;
-            };
-            /** Format: uuid */
-            productId: string;
-            status: components["schemas"]["SkuStatus"];
-            /** Format: date-time */
-            updatedAt: string;
-            version: number;
-        };
-        SkuListResponse: {
-            items: components["schemas"]["Sku"][];
-            nextCursor?: string | null;
-        };
-        /** @enum {string} */
-        SkuStatus: "active" | "inactive" | "archived";
-        UpdateProductRequest: {
-            attributes?: components["schemas"]["AttributeMap"];
-            brand?: string;
-            description?: string;
-            manufacturerPartNumber?: string;
-            name?: string;
-            status?: components["schemas"]["ProductStatus"];
-        };
-        UpdateSkuRequest: {
-            attributes?: components["schemas"]["AttributeMap"];
-            code?: string;
-            gtin?: string;
-            optionValues?: {
-                [key: string]: string;
-            };
-            status?: components["schemas"]["SkuStatus"];
-        };
-        ValidationIssue: {
-            code: string;
-            field: string;
-            message: string;
-        };
+  schemas: {
+    AttributeMap: {
+      [key: string]: components["schemas"]["AttributeValue"];
     };
-    responses: {
-        /** @description Request syntax or parameters are invalid. */
-        BadRequest: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description The command conflicts with current state, uniqueness, or idempotency history. */
-        Conflict: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description The authenticated principal is not allowed to perform the operation. */
-        Forbidden: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description The requested resource does not exist. */
-        NotFound: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description The If-Match precondition does not match the current representation. */
-        PreconditionFailed: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description Authentication is required or the bearer token is invalid. */
-        Unauthorized: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
-        /** @description Request is syntactically valid but violates domain validation rules. */
-        UnprocessableEntity: {
-            headers: {
-                "X-Request-ID": components["headers"]["RequestId"];
-                [name: string]: unknown;
-            };
-            content: {
-                "application/problem+json": components["schemas"]["Problem"];
-            };
-        };
+    AttributeValue: string | number | boolean | string[];
+    CreateProductRequest: {
+      attributes?: components["schemas"]["AttributeMap"];
+      brand?: string;
+      description?: string;
+      manufacturerPartNumber?: string;
+      name: string;
+      status?: components["schemas"]["ProductStatus"];
     };
-    parameters: {
-        /** @description Opaque cursor returned by the previous page. */
-        Cursor: string;
-        /** @description Stable caller-generated key used to make replayable commands idempotent. */
-        IdempotencyKey: string;
-        /** @description ETag of the representation being modified; prevents lost updates. */
-        IfMatch: string;
-        /** @description Maximum number of items to return. */
-        Limit: number;
-        ProductId: string;
-        SkuId: string;
+    CreateSkuRequest: {
+      attributes?: components["schemas"]["AttributeMap"];
+      code: string;
+      gtin?: string;
+      optionValues?: {
+        [key: string]: string;
+      };
+      status?: components["schemas"]["SkuStatus"];
     };
-    requestBodies: never;
-    headers: {
-        /** @description Opaque representation version used with If-Match. */
-        ETag: string;
-        /** @description Correlation identifier for the request. */
-        RequestId: string;
+    Problem: {
+      code: string;
+      detail?: string;
+      errors?: components["schemas"]["ValidationIssue"][];
+      /** Format: uri-reference */
+      instance?: string;
+      requestId: string;
+      status: number;
+      title: string;
+      /** Format: uri-reference */
+      type: string;
     };
-    pathItems: never;
+    /**
+     * @example {
+     *       "attributes": {
+     *         "adjustable": true,
+     *         "material": "metal"
+     *       },
+     *       "brand": "NOMA",
+     *       "createdAt": "2026-09-06T10:00:00Z",
+     *       "description": "Lampe orientable en métal.",
+     *       "id": "018f2b65-6dc4-7d10-9f6f-49fc8f84eabb",
+     *       "manufacturerPartNumber": "NOMA-LAMP-01",
+     *       "name": "Lampe de bureau NOMA",
+     *       "status": "active",
+     *       "updatedAt": "2026-09-06T10:00:00Z",
+     *       "version": 1
+     *     }
+     */
+    Product: {
+      attributes: components["schemas"]["AttributeMap"];
+      brand?: string;
+      /** Format: date-time */
+      createdAt: string;
+      description?: string;
+      /** Format: uuid */
+      id: string;
+      manufacturerPartNumber?: string;
+      name: string;
+      status: components["schemas"]["ProductStatus"];
+      /** Format: date-time */
+      updatedAt: string;
+      version: number;
+    };
+    ProductListResponse: {
+      items: components["schemas"]["Product"][];
+      nextCursor?: string | null;
+    };
+    /** @enum {string} */
+    ProductStatus: "draft" | "active" | "archived";
+    /**
+     * @example {
+     *       "attributes": {
+     *         "voltage": "230V"
+     *       },
+     *       "code": "NOMA-LAMP-01-BLK",
+     *       "createdAt": "2026-09-06T10:00:00Z",
+     *       "gtin": "12345678",
+     *       "id": "018f2b66-3a39-7d2a-b93e-839061ebbb80",
+     *       "optionValues": {
+     *         "color": "black"
+     *       },
+     *       "productId": "018f2b65-6dc4-7d10-9f6f-49fc8f84eabb",
+     *       "status": "active",
+     *       "updatedAt": "2026-09-06T10:00:00Z",
+     *       "version": 1
+     *     }
+     */
+    Sku: {
+      attributes: components["schemas"]["AttributeMap"];
+      code: string;
+      /** Format: date-time */
+      createdAt: string;
+      gtin?: string;
+      /** Format: uuid */
+      id: string;
+      optionValues: {
+        [key: string]: string;
+      };
+      /** Format: uuid */
+      productId: string;
+      status: components["schemas"]["SkuStatus"];
+      /** Format: date-time */
+      updatedAt: string;
+      version: number;
+    };
+    SkuListResponse: {
+      items: components["schemas"]["Sku"][];
+      nextCursor?: string | null;
+    };
+    /** @enum {string} */
+    SkuStatus: "active" | "inactive" | "archived";
+    UpdateProductRequest: {
+      attributes?: components["schemas"]["AttributeMap"];
+      brand?: string;
+      description?: string;
+      manufacturerPartNumber?: string;
+      name?: string;
+      status?: components["schemas"]["ProductStatus"];
+    };
+    UpdateSkuRequest: {
+      attributes?: components["schemas"]["AttributeMap"];
+      code?: string;
+      gtin?: string;
+      optionValues?: {
+        [key: string]: string;
+      };
+      status?: components["schemas"]["SkuStatus"];
+    };
+    ValidationIssue: {
+      code: string;
+      field: string;
+      message: string;
+    };
+  };
+  responses: {
+    /** @description Request syntax or parameters are invalid. */
+    BadRequest: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description The command conflicts with current state, uniqueness, or idempotency history. */
+    Conflict: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description The authenticated principal is not allowed to perform the operation. */
+    Forbidden: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description The requested resource does not exist. */
+    NotFound: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description The If-Match precondition does not match the current representation. */
+    PreconditionFailed: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description Authentication is required or the bearer token is invalid. */
+    Unauthorized: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+    /** @description Request is syntactically valid but violates domain validation rules. */
+    UnprocessableEntity: {
+      headers: {
+        "X-Request-ID": components["headers"]["RequestId"];
+        [name: string]: unknown;
+      };
+      content: {
+        "application/problem+json": components["schemas"]["Problem"];
+      };
+    };
+  };
+  parameters: {
+    /** @description Opaque cursor returned by the previous page. */
+    Cursor: string;
+    /** @description Stable caller-generated key used to make replayable commands idempotent. */
+    IdempotencyKey: string;
+    /** @description ETag of the representation being modified; prevents lost updates. */
+    IfMatch: string;
+    /** @description Maximum number of items to return. */
+    Limit: number;
+    ProductId: string;
+    SkuId: string;
+  };
+  requestBodies: never;
+  headers: {
+    /** @description Opaque representation version used with If-Match. */
+    ETag: string;
+    /** @description Correlation identifier for the request. */
+    RequestId: string;
+  };
+  pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    listProducts: {
-        parameters: {
-            query?: {
-                /** @description Maximum number of items to return. */
-                limit?: components["parameters"]["Limit"];
-                /** @description Opaque cursor returned by the previous page. */
-                cursor?: components["parameters"]["Cursor"];
-                status?: components["schemas"]["ProductStatus"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Product page. */
-            200: {
-                headers: {
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ProductListResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            default: components["responses"]["BadRequest"];
-        };
+  listProducts: {
+    parameters: {
+      query?: {
+        /** @description Maximum number of items to return. */
+        limit?: components["parameters"]["Limit"];
+        /** @description Opaque cursor returned by the previous page. */
+        cursor?: components["parameters"]["Cursor"];
+        status?: components["schemas"]["ProductStatus"];
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
     };
-    createProduct: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Stable caller-generated key used to make replayable commands idempotent. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-            };
-            path?: never;
-            cookie?: never;
+    requestBody?: never;
+    responses: {
+      /** @description Product page. */
+      200: {
+        headers: {
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateProductRequest"];
-            };
+        content: {
+          "application/json": components["schemas"]["ProductListResponse"];
         };
-        responses: {
-            /** @description Product created. */
-            201: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Product"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["UnprocessableEntity"];
-            default: components["responses"]["BadRequest"];
-        };
+      };
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      default: components["responses"]["BadRequest"];
     };
-    getProduct: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Product base facts. */
-            200: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Product"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            default: components["responses"]["BadRequest"];
-        };
+  };
+  createProduct: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Stable caller-generated key used to make replayable commands idempotent. */
+        "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+      };
+      path?: never;
+      cookie?: never;
     };
-    updateProduct: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Stable caller-generated key used to make replayable commands idempotent. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-                /** @description ETag of the representation being modified; prevents lost updates. */
-                "If-Match": components["parameters"]["IfMatch"];
-            };
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateProductRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated product. */
-            200: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Product"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            412: components["responses"]["PreconditionFailed"];
-            422: components["responses"]["UnprocessableEntity"];
-            default: components["responses"]["BadRequest"];
-        };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateProductRequest"];
+      };
     };
-    listProductSkus: {
-        parameters: {
-            query?: {
-                /** @description Maximum number of items to return. */
-                limit?: components["parameters"]["Limit"];
-                /** @description Opaque cursor returned by the previous page. */
-                cursor?: components["parameters"]["Cursor"];
-            };
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
+    responses: {
+      /** @description Product created. */
+      201: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
         };
-        requestBody?: never;
-        responses: {
-            /** @description SKU page. */
-            200: {
-                headers: {
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SkuListResponse"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            default: components["responses"]["BadRequest"];
+        content: {
+          "application/json": components["schemas"]["Product"];
         };
+      };
+      400: components["responses"]["BadRequest"];
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      409: components["responses"]["Conflict"];
+      422: components["responses"]["UnprocessableEntity"];
+      default: components["responses"]["BadRequest"];
     };
-    createProductSku: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Stable caller-generated key used to make replayable commands idempotent. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-            };
-            path: {
-                productId: components["parameters"]["ProductId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateSkuRequest"];
-            };
-        };
-        responses: {
-            /** @description SKU created. */
-            201: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Sku"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            422: components["responses"]["UnprocessableEntity"];
-            default: components["responses"]["BadRequest"];
-        };
+  };
+  getProduct: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
     };
-    getProductSku: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                productId: components["parameters"]["ProductId"];
-                skuId: components["parameters"]["SkuId"];
-            };
-            cookie?: never;
+    requestBody?: never;
+    responses: {
+      /** @description Product base facts. */
+      200: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
         };
-        requestBody?: never;
-        responses: {
-            /** @description SKU. */
-            200: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Sku"];
-                };
-            };
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            default: components["responses"]["BadRequest"];
+        content: {
+          "application/json": components["schemas"]["Product"];
         };
+      };
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      default: components["responses"]["BadRequest"];
     };
-    updateProductSku: {
-        parameters: {
-            query?: never;
-            header: {
-                /** @description Stable caller-generated key used to make replayable commands idempotent. */
-                "Idempotency-Key": components["parameters"]["IdempotencyKey"];
-                /** @description ETag of the representation being modified; prevents lost updates. */
-                "If-Match": components["parameters"]["IfMatch"];
-            };
-            path: {
-                productId: components["parameters"]["ProductId"];
-                skuId: components["parameters"]["SkuId"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateSkuRequest"];
-            };
-        };
-        responses: {
-            /** @description Updated SKU. */
-            200: {
-                headers: {
-                    ETag: components["headers"]["ETag"];
-                    "X-Request-ID": components["headers"]["RequestId"];
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Sku"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
-            412: components["responses"]["PreconditionFailed"];
-            422: components["responses"]["UnprocessableEntity"];
-            default: components["responses"]["BadRequest"];
-        };
+  };
+  updateProduct: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Stable caller-generated key used to make replayable commands idempotent. */
+        "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+        /** @description ETag of the representation being modified; prevents lost updates. */
+        "If-Match": components["parameters"]["IfMatch"];
+      };
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
     };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UpdateProductRequest"];
+      };
+    };
+    responses: {
+      /** @description Updated product. */
+      200: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Product"];
+        };
+      };
+      400: components["responses"]["BadRequest"];
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      409: components["responses"]["Conflict"];
+      412: components["responses"]["PreconditionFailed"];
+      422: components["responses"]["UnprocessableEntity"];
+      default: components["responses"]["BadRequest"];
+    };
+  };
+  listProductSkus: {
+    parameters: {
+      query?: {
+        /** @description Maximum number of items to return. */
+        limit?: components["parameters"]["Limit"];
+        /** @description Opaque cursor returned by the previous page. */
+        cursor?: components["parameters"]["Cursor"];
+      };
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description SKU page. */
+      200: {
+        headers: {
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SkuListResponse"];
+        };
+      };
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      default: components["responses"]["BadRequest"];
+    };
+  };
+  createProductSku: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Stable caller-generated key used to make replayable commands idempotent. */
+        "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+      };
+      path: {
+        productId: components["parameters"]["ProductId"];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateSkuRequest"];
+      };
+    };
+    responses: {
+      /** @description SKU created. */
+      201: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Sku"];
+        };
+      };
+      400: components["responses"]["BadRequest"];
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      409: components["responses"]["Conflict"];
+      422: components["responses"]["UnprocessableEntity"];
+      default: components["responses"]["BadRequest"];
+    };
+  };
+  getProductSku: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        productId: components["parameters"]["ProductId"];
+        skuId: components["parameters"]["SkuId"];
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description SKU. */
+      200: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Sku"];
+        };
+      };
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      default: components["responses"]["BadRequest"];
+    };
+  };
+  updateProductSku: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Stable caller-generated key used to make replayable commands idempotent. */
+        "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+        /** @description ETag of the representation being modified; prevents lost updates. */
+        "If-Match": components["parameters"]["IfMatch"];
+      };
+      path: {
+        productId: components["parameters"]["ProductId"];
+        skuId: components["parameters"]["SkuId"];
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["UpdateSkuRequest"];
+      };
+    };
+    responses: {
+      /** @description Updated SKU. */
+      200: {
+        headers: {
+          ETag: components["headers"]["ETag"];
+          "X-Request-ID": components["headers"]["RequestId"];
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Sku"];
+        };
+      };
+      400: components["responses"]["BadRequest"];
+      401: components["responses"]["Unauthorized"];
+      403: components["responses"]["Forbidden"];
+      404: components["responses"]["NotFound"];
+      409: components["responses"]["Conflict"];
+      412: components["responses"]["PreconditionFailed"];
+      422: components["responses"]["UnprocessableEntity"];
+      default: components["responses"]["BadRequest"];
+    };
+  };
 }

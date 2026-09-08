@@ -37,9 +37,7 @@ class TektonRuntimeWiringTests(unittest.TestCase):
 
     def test_pipeline_passes_runtime_auth_only_to_the_tasks_that_need_it(self):
         pipeline = self.read("platform/tekton/pipelines/affected.yaml")
-        for name in (
-            "evidence-repository", "evidence-signing-secret", "registry-auth-secret", "status-secret"
-        ):
+        for name in ("evidence-repository", "evidence-signing-secret", "registry-auth-secret", "status-secret"):
             self.assertIn(f"name: {name}", pipeline)
         classify = pipeline.split("- name: classify", 1)[1].split("- name: global-gates", 1)[0]
         self.assertIn("evidence-repository", classify)

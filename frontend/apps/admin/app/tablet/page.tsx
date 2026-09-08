@@ -4,10 +4,7 @@ import { ProductArt } from "@noma/ui";
 import Link from "next/link";
 
 export default async function TabletPage() {
-  const [metrics, orders] = await Promise.all([
-    getDashboardMetrics(),
-    getOrders(),
-  ]);
+  const [metrics, orders] = await Promise.all([getDashboardMetrics(), getOrders()]);
   return (
     <div className="tablet-view">
       <header>
@@ -60,11 +57,7 @@ export default async function TabletPage() {
         </section>
         <section className="data-panel noma-panel">
           <h2>Commandes récentes</h2>
-          <div
-            className="table-scroll"
-            tabIndex={0}
-            aria-label="Commandes récentes, défilement horizontal"
-          >
+          <div className="table-scroll" aria-label="Commandes récentes, défilement horizontal">
             <table className="admin-table">
               <thead>
                 <tr>

@@ -1,22 +1,12 @@
 import { Button } from "@noma/ui";
-import {
-  ArrowRight,
-  Box,
-  RotateCcw,
-  ShieldAlert,
-  ShoppingCart,
-  Truck,
-} from "lucide-react";
+import { ArrowRight, Box, RotateCcw, ShieldAlert, ShoppingCart, Truck } from "lucide-react";
 import Link from "next/link";
 
 import { getDashboardMetrics, getOrders } from "@/application/admin";
 import { PageHeader, Sparkline, StatusBadge } from "@/components/admin-ui";
 
 export default async function DashboardPage() {
-  const [metrics, orders] = await Promise.all([
-    getDashboardMetrics(),
-    getOrders(),
-  ]);
+  const [metrics, orders] = await Promise.all([getDashboardMetrics(), getOrders()]);
   const actions = [
     {
       label: "Commandes en attente",
@@ -100,15 +90,9 @@ export default async function DashboardPage() {
             <span>Période actuelle</span>
             <span>Période précédente</span>
           </div>
-          <svg
-            viewBox="0 0 600 180"
-            role="img"
-            aria-label="Évolution du chiffre d’affaires sur sept jours"
-          >
-            <path
-              className="grid-line"
-              d="M0 30H600M0 75H600M0 120H600M0 165H600"
-            />
+          <svg viewBox="0 0 600 180">
+            <title>Évolution du chiffre d’affaires sur sept jours</title>
+            <path className="grid-line" d="M0 30H600M0 75H600M0 120H600M0 165H600" />
             <polyline
               className="chart-previous"
               points="0,130 90,75 180,125 270,92 360,120 450,70 540,132 600,96"
@@ -125,15 +109,9 @@ export default async function DashboardPage() {
             <span>Période actuelle</span>
             <span>Période précédente</span>
           </div>
-          <svg
-            viewBox="0 0 600 180"
-            role="img"
-            aria-label="Évolution des commandes"
-          >
-            <path
-              className="grid-line"
-              d="M0 30H600M0 75H600M0 120H600M0 165H600"
-            />
+          <svg viewBox="0 0 600 180">
+            <title>Évolution des commandes</title>
+            <path className="grid-line" d="M0 30H600M0 75H600M0 120H600M0 165H600" />
             <polyline
               className="chart-previous"
               points="0,135 90,90 180,130 270,87 360,139 450,96 540,130 600,105"

@@ -54,8 +54,7 @@ class PerformanceAuditTests(unittest.TestCase):
         task = root / "platform" / "tekton" / "tasks" / "component-gates.yaml"
         task.parent.mkdir(parents=True)
         task.write_text(
-            "name: GOCACHE\nvalue: .context/cache/go-build\n"
-            "name: GOMODCACHE\nvalue: .context/cache/go-mod\n",
+            "name: GOCACHE\nvalue: .context/cache/go-build\nname: GOMODCACHE\nvalue: .context/cache/go-mod\n",
             encoding="utf-8",
         )
         return root
@@ -82,7 +81,9 @@ class PerformanceAuditTests(unittest.TestCase):
 
     def test_component_becomes_critical_when_it_is_longer_than_global_branch(self):
         evidence = self.evidence()
-        next(record for record in evidence["gates"] if record["gate"] == "frontend:storefront")["duration_seconds"] = 12.0
+        next(record for record in evidence["gates"] if record["gate"] == "frontend:storefront")["duration_seconds"] = (
+            12.0
+        )
         critical = AUDIT.tekton_critical_path(evidence["gates"])
         self.assertEqual(12.0, critical["critical_path_estimate_seconds"])
         self.assertEqual("component-matrix", critical["critical_branch"])

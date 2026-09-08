@@ -4,6 +4,7 @@
 The pack is read-only. Task semantics and changed paths choose the smallest
 safe context level; AST outlines are preferred over broad file excerpts.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,8 +65,10 @@ def file_route(files: list[str], cfg: dict) -> str:
 def task_route(task: str, cfg: dict) -> str:
     lowered = task.lower()
     for level in ("L2", "L1"):
-        if any(re.search(rf"(?<![a-z0-9-]){re.escape(str(word).lower())}(?![a-z0-9-])", lowered)
-               for word in cfg["levels"][level].get("task_keywords", [])):
+        if any(
+            re.search(rf"(?<![a-z0-9-]){re.escape(str(word).lower())}(?![a-z0-9-])", lowered)
+            for word in cfg["levels"][level].get("task_keywords", [])
+        ):
             return level
     return "L0"
 
@@ -97,15 +100,20 @@ def service_contract(name: str) -> str:
     owner = yq_json(f'.services."{name}"', OWNERSHIP)
     dep = yq_json(f'.services."{name}"', DEPS)
     services = yq_json(".services", DEPS) or {}
-    consumers = sorted(service for service, contract in services.items()
-                       if name in ((contract or {}).get("sync") or []))
+    consumers = sorted(
+        service for service, contract in services.items() if name in ((contract or {}).get("sync") or [])
+    )
     public = yq_json(f'.contracts."{name}"', PUBLIC_API)
-    return json.dumps({
-        "ownership": owner,
-        "dependency_map": dep,
-        "direct_sync_consumers": consumers,
-        "public_api": public,
-    }, indent=2, sort_keys=True)
+    return json.dumps(
+        {
+            "ownership": owner,
+            "dependency_map": dep,
+            "direct_sync_consumers": consumers,
+            "public_api": public,
+        },
+        indent=2,
+        sort_keys=True,
+    )
 
 
 def excerpt(path: str, max_lines: int) -> str:
@@ -141,7 +149,10 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
         for pattern in patterns:
             p = subprocess.run(
                 ["ast-grep", "run", "--lang", lang, "--pattern", pattern, "--json", str(target)],
-                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                cwd=ROOT,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
             if p.returncode != 0 or not p.stdout.strip():
                 continue
@@ -157,12 +168,12 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
                 pass
     if not collected:
         pattern = r"^(?:func|type|interface|export\s+(?:async\s+)?function|export\s+const|const\s+[A-Za-z0-9_]+\s*=)"
-        p = subprocess.run(["rg", "-n", pattern, str(target)], cwd=ROOT, text=True,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p = subprocess.run(
+            ["rg", "-n", pattern, str(target)], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
         if p.returncode in (0, 1):
             collected.extend(p.stdout.splitlines())
     return "\n".join(dict.fromkeys(collected[:max_lines]))
-
 
 
 def bounded(text: str, max_bytes: int) -> str:

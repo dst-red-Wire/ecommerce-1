@@ -50,10 +50,12 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
 
     def test_extract_servers_from_terraform_show_json(self):
         servers = module.extract_servers_from_show(
-            self.show_doc([
-                self.server("mgmt-cp-1", "198.51.100.11"),
-                self.server("mgmt-worker-1", "198.51.100.12"),
-            ])
+            self.show_doc(
+                [
+                    self.server("mgmt-cp-1", "198.51.100.11"),
+                    self.server("mgmt-worker-1", "198.51.100.12"),
+                ]
+            )
         )
 
         self.assertEqual("198.51.100.11", servers["mgmt-cp-1"]["ipv4"])
@@ -66,10 +68,12 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
     def test_duplicate_server_index_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "duplicate MGMT hcloud_server index"):
             module.extract_servers_from_show(
-                self.show_doc([
-                    self.server("mgmt-cp-1"),
-                    self.server("mgmt-cp-1", "198.51.100.20"),
-                ])
+                self.show_doc(
+                    [
+                        self.server("mgmt-cp-1"),
+                        self.server("mgmt-cp-1", "198.51.100.20"),
+                    ]
+                )
             )
 
     def test_validate_servers_requires_exact_canonical_node_set(self):

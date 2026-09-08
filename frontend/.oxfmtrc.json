@@ -1,0 +1,11 @@
+{
+  "printWidth": 80,
+  "sortPackageJson": false,
+  "ignorePatterns": [
+    "**/.next/**",
+    "**/node_modules/**",
+    "playwright-report/**",
+    "test-results/**",
+    "screenshots/**"
+  ]
+}

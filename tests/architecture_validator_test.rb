@@ -449,9 +449,10 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform registry] => "docker-hub",
       %w[platform runtime_security] => "falco",
       %w[stateful object_storage] => "minio-community",
-      %w[observability log_shipper] => "vector",
-      %w[observability log_pipeline] => "logstash",
-      %w[observability logs] => "loki",
+      %w[observability application_gateway] => "opentelemetry-collector",
+      %w[observability metrics] => "prometheus",
+      %w[observability infrastructure_logs] => "loki",
+      %w[observability security_pipeline] => "logstash",
       %w[observability security] => "splunk"
     }
     mutations.each do |path, value|

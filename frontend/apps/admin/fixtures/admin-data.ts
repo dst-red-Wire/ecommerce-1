@@ -220,36 +220,25 @@ const paymentSequence: readonly OrderViewModel["payment"][] = [
   "CAPTURED",
 ];
 
-export const orders: readonly OrderViewModel[] = Array.from(
-  { length: 12 },
-  (_, index) => ({
-    id: `ORD-2026-${String(8471 - index).padStart(6, "0")}`,
-    date:
-      index < 6
-        ? `16/05/2026 ${["10:24", "10:18", "09:58", "09:32", "09:15", "08:33"][index]}`
-        : `15/05/2026 ${String(18 - index).padStart(2, "0")}:20`,
-    customerReference: `PO-${5578 - index}`,
-    customerName:
-      ["Jean Dupont", "Sophie Martin", "Lucas Bernard", "Alice Moreau"][
-        index % 4
-      ] ?? "Client NOMA",
-    amount:
-      [129.9, 89, 109, 149, 79, 99, 149, 119, 139, 89, 109, 159][index] ?? 99,
-    payment: paymentSequence[index] ?? "CAPTURED",
-    fulfillment: fulfillmentSequence[index] ?? "PROCESSING",
-    risk:
-      index === 11
-        ? "HIGH"
-        : index === 4 || index === 6 || index === 9
-          ? "MEDIUM"
-          : "LOW",
-    shipping:
-      index === 6 || index === 7 || index === 9 || index === 11
-        ? "—"
-        : `${index % 2 ? "Chronopost" : "Colissimo"}\n6JX${123456789 + index}FR`,
-    status: statusSequence[index] ?? "En attente",
-  }),
-);
+export const orders: readonly OrderViewModel[] = Array.from({ length: 12 }, (_, index) => ({
+  id: `ORD-2026-${String(8471 - index).padStart(6, "0")}`,
+  date:
+    index < 6
+      ? `16/05/2026 ${["10:24", "10:18", "09:58", "09:32", "09:15", "08:33"][index]}`
+      : `15/05/2026 ${String(18 - index).padStart(2, "0")}:20`,
+  customerReference: `PO-${5578 - index}`,
+  customerName:
+    ["Jean Dupont", "Sophie Martin", "Lucas Bernard", "Alice Moreau"][index % 4] ?? "Client NOMA",
+  amount: [129.9, 89, 109, 149, 79, 99, 149, 119, 139, 89, 109, 159][index] ?? 99,
+  payment: paymentSequence[index] ?? "CAPTURED",
+  fulfillment: fulfillmentSequence[index] ?? "PROCESSING",
+  risk: index === 11 ? "HIGH" : index === 4 || index === 6 || index === 9 ? "MEDIUM" : "LOW",
+  shipping:
+    index === 6 || index === 7 || index === 9 || index === 11
+      ? "—"
+      : `${index % 2 ? "Chronopost" : "Colissimo"}\n6JX${123456789 + index}FR`,
+  status: statusSequence[index] ?? "En attente",
+}));
 
 export const inventory: readonly InventoryItemViewModel[] = Array.from(
   { length: 10 },
@@ -258,12 +247,7 @@ export const inventory: readonly InventoryItemViewModel[] = Array.from(
     const reserved = [16, 10, 8, 4, 2, 20, 5, 30, 1, 6][index] ?? 0;
     return {
       sku: `SKU-NOMA-${String(471 + Math.floor(index / 3)).padStart(4, "0")}-${index % 2 ? "WHT" : "BLK"}-${["M", "L", "XL"][index % 3]}`,
-      product:
-        index < 5
-          ? "NOMA Runner 2.0"
-          : index < 8
-            ? "NOMA Court Classic"
-            : "NOMA Trail",
+      product: index < 5 ? "NOMA Runner 2.0" : index < 8 ? "NOMA Court Classic" : "NOMA Trail",
       variant: index % 2 ? "Blanc" : "Noir",
       available,
       reserved,

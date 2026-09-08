@@ -7,7 +7,10 @@ TASKS = (ROOT / "platform/ansible/roles/product_persistence/tasks/main.yml").rea
 
 class ProductPersistenceBootstrapContractTest(unittest.TestCase):
     def test_sqlc_generation_precedes_dependency_resolution(self):
-        self.assertLess(TASKS.index("Generate Product sqlc bindings"), TASKS.index("Reconcile exact Product persistence Go dependencies"))
+        self.assertLess(
+            TASKS.index("Generate Product sqlc bindings"),
+            TASKS.index("Reconcile exact Product persistence Go dependencies"),
+        )
 
     def test_go_dependency_resolution_is_workspace_isolated(self):
         self.assertIn("GOWORK: 'off'", TASKS)
