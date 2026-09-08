@@ -161,6 +161,7 @@ module ArchitectureValidator
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
     events, events_path = required_machine_contract(contracts, "event_contracts")
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
+    deployment_waves, = required_machine_contract(contracts, "deployment_waves")
     network, = required_machine_contract(contracts, "network_plan")
     mgmt, = required_machine_contract(contracts, "mgmt_inventory")
     prod, = required_machine_contract(contracts, "prod_inventory")
@@ -395,11 +396,10 @@ module ArchitectureValidator
       end
     end
 
-    waves = YAML.safe_load(File.read(File.join(root, "config/infrastructure/deployment-waves.yaml")))
-    wave_components = waves.fetch("waves").flat_map do |wave|
+    wave_components = deployment_waves.fetch("waves").flat_map do |wave|
       Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
     end
-    %w[mongodb-oss-self-hosted lakefs lakefs-metadata-cnpg mlflow-metadata-cnpg].each do |component|
+    %w[mongodb-oss-self-hosted lakefs lakefs-metadata-cnpg mlflow mlflow-metadata-cnpg].each do |component|
       check_equal(errors, "deployment waves include #{component}", true, wave_components.include?(component))
     end
 

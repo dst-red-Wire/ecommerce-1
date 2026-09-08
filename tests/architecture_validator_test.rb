@@ -33,7 +33,7 @@ class ArchitectureValidatorTest < Minitest::Test
         data["waves"].find { |wave| wave["id"] == "60-stateful" }["parallel_groups"][0].delete("lakefs")
       end
       errors = ArchitectureValidator.validate(root)
-      assert_includes errors, "deployment waves include lakefs expected=true actual=false"
+      assert_includes errors, "deployment waves include lakefs: expected true, got false"
     end
   end
 
