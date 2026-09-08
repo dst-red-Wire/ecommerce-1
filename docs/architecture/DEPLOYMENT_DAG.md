@@ -73,8 +73,7 @@ May run in parallel after storage/network prerequisites:
 
 - CNPG/PostgreSQL;
 - dedicated CNPG metadata databases for lakeFS and MLflow;
-- lakeFS dataset version authority backed by SeaweedFS S3;
-- MLflow experiments, lineage and champion/challenger service backed by its dedicated CNPG metadata database;
+- after healthy SeaweedFS and dedicated CNPG metadata databases: lakeFS dataset version authority, then MLflow experiments, lineage and champion/challenger service;
 - Strimzi Kafka KRaft;
 - RabbitMQ;
 - Redis Cluster;
