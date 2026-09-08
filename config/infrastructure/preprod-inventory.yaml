@@ -88,3 +88,5 @@ forbidden:
   - fluxcd
   - flagger
   - ceph-default
+  - fluent-bit-general-log-shipper
+  - opensearch-general-log-store

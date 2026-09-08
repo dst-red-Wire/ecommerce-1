@@ -95,6 +95,19 @@ observability:
   security_logs: opensearch
   security: wazuh
 
+mlops:
+  dataset_versioner: lakefs
+  object_storage: seaweedfs-s3
+  metadata_database: cloudnativepg-postgresql
+  experiments_lineage: mlflow
+  artifact_registry: harbor
+  promotion_authority: gitea-gitops
+  orchestration: tekton
+  desired_state: rancher-fleet
+  progressive_delivery: argo-rollouts
+  runtime: kserve-vllm
+  drift: evidently-tekton-batch
+
 supply_chain:
   scanner: trivy
   sbom: syft
@@ -171,6 +184,7 @@ superseded:
   prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
   rook-ceph-launch-baseline: no-default-ceph
   woodpecker-ci: tekton
+  dvc-dataset-versioner: lakefs
 
 build_milestones:
   - M0-architecture-sync

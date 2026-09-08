@@ -373,6 +373,14 @@ module ArchitectureValidator
         "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
         "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
       },
+      "mlops" => {
+        "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
+        "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
+        "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
+        "orchestration" => "tekton", "desired_state" => "rancher-fleet",
+        "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
+        "drift" => "evidently-tekton-batch"
+      },
       "supply_chain" => {
         "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",
         "immutable_images" => true, "forbid_latest" => true

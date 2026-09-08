@@ -24,6 +24,38 @@ class GovernanceDocumentationTest(unittest.TestCase):
                 text = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertIsNone(re.search(forbidden, text, flags=re.IGNORECASE))
 
+    def test_execution_authorities_do_not_restore_superseded_targets(self):
+        checks = {
+            "docs/architecture/BASELINE_V2.md": [
+                r"DVC \+ Git/Gitea",
+                r"Fluent Bit \+ Data Prepper \+ OpenSearch Logs",
+            ],
+            "docs/architecture/EXACT_TOPOLOGY_V2.md": [
+                r"Exactly 17 Go services",
+                r"No checkout service",
+                r"Storefront Next\.js|Admin Next\.js",
+                r"DVC/Git/SeaweedFS",
+            ],
+            "docs/project/CODEX_HANDOFFS.md": [
+                r"exactly 17 backend",
+                r"no checkout service",
+                r"Cart -> Order -> Tax -> Fraud/Risk -> Payment",
+                r"^C\. `Shipping -> Tracking -> Returns -> Billing -> Notification`",
+            ],
+            "docs/architecture/DEPLOYMENT_DAG.md": [
+                r"OTel Collector, Prometheus, Alertmanager, Grafana",
+                r"Fluent Bit -> Data Prepper -> OpenSearch Logs",
+            ],
+            "config/infrastructure/deployment-waves.yaml": [
+                r"fluent-bit|opensearch-logs|\bprometheus\b",
+            ],
+        }
+        for relative, forbidden_terms in checks.items():
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            for forbidden in forbidden_terms:
+                with self.subTest(relative=relative, forbidden=forbidden):
+                    self.assertIsNone(re.search(forbidden, text, flags=re.IGNORECASE))
+
 
 if __name__ == "__main__":
     unittest.main()

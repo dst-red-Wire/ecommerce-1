@@ -16,10 +16,10 @@ api:
   HAProxy -> Caddy + Coraza -> Kong -> Istio Gateway -> Go services
 
 www:
-  ATS -> Storefront Next.js
+  ATS -> Storefront Go + templ + HTMX
 
 admin:
-  ATS -> Admin Next.js
+  ATS -> Admin Go + templ + HTMX
 
 cdn:
   ATS -> SeaweedFS S3 assets
@@ -92,7 +92,7 @@ No default Ceph. No active MinIO CE. See `STORAGE_TOPOLOGY_V2.md` and `config/in
 
 ## Application ownership
 
-Exactly 17 Go services. No checkout service. `order` orchestrates checkout.
+Exactly 19 backend services. `checkout` and `fulfillment` are autonomous services; `checkout` owns pre-order validation/orchestration and `order` owns the durable order snapshot.
 
 - authority/dependencies: `SERVICE_OWNERSHIP_MATRIX.md`
 - data ownership: `DATA_OWNERSHIP_MATRIX.md`
@@ -117,7 +117,7 @@ Gitea -> Tekton -> Harbor -> Fleet -> RKE2 -> Argo Rollouts
 
 ## MLOps
 
-`MLOPS_TOPOLOGY_V1.md` defines DVC/Git/SeaweedFS dataset lineage, MLflow metadata, Harbor Modelcars, deterministic gates, champion/challenger, bounded retraining and recovery.
+`MLOPS_TOPOLOGY_V1.md` defines lakeFS/SeaweedFS dataset lineage, dedicated CNPG metadata, MLflow experiments, Harbor Modelcars, deterministic gates, champion/challenger, bounded retraining and recovery.
 
 ## Status rule
 

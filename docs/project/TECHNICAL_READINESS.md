@@ -33,7 +33,7 @@ Codex handoff
 | Service dependencies | `config/contracts/dependency-map.yaml` | EXACT |
 | Security boundaries | `docs/architecture/SECURITY_TRUST_ZONES.md` | EXACT |
 | Deployment order | `docs/architecture/DEPLOYMENT_DAG.md`, `config/infrastructure/deployment-waves.yaml` | EXACT |
-| Codex execution | `docs/project/CODEX_HANDOFFS.md`, issues `#13`, `#14`, `#16-#22` | READY/DEPENDENCY-GATED |
+| Codex execution | `docs/project/CODEX_HANDOFFS.md`, issues `#13`, `#14`, `#16-#22`, `#32` | READY/DEPENDENCY-GATED |
 | Work execution | `docs/project/WORK_HANDOFFS.md`, issues `#23-#25` | READY/DEPENDENCY-GATED |
 
 ## Allowed blockers after this gate
@@ -60,7 +60,8 @@ Work verifies current external reality against the exact contracts. It does not 
 
 - M1: `READY FOR CODEX`.
 - M2: dependency-gated by M1, no specification blocker.
-- M3: dependency-gated by M1 and real provider access for deployment, no specification blocker.
+- M2.5: dependency-gated by M1; it establishes the persistent management plane required for real PREPROD CREATE.
+- M3: dependency-gated by M1, M2.5 for real PREPROD CREATE, and real provider access for deployment; offline/static preparation may proceed earlier.
 - M4-M9: dependency-gated by preceding milestones/evidence, no known specification blocker.
 - W1/W2: `READY FOR WORK`.
 - W3-W5: evidence/dependency-gated, no specification blocker.

@@ -50,12 +50,13 @@ Tracker: `#13`.
 Goal: create the minimal repository skeleton and automation entrypoints needed for later milestones without implementing deep business logic.
 
 Required result:
-- exactly 17 backend service directories and two frontends;
-- no checkout service;
+- exactly 19 backend service directories and two frontends;
+- autonomous `checkout` and `fulfillment` services;
+- frontend target paths `frontend/apps/storefront` and `frontend/apps/admin`, using the shared `frontend/go.mod` Go + templ + HTMX runtime;
 - contracts, platform, observability, tests and tools areas;
 - `go.work`, ownership/contribution/security root files;
 - Fleet/Tekton paths, never Flux/Flagger;
-- no MinIO CE/Loki/Splunk active defaults;
+- no MinIO CE/Loki/Splunk/DVC active defaults;
 - no image using `latest`;
 - no tracked repository Shell automation;
 - preserve `config/infrastructure/*` and `config/contracts/*` as single config sources;
@@ -133,8 +134,8 @@ Goal: prove a real user-facing commerce path through the actual platform without
 Implement in four bounded slices:
 
 A. `Storefront -> Catalog/Product/Search/Pricing/Inventory`
-B. `Cart -> Order -> Tax -> Fraud/Risk -> Payment`
-C. `Shipping -> Tracking -> Returns -> Billing -> Notification`
+B. `Cart -> Checkout -> Order -> Payment`, with Checkout using Pricing, Tax, Inventory, Fraud/Risk and Shipping delivery options through contracts.
+C. `Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
 For each slice:
@@ -187,6 +188,7 @@ Execute/generate automation for:
 - k6 performance;
 - Chaos Mesh and DR tests behind fail-closed environment gates;
 - restore/rebuild checks;
+- when a model is in the release candidate: lineage, reproducibility, deterministic gates, challenger/champion, SBOM, signature, drift, rollback and restore;
 - evidence index referencing external artifacts rather than committing runtime evidence.
 
 A FAIL cannot be converted to PASS by documentation. Open corrective issues.
@@ -195,7 +197,7 @@ A FAIL cannot be converted to PASS by documentation. Open corrective issues.
 
 Tracker: `#21`.
 
-Goal: automate and execute, where credentials/hardware permit, the three validated campaigns using the same signed digest/release manifest/configuration and the exact physical topology from `PROD_TOPOLOGY_V2.md`/`prod-inventory.yaml`.
+Goal: automate and execute, where credentials/hardware permit, the three validated campaigns using the same signed release identity (including any model digest), configuration and exact physical topology from `PROD_TOPOLOGY_V2.md`/`prod-inventory.yaml`.
 
 1. Standard <=24h: general qualification.
 2. Endurance: 72 useful hours of stable load.

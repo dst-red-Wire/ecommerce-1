@@ -22,12 +22,12 @@ Purpose: identify inputs that ChatGPT cannot manufacture and that would otherwis
 - machine-readable service/event contracts;
 - repository agent rules;
 - M0 sync merged;
-- milestone program M1-M9;
+- milestone program M1-M9 plus M2.5 persistent MGMT bootstrap;
 - Codex handoffs M1-M9 bound to exact contracts;
 - Work handoffs W1-W6 bound to exact architecture context;
 - business readiness gates;
 - risk register;
-- GitHub milestone trackers #13, #14, #16-#22;
+- GitHub milestone trackers #13, #14, #16-#22 and #32 (M2.5 MGMT);
 - Work trackers #23-#25;
 - PREPROD/PROD certification sequencing and evidence expectations.
 

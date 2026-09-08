@@ -16,10 +16,10 @@ Status: `EXACT`
 
 ## Sources
 
-- Prometheus metrics
+- VictoriaMetrics metrics through vmagent
 - OpenTelemetry traces/metrics
 - Wazuh security signals
-- OpenSearch Logs
+- VictoriaLogs infrastructure logs; OpenSearch security/SIEM data only
 - Kubernetes events
 - Fleet desired/observed state
 

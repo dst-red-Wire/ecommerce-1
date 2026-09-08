@@ -62,8 +62,8 @@ Parallel groups:
 
 A. Harbor integrations/robot accounts/signature verification hooks.
 B. Tekton pipelines/tasks.
-C. OTel Collector, Prometheus, Alertmanager, Grafana.
-D. Fluent Bit -> Data Prepper -> OpenSearch Logs + Wazuh integrations.
+C. Rotel, OpenTelemetry Collector, vmagent, VictoriaMetrics, VictoriaLogs, vmalert, Alertmanager, Grafana, ClickHouse and HyperDX.
+D. Data Prepper -> OpenSearch -> Wazuh security/SIEM integrations only.
 
 Gate W5: pipeline dry-run, registry pull-by-digest, telemetry/log/security event flow pass.
 

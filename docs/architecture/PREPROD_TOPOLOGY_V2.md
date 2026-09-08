@@ -46,7 +46,7 @@ Strict pair anti-affinity:
 | Squid | 4 | 8 GiB | 64 GiB |
 | GW | 2 | 4 GiB | 32 GiB |
 
-All VMs use Rocky Linux 9.x minimal or GenericCloud-derived immutable images, SELinux Enforcing, nftables where applicable, chrony, Wazuh agent and Fluent Bit where the role requires host telemetry.
+All VMs use Rocky Linux 9.x minimal or GenericCloud-derived immutable images, SELinux Enforcing, nftables where applicable, chrony, Wazuh agent where required for security telemetry, and OpenTelemetry Collector for general host telemetry. Fluent Bit is `SUPERSEDED` as the general shipper.
 
 ## RKE2 topology
 

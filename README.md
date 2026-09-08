@@ -141,10 +141,10 @@ Les cibles Make restent des façades courtes : elles appellent `scripts/repoctl.
 
 ## Observabilité
 
-- OpenTelemetry Collector.
-- Prometheus + Alertmanager + Grafana.
-- Fluent Bit + Data Prepper + OpenSearch Logs.
-- Wazuh pour la sécurité et l'audit.
+- Applications : `OTLP -> Rotel -> ClickHouse -> HyperDX` pour les traces/logs et `Rotel -> vmagent -> VictoriaMetrics` pour les métriques.
+- Infrastructure : vmagent -> VictoriaMetrics pour les métriques ; OpenTelemetry Collector -> VictoriaLogs -> Grafana pour les logs.
+- Alerting : VictoriaMetrics/VictoriaLogs -> vmalert -> Alertmanager.
+- Sécurité/SIEM uniquement : Data Prepper -> OpenSearch -> Wazuh. Fluent Bit et OpenSearch comme pipeline général de logs sont supersédés.
 - Archives DFIR immuables selon la politique de résilience.
 
 ## QA
@@ -212,12 +212,12 @@ Les répertoires de plateforme supplémentaires apparaissent uniquement lorsqu�
 
 Priorité :
 
-1. règles système et sécurité ;
-2. ADR et Skills spécialisés validés ;
-3. `docs/architecture/BASELINE_V2.md` ;
-4. `architecture.lock.yaml` ;
-5. specs et issues d'implémentation ;
-6. anciens prompts/PDF uniquement comme historique.
+1. contrats machine spécialisés ;
+2. topologies/documents spécialisés validés ;
+3. `architecture.lock.yaml` ;
+4. `docs/architecture/BASELINE_V2.md` ;
+5. plan d'exécution, handoffs et issues ;
+6. README et documents historiques, uniquement s'ils sont marqués `SUPERSEDED`.
 
 Une décision supersédée reste historique mais ne doit pas être réintroduite comme cible active.
 

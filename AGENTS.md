@@ -6,11 +6,13 @@ These rules apply to the whole repository.
 
 ## Authoritative architecture
 
-Before changing code or structure, read:
+Before changing code or structure, read the applicable authority in this order:
 
-1. `docs/architecture/BASELINE_V2.md`
-2. `architecture.lock.yaml`
-3. relevant ADRs and domain documentation
+1. specialized machine contract;
+2. specialized validated topology/document;
+3. `architecture.lock.yaml`;
+4. `docs/architecture/BASELINE_V2.md`;
+5. execution plan/handoff/issue.
 
 Validated architecture is not to be redesigned during implementation unless an explicit contradiction is found and routed back to architecture governance.
 
@@ -31,7 +33,8 @@ Validated architecture is not to be redesigned during implementation unless an e
 - Progressive delivery: Argo Rollouts.
 - Registry: Harbor.
 - Object storage target: SeaweedFS S3.
-- Logging/security: Fluent Bit + Data Prepper + OpenSearch Logs + Wazuh.
+- Observability: Rotel -> ClickHouse/HyperDX for application traces and logs; vmagent -> VictoriaMetrics for metrics; OpenTelemetry Collector -> VictoriaLogs for infrastructure logs; vmalert -> Alertmanager for alerting.
+- Security/SIEM only: Data Prepper -> OpenSearch -> Wazuh.
 
 Do not introduce these superseded defaults into new implementation:
 
@@ -40,6 +43,7 @@ Do not introduce these superseded defaults into new implementation:
 - MinIO Community Edition / MinIO Operator
 - Loki as the logging baseline
 - Splunk as the SIEM baseline
+- DVC as the active dataset versioner
 
 Historical references may remain only when explicitly labelled superseded.
 

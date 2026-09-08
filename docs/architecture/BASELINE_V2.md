@@ -95,10 +95,12 @@ DNS:
 
 ## 7. Observability and security logging
 
-- OpenTelemetry Collector.
-- Prometheus + Alertmanager + Grafana.
-- Fluent Bit + Data Prepper + OpenSearch Logs.
-- Wazuh for security/audit.
+- Applications: `OTLP -> Rotel -> ClickHouse -> HyperDX` for traces/logs; `Rotel -> vmagent -> VictoriaMetrics` for metrics.
+- Infrastructure metrics: Prometheus-compatible exposition scraped by `vmagent` and stored in VictoriaMetrics.
+- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs -> Grafana.
+- Alerting: VictoriaMetrics/VictoriaLogs -> vmalert -> Alertmanager.
+- Security/SIEM only: Data Prepper -> OpenSearch -> Wazuh. Neither Data Prepper nor OpenSearch is a general log pipeline/store.
+- Prometheus server TSDB and Fluent Bit general shipping are not active targets.
 - Immutable DFIR archive where required.
 
 ## 8. Quality baseline
@@ -165,8 +167,8 @@ PCA continuity, DFIR evidence preservation, and PRI reconstruction cooperate but
 
 ## 11. MLOps baseline
 
-- DVC + Git/Gitea + SeaweedFS S3 for dataset versioning/storage.
-- MLflow for experiments, metadata, lineage and model lifecycle.
+- lakeFS is the sole dataset version authority, with metadata in dedicated CNPG and objects in SeaweedFS S3.
+- MLflow owns experiments, metrics, lineage and champion/challenger; it never owns deployment promotion.
 - Harbor for Modelcars OCI.
 - deterministic hard gates + champion/challenger non-inferiority + persistent multi-signal drift.
 - event-driven bounded retraining; no blind retraining and no automatic model promotion.
@@ -181,8 +183,9 @@ The following are historical and MUST NOT be introduced as active defaults:
 | FluxCD | Rancher Fleet |
 | Flagger | Argo Rollouts |
 | MinIO Community Edition / Operator | SeaweedFS S3 for new PROD object storage |
-| Loki as logging baseline | OpenSearch Logs pipeline |
-| Splunk as SIEM baseline | Wazuh + OpenSearch Logs |
+| Loki as logging baseline | VictoriaLogs infrastructure log pipeline |
+| Splunk as SIEM baseline | Wazuh + OpenSearch security/SIEM pipeline |
+| DVC dataset authority | lakeFS + SeaweedFS S3 |
 | 5 physical PROD hosts/site planning target | 3 physical failure-domain hosts/site, 6 total, certified topology |
 
 References in historical ADRs/issues may remain if clearly marked `SUPERSEDED`.

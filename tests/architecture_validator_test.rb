@@ -453,7 +453,9 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[observability metrics] => "prometheus",
       %w[observability infrastructure_logs] => "loki",
       %w[observability security_pipeline] => "logstash",
-      %w[observability security] => "splunk"
+      %w[observability security] => "splunk",
+      %w[mlops dataset_versioner] => "dvc",
+      %w[mlops progressive_delivery] => "flagger"
     }
     mutations.each do |path, value|
       with_contract_copy do |root|

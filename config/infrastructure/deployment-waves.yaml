@@ -18,7 +18,7 @@ waves:
     components: [openbao, external-secrets, harbor, tekton]
   - id: 50-observability
     requires: [40-secrets-registry-ci]
-    components: [opentelemetry, prometheus, alertmanager, grafana, fluent-bit, data-prepper, opensearch-logs, wazuh]
+    components: [rotel, opentelemetry-collector, vmagent, victoriametrics, victorialogs, vmalert, alertmanager, grafana, clickhouse, hyperdx, data-prepper-security, opensearch-security, wazuh]
   - id: 60-stateful
     requires: [40-secrets-registry-ci, 20-network-security]
     parallel_groups:
@@ -37,7 +37,7 @@ waves:
       - [cart, fraud-risk]
       - [shipping, tracking]
       - [review, user-profile, notification]
-    serial_after_parallel: [order, payment, returns, billing]
+    serial_after_parallel: [checkout, order, payment, fulfillment, returns, billing]
   - id: 100-frontends
     requires: [90-commerce]
     components: [storefront, admin]

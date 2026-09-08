@@ -4,12 +4,12 @@ Status: `EXACT`
 
 ## Lifecycle
 
-`dataset -> experiment -> candidate -> deterministic gates -> champion/challenger -> signed OCI artifact -> GitOps promotion -> deployment -> drift monitoring -> rollback/retrain trigger`
+`dataset -> experiment -> candidate -> deterministic gates -> security/provenance -> champion/challenger -> probabilistic evaluation -> drift baseline -> signed OCI artifact -> GitOps PR -> shadow -> canary -> promotion`
 
 ## Data and metadata
 
-- Dataset versioning: DVC + Git/Gitea + SeaweedFS S3.
-- MLflow: experiments, metadata, lineage, run/dataset/model relationships and digests.
+- lakeFS: sole dataset-version authority; its dedicated CNPG metadata references objects in SeaweedFS S3.
+- MLflow: dedicated CNPG metadata; experiments, metrics, lineage, run/dataset/model relationships and champion/challenger.
 - SeaweedFS S3: dataset/object backend with dedicated buckets by environment/finality.
 - Harbor: authoritative OCI registry for Modelcars and signed RAG snapshots.
 
@@ -18,7 +18,7 @@ Status: `EXACT`
 A promotable ML release pins at minimum:
 
 - source revision
-- dataset digest/version
+- lakeFS dataset commit/digest
 - training/evaluation code revision
 - parameters
 - base model revision
@@ -29,7 +29,7 @@ A promotable ML release pins at minimum:
 - reranker digest when used
 - RAG snapshot digest when used
 - chunking policy version
-- evaluation result digest
+- evaluation digest
 - SBOM/provenance/signature
 
 ## Evaluation
@@ -55,13 +55,13 @@ Critical invariants use tolerance zero. Drift is multi-signal and persistent; th
 - double approval is required where governed by release/AIOps policy.
 - no model self-promotion.
 
-## Retraining
+## Drift and retraining
 
-- event-driven and bounded;
-- scheduled re-evaluation is allowed;
-- no blind retraining;
-- no automatic promotion;
-- retraining output always re-enters full candidate evaluation.
+Evidently OSS runs as a Tekton batch, never as a permanent launch service. Its Prometheus-compatible metrics are scraped by vmagent into VictoriaMetrics; detailed governed evidence never includes raw datasets in metrics or logs.
+
+`drift -> qualification (dedupe, quotas, evidence) -> analysis -> approval if retraining is justified -> training -> full qualification -> challenger/champion -> GitOps PR -> shadow -> canary -> promotion`
+
+Drift never directly triggers training, promotion or deployment. Retraining is bounded; no model self-promotion is permitted.
 
 ## Recovery
 
@@ -69,8 +69,8 @@ Retention classes R0-R5 apply by artefact/data class.
 
 Required recovery assets:
 
-- PostgreSQL backup for MLflow metadata;
-- independent object backup for datasets/evaluation artefacts;
+- CNPG backups for separate lakeFS and MLflow metadata;
+- independent SeaweedFS S3 backup for datasets/evaluation artefacts;
 - Harbor recovery for OCI artefacts;
 - tested restore procedures;
 - promotion freeze during recovery.
@@ -81,3 +81,5 @@ Required recovery assets:
 - deploy by immutable digest only;
 - KServe/vLLM GPU JIT has no source-of-truth or promotion authority;
 - rollback selects a previously approved immutable release bundle.
+- recovery order is IAM/OpenBao -> GitOps/Harbor -> CNPG -> S3 -> lakeFS/MLflow -> integrity/lineage verification -> runtimes; resilience governance remains authoritative for RTO/RPO.
+- GPU JIT is for qualification or inference only; after a temporary campaign archive evidence, destroy resources and prove `GPU_ZERO_RESOURCE=true`.
