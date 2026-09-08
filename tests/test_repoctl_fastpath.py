@@ -13,8 +13,10 @@ SPEC.loader.exec_module(MOD)
 
 class DeveloperStateFastPathTest(unittest.TestCase):
     def test_exact_state_skips_ansible_startup(self):
-        with mock.patch.object(MOD, "developer_state_ready", return_value=True), \
-             mock.patch.object(MOD, "require", side_effect=AssertionError("Ansible must not start")):
+        with (
+            mock.patch.object(MOD, "developer_state_ready", return_value=True),
+            mock.patch.object(MOD, "require", side_effect=AssertionError("Ansible must not start")),
+        ):
             MOD.ensure_developer("go,cgo,sqlc,docker")
 
     def test_shell_policy_uses_effective_worktree_not_stale_index(self):
@@ -47,7 +49,15 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
     def test_exact_versions_are_detected_without_ansible(self):
         pins = {"GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
-        commands = {"node": "/bin/node", "corepack": "/bin/corepack", "go": "/bin/go", "gofmt": "/bin/gofmt", "cc": "/bin/cc", "sqlc": "/bin/sqlc", "docker": "/bin/docker"}
+        commands = {
+            "node": "/bin/node",
+            "corepack": "/bin/corepack",
+            "go": "/bin/go",
+            "gofmt": "/bin/gofmt",
+            "cc": "/bin/cc",
+            "sqlc": "/bin/sqlc",
+            "docker": "/bin/docker",
+        }
 
         def fake_which(name):
             return commands.get(name)
@@ -63,9 +73,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             raise AssertionError(cmd)
 
-        with mock.patch.object(MOD, "pinned_versions", return_value=pins), \
-             mock.patch.object(MOD.shutil, "which", side_effect=fake_which), \
-             mock.patch.object(MOD, "run", side_effect=fake_run):
+        with (
+            mock.patch.object(MOD, "pinned_versions", return_value=pins),
+            mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+        ):
             self.assertTrue(MOD.developer_state_ready("node,go,cgo,sqlc,docker"))
 
 

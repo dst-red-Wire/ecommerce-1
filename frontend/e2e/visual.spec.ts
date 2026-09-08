@@ -1,10 +1,7 @@
 import { test } from "@playwright/test";
 
 test.beforeEach(({}, testInfo) =>
-  test.skip(
-    testInfo.project.name !== "desktop",
-    "Captured once with explicit golden viewport",
-  ),
+  test.skip(testInfo.project.name !== "desktop", "Captured once with explicit golden viewport"),
 );
 
 const references = [

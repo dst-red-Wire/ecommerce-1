@@ -52,9 +52,7 @@ export function ProductCard({ product }: { product: ProductViewModel }) {
         <Rating value={product.rating} count={product.reviewCount} />
         <Price
           amount={product.price}
-          {...(product.previousPrice !== undefined
-            ? { previous: product.previousPrice }
-            : {})}
+          {...(product.previousPrice !== undefined ? { previous: product.previousPrice } : {})}
         />
       </div>
     </article>

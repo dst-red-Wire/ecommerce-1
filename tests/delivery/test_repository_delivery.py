@@ -20,8 +20,13 @@ class EvidenceMetricsTests(unittest.TestCase):
     def test_metrics_count_execution_reuse_and_saved_time(self):
         records = [
             {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
-            {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 0.0,
-             "reused_from_sha": "a" * 40, "source_duration_seconds": 20.0},
+            {
+                "gate": "frontend:storefront",
+                "status": "PASS",
+                "duration_seconds": 0.0,
+                "reused_from_sha": "a" * 40,
+                "source_duration_seconds": 20.0,
+            },
             {"gate": "service:unimplemented", "status": "SKIP", "duration_seconds": 0.0},
         ]
         self.assertEqual(
@@ -37,29 +42,45 @@ class EvidenceMetricsTests(unittest.TestCase):
             RD.evidence_metrics(records),
         )
 
-
     def test_compare_uses_measured_execution_time(self):
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             full = td / "full.json"
             inc = td / "inc.json"
-            full.write_text(json.dumps({
-                "status": "PASS", "head_sha": "1" * 40,
-                "metrics": {"deliver_wall_seconds": 24.0},
-                "gates": [
-                    {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
-                    {"gate": "system", "status": "PASS", "duration_seconds": 18.0},
-                ],
-            }), encoding="utf-8")
-            inc.write_text(json.dumps({
-                "status": "PASS", "head_sha": "2" * 40,
-                "metrics": {"deliver_wall_seconds": 4.0},
-                "gates": [
-                    {"gate": "governance", "status": "PASS", "duration_seconds": 1.5},
-                    {"gate": "system", "status": "PASS", "duration_seconds": 0.0,
-                     "reused_from_sha": "1" * 40, "source_duration_seconds": 18.0},
-                ],
-            }), encoding="utf-8")
+            full.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "head_sha": "1" * 40,
+                        "metrics": {"deliver_wall_seconds": 24.0},
+                        "gates": [
+                            {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
+                            {"gate": "system", "status": "PASS", "duration_seconds": 18.0},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inc.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "head_sha": "2" * 40,
+                        "metrics": {"deliver_wall_seconds": 4.0},
+                        "gates": [
+                            {"gate": "governance", "status": "PASS", "duration_seconds": 1.5},
+                            {
+                                "gate": "system",
+                                "status": "PASS",
+                                "duration_seconds": 0.0,
+                                "reused_from_sha": "1" * 40,
+                                "source_duration_seconds": 18.0,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             result = RD.compare_evidence(full, inc)
         self.assertEqual(20.0, result["full_executed_seconds"])
         self.assertEqual(1.5, result["incremental_executed_seconds"])
@@ -75,9 +96,9 @@ class RemoteEvidenceTests(unittest.TestCase):
             root = Path(td)
             evidence = root / "evidence.json"
             sha = "c" * 40
-            evidence.write_text(json.dumps({
-                "status": "PASS", "exact_commit_evidence": True, "head_sha": sha
-            }), encoding="utf-8")
+            evidence.write_text(
+                json.dumps({"status": "PASS", "exact_commit_evidence": True, "head_sha": sha}), encoding="utf-8"
+            )
 
             def fake_sign(_root, _evidence, bundle):
                 bundle.write_text("{}", encoding="utf-8")
@@ -88,10 +109,12 @@ class RemoteEvidenceTests(unittest.TestCase):
                     cmd, 0, json.dumps({"reference": f"registry.example/evidence@sha256:{'1' * 64}"}), ""
                 )
 
-            with mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True), \
-                 mock.patch.object(RD, "require_command", return_value="oras"), \
-                 mock.patch.object(RD, "_cosign_sign_blob", side_effect=fake_sign), \
-                 mock.patch.object(RD, "_run", side_effect=fake_run):
+            with (
+                mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True),
+                mock.patch.object(RD, "require_command", return_value="oras"),
+                mock.patch.object(RD, "_cosign_sign_blob", side_effect=fake_sign),
+                mock.patch.object(RD, "_run", side_effect=fake_run),
+            ):
                 result = RD.publish_evidence(root, evidence)
 
         self.assertEqual(f"registry.example/evidence:sha-{sha}", result["tag_reference"])
@@ -106,16 +129,18 @@ class RemoteEvidenceTests(unittest.TestCase):
             def fake_run(cmd, *, cwd, check=True, capture=False, env=None):
                 output_index = cmd.index("--output") + 1
                 staging = Path(cmd[output_index])
-                (staging / "evidence.json").write_text(json.dumps({
-                    "status": "PASS", "exact_commit_evidence": True, "head_sha": sha
-                }), encoding="utf-8")
+                (staging / "evidence.json").write_text(
+                    json.dumps({"status": "PASS", "exact_commit_evidence": True, "head_sha": sha}), encoding="utf-8"
+                )
                 (staging / "evidence.sigstore.json").write_text("{}", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
-            with mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True), \
-                 mock.patch.object(RD, "require_command", return_value="oras"), \
-                 mock.patch.object(RD, "_run", side_effect=fake_run), \
-                 mock.patch.object(RD, "_cosign_verify_blob") as verify:
+            with (
+                mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True),
+                mock.patch.object(RD, "require_command", return_value="oras"),
+                mock.patch.object(RD, "_run", side_effect=fake_run),
+                mock.patch.object(RD, "_cosign_verify_blob") as verify,
+            ):
                 destination = RD.fetch_evidence(root, context, sha)
 
             verify.assert_called_once()
@@ -129,16 +154,19 @@ class RemoteEvidenceTests(unittest.TestCase):
 
             def fake_run(cmd, *, cwd, check=True, capture=False, env=None):
                 staging = Path(cmd[cmd.index("--output") + 1])
-                (staging / "evidence.json").write_text(json.dumps({
-                    "status": "PASS", "exact_commit_evidence": True, "head_sha": "f" * 40
-                }), encoding="utf-8")
+                (staging / "evidence.json").write_text(
+                    json.dumps({"status": "PASS", "exact_commit_evidence": True, "head_sha": "f" * 40}),
+                    encoding="utf-8",
+                )
                 (staging / "evidence.sigstore.json").write_text("{}", encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
-            with mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True), \
-                 mock.patch.object(RD, "require_command", return_value="oras"), \
-                 mock.patch.object(RD, "_run", side_effect=fake_run), \
-                 mock.patch.object(RD, "_cosign_verify_blob"):
+            with (
+                mock.patch.dict(RD.os.environ, {"CI_EVIDENCE_REPOSITORY": "registry.example/evidence"}, clear=True),
+                mock.patch.object(RD, "require_command", return_value="oras"),
+                mock.patch.object(RD, "_run", side_effect=fake_run),
+                mock.patch.object(RD, "_cosign_verify_blob"),
+            ):
                 with self.assertRaisesRegex(RuntimeError, "not exact PASS evidence"):
                     RD.fetch_evidence(root, root / ".context", requested)
 
@@ -176,9 +204,13 @@ class BundleDeliveryTests(unittest.TestCase):
             source = td / "source"
             self.init_repo(source)
             bare = td / "remote.git"
-            subprocess.run(["git", "clone", "--bare", str(source), str(bare)], check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(bare)], check=True, capture_output=True, text=True
+            )
             subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=source, check=True)
-            subprocess.run(["git", "switch", "-c", "feat/proof"], cwd=source, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "switch", "-c", "feat/proof"], cwd=source, check=True, capture_output=True, text=True
+            )
             (source / "feature.txt").write_text("x\n", encoding="utf-8")
             subprocess.run(["git", "add", "feature.txt"], cwd=source, check=True)
             subprocess.run(["git", "commit", "-m", "feature"], cwd=source, check=True, capture_output=True, text=True)
@@ -204,9 +236,7 @@ class BundleDeliveryTests(unittest.TestCase):
                 return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
 
             with mock.patch.object(RD, "_run", side_effect=fake_run):
-                rc = RD.bundle_deliver(
-                    source, trusted, str(bundle), head, "Proof PR", "main", "python3"
-                )
+                rc = RD.bundle_deliver(source, trusted, str(bundle), head, "Proof PR", "main", "python3")
             self.assertEqual(0, rc)
             self.assertEqual(before, RD._worktree_snapshot(source))
             self.assertNotEqual(source, seen["cwd"])
@@ -217,20 +247,27 @@ class BundleDeliveryTests(unittest.TestCase):
 class RemoteStatusTests(unittest.TestCase):
     class Response:
         status = 201
+
         def __enter__(self):
             return self
+
         def __exit__(self, exc_type, exc, tb):
             return False
 
     def test_github_status_binds_the_exact_sha_and_context(self):
         sha = "a" * 40
         captured = {}
+
         def fake_urlopen(request, timeout):
             captured["url"] = request.full_url
             captured["payload"] = json.loads(request.data.decode("utf-8"))
             return self.Response()
+
         env = {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_TOKEN": "secret"}
-        with mock.patch.dict(RD.os.environ, env, clear=True), mock.patch.object(RD.urllib.request, "urlopen", side_effect=fake_urlopen):
+        with (
+            mock.patch.dict(RD.os.environ, env, clear=True),
+            mock.patch.object(RD.urllib.request, "urlopen", side_effect=fake_urlopen),
+        ):
             self.assertTrue(RD.publish_remote_status(sha, "success", "PASS"))
         self.assertTrue(captured["url"].endswith(f"/statuses/{sha}"))
         self.assertEqual(RD.REMOTE_STATUS_CONTEXT, captured["payload"]["context"])
@@ -238,9 +275,11 @@ class RemoteStatusTests(unittest.TestCase):
 
     def test_dual_forge_status_configuration_is_rejected(self):
         env = {
-            "GITHUB_REPOSITORY": "owner/repo", "GITHUB_TOKEN": "github",
+            "GITHUB_REPOSITORY": "owner/repo",
+            "GITHUB_TOKEN": "github",
             "GITEA_API_URL": "https://gitea.example/api/v1",
-            "GITEA_REPOSITORY": "owner/repo", "GITEA_TOKEN": "gitea",
+            "GITEA_REPOSITORY": "owner/repo",
+            "GITEA_TOKEN": "gitea",
         }
         with mock.patch.dict(RD.os.environ, env, clear=True):
             with self.assertRaisesRegex(RuntimeError, "exactly one"):

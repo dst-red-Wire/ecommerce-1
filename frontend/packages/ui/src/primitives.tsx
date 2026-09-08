@@ -17,13 +17,7 @@ export function Button({
   );
 }
 
-export function Badge({
-  children,
-  tone = "neutral",
-}: {
-  children: ReactNode;
-  tone?: BadgeTone;
-}) {
+export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: BadgeTone }) {
   return (
     <span className="noma-badge" data-tone={tone}>
       {children}
@@ -34,20 +28,14 @@ export function Badge({
 export function Rating({ value, count }: { value: number; count?: number }) {
   const rounded = Math.round(value);
   return (
-    <span
-      role="img"
-      aria-label={`${value.toLocaleString("fr-FR")} étoiles sur 5${count ? `, ${count} avis` : ""}`}
-    >
-      <span
-        aria-hidden="true"
-        style={{ color: "#e99a00", letterSpacing: "0.08em" }}
-      >
-        {Array.from({ length: 5 }, (_, index) =>
-          index < rounded ? "★" : "☆",
-        ).join("")}
+    <span>
+      <span className="sr-only">{`${value.toLocaleString("fr-FR")} étoiles sur 5${count ? `, ${count} avis` : ""}`}</span>
+      <span aria-hidden="true" style={{ color: "#e99a00", letterSpacing: "0.08em" }}>
+        {Array.from({ length: 5 }, (_, index) => (index < rounded ? "★" : "☆")).join("")}
       </span>
       {count ? (
         <span
+          aria-hidden="true"
           style={{ color: "var(--noma-muted)", marginInlineStart: "0.45rem" }}
         >
           ({count})
@@ -57,13 +45,7 @@ export function Rating({ value, count }: { value: number; count?: number }) {
   );
 }
 
-export function Price({
-  amount,
-  previous,
-}: {
-  amount: number;
-  previous?: number;
-}) {
+export function Price({ amount, previous }: { amount: number; previous?: number }) {
   const formatter = new Intl.NumberFormat("fr-FR", {
     style: "currency",
     currency: "EUR",

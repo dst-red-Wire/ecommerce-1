@@ -56,13 +56,15 @@ class IncrementalDeliveryTests(unittest.TestCase):
             context = Path(tmp)
             evidence_dir = context / "evidence"
             evidence_dir.mkdir()
-            (evidence_dir / f"{self.PARENT}.json").write_text(
-                json.dumps(self.parent_evidence()), encoding="utf-8"
-            )
+            (evidence_dir / f"{self.PARENT}.json").write_text(json.dumps(self.parent_evidence()), encoding="utf-8")
 
             def fake_changed_paths(base, head):
                 if base == "origin/main":
-                    return ["frontend/apps/storefront/app/page.tsx", "platform/terraform/main.tf", "scripts/resource-sizing.rb"]
+                    return [
+                        "frontend/apps/storefront/app/page.tsx",
+                        "platform/terraform/main.tf",
+                        "scripts/resource-sizing.rb",
+                    ]
                 if base == self.PARENT:
                     return ["scripts/resource-sizing.rb"]
                 raise AssertionError((base, head))
@@ -86,12 +88,14 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 captured["verification"] = verification
                 return context / "evidence" / "current.json"
 
-            with mock.patch.object(REPOCTL, "CONTEXT", context), \
-                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git), \
-                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths), \
-                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected), \
-                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate), \
-                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write):
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+                mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
+                mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
+                mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+            ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
         self.assertEqual(
@@ -124,6 +128,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
             if args == ("rev-list", "--parents", "-n", "1", self.HEAD):
                 return f"{self.HEAD} {self.PARENT} {'7' * 40}\n"
             raise AssertionError(args)
+
         with mock.patch.object(REPOCTL, "git", side_effect=merge_git):
             parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
         self.assertIsNone(parent)
@@ -133,8 +138,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             context = Path(tmp)
             (context / "evidence").mkdir()
-            with mock.patch.object(REPOCTL, "CONTEXT", context), \
-                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git):
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+            ):
                 parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
         self.assertIsNone(parent)
         self.assertIsNone(data)
@@ -148,8 +155,11 @@ class IncrementalDeliveryTests(unittest.TestCase):
             if args == ("status", "--porcelain", "--untracked-files=all"):
                 return " M README.md\n"
             raise AssertionError(args)
-        with mock.patch.object(REPOCTL, "git", side_effect=dirty_git), \
-             mock.patch.object(REPOCTL, "_run_gate") as run_gate:
+
+        with (
+            mock.patch.object(REPOCTL, "git", side_effect=dirty_git),
+            mock.patch.object(REPOCTL, "_run_gate") as run_gate,
+        ):
             self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
         run_gate.assert_not_called()
 
@@ -186,12 +196,14 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 captured["records"] = list(records)
                 return context / "evidence/current.json"
 
-            with mock.patch.object(REPOCTL, "CONTEXT", context), \
-                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git), \
-                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths), \
-                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected), \
-                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate), \
-                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write):
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+                mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
+                mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
+                mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+            ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
         self.assertIn("platform:terraform", executed)
@@ -209,8 +221,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 return checked_out + "\n"
             raise AssertionError(f"unexpected git call before fail-closed mismatch: {args}")
 
-        with mock.patch.object(REPOCTL, "git", side_effect=mismatched_git), \
-             mock.patch.object(REPOCTL, "_run_gate") as run_gate:
+        with (
+            mock.patch.object(REPOCTL, "git", side_effect=mismatched_git),
+            mock.patch.object(REPOCTL, "_run_gate") as run_gate,
+        ):
             self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
         run_gate.assert_not_called()
 
@@ -221,8 +235,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
             context = Path(tmp)
             (context / "evidence").mkdir()
             (context / "evidence" / f"{self.PARENT}.json").write_text(json.dumps(evidence), encoding="utf-8")
-            with mock.patch.object(REPOCTL, "CONTEXT", context), \
-                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git):
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+            ):
                 parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
         self.assertIsNone(parent)
         self.assertIsNone(data)

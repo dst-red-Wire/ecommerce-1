@@ -8,17 +8,9 @@ import { useMemo, useState } from "react";
 import type { AdminProductViewModel } from "@/domain/models";
 import { AdminPagination, StatusBadge } from "./admin-ui";
 
-export function ProductsTable({
-  products,
-}: {
-  products: readonly AdminProductViewModel[];
-}) {
+export function ProductsTable({ products }: { products: readonly AdminProductViewModel[] }) {
   const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<readonly string[]>([
-    "p2",
-    "p3",
-    "p5",
-  ]);
+  const [selected, setSelected] = useState<readonly string[]>(["p2", "p3", "p5"]);
   const visible = useMemo(
     () =>
       products.filter((product) =>
@@ -31,17 +23,12 @@ export function ProductsTable({
 
   function toggle(id: string) {
     setSelected((current) =>
-      current.includes(id)
-        ? current.filter((item) => item !== id)
-        : [...current, id],
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
     );
   }
 
   return (
-    <section
-      className="data-panel noma-panel"
-      aria-labelledby="product-table-title"
-    >
+    <section className="data-panel noma-panel" aria-labelledby="product-table-title">
       <h2 id="product-table-title" className="sr-only">
         Liste des produits
       </h2>
@@ -108,10 +95,7 @@ export function ProductsTable({
           </thead>
           <tbody>
             {visible.map((product) => (
-              <tr
-                key={product.id}
-                data-selected={selected.includes(product.id)}
-              >
+              <tr key={product.id} data-selected={selected.includes(product.id)}>
                 <td>
                   <input
                     type="checkbox"
@@ -134,9 +118,7 @@ export function ProductsTable({
                 <td>{product.sku}</td>
                 <td>{product.category}</td>
                 <td>{product.price.toFixed(2).replace(".", ",")} €</td>
-                <td className={product.stock === 0 ? "danger-text" : ""}>
-                  {product.stock}
-                </td>
+                <td className={product.stock === 0 ? "danger-text" : ""}>{product.stock}</td>
                 <td>
                   <StatusBadge value={product.visibility} />
                 </td>

@@ -12,8 +12,6 @@ describe("MobileAlerts", () => {
     });
     fireEvent.click(acknowledge);
 
-    expect(
-      screen.getByRole("button", { name: /Accusé réception/ }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Accusé réception/ })).toBeDisabled();
   });
 });

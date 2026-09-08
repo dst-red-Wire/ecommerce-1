@@ -30,16 +30,11 @@ export function ProductEditorForm() {
           </p>
         ) : null}
         {saved ? (
-          <p className="saved-banner" role="status">
-            <CheckCircle2 aria-hidden="true" /> Modifications enregistrées dans
-            le mock local
-          </p>
+          <output className="saved-banner">
+            <CheckCircle2 aria-hidden="true" /> Modifications enregistrées dans le mock local
+          </output>
         ) : null}
-        <div
-          className="editor-tabs"
-          role="tablist"
-          aria-label="Sections produit"
-        >
+        <div className="editor-tabs" role="tablist" aria-label="Sections produit">
           <button type="button" role="tab" aria-selected="true">
             Général
           </button>
@@ -71,11 +66,7 @@ export function ProductEditorForm() {
             </label>
             <label>
               Marque <b>*</b>
-              <select
-                className="noma-field"
-                defaultValue="NOMA"
-                onChange={markDirty}
-              >
+              <select className="noma-field" defaultValue="NOMA" onChange={markDirty}>
                 <option>NOMA</option>
               </select>
             </label>
@@ -90,22 +81,14 @@ export function ProductEditorForm() {
             </label>
             <label>
               Catégorie <b>*</b>
-              <select
-                className="noma-field"
-                defaultValue="Sneakers"
-                onChange={markDirty}
-              >
+              <select className="noma-field" defaultValue="Sneakers" onChange={markDirty}>
                 <option>Sneakers</option>
                 <option>Maison</option>
               </select>
             </label>
             <label>
               Statut <b>*</b>
-              <select
-                className="noma-field"
-                defaultValue="Actif"
-                onChange={markDirty}
-              >
+              <select className="noma-field" defaultValue="Actif" onChange={markDirty}>
                 <option>Actif</option>
                 <option>Brouillon</option>
               </select>
@@ -115,11 +98,7 @@ export function ProductEditorForm() {
             <legend>Médias de démonstration</legend>
             <div className="media-grid">
               {[0, 1, 2, 3].map((index) => (
-                <button
-                  key={index}
-                  type="button"
-                  aria-label={`Sélectionner le média ${index + 1}`}
-                >
+                <button key={index} type="button" aria-label={`Sélectionner le média ${index + 1}`}>
                   <ProductArt kind="shoe" compact />
                 </button>
               ))}
@@ -130,9 +109,7 @@ export function ProductEditorForm() {
                 un média
               </button>
             </div>
-            <small>
-              Illustrations temporaires — ASSET_REQUIRED avant production.
-            </small>
+            <small>Illustrations temporaires — ASSET_REQUIRED avant production.</small>
           </fieldset>
         </section>
         <div className="editor-bottom-grid">
@@ -166,27 +143,15 @@ export function ProductEditorForm() {
             <div className="form-grid">
               <label>
                 Prix de vente <b>*</b>
-                <input
-                  className="noma-field"
-                  defaultValue="129,00"
-                  onChange={markDirty}
-                />
+                <input className="noma-field" defaultValue="129,00" onChange={markDirty} />
               </label>
               <label>
                 Prix comparé
-                <input
-                  className="noma-field"
-                  defaultValue="159,00"
-                  onChange={markDirty}
-                />
+                <input className="noma-field" defaultValue="159,00" onChange={markDirty} />
               </label>
               <label>
                 Coût
-                <input
-                  className="noma-field"
-                  defaultValue="58,00"
-                  onChange={markDirty}
-                />
+                <input className="noma-field" defaultValue="58,00" onChange={markDirty} />
               </label>
               <label>
                 Marge

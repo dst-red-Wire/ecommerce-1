@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { publicCatalogRepository } from "./public-catalog-repository";
 
+type FetchMock = (
+  ...args: Parameters<typeof fetch>
+) => Promise<Pick<Response, "json" | "ok" | "status">>;
+
 const originalKey = process.env.PEXELS_API_KEY;
 
 afterEach(() => {
@@ -51,7 +55,8 @@ describe("publicCatalogRepository", () => {
     process.env.PEXELS_API_KEY = "test-only";
     vi.stubGlobal(
       "fetch",
-      vi.fn()
+      vi
+        .fn()
         .mockResolvedValueOnce({
           ok: true,
           status: 200,
@@ -80,7 +85,9 @@ describe("publicCatalogRepository", () => {
                 alt: "Product photo",
                 photographer: "Demo Photographer",
                 photographer_url: "https://www.pexels.com/@demo/",
-                src: { medium: "https://images.pexels.com/photos/99/demo.jpeg" },
+                src: {
+                  medium: "https://images.pexels.com/photos/99/demo.jpeg",
+                },
               },
             ],
           }),
@@ -100,7 +107,7 @@ describe("publicCatalogRepository", () => {
 
   it("deduplicates concurrent catalog consumers", async () => {
     delete process.env.PEXELS_API_KEY;
-    const fetchMock = vi.fn().mockResolvedValue({
+    const fetchMock = vi.fn<FetchMock>().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -39,11 +40,71 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
 
     def test_worktree_security_scans_materialized_exact_tree_not_checkout_caches(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        section = source[source.index("def security() -> int:"):source.index("def terraform_check() -> int:")]
-        self.assertIn('os.environ.get("HEAD", "").strip() == "WORKTREE"', section)
-        self.assertIn('tree_sha = worktree_tree_sha()', section)
-        self.assertIn('["git", "archive", "--format=tar", "--output", str(archive), tree_sha]', section)
-        self.assertIn('["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)]', section)
+        module = ast.parse(source)
+        security = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "security")
+
+        worktree_guards = [
+            node
+            for node in ast.walk(security)
+            if isinstance(node, ast.Compare)
+            and any(isinstance(value, ast.Constant) and value.value == "WORKTREE" for value in node.comparators)
+            and any(isinstance(value, ast.Constant) and value.value == "HEAD" for value in ast.walk(node.left))
+        ]
+        self.assertTrue(worktree_guards)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "tree_sha" for target in node.targets)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "worktree_tree_sha"
+                for node in ast.walk(security)
+            )
+        )
+
+        command_vectors = []
+        for call in ast.walk(security):
+            if (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "run"
+                and call.args
+                and isinstance(call.args[0], ast.List)
+            ):
+                vector = []
+                for item in call.args[0].elts:
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                        vector.append(item.value)
+                    elif isinstance(item, ast.Name):
+                        vector.append(f"${item.id}")
+                    elif (
+                        isinstance(item, ast.Call)
+                        and isinstance(item.func, ast.Name)
+                        and item.func.id == "str"
+                        and len(item.args) == 1
+                        and isinstance(item.args[0], ast.Name)
+                    ):
+                        vector.append(f"$str:{item.args[0].id}")
+                    else:
+                        vector.append("$other")
+                command_vectors.append(vector)
+
+        self.assertIn(
+            ["git", "archive", "--format=tar", "--output", "$str:archive", "$tree_sha"],
+            command_vectors,
+        )
+        self.assertIn(
+            [
+                "gitleaks",
+                "dir",
+                "--config",
+                ".gitleaks.toml",
+                "--redact",
+                "--no-banner",
+                "$str:scan_root",
+            ],
+            command_vectors,
+        )
 
     def test_worktree_tree_sha_does_not_mutate_the_real_index(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -51,11 +112,13 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             self.init_repo(root)
             (root / "README.md").write_text("changed\n", encoding="utf-8")
             (root / "new.txt").write_text("new\n", encoding="utf-8")
-            index = Path(subprocess.check_output(
-                ["git", "rev-parse", "--path-format=absolute", "--git-path", "index"],
-                cwd=root,
-                text=True,
-            ).strip())
+            index = Path(
+                subprocess.check_output(
+                    ["git", "rev-parse", "--path-format=absolute", "--git-path", "index"],
+                    cwd=root,
+                    text=True,
+                ).strip()
+            )
             before = index.read_bytes()
             with mock.patch.object(REPOCTL, "ROOT", root):
                 tree = REPOCTL.worktree_tree_sha()
@@ -88,7 +151,12 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "changed_paths": ["README.md"],
                     "affected_components": ["global"],
                     "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 2.0}],
-                    "verification": {"mode": "worktree", "source_head_sha": base, "source_tree_sha": tree, "tree_stable": True},
+                    "verification": {
+                        "mode": "worktree",
+                        "source_head_sha": base,
+                        "source_tree_sha": tree,
+                        "tree_stable": True,
+                    },
                 }
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 self.assertIsNotNone(REPOCTL._load_promotable_worktree_evidence(base))
@@ -120,9 +188,19 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "affected_components": ["global"],
                     "gates": [
                         {"gate": "governance", "status": "PASS", "duration_seconds": 12.5},
-                        {"gate": "service:catalog", "status": "SKIP", "duration_seconds": 0.0, "reason": "not implemented"},
+                        {
+                            "gate": "service:catalog",
+                            "status": "SKIP",
+                            "duration_seconds": 0.0,
+                            "reason": "not implemented",
+                        },
                     ],
-                    "verification": {"mode": "worktree", "source_head_sha": base, "source_tree_sha": tree, "tree_stable": True},
+                    "verification": {
+                        "mode": "worktree",
+                        "source_head_sha": base,
+                        "source_tree_sha": tree,
+                        "tree_stable": True,
+                    },
                 }
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 candidate = REPOCTL._load_promotable_worktree_evidence(base)

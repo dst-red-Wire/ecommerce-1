@@ -21,11 +21,7 @@ export function StorefrontHeader() {
           <Link href="/catalogue?category=Accessoires">Accessoires</Link>
         </nav>
         <div className="header-actions">
-          <button
-            className="header-icon mobile-only"
-            type="button"
-            aria-label="Ouvrir le menu"
-          >
+          <button className="header-icon mobile-only" type="button" aria-label="Ouvrir le menu">
             <Menu aria-hidden="true" />
           </button>
           <button
@@ -35,26 +31,19 @@ export function StorefrontHeader() {
           >
             <UserRound aria-hidden="true" />
           </button>
-          <button
-            className="header-icon"
-            type="button"
-            aria-label="Panier, vide"
-          >
+          <button className="header-icon" type="button" aria-label="Panier, vide">
             <ShoppingBag aria-hidden="true" />
           </button>
         </div>
-        <form className="header-search" action="/catalogue" role="search">
-          <label className="sr-only" htmlFor="global-search">
-            Rechercher un produit
-          </label>
-          <Search aria-hidden="true" />
-          <input
-            id="global-search"
-            name="q"
-            type="search"
-            placeholder="Rechercher un produit"
-          />
-        </form>
+        <search className="header-search-container">
+          <form className="header-search" action="/catalogue">
+            <label className="sr-only" htmlFor="global-search">
+              Rechercher un produit
+            </label>
+            <Search aria-hidden="true" />
+            <input id="global-search" name="q" type="search" placeholder="Rechercher un produit" />
+          </form>
+        </search>
       </div>
     </header>
   );

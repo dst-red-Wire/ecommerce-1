@@ -32,21 +32,12 @@ importers:
       '@types/react-dom':
         specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.14)
-      eslint:
-        specifier: 9.39.5
-        version: 9.39.5(jiti@2.7.0)(supports-color@10.2.2)
-      eslint-config-next:
-        specifier: 16.3.3
-        version: 16.3.3(@typescript-eslint/parser@8.68.0(eslint@9.39.5(jiti@2.7.0)(supports-color@10.2.2))(supports-color@10.2.2)(typescript@6.0.3))(eslint@9.39.5(jiti@2.7.0)(supports-color@10.2.2))(supports-color@10.2.2)(typescript@6.0.3)
       jsdom:
         specifier: 30.0.1
         version: 30.0.1
       openapi-typescript:
         specifier: 7.13.0
         version: 7.13.0(typescript@6.0.3)
-      prettier:
-        specifier: 3.9.6
-        version: 3.9.6
       turbo:
         specifier: 2.10.12
         version: 2.10.12

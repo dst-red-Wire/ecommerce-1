@@ -17,11 +17,7 @@ import type { OperationalAlertViewModel } from "@/domain/models";
 
 const icons = [XCircle, ShieldAlert, Package, Truck] as const;
 
-export function MobileAlerts({
-  alerts,
-}: {
-  alerts: readonly OperationalAlertViewModel[];
-}) {
+export function MobileAlerts({ alerts }: { alerts: readonly OperationalAlertViewModel[] }) {
   const [openId, setOpenId] = useState(alerts[0]?.id ?? "");
   const [acknowledged, setAcknowledged] = useState<readonly string[]>([]);
   return (
@@ -68,11 +64,7 @@ export function MobileAlerts({
             const open = openId === alert.id;
             const done = acknowledged.includes(alert.id);
             return (
-              <article
-                key={alert.id}
-                data-severity={alert.severity}
-                data-open={open}
-              >
+              <article key={alert.id} data-severity={alert.severity} data-open={open}>
                 <button
                   className="alert-summary"
                   type="button"
@@ -89,24 +81,14 @@ export function MobileAlerts({
                     <small>{alert.detail}</small>
                   </span>
                   <time>{alert.time}</time>
-                  {open ? (
-                    <ChevronUp aria-hidden="true" />
-                  ) : (
-                    <ChevronDown aria-hidden="true" />
-                  )}
+                  {open ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
                 </button>
                 {open ? (
                   <div className="alert-detail">
                     <h2>Contexte</h2>
-                    <p>
-                      Signal de démonstration détecté sur les quinze dernières
-                      minutes.
-                    </p>
+                    <p>Signal de démonstration détecté sur les quinze dernières minutes.</p>
                     <h2>Impact</h2>
-                    <p>
-                      Une vérification humaine est nécessaire avant toute action
-                      réelle.
-                    </p>
+                    <p>Une vérification humaine est nécessaire avant toute action réelle.</p>
                     <hr />
                     <p>
                       <strong>Acteur</strong>
@@ -116,9 +98,7 @@ export function MobileAlerts({
                     <button
                       type="button"
                       disabled={done}
-                      onClick={() =>
-                        setAcknowledged((current) => [...current, alert.id])
-                      }
+                      onClick={() => setAcknowledged((current) => [...current, alert.id])}
                     >
                       {done ? (
                         <>
@@ -141,9 +121,7 @@ export function MobileAlerts({
               <article key={alert.id}>
                 <span>{alert.title}</span>
                 <strong>{index === 1 ? "8 453 €" : alert.count}</strong>
-                <b>
-                  {alert.severity === "critical" ? "Critique" : "Avertissement"}
-                </b>
+                <b>{alert.severity === "critical" ? "Critique" : "Avertissement"}</b>
               </article>
             ))}
           </div>

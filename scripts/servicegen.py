@@ -5,6 +5,7 @@ Business behavior, contracts, migrations and external integrations are never
 invented. During M2, non-Product creation is deliberately blocked until the
 Product golden service has finished establishing those conventions.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,11 +17,17 @@ import json
 
 
 def load_yaml(path: Path) -> dict:
-    output = subprocess.check_output([
-        "ruby", "-ryaml", "-rjson", "-e",
-        "d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)",
-        str(path),
-    ], text=True)
+    output = subprocess.check_output(
+        [
+            "ruby",
+            "-ryaml",
+            "-rjson",
+            "-e",
+            "d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)",
+            str(path),
+        ],
+        text=True,
+    )
     return json.loads(output)
 
 
@@ -45,12 +52,12 @@ def build_files(service: str) -> dict[str, str]:
     module = f"github.com/dst-red-Wire/ecommerce-1/services/{service}"
     return {
         f"services/{service}/go.mod": f"module {module}\n\ngo 1.25.0\n",
-        f"services/{service}/cmd/{service}-api/main.go": f'''package main\n\nimport (\n\t"log"\n\t"net/http"\n\t"os"\n\t"time"\n)\n\nfunc main() {{\n\taddr := os.Getenv("{service.upper().replace('-', '_')}_HTTP_ADDR")\n\tif addr == "" {{\n\t\taddr = ":8080"\n\t}}\n\tmux := http.NewServeMux()\n\tmux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {{ w.WriteHeader(http.StatusOK) }})\n\tmux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {{ w.WriteHeader(http.StatusOK) }})\n\tserver := &http.Server{{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}}\n\tlog.Printf("{service} API listening on %s", addr)\n\tif err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {{\n\t\tlog.Fatal(err)\n\t}}\n}}\n''',
+        f"services/{service}/cmd/{service}-api/main.go": f'''package main\n\nimport (\n\t"log"\n\t"net/http"\n\t"os"\n\t"time"\n)\n\nfunc main() {{\n\taddr := os.Getenv("{service.upper().replace("-", "_")}_HTTP_ADDR")\n\tif addr == "" {{\n\t\taddr = ":8080"\n\t}}\n\tmux := http.NewServeMux()\n\tmux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {{ w.WriteHeader(http.StatusOK) }})\n\tmux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {{ w.WriteHeader(http.StatusOK) }})\n\tserver := &http.Server{{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}}\n\tlog.Printf("{service} API listening on %s", addr)\n\tif err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {{\n\t\tlog.Fatal(err)\n\t}}\n}}\n''',
         f"services/{service}/internal/domain/doc.go": f"// Package domain owns {service} business invariants.\npackage domain\n",
         f"services/{service}/internal/application/doc.go": f"// Package application owns {service} use cases.\npackage application\n",
         f"services/{service}/internal/transport/doc.go": f"// Package transport maps {service} protocol requests to application use cases.\npackage transport\n",
         f"services/{service}/internal/infrastructure/doc.go": f"// Package infrastructure contains {service} outbound adapters.\npackage infrastructure\n",
-        f"services/{service}/README.md": f'''# {service} service\n\nGenerated structural baseline only. Add business behavior only after its canonical contract and owning invariants are reviewed.\n\nValidation:\n\n```text\npython3 scripts/repoctl.py service {service}\n```\n''',
+        f"services/{service}/README.md": f"""# {service} service\n\nGenerated structural baseline only. Add business behavior only after its canonical contract and owning invariants are reviewed.\n\nValidation:\n\n```text\npython3 scripts/repoctl.py service {service}\n```\n""",
     }
 
 
@@ -81,7 +88,10 @@ def main() -> int:
         return 0
 
     if blocked_by_golden_milestone(root):
-        print("FAIL servicegen: non-Product service mutation is blocked during M2 golden Product qualification; use --dry-run only", file=sys.stderr)
+        print(
+            "FAIL servicegen: non-Product service mutation is blocked during M2 golden Product qualification; use --dry-run only",
+            file=sys.stderr,
+        )
         return 3
 
     for relative, content in files.items():

@@ -18,14 +18,10 @@ export function PaymentRefundDialog() {
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content
-          className="refund-dialog"
-          aria-describedby="refund-description"
-        >
+        <Dialog.Content className="refund-dialog" aria-describedby="refund-description">
           <Dialog.Title>Rembourser le paiement</Dialog.Title>
           <Dialog.Description id="refund-description">
-            Commande : <strong>ORD-2026-008471</strong>. Action simulée, sans
-            connexion backend.
+            Commande : <strong>ORD-2026-008471</strong>. Action simulée, sans connexion backend.
           </Dialog.Description>
           <Dialog.Close asChild>
             <button className="dialog-close" type="button" aria-label="Fermer">
@@ -44,11 +40,7 @@ export function PaymentRefundDialog() {
             <label>
               Montant <b>*</b>
               <div className="amount-field">
-                <input
-                  className="noma-field"
-                  defaultValue="129,90"
-                  inputMode="decimal"
-                />
+                <input className="noma-field" defaultValue="129,90" inputMode="decimal" />
                 <span>EUR</span>
               </div>
               <small>Maximum 129,90 EUR</small>
@@ -83,8 +75,8 @@ export function PaymentRefundDialog() {
               <p>
                 <strong>Action sensible</strong>
                 <br />
-                Cette action peut être irréversible. Une future API devra
-                revalider montant, droit et état.
+                Cette action peut être irréversible. Une future API devra revalider montant, droit
+                et état.
               </p>
             </div>
             <label className="confirmation-check">
@@ -94,8 +86,7 @@ export function PaymentRefundDialog() {
                 onChange={(event) => setAcknowledged(event.target.checked)}
               />
               <span>
-                Je comprends qu’une fois confirmé, le remboursement peut être
-                irréversible.
+                Je comprends qu’une fois confirmé, le remboursement peut être irréversible.
               </span>
             </label>
             <label>
@@ -120,11 +111,7 @@ export function PaymentRefundDialog() {
           </form>
         </Dialog.Content>
       </Dialog.Portal>
-      {result ? (
-        <p className="dialog-result" role="status">
-          {result}
-        </p>
-      ) : null}
+      {result ? <output className="dialog-result">{result}</output> : null}
     </Dialog.Root>
   );
 }

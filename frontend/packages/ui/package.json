@@ -13,13 +13,13 @@
   "dependencies": {
     "lucide-react": "1.31.0"
   },
-  "peerDependencies": {
-    "react": "19.2.8"
-  },
   "devDependencies": {
     "@noma/config": "workspace:*",
     "@types/react": "19.2.14",
     "react": "19.2.8",
     "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "react": "19.2.8"
   }
 }

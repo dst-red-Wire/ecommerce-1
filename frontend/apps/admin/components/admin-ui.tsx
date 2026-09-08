@@ -53,11 +53,7 @@ const statusTones: Record<string, BadgeTone> = {
 };
 
 export function StatusBadge({ value }: { value: string }) {
-  return (
-    <Badge tone={statusTones[value] ?? "neutral"}>
-      {value.replaceAll("_", " ")}
-    </Badge>
-  );
+  return <Badge tone={statusTones[value] ?? "neutral"}>{value.replaceAll("_", " ")}</Badge>;
 }
 
 export function Sparkline({ values }: { values: readonly number[] }) {
@@ -70,12 +66,8 @@ export function Sparkline({ values }: { values: readonly number[] }) {
     )
     .join(" ");
   return (
-    <svg
-      className="sparkline"
-      viewBox="0 0 100 32"
-      role="img"
-      aria-label="Évolution de la métrique"
-    >
+    <svg className="sparkline" viewBox="0 0 100 32">
+      <title>Évolution de la métrique</title>
       <polyline points={points} />
     </svg>
   );

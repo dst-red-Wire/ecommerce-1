@@ -1,7 +1,14 @@
 import type { CSSProperties } from "react";
 
 export type ProductArtKind =
-  "shoe" | "lamp" | "bag" | "headphones" | "vase" | "throw" | "cap" | "mug";
+  | "shoe"
+  | "lamp"
+  | "bag"
+  | "headphones"
+  | "vase"
+  | "throw"
+  | "cap"
+  | "mug";
 
 const art: Record<ProductArtKind, { glyph: string; label: string }> = {
   shoe: { glyph: "⌁", label: "Illustration temporaire d'une paire de baskets" },
@@ -31,12 +38,8 @@ export function ProductArt({
     "--art-size": compact ? "3.2rem" : "clamp(5rem, 10vw, 9rem)",
   } as CSSProperties;
   return (
-    <span
-      className={`product-art product-art--${kind} ${className}`.trim()}
-      role="img"
-      aria-label={item.label}
-      style={style}
-    >
+    <span className={`product-art product-art--${kind} ${className}`.trim()} style={style}>
+      <span className="sr-only">{item.label}</span>
       <span aria-hidden="true">{item.glyph}</span>
     </span>
   );

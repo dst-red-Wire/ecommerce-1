@@ -5,7 +5,7 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint test security terraform ansible system
+.PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
@@ -29,8 +29,16 @@ contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compat
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
 
-lint: automation ## Lint Go and frontend sources with declared toolchains
+lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
+
+format: ## Format Python and frontend sources with Ruff/Oxfmt
+	@ruff format scripts tests
+	@oxfmt --write frontend/apps frontend/packages frontend/e2e
+
+format-check: ## Check Ruff/Oxfmt formatting without mutation
+	@ruff format --check scripts tests
+	@oxfmt --check frontend/apps frontend/packages frontend/e2e
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
@@ -77,13 +85,16 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
 	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+
+quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
+	@$(ANSIBLE_LOCAL) --tags quality_tools
 
 agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
 	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools

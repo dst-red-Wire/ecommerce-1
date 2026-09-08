@@ -6,12 +6,7 @@ import { useMemo, useState } from "react";
 import type { ProductViewModel } from "@/domain/models";
 import { ProductCard } from "./product-card";
 
-const categoryOptions = [
-  "Maison",
-  "Mode",
-  "Électronique",
-  "Accessoires",
-] as const;
+const categoryOptions = ["Maison", "Mode", "Électronique", "Accessoires"] as const;
 
 export function CatalogExplorer({
   products,
@@ -20,20 +15,15 @@ export function CatalogExplorer({
   products: readonly ProductViewModel[];
   initialQuery?: string;
 }) {
-  const [categories, setCategories] = useState<readonly string[]>([
-    "Maison",
-    "Mode",
-  ]);
+  const [categories, setCategories] = useState<readonly string[]>(["Maison", "Mode"]);
   const [sort, setSort] = useState("new");
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   const visibleProducts = useMemo(() => {
     const query = initialQuery.trim().toLocaleLowerCase("fr");
     const filtered = products.filter((product) => {
-      const matchesQuery =
-        !query || product.name.toLocaleLowerCase("fr").includes(query);
-      const matchesCategory =
-        categories.length === 0 || categories.includes(product.category);
+      const matchesQuery = !query || product.name.toLocaleLowerCase("fr").includes(query);
+      const matchesCategory = categories.length === 0 || categories.includes(product.category);
       return matchesQuery && matchesCategory;
     });
     return [...filtered].sort((left, right) => {
@@ -90,10 +80,7 @@ export function CatalogExplorer({
 
   return (
     <div className="catalog-layout">
-      <aside
-        className="catalog-filters desktop-filters"
-        aria-label="Filtres catalogue"
-      >
+      <aside className="catalog-filters desktop-filters" aria-label="Filtres catalogue">
         {filters}
       </aside>
       <section className="catalog-results" aria-live="polite">
@@ -107,21 +94,14 @@ export function CatalogExplorer({
           </button>
           <div className="active-filters">
             {categories.map((category) => (
-              <button
-                key={category}
-                type="button"
-                onClick={() => toggleCategory(category)}
-              >
+              <button key={category} type="button" onClick={() => toggleCategory(category)}>
                 {category} <X aria-hidden="true" />
               </button>
             ))}
           </div>
           <label className="sort-control">
             <span>Trier par</span>
-            <select
-              value={sort}
-              onChange={(event) => setSort(event.target.value)}
-            >
+            <select value={sort} onChange={(event) => setSort(event.target.value)}>
               <option value="new">Nouveautés</option>
               <option value="price-asc">Prix croissant</option>
               <option value="price-desc">Prix décroissant</option>
@@ -137,14 +117,8 @@ export function CatalogExplorer({
         ) : (
           <div className="catalog-empty noma-panel">
             <h2>Aucun produit trouvé</h2>
-            <p>
-              Retirez un filtre pour retrouver les produits de démonstration.
-            </p>
-            <button
-              className="noma-button"
-              type="button"
-              onClick={() => setCategories([])}
-            >
+            <p>Retirez un filtre pour retrouver les produits de démonstration.</p>
+            <button className="noma-button" type="button" onClick={() => setCategories([])}>
               Réinitialiser les filtres
             </button>
           </div>
@@ -160,12 +134,7 @@ export function CatalogExplorer({
         </nav>
       </section>
       {mobileFiltersOpen ? (
-        <div
-          className="filter-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="filter-title"
-        >
+        <dialog open className="filter-dialog" aria-modal="true" aria-labelledby="filter-title">
           <button
             className="filter-backdrop"
             type="button"
@@ -175,11 +144,7 @@ export function CatalogExplorer({
           <div className="filter-sheet">
             <div className="filter-sheet__header">
               <h2 id="filter-title">Filtrer les produits</h2>
-              <button
-                type="button"
-                onClick={() => setMobileFiltersOpen(false)}
-                aria-label="Fermer"
-              >
+              <button type="button" onClick={() => setMobileFiltersOpen(false)} aria-label="Fermer">
                 <X aria-hidden="true" />
               </button>
             </div>
@@ -192,7 +157,7 @@ export function CatalogExplorer({
               Voir {visibleProducts.length} produits
             </button>
           </div>
-        </div>
+        </dialog>
       ) : null}
     </div>
   );

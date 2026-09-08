@@ -24,7 +24,7 @@ class TektonSourceCheckoutContractTests(unittest.TestCase):
         checkout = pipeline.index("    - name: source-checkout")
         classify = pipeline.index("    - name: classify")
         self.assertLess(checkout, classify)
-        classify_block = pipeline[classify:pipeline.index("    - name: global-gates")]
+        classify_block = pipeline[classify : pipeline.index("    - name: global-gates")]
         self.assertIn("runAfter: [source-checkout]", classify_block)
         self.assertIn("name: ecommerce-source-checkout", pipeline)
 

@@ -5,11 +5,7 @@ import { notFound } from "next/navigation";
 import { getOrders } from "@/application/admin";
 import { PageHeader, StatusBadge } from "@/components/admin-ui";
 
-export default async function OrderDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+export default async function OrderDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const id = (await params).id;
   const orders = await getOrders();
   const order = orders.find((item) => item.id === id);
@@ -27,11 +23,7 @@ export default async function OrderDetailPage({
             <Button variant="secondary" type="button">
               Créer un retour
             </Button>
-            <button
-              className="icon-action"
-              type="button"
-              aria-label="Autres actions"
-            >
+            <button className="icon-action" type="button" aria-label="Autres actions">
               <MoreHorizontal />
             </button>
           </>
@@ -39,11 +31,7 @@ export default async function OrderDetailPage({
       />
       <div className="order-kpis">
         {[
-          [
-            "Montant total",
-            `${order.amount.toFixed(2).replace(".", ",")} EUR`,
-            null,
-          ],
+          ["Montant total", `${order.amount.toFixed(2).replace(".", ",")} EUR`, null],
           ["Paiement", "Paiement capturé", Check],
           ["Risque", "Risque faible", ShieldCheck],
           ["Livraison", "En transit", Truck],
@@ -127,9 +115,7 @@ export default async function OrderDetailPage({
                 <li key={step} data-complete={index < 5}>
                   <span>{index < 5 ? "✓" : ""}</span>
                   <strong>{step}</strong>
-                  <small>
-                    {index < 5 ? `16/05/2026 10:${24 + index}` : "—"}
-                  </small>
+                  <small>{index < 5 ? `16/05/2026 10:${24 + index}` : "—"}</small>
                 </li>
               ))}
             </ol>
@@ -137,14 +123,8 @@ export default async function OrderDetailPage({
           <section className="address-grid">
             {[
               ["Client", "Jean Dupont\nclient@example.com"],
-              [
-                "Adresse de facturation",
-                "12 rue de la Paix\n75002 Paris\nFrance",
-              ],
-              [
-                "Adresse de livraison",
-                "12 rue de la Paix\n75002 Paris\nFrance",
-              ],
+              ["Adresse de facturation", "12 rue de la Paix\n75002 Paris\nFrance"],
+              ["Adresse de livraison", "12 rue de la Paix\n75002 Paris\nFrance"],
               ["Méthode de paiement", "Visa •••• 4242\nExp. 04/2027"],
               ["Transporteur", "Chronopost\n6JX123456789FR"],
             ].map(([title, content]) => (
@@ -157,11 +137,7 @@ export default async function OrderDetailPage({
         </div>
         <aside className="order-detail-side">
           <section className="detail-card noma-panel">
-            <div
-              className="detail-tabs"
-              role="tablist"
-              aria-label="Détails de commande"
-            >
+            <div className="detail-tabs" role="tablist" aria-label="Détails de commande">
               <button type="button" role="tab" aria-selected="true">
                 Facture
               </button>
@@ -180,12 +156,7 @@ export default async function OrderDetailPage({
             <p>Émise le 16/05/2026 10:24</p>
             <strong>129,90 EUR</strong>
           </section>
-          {[
-            "Retours",
-            "Remboursements",
-            "Notifications",
-            "Historique d’audit",
-          ].map((title) => (
+          {["Retours", "Remboursements", "Notifications", "Historique d’audit"].map((title) => (
             <section className="detail-card noma-panel" key={title}>
               <h2>{title}</h2>
               <p>

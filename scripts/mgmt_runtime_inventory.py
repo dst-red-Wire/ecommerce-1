@@ -7,6 +7,7 @@ state created before the root output existed, `--terraform-state` reads that sta
 `terraform show -json` and extracts only the canonical hcloud_server transport addresses.
 It never refreshes, plans, applies, imports, moves, removes, or rewrites Terraform state.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -90,15 +91,9 @@ def extract_servers_from_show(show_doc: Any) -> dict[str, Any]:
     if not isinstance(children, list):
         raise ValueError("terraform show JSON requires root child_modules")
 
-    modules = [
-        item
-        for item in children
-        if isinstance(item, dict) and item.get("address") == MGMT_MODULE_ADDRESS
-    ]
+    modules = [item for item in children if isinstance(item, dict) and item.get("address") == MGMT_MODULE_ADDRESS]
     if len(modules) != 1:
-        raise ValueError(
-            f"terraform show JSON requires exactly one {MGMT_MODULE_ADDRESS}, got {len(modules)}"
-        )
+        raise ValueError(f"terraform show JSON requires exactly one {MGMT_MODULE_ADDRESS}, got {len(modules)}")
     resources = modules[0].get("resources")
     if not isinstance(resources, list):
         raise ValueError(f"{MGMT_MODULE_ADDRESS} requires resources list")
@@ -107,7 +102,11 @@ def extract_servers_from_show(show_doc: Any) -> dict[str, Any]:
     for item in resources:
         if not isinstance(item, dict):
             continue
-        if item.get("mode") != "managed" or item.get("type") != MGMT_SERVER_TYPE or item.get("name") != MGMT_SERVER_NAME:
+        if (
+            item.get("mode") != "managed"
+            or item.get("type") != MGMT_SERVER_TYPE
+            or item.get("name") != MGMT_SERVER_NAME
+        ):
             continue
         index = item.get("index")
         resource_values = item.get("values")
@@ -126,9 +125,7 @@ def extract_servers_from_show(show_doc: Any) -> dict[str, Any]:
         if not isinstance(labels, dict):
             raise ValueError(f"MGMT hcloud_server {index} requires labels mapping")
         if labels.get("project") != MGMT_PROJECT_LABEL or labels.get("site") != MGMT_SITE_LABEL:
-            raise ValueError(
-                f"MGMT hcloud_server {index} ownership labels do not match ecommerce-1/mgmt"
-            )
+            raise ValueError(f"MGMT hcloud_server {index} ownership labels do not match ecommerce-1/mgmt")
         ipv4 = resource_values.get("ipv4_address")
         ipv6 = resource_values.get("ipv6_address")
         resource_id = resource_values.get("id")

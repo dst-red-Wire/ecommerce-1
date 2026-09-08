@@ -5,6 +5,7 @@ This program replaces stateless shell wrappers. It performs no cloud deployment 
 never becomes a CI authority: Tekton remains authoritative. Stateful workstation and
 toolchain reconciliation belongs to platform/ansible/developer.yml.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,11 +24,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+
 def _missing_repository_delivery(*_args, **_kwargs):
     raise RuntimeError(
         "repository delivery helper unavailable: scripts/repository_delivery.py is required "
         "for delivery/evidence/Tekton commands"
     )
+
 
 try:
     from repository_delivery import (
@@ -72,11 +75,22 @@ def require(name: str) -> str:
     return path
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
-        check: bool = True, capture: bool = False) -> subprocess.CompletedProcess[str]:
-    p = subprocess.run(cmd, cwd=cwd or ROOT, env=env, text=True,
-                       stdout=subprocess.PIPE if capture else None,
-                       stderr=subprocess.PIPE if capture else None)
+def run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    p = subprocess.run(
+        cmd,
+        cwd=cwd or ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
     if check and p.returncode:
         detail = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
@@ -147,7 +161,9 @@ def ansible_collections_check() -> int:
         if actual == expected:
             print(f"PASS ansible collection {name} {actual}")
         else:
-            print(f"FAIL ansible collection {name}: expected {expected}, resolved {actual or 'missing'}", file=sys.stderr)
+            print(
+                f"FAIL ansible collection {name}: expected {expected}, resolved {actual or 'missing'}", file=sys.stderr
+            )
             rc = 1
     return rc
 
@@ -165,20 +181,27 @@ def reconcile_ansible_collections() -> None:
         return
     require("ansible-playbook")
     require("ansible-galaxy")
-    run([
-        "ansible-playbook", "-i", "localhost,", "-c", "local",
-        "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}",
-        "--tags", "ansible_collections",
-    ])
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "--tags",
+            "ansible_collections",
+        ]
+    )
     if not ansible_collections_ready():
         drift = []
         for name, expected in required_ansible_collections().items():
             actual = resolved_ansible_collection_version(name)
             if actual != expected:
                 drift.append(f"{name}: expected {expected}, resolved {actual or 'missing'}")
-        raise RuntimeError(
-            "project Ansible collection reconciliation incomplete: " + "; ".join(drift)
-        )
+        raise RuntimeError("project Ansible collection reconciliation incomplete: " + "; ".join(drift))
     print("PASS project-owned Ansible collections reconciled")
 
 
@@ -187,7 +210,8 @@ def developer_state_ready(tags: str) -> bool:
     wanted = {tag.strip() for tag in tags.split(",") if tag.strip()}
     pins = pinned_versions()
     if "node" in wanted:
-        node = shutil.which("node"); corepack = shutil.which("corepack")
+        node = shutil.which("node")
+        corepack = shutil.which("corepack")
         if not node or not corepack:
             return False
         expected_node = (ROOT / "frontend" / ".node-version").read_text(encoding="utf-8").strip()
@@ -195,7 +219,8 @@ def developer_state_ready(tags: str) -> bool:
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
     if "go" in wanted or "cgo" in wanted:
-        go = shutil.which("go"); gofmt = shutil.which("gofmt")
+        go = shutil.which("go")
+        gofmt = shutil.which("gofmt")
         if not go or not gofmt:
             return False
         got = run([go, "version"], check=False, capture=True)
@@ -203,6 +228,14 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
+    if "quality_tools" in wanted:
+        for command, key in (("oxlint", "OXLINT_VERSION"), ("oxfmt", "OXFMT_VERSION"), ("ruff", "RUFF_VERSION")):
+            executable = shutil.which(command)
+            if not executable:
+                return False
+            got = run([executable, "--version"], check=False, capture=True)
+            if got.returncode or pins.get(key, "") not in got.stdout:
+                return False
     if "sqlc" in wanted:
         sqlc = shutil.which("sqlc")
         if not sqlc:
@@ -239,7 +272,15 @@ def runtime_efficiency_check() -> int:
 def governance() -> int:
     require("ruby")
     run(["ruby", "scripts/validate-architecture.rb"])
-    run_ruby_tests(["tests/architecture_validator_test.rb", "tests/ci_authority_test.rb", "tests/ci_affected_test.rb"])
+    run(["ruby", "scripts/validate-observability.rb"])
+    run_ruby_tests(
+        [
+            "tests/architecture_validator_test.rb",
+            "tests/observability_topology_test.rb",
+            "tests/ci_authority_test.rb",
+            "tests/ci_affected_test.rb",
+        ]
+    )
     if documentation_policy():
         return 1
     print("PASS governance checks completed")
@@ -317,15 +358,14 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
             elif isinstance(current, dict) and set(current) == {"$ref"} and current.get("$ref") in expected_refs:
                 target_group[key] = copy.deepcopy(common_value)
             elif current != common_value:
-                raise RuntimeError(
-                    f"service/common OpenAPI component collision at components/{group}/{key}"
-                )
+                raise RuntimeError(f"service/common OpenAPI component collision at components/{group}/{key}")
 
     rewrite_refs(service_doc)
 
     # Generation must now be self-contained. Keep internal refs intact so named
     # service schemas retain stable generated Go/TypeScript type names.
     leftovers: list[str] = []
+
     def collect_external(node):
         if isinstance(node, dict):
             ref = node.get("$ref")
@@ -336,13 +376,14 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
         elif isinstance(node, list):
             for value in node:
                 collect_external(value)
+
     collect_external(service_doc)
     if leftovers:
         raise RuntimeError(f"bundled OpenAPI still contains external refs: {sorted(set(leftovers))}")
     return service_doc
 
 
-def api_generate(target: str = "all", service: str = "") -> int:
+def api_generate(target: str = "all", service: str = "", check: bool = False) -> int:
     if target not in {"all", "go", "ts"}:
         return fail("api-generate target must be all, go, or ts")
     registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
@@ -387,6 +428,7 @@ def api_generate(target: str = "all", service: str = "") -> int:
                     run(["gofmt", "-w", str(generated)], cwd=module)
             if target in {"all", "ts"}:
                 require("corepack")
+                require("oxfmt")
                 out_dir = ROOT / "frontend" / "packages" / "api-client" / "src" / "generated"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 generated = out_dir / f"{name}.ts"
@@ -394,7 +436,27 @@ def api_generate(target: str = "all", service: str = "") -> int:
                     ["corepack", "pnpm", "--dir", "frontend", "exec", "openapi-typescript", str(bundled_spec)],
                     capture=True,
                 )
-                generated.write_text(p.stdout, encoding="utf-8")
+                candidate = Path(temp_dir) / f"{name}.generated.ts"
+                candidate.write_text(p.stdout, encoding="utf-8")
+                run(
+                    [
+                        "oxfmt",
+                        "--config",
+                        str(ROOT / "frontend" / ".oxfmtrc.json"),
+                        "--write",
+                        str(candidate),
+                    ],
+                    cwd=ROOT / "frontend",
+                )
+                canonical = candidate.read_text(encoding="utf-8")
+                if check:
+                    if not generated.is_file():
+                        return fail(f"generated TypeScript API client is missing: {generated.relative_to(ROOT)}", 1)
+                    current = generated.read_text(encoding="utf-8")
+                    if current != canonical:
+                        return fail(f"generated TypeScript API client is stale: {generated.relative_to(ROOT)}", 1)
+                else:
+                    generated.write_text(canonical, encoding="utf-8")
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -412,18 +474,30 @@ def api_compat(base: str, head: str) -> int:
     registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
     common = registry.get("common_components")
     specs = [entry["path"] for entry in registry.get("contracts", {}).values()]
-    with tempfile.TemporaryDirectory(prefix="ecommerce-oas-old-") as old_s, tempfile.TemporaryDirectory(prefix="ecommerce-oas-new-") as new_s:
-        old = Path(old_s); new = Path(new_s)
+    with (
+        tempfile.TemporaryDirectory(prefix="ecommerce-oas-old-") as old_s,
+        tempfile.TemporaryDirectory(prefix="ecommerce-oas-new-") as new_s,
+    ):
+        old = Path(old_s)
+        new = Path(new_s)
         for tree, ref in ((old, base), (new, head)):
             if ref == "WORKTREE":
                 shutil.copytree(ROOT / "contracts" / "openapi", tree / "contracts" / "openapi", dirs_exist_ok=True)
                 (tree / "config" / "contracts").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(ROOT / "config" / "contracts" / "public-api-contracts.yaml", tree / "config" / "contracts" / "public-api-contracts.yaml")
+                shutil.copy2(
+                    ROOT / "config" / "contracts" / "public-api-contracts.yaml",
+                    tree / "config" / "contracts" / "public-api-contracts.yaml",
+                )
             else:
                 # git archive is binary; stream it directly to tar.
-                proc1 = subprocess.Popen(["git", "archive", ref, "contracts/openapi", "config/contracts/public-api-contracts.yaml"], cwd=ROOT, stdout=subprocess.PIPE)
+                proc1 = subprocess.Popen(
+                    ["git", "archive", ref, "contracts/openapi", "config/contracts/public-api-contracts.yaml"],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                )
                 proc2 = subprocess.run(["tar", "-x", "-C", str(tree)], stdin=proc1.stdout)
-                if proc1.stdout: proc1.stdout.close()
+                if proc1.stdout:
+                    proc1.stdout.close()
                 rc = proc1.wait()
                 if rc or proc2.returncode:
                     raise RuntimeError(f"git archive failed for {ref}")
@@ -479,7 +553,10 @@ def automation_policy() -> int:
     # Shell source is forbidden repository-wide after the Ansible-first migration.
     shell_files = repository_shell_paths()
     if shell_files:
-        print("FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration", file=sys.stderr)
+        print(
+            "FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration",
+            file=sys.stderr,
+        )
         for path in shell_files:
             print(f"  {path}", file=sys.stderr)
         return 1
@@ -525,8 +602,10 @@ def documentation_policy() -> int:
 def frontend(action: str, scope: str) -> int:
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: action={check|lint|test|build} scope={all|storefront|admin}")
-    ensure_developer("node")
-    require("node"); require("corepack")
+    ensure_developer("node,quality_tools")
+    require("node")
+    require("corepack")
+    require("oxlint")
     package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
     pm = package.get("packageManager", "")
     if not pm.startswith("pnpm@"):
@@ -537,22 +616,32 @@ def frontend(action: str, scope: str) -> int:
         return fail(f"pnpm version mismatch: expected {expected}, got {actual}")
     run(["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline"], cwd=ROOT / "frontend")
     if action in {"check", "test", "build"}:
-        api_generate("ts")
+        if api_generate("ts", check=True):
+            return 1
+
     def pnpm(*args: str) -> None:
         run(["corepack", "pnpm", *args], cwd=ROOT / "frontend")
+
     if action in {"check", "lint"}:
-        if scope == "all": pnpm("run", "lint")
-        else: pnpm("exec", "eslint", f"apps/{scope}", "packages/ui", "packages/api-client")
+        lint_paths = ["apps", "packages"] if scope == "all" else [f"apps/{scope}", "packages/ui", "packages/api-client"]
+        run(["oxlint", *lint_paths], cwd=ROOT / "frontend")
     if action in {"check", "test", "build"}:
-        if scope == "all": pnpm("run", "typecheck")
+        if scope == "all":
+            pnpm("run", "typecheck")
         else:
-            pnpm("--filter", "@noma/ui", "typecheck"); pnpm("--filter", "@noma/api-client", "typecheck"); pnpm("--filter", f"@noma/{scope}", "typecheck")
+            pnpm("--filter", "@noma/ui", "typecheck")
+            pnpm("--filter", "@noma/api-client", "typecheck")
+            pnpm("--filter", f"@noma/{scope}", "typecheck")
     if action in {"check", "test"}:
-        if scope == "all": pnpm("run", "test")
-        else: pnpm("--filter", f"@noma/{scope}", "test")
+        if scope == "all":
+            pnpm("run", "test")
+        else:
+            pnpm("--filter", f"@noma/{scope}", "test")
     if action in {"check", "build"}:
-        if scope == "all": pnpm("run", "build")
-        else: pnpm("--filter", f"@noma/{scope}", "build")
+        if scope == "all":
+            pnpm("run", "build")
+        else:
+            pnpm("--filter", f"@noma/{scope}", "build")
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
 
@@ -561,8 +650,20 @@ def ensure_developer(tags: str) -> None:
     if developer_state_ready(tags):
         return
     require("ansible-playbook")
-    run(["ansible-playbook", "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml",
-         "-e", f"repo_root={ROOT}", "--tags", tags])
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "--tags",
+            tags,
+        ]
+    )
     if not developer_state_ready(tags):
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
 
@@ -576,7 +677,9 @@ def service_check(service: str) -> int:
     if not (module / "go.mod").is_file():
         return fail(f"service module does not exist: services/{service}/go.mod")
     ensure_developer("go,cgo,sqlc,docker")
-    env = os.environ.copy(); env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH','')}"; env["CGO_ENABLED"] = "1"
+    env = os.environ.copy()
+    env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env["CGO_ENABLED"] = "1"
     if (module / "sqlc.yaml").is_file():
         cfg = ruby_yaml(str(module / "sqlc.yaml"))
         out_dir = cfg["sql"][0]["gen"]["go"]["out"]
@@ -594,10 +697,15 @@ def service_check(service: str) -> int:
     if go_files:
         p = run(["gofmt", "-l", *go_files], capture=True)
         if p.stdout.strip():
-            print(p.stdout, file=sys.stderr); return fail(f"gofmt required for {service}", 1)
+            print(p.stdout, file=sys.stderr)
+            return fail(f"gofmt required for {service}", 1)
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        run(["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"], cwd=module, env=env)
+        run(
+            ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
+            cwd=module,
+            env=env,
+        )
     run(["go", "vet", "./..."], cwd=module, env=env)
     run(["go", "build", "./..."], cwd=module, env=env)
     print(f"PASS {service} service checks completed")
@@ -627,9 +735,11 @@ def security() -> int:
 def terraform_check() -> int:
     tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
     if not tf_files:
-        print("SKIP terraform: no Terraform files found"); return 0
+        print("SKIP terraform: no Terraform files found")
+        return 0
     tool = shutil.which("tofu") or shutil.which("terraform")
-    if not tool: return fail("Terraform sources exist but neither tofu nor terraform is installed")
+    if not tool:
+        return fail("Terraform sources exist but neither tofu nor terraform is installed")
     run([tool, "fmt", "-check", "-recursive", "-diff"])
     for directory in sorted({p.parent for p in tf_files}):
         print(f"CHECK terraform: {directory.relative_to(ROOT)}")
@@ -650,9 +760,23 @@ def ansible_check() -> int:
     require("ansible-lint")
     files = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yml"))
     files += sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yaml"))
-    if not files: print("SKIP ansible: no Ansible files found"); return 0
+    if not files:
+        print("SKIP ansible: no Ansible files found")
+        return 0
     run(["ansible-lint", *files])
-    run(["ansible-playbook", "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "--syntax-check", "-e", f"repo_root={ROOT}"])
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "--syntax-check",
+            "-e",
+            f"repo_root={ROOT}",
+        ]
+    )
     if ansible_collections_check():
         return 1
     print("PASS ansible checks completed")
@@ -670,13 +794,21 @@ def system_check() -> int:
 
 
 def lint_all() -> int:
-    if automation_policy(): return 1
+    if automation_policy():
+        return 1
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
         p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip(): print(p.stdout, file=sys.stderr); return 1
-    if (ROOT / "frontend" / "package.json").is_file(): frontend("lint", "all")
+        if p.stdout.strip():
+            print(p.stdout, file=sys.stderr)
+            return 1
+    python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
+    if python_files:
+        require("ruff")
+        run(["ruff", "check", *python_files])
+    if (ROOT / "frontend" / "package.json").is_file():
+        frontend("lint", "all")
     print("PASS lint checks completed")
     return 0
 
@@ -689,7 +821,8 @@ def test_all() -> int:
             ensure_developer("go")
             run(["go", "test", "./..."], cwd=module)
             run(["go", "vet", "./..."], cwd=module)
-    if (ROOT / "frontend" / "package.json").is_file(): frontend("test", "all")
+    if (ROOT / "frontend" / "package.json").is_file():
+        frontend("test", "all")
     print("PASS test checks completed")
     return 0
 
@@ -699,7 +832,9 @@ def changed_paths(base: str, head: str) -> list[str]:
         tracked = git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--").splitlines()
         untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
         return sorted(set(filter(None, tracked + untracked)))
-    return sorted(set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines())))
+    return sorted(
+        set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines()))
+    )
 
 
 def worktree_tree_sha() -> str:
@@ -785,21 +920,23 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         records.append(promoted)
 
     payload = copy.deepcopy(source)
-    payload.update({
-        "schema_version": 4,
-        "evidence_kind": "exact_commit",
-        "head_ref": requested,
-        "head_sha": requested,
-        "exact_commit_evidence": True,
-        "gates": records,
-        "metrics": evidence_metrics(records),
-        "verification": {
-            "mode": "promoted-worktree",
-            "source_head_sha": source_head,
-            "source_tree_sha": source_tree,
-            "commit_tree_sha": commit_tree,
-        },
-    })
+    payload.update(
+        {
+            "schema_version": 4,
+            "evidence_kind": "exact_commit",
+            "head_ref": requested,
+            "head_sha": requested,
+            "exact_commit_evidence": True,
+            "gates": records,
+            "metrics": evidence_metrics(records),
+            "verification": {
+                "mode": "promoted-worktree",
+                "source_head_sha": source_head,
+                "source_tree_sha": source_tree,
+                "commit_tree_sha": commit_tree,
+            },
+        }
+    )
     destination = CONTEXT / "evidence" / f"{requested}.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -840,14 +977,23 @@ def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]
 
 
 def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str, str] | None = None) -> bool:
-    logs = CONTEXT / "logs"; logs.mkdir(parents=True, exist_ok=True)
-    log_path = logs / f"{name.replace(':','-').replace('/','-')}.log"
+    logs = CONTEXT / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
     start = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
         p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
     duration = round(time.monotonic() - start, 3)
-    records.append({"gate": name, "status": "PASS" if p.returncode == 0 else "FAIL", "exit_code": p.returncode,
-                    "duration_seconds": duration, "command": command, "log": str(log_path.relative_to(ROOT))})
+    records.append(
+        {
+            "gate": name,
+            "status": "PASS" if p.returncode == 0 else "FAIL",
+            "exit_code": p.returncode,
+            "duration_seconds": duration,
+            "command": command,
+            "log": str(log_path.relative_to(ROOT)),
+        }
+    )
     print(f"{'PASS' if p.returncode == 0 else 'FAIL'} {name} ({duration:.3f}s)")
     if p.returncode:
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
@@ -877,12 +1023,14 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
     except (OSError, json.JSONDecodeError):
         return None, None
     base_sha = git("rev-parse", base).strip()
-    if (evidence.get("schema_version", 0) < 2
-            or evidence.get("status") != "PASS"
-            or evidence.get("exact_commit_evidence") is not True
-            or evidence.get("head_sha") != parent_sha
-            or evidence.get("base_sha") != base_sha
-            or not isinstance(evidence.get("gates"), list)):
+    if (
+        evidence.get("schema_version", 0) < 2
+        or evidence.get("status") != "PASS"
+        or evidence.get("exact_commit_evidence") is not True
+        or evidence.get("head_sha") != parent_sha
+        or evidence.get("base_sha") != base_sha
+        or not isinstance(evidence.get("gates"), list)
+    ):
         return None, None
     return parent_sha, evidence
 
@@ -893,19 +1041,20 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
         return False
     source_duration = float(source.get("source_duration_seconds", source.get("duration_seconds", 0.0)) or 0.0)
     original_execution_sha = source.get("original_execution_sha") or source.get("reused_from_sha") or parent_sha
-    records.append({
-        "gate": name,
-        "status": "PASS",
-        "exit_code": 0,
-        "duration_seconds": 0.0,
-        "reused_from_sha": parent_sha,
-        "original_execution_sha": original_execution_sha,
-        "source_duration_seconds": source_duration,
-        "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
-    })
+    records.append(
+        {
+            "gate": name,
+            "status": "PASS",
+            "exit_code": 0,
+            "duration_seconds": 0.0,
+            "reused_from_sha": parent_sha,
+            "original_execution_sha": original_execution_sha,
+            "source_duration_seconds": source_duration,
+            "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
+        }
+    )
     print(f"PASS | reused {parent_sha} | {name} | saved~{source_duration:.3f}s")
     return True
-
 
 
 def _controller_command(*args: str) -> list[str]:
@@ -968,7 +1117,9 @@ def _record_delivery_wall(evidence_path: Path, evidence: dict, started: float) -
     metrics = evidence.setdefault("metrics", evidence_metrics(evidence.get("gates", [])))
     metrics["deliver_wall_seconds"] = wall
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"DELIVER_METRICS wall={wall:.3f}s executed={metrics.get('executed_gates', 0)} reused={metrics.get('reused_gates', 0)}")
+    print(
+        f"DELIVER_METRICS wall={wall:.3f}s executed={metrics.get('executed_gates', 0)} reused={metrics.get('reused_gates', 0)}"
+    )
     return wall
 
 
@@ -1045,7 +1196,8 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
         return 2
     requested, _ = exact
     records: list[dict] = []
-    env = os.environ.copy(); env.update({"BASE": base, "HEAD": head})
+    env = os.environ.copy()
+    env.update({"BASE": base, "HEAD": head})
     rc = 0
     for name, command in _global_gate_commands(base, head):
         if not _run_gate(name, command, records, env):
@@ -1066,7 +1218,8 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
         records.append({"gate": component, "status": "SKIP", "reason": reason, "duration_seconds": 0.0})
         rc = 0
     else:
-        env = os.environ.copy(); env.update({"BASE": base, "HEAD": head})
+        env = os.environ.copy()
+        env.update({"BASE": base, "HEAD": head})
         rc = 0 if _run_gate(component, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"component-{component}"), {"head_sha": requested, "records": records})
     return rc
@@ -1111,7 +1264,9 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
             duplicates.add(gate)
         by_gate[gate] = record
     missing = expected - set(by_gate)
-    bad = sorted(gate for gate, record in by_gate.items() if gate in expected and record.get("status") not in {"PASS", "SKIP"})
+    bad = sorted(
+        gate for gate, record in by_gate.items() if gate in expected and record.get("status") not in {"PASS", "SKIP"}
+    )
     if missing or duplicates or bad:
         description = f"Tekton incomplete/failed: missing={len(missing)} duplicate={len(duplicates)} failed={len(bad)}"
         publish_remote_status(requested, "failure", description[:140], target)
@@ -1152,7 +1307,10 @@ def evidence_fetch_command(sha: str) -> int:
 
 def evidence_compare_command(full_path: str, incremental_path: str) -> int:
     result = compare_evidence(Path(full_path), Path(incremental_path))
-    destination = CONTEXT / f"evidence-comparison-{str(result.get('full_head_sha'))[:12]}-{str(result.get('incremental_head_sha'))[:12]}.json"
+    destination = (
+        CONTEXT
+        / f"evidence-comparison-{str(result.get('full_head_sha'))[:12]}-{str(result.get('incremental_head_sha'))[:12]}.json"
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -1172,18 +1330,16 @@ def github_exact_ci_status(gh: str, head_sha: str) -> str:
         payload = json.loads(response.stdout or "{}")
     except json.JSONDecodeError:
         return "no remote CI status present"
-    statuses = [
-        status for status in payload.get("statuses", [])
-        if status.get("context") == REMOTE_STATUS_CONTEXT
-    ]
+    statuses = [status for status in payload.get("statuses", []) if status.get("context") == REMOTE_STATUS_CONTEXT]
     if not statuses:
         return "no remote CI status present"
     latest = statuses[0]
     return f"{latest.get('state', 'unknown')} | {REMOTE_STATUS_CONTEXT} | {head_sha}"
 
 
-def write_evidence(base: str, head: str, paths: list[str], components: list[str], records: list[dict],
-                   verification: dict | None = None) -> Path:
+def write_evidence(
+    base: str, head: str, paths: list[str], components: list[str], records: list[dict], verification: dict | None = None
+) -> Path:
     base_sha = git("rev-parse", base).strip()
     current_head_sha = git("rev-parse", "HEAD").strip()
     head_sha = current_head_sha if head == "WORKTREE" else git("rev-parse", head).strip()
@@ -1223,9 +1379,7 @@ def verify_change(base: str, head: str) -> int:
         requested_head_sha = git("rev-parse", head).strip()
         current_head_sha = git("rev-parse", "HEAD").strip()
         if requested_head_sha != current_head_sha:
-            return fail(
-                f"verify-change head mismatch: requested {requested_head_sha}, checked out {current_head_sha}"
-            )
+            return fail(f"verify-change head mismatch: requested {requested_head_sha}, checked out {current_head_sha}")
         if git("status", "--porcelain", "--untracked-files=all").strip():
             return fail("verify-change exact head requires a clean worktree")
     else:
@@ -1237,6 +1391,23 @@ def verify_change(base: str, head: str) -> int:
     records: list[dict] = []
     env = os.environ.copy()
     env.update({"BASE": base, "HEAD": head})
+
+    def run_stable_gate(name: str, command: list[str]) -> bool:
+        before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+        ok = _run_gate(name, command, records, env)
+        if head != "WORKTREE":
+            return ok
+        after_tree = worktree_tree_sha()
+        if after_tree == before_tree:
+            return ok
+        mutated_paths = git("diff", "--name-only", before_tree, after_tree).splitlines()
+        if records and records[-1].get("gate") == name:
+            records[-1]["status"] = "FAIL"
+            records[-1]["exit_code"] = 1
+            records[-1]["reason"] = "gate mutated worktree"
+            records[-1]["mutated_paths"] = mutated_paths
+        print(f"FAIL {name} mutated worktree: {mutated_paths}", file=sys.stderr)
+        return False
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
@@ -1260,7 +1431,7 @@ def verify_change(base: str, head: str) -> int:
 
     global_commands = _global_gate_commands(base, head)
     for name, command in global_commands:
-        if not _run_gate(name, command, records, env):
+        if not run_stable_gate(name, command):
             write_evidence(base, head, paths, components, records, verification)
             return 1
 
@@ -1268,12 +1439,12 @@ def verify_change(base: str, head: str) -> int:
     if combined:
         frontend_delta = bool({"frontend:storefront", "frontend:admin"} & delta_components)
         reused = bool(
-            parent_evidence and parent_sha and not frontend_delta
+            parent_evidence
+            and parent_sha
+            and not frontend_delta
             and _reuse_gate("frontend:all", parent_sha, parent_evidence, records)
         )
-        if not reused and not _run_gate(
-            "frontend:all", _controller_command("frontend", "check", "all"), records, env
-        ):
+        if not reused and not _run_gate("frontend:all", _controller_command("frontend", "check", "all"), records, env):
             write_evidence(base, head, paths, components, records, verification)
             return 1
 
@@ -1287,7 +1458,7 @@ def verify_change(base: str, head: str) -> int:
         if parent_evidence and parent_sha and component not in delta_components:
             if _reuse_gate(component, parent_sha, parent_evidence, records):
                 continue
-        if not _run_gate(component, command, records, env):
+        if not run_stable_gate(component, command):
             write_evidence(base, head, paths, components, records, verification)
             return 1
 
@@ -1296,13 +1467,15 @@ def verify_change(base: str, head: str) -> int:
         verification["final_tree_sha"] = final_tree_sha
         verification["tree_stable"] = final_tree_sha == source_tree_sha
         if final_tree_sha != source_tree_sha:
-            records.append({
-                "gate": "worktree-stability",
-                "status": "FAIL",
-                "exit_code": 1,
-                "duration_seconds": 0.0,
-                "reason": "tracked/untracked commit tree changed during verification",
-            })
+            records.append(
+                {
+                    "gate": "worktree-stability",
+                    "status": "FAIL",
+                    "exit_code": 1,
+                    "duration_seconds": 0.0,
+                    "reason": "tracked/untracked commit tree changed during verification",
+                }
+            )
             write_evidence(base, head, paths, components, records, verification)
             return fail("worktree changed during verification; evidence is not promotable", 1)
 
@@ -1318,54 +1491,137 @@ def diff_context(base: str) -> int:
     stat = git("diff", "--stat", base)
     diff = git("diff", "--unified=2", base, "--")
     out = CONTEXT / "diff.md"
-    out.write_text("# Diff context\n\n## Files\n" + "\n".join(f"- `{p}`" for p in paths) + "\n\n## Stat\n```text\n" + stat[:12000] + "\n```\n\n## Diff\n```diff\n" + diff[:28000] + "\n```\n", encoding="utf-8")
-    print(out.relative_to(ROOT)); return 0
+    out.write_text(
+        "# Diff context\n\n## Files\n"
+        + "\n".join(f"- `{p}`" for p in paths)
+        + "\n\n## Stat\n```text\n"
+        + stat[:12000]
+        + "\n```\n\n## Diff\n```diff\n"
+        + diff[:28000]
+        + "\n```\n",
+        encoding="utf-8",
+    )
+    print(out.relative_to(ROOT))
+    return 0
 
 
 def failure_context(gate: str, component: str) -> int:
     if component:
-        if component.startswith("service:"): cmd = [sys.executable, "scripts/repoctl.py", "service", component.split(":",1)[1]]
-        elif component.startswith("frontend:"): cmd = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":",1)[1]]
-        elif component == "platform:terraform": cmd = [sys.executable, "scripts/repoctl.py", "terraform"]
-        elif component == "platform:ansible": cmd = [sys.executable, "scripts/repoctl.py", "ansible"]
-        else: return fail(f"unsupported COMPONENT: {component}")
+        if component.startswith("service:"):
+            cmd = [sys.executable, "scripts/repoctl.py", "service", component.split(":", 1)[1]]
+        elif component.startswith("frontend:"):
+            cmd = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":", 1)[1]]
+        elif component == "platform:terraform":
+            cmd = [sys.executable, "scripts/repoctl.py", "terraform"]
+        elif component == "platform:ansible":
+            cmd = [sys.executable, "scripts/repoctl.py", "ansible"]
+        else:
+            return fail(f"unsupported COMPONENT: {component}")
         name = component.replace(":", "-")
     else:
-        allowed = {"governance", "runtime-efficiency", "contracts", "lint", "test", "security", "terraform", "ansible", "system", "automation-policy"}
-        if gate not in allowed: return fail(f"unsupported GATE: {gate}")
-        cmd = [sys.executable, "scripts/repoctl.py", gate]; name = gate
+        allowed = {
+            "governance",
+            "runtime-efficiency",
+            "contracts",
+            "lint",
+            "test",
+            "security",
+            "terraform",
+            "ansible",
+            "system",
+            "automation-policy",
+        }
+        if gate not in allowed:
+            return fail(f"unsupported GATE: {gate}")
+        cmd = [sys.executable, "scripts/repoctl.py", gate]
+        name = gate
     p = run(cmd, check=False, capture=True)
     text = (p.stdout or "") + (p.stderr or "")
-    lines = text.splitlines(); keywords = re.compile(r"FAIL|FAILED|ERROR|error:|fatal:|panic:|cannot use|undefined|make: \*\*\*", re.I)
+    lines = text.splitlines()
+    keywords = re.compile(r"FAIL|FAILED|ERROR|error:|fatal:|panic:|cannot use|undefined|make: \*\*\*", re.I)
     hits = [i for i, line in enumerate(lines) if keywords.search(line)]
     chosen: set[int] = set()
-    for i in hits: chosen.update(range(max(0, i-3), min(len(lines), i+4)))
+    for i in hits:
+        chosen.update(range(max(0, i - 3), min(len(lines), i + 4)))
     relevant = [lines[i] for i in sorted(chosen)] if chosen else lines[-120:]
-    CONTEXT.mkdir(exist_ok=True); path = CONTEXT / f"failure-{name}.md"
-    path.write_text(f"# Failure context\nGATE: {name}\nSTATUS: {'PASS' if p.returncode == 0 else 'FAIL'}\nEXIT_CODE: {p.returncode}\n\n## Relevant output\n```text\n" + "\n".join(relevant[:220]) + "\n```\n", encoding="utf-8")
-    print(path.relative_to(ROOT)); return p.returncode
+    CONTEXT.mkdir(exist_ok=True)
+    path = CONTEXT / f"failure-{name}.md"
+    path.write_text(
+        f"# Failure context\nGATE: {name}\nSTATUS: {'PASS' if p.returncode == 0 else 'FAIL'}\nEXIT_CODE: {p.returncode}\n\n## Relevant output\n```text\n"
+        + "\n".join(relevant[:220])
+        + "\n```\n",
+        encoding="utf-8",
+    )
+    print(path.relative_to(ROOT))
+    return p.returncode
 
 
 def doctor() -> int:
-    expected = ["git","make","go","gofmt","python3","pipx","pre-commit","ansible","ansible-lint","molecule","terraform","tflint","trivy","checkov","gitleaks","ggshield","semgrep","syft","cosign","oras","rg","fd","yq","ast-grep","kubeconform","conftest","opa","kubectl","helm","kustomize","docker","bazel","bazelisk","nx","oasdiff","oapi-codegen"]
+    expected = [
+        "git",
+        "make",
+        "go",
+        "gofmt",
+        "python3",
+        "pipx",
+        "pre-commit",
+        "ansible",
+        "ansible-lint",
+        "molecule",
+        "terraform",
+        "tflint",
+        "trivy",
+        "checkov",
+        "gitleaks",
+        "ggshield",
+        "semgrep",
+        "syft",
+        "cosign",
+        "oras",
+        "rg",
+        "fd",
+        "yq",
+        "ast-grep",
+        "kubeconform",
+        "conftest",
+        "opa",
+        "kubectl",
+        "helm",
+        "kustomize",
+        "docker",
+        "bazel",
+        "bazelisk",
+        "nx",
+        "oasdiff",
+        "oapi-codegen",
+        "oxlint",
+        "oxfmt",
+        "ruff",
+    ]
     rc = 0
     for cmd in expected:
         path = shutil.which(cmd)
         print(f"{'PASS' if path else 'FAIL'} {cmd:24} {path or 'missing'}")
         rc |= 0 if path else 1
-    if shutil.which("docker") and run(["docker","info"], check=False, capture=True).returncode == 0: print("PASS docker-daemon reachable")
-    else: print("FAIL docker-daemon unreachable"); rc = 1
+    if shutil.which("docker") and run(["docker", "info"], check=False, capture=True).returncode == 0:
+        print("PASS docker-daemon reachable")
+    else:
+        print("FAIL docker-daemon unreachable")
+        rc = 1
     rc |= ansible_collections_check()
     return rc
 
 
 def git_sync() -> int:
     branch = git("branch", "--show-current").strip()
-    if not branch: return fail("git-sync detached HEAD")
-    if git("status", "--porcelain", "--untracked-files=all").strip(): return fail("git-sync requires clean tree")
-    run(["git","fetch","origin","--prune"])
-    run(["git","merge","--ff-only",f"origin/{branch}"])
-    print(f"PASS git-sync {branch}"); return 0
+    if not branch:
+        return fail("git-sync detached HEAD")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("git-sync requires clean tree")
+    run(["git", "fetch", "origin", "--prune"])
+    run(["git", "merge", "--ff-only", f"origin/{branch}"])
+    print(f"PASS git-sync {branch}")
+    return 0
 
 
 def publish(base: str, message: str) -> int:
@@ -1383,17 +1639,12 @@ def publish(base: str, message: str) -> int:
         if not message:
             return fail("dirty tree requires MSG/TITLE")
         if promotable:
-            print(
-                "INFO exact worktree PASS matches current parent/base/tree; "
-                "commit will attempt evidence promotion"
-            )
+            print("INFO exact worktree PASS matches current parent/base/tree; commit will attempt evidence promotion")
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
         commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(
-            filter(None, [commit_env.get("SKIP", ""), "affected-precommit"])
-        )
+        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
         run(["git", "commit", "-m", message], env=commit_env)
 
     head = git("rev-parse", "HEAD").strip()
@@ -1416,19 +1667,38 @@ def publish(base: str, message: str) -> int:
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
-    if publish(base, message or title): return 1
+    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    review_forge = (review_policy.get("pull_request_review") or {}).get("forge")
+    if review_forge != "github":
+        return fail(f"review-policy forge must be github for delivery; got {review_forge!r}")
+    if publish(base, message or title):
+        return 1
     gh = shutil.which("gh") or shutil.which("gh.exe")
-    if not gh: return fail("GitHub CLI missing")
-    branch = git("branch","--show-current").strip(); head = git("rev-parse","HEAD").strip()
+    if not gh:
+        return fail("GitHub CLI missing")
+    branch = git("branch", "--show-current").strip()
+    head = git("rev-parse", "HEAD").strip()
     evidence = CONTEXT / "evidence" / f"{head}.json"
-    if not evidence.is_file(): return fail(f"exact evidence missing for {head}")
-    if not title: title = git("log","-1","--pretty=%s").strip()
-    changed = git("diff","--name-only",f"origin/{base}...HEAD") if not base.startswith("origin/") else git("diff","--name-only",f"{base}...HEAD")
-    stat = git("diff","--stat",f"origin/{base}...HEAD") if not base.startswith("origin/") else git("diff","--stat",f"{base}...HEAD")
+    if not evidence.is_file():
+        return fail(f"exact evidence missing for {head}")
+    if not title:
+        title = git("log", "-1", "--pretty=%s").strip()
+    changed = (
+        git("diff", "--name-only", f"origin/{base}...HEAD")
+        if not base.startswith("origin/")
+        else git("diff", "--name-only", f"{base}...HEAD")
+    )
+    stat = (
+        git("diff", "--stat", f"origin/{base}...HEAD")
+        if not base.startswith("origin/")
+        else git("diff", "--stat", f"{base}...HEAD")
+    )
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
-    body = CONTEXT / "pr-body.md"; body.parent.mkdir(exist_ok=True)
+    body = CONTEXT / "pr-body.md"
+    body.parent.mkdir(exist_ok=True)
+
     def gate_source(gate: dict) -> str:
         if gate.get("promoted_from_worktree"):
             return "promoted from validated worktree tree"
@@ -1437,22 +1707,71 @@ def deliver(base: str, title: str, message: str) -> int:
         if gate.get("status") == "SKIP":
             return gate.get("reason", "not applicable")
         return "executed"
+
     rows = "\n".join(
-        f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds',0)} | {gate_source(g)} |"
-        for g in ev["gates"]
+        f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds', 0)} | {gate_source(g)} |" for g in ev["gates"]
     )
-    body.write_text(f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get("executed_gates", 0)}\n- Reused gates: {metrics.get("reused_gates", 0)}\n- Gate execution time: {metrics.get("executed_seconds", 0)} s\n- Estimated reused time: {metrics.get("estimated_saved_seconds", 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n", encoding="utf-8")
-    existing = output([gh,"pr","list","--head",branch,"--base",base.replace("origin/",""),"--state","open","--json","number,url","--jq",'.[0] | select(.) | "\\(.number) \\(.url)"']).strip()
+    body.write_text(
+        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        encoding="utf-8",
+    )
+    existing = output(
+        [
+            gh,
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base.replace("origin/", ""),
+            "--state",
+            "open",
+            "--json",
+            "number,url",
+            "--jq",
+            '.[0] | select(.) | "\\(.number) \\(.url)"',
+        ]
+    ).strip()
     if existing:
-        num, url = existing.split(" ",1)
-        run([gh,"api","--method","PATCH",f"repos/{{owner}}/{{repo}}/pulls/{num}","--raw-field",f"title={title}","--raw-field",f"body={body.read_text(encoding='utf-8')}"])
-        actual = output([gh,"api",f"repos/{{owner}}/{{repo}}/pulls/{num}","--jq",".head.sha"]).strip()
-        if actual != head: return fail(f"PR head mismatch: expected {head}, got {actual}")
+        num, url = existing.split(" ", 1)
+        run(
+            [
+                gh,
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{{owner}}/{{repo}}/pulls/{num}",
+                "--raw-field",
+                f"title={title}",
+                "--raw-field",
+                f"body={body.read_text(encoding='utf-8')}",
+            ]
+        )
+        actual = output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{num}", "--jq", ".head.sha"]).strip()
+        if actual != head:
+            return fail(f"PR head mismatch: expected {head}, got {actual}")
         _record_delivery_wall(evidence, ev, deliver_started)
-        print(f"PASS deliver: refreshed PR {url} at {head}"); return 0
-    p = run([gh,"pr","create","--base",base.replace("origin/",""),"--head",branch,"--title",title,"--body-file",str(body)],capture=True)
+        print(f"PASS deliver: refreshed PR {url} at {head}")
+        return 0
+    p = run(
+        [
+            gh,
+            "pr",
+            "create",
+            "--base",
+            base.replace("origin/", ""),
+            "--head",
+            branch,
+            "--title",
+            title,
+            "--body-file",
+            str(body),
+        ],
+        capture=True,
+    )
     _record_delivery_wall(evidence, ev, deliver_started)
-    print(f"PASS deliver: created PR {p.stdout.strip()} at {head}"); return 0
+    print(f"PASS deliver: created PR {p.stdout.strip()} at {head}")
+    return 0
 
 
 def precommit() -> int:
@@ -1460,13 +1779,19 @@ def precommit() -> int:
 
 
 def prepush() -> int:
-    head = git("rev-parse","HEAD").strip(); ev = CONTEXT / "evidence" / f"{head}.json"
+    head = git("rev-parse", "HEAD").strip()
+    ev = CONTEXT / "evidence" / f"{head}.json"
     base_sha = git("rev-parse", "origin/main").strip()
     if ev.is_file():
         data = json.loads(ev.read_text(encoding="utf-8"))
-        if (data.get("status") == "PASS" and data.get("exact_commit_evidence") is True
-                and data.get("head_sha") == head and data.get("base_sha") == base_sha):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}"); return 0
+        if (
+            data.get("status") == "PASS"
+            and data.get("exact_commit_evidence") is True
+            and data.get("head_sha") == head
+            and data.get("base_sha") == base_sha
+        ):
+            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
+            return 0
     return verify_change("origin/main", head)
 
 
@@ -1475,83 +1800,219 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     if not runtime_config.strip():
         return fail("tekton-trigger-readiness requires RUNTIME_CONFIG/--runtime-config")
     from tekton_trigger_readiness import run_readiness
+
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ["governance","runtime-efficiency","automation-policy","lint","test","security","terraform","ansible","system","doctor","git-sync","precommit","prepush"]: sub.add_parser(name)
-    c = sub.add_parser("contracts"); c.add_argument("--base",default=os.environ.get("BASE","")); c.add_argument("--head",default=os.environ.get("HEAD","WORKTREE")); c.add_argument("--generate",action="store_true")
-    f = sub.add_parser("frontend"); f.add_argument("action"); f.add_argument("scope")
-    s = sub.add_parser("service"); s.add_argument("service")
-    a = sub.add_parser("affected"); a.add_argument("--base",default=os.environ.get("BASE","origin/main")); a.add_argument("--head",default=os.environ.get("HEAD","WORKTREE")); a.add_argument("--json",action="store_true")
-    v = sub.add_parser("verify-change"); v.add_argument("--base",default=os.environ.get("BASE","origin/main")); v.add_argument("--head",default=os.environ.get("HEAD","WORKTREE"))
-    d = sub.add_parser("diff-context"); d.add_argument("--base",default=os.environ.get("BASE","origin/main"))
-    fc = sub.add_parser("failure-context"); fc.add_argument("--gate",default=os.environ.get("GATE","")); fc.add_argument("--component",default=os.environ.get("COMPONENT",""))
-    ctx = sub.add_parser("context"); ctx.add_argument("task",nargs="?",default="")
-    gen = sub.add_parser("api-generate"); gen.add_argument("--target",default="all"); gen.add_argument("--service",default="")
-    mock = sub.add_parser("api-mock"); mock.add_argument("--service",default="product"); mock.add_argument("--port",type=int,default=4010)
+    for name in [
+        "governance",
+        "runtime-efficiency",
+        "automation-policy",
+        "lint",
+        "test",
+        "security",
+        "terraform",
+        "ansible",
+        "system",
+        "doctor",
+        "git-sync",
+        "precommit",
+        "prepush",
+    ]:
+        sub.add_parser(name)
+    c = sub.add_parser("contracts")
+    c.add_argument("--base", default=os.environ.get("BASE", ""))
+    c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    c.add_argument("--generate", action="store_true")
+    f = sub.add_parser("frontend")
+    f.add_argument("action")
+    f.add_argument("scope")
+    s = sub.add_parser("service")
+    s.add_argument("service")
+    a = sub.add_parser("affected")
+    a.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    a.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    a.add_argument("--json", action="store_true")
+    v = sub.add_parser("verify-change")
+    v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    d = sub.add_parser("diff-context")
+    d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    fc = sub.add_parser("failure-context")
+    fc.add_argument("--gate", default=os.environ.get("GATE", ""))
+    fc.add_argument("--component", default=os.environ.get("COMPONENT", ""))
+    ctx = sub.add_parser("context")
+    ctx.add_argument("task", nargs="?", default="")
+    gen = sub.add_parser("api-generate")
+    gen.add_argument("--target", default="all")
+    gen.add_argument("--service", default="")
+    gen.add_argument("--check", action="store_true")
+    mock = sub.add_parser("api-mock")
+    mock.add_argument("--service", default="product")
+    mock.add_argument("--port", type=int, default=4010)
     nx = sub.add_parser("nx-graph")
-    sg = sub.add_parser("service-new"); sg.add_argument("--service",required=True); sg.add_argument("--dry-run",action="store_true")
-    pub = sub.add_parser("publish"); pub.add_argument("--base",default=os.environ.get("BASE","origin/main")); pub.add_argument("--message",default=os.environ.get("MSG",""))
-    dlv = sub.add_parser("deliver"); dlv.add_argument("--base",default=os.environ.get("BASE","main")); dlv.add_argument("--title",default=os.environ.get("TITLE","")); dlv.add_argument("--message",default=os.environ.get("MSG",""))
-    bdlv = sub.add_parser("bundle-deliver"); bdlv.add_argument("--bundle",required=True); bdlv.add_argument("--expected-head",required=True); bdlv.add_argument("--title",required=True); bdlv.add_argument("--base",default=os.environ.get("BASE","main"))
-    trr = sub.add_parser("tekton-trigger-readiness"); trr.add_argument("--runtime-config",required=True); trr.add_argument("--evidence",default=os.environ.get("TEKTON_TRIGGER_READINESS_EVIDENCE",".context/runtime/tekton-trigger-readiness.json"))
-    tp = sub.add_parser("tekton-plan"); tp.add_argument("--base",required=True); tp.add_argument("--head",required=True); tp.add_argument("--record-dir",required=True); tp.add_argument("--result-path",required=True)
-    cg = sub.add_parser("ci-global"); cg.add_argument("--base",required=True); cg.add_argument("--head",required=True); cg.add_argument("--record-dir",required=True)
-    cc = sub.add_parser("ci-component"); cc.add_argument("--component",required=True); cc.add_argument("--base",required=True); cc.add_argument("--head",required=True); cc.add_argument("--record-dir",required=True)
-    cf = sub.add_parser("ci-finalize"); cf.add_argument("--base",required=True); cf.add_argument("--head",required=True); cf.add_argument("--record-dir",required=True)
-    ep = sub.add_parser("evidence-publish"); ep.add_argument("--path",required=True)
-    ef = sub.add_parser("evidence-fetch"); ef.add_argument("--sha",required=True)
-    ec = sub.add_parser("evidence-compare"); ec.add_argument("--full",required=True); ec.add_argument("--incremental",required=True)
+    sg = sub.add_parser("service-new")
+    sg.add_argument("--service", required=True)
+    sg.add_argument("--dry-run", action="store_true")
+    pub = sub.add_parser("publish")
+    pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pub.add_argument("--message", default=os.environ.get("MSG", ""))
+    dlv = sub.add_parser("deliver")
+    dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
+    dlv.add_argument("--message", default=os.environ.get("MSG", ""))
+    bdlv = sub.add_parser("bundle-deliver")
+    bdlv.add_argument("--bundle", required=True)
+    bdlv.add_argument("--expected-head", required=True)
+    bdlv.add_argument("--title", required=True)
+    bdlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    trr = sub.add_parser("tekton-trigger-readiness")
+    trr.add_argument("--runtime-config", required=True)
+    trr.add_argument(
+        "--evidence",
+        default=os.environ.get("TEKTON_TRIGGER_READINESS_EVIDENCE", ".context/runtime/tekton-trigger-readiness.json"),
+    )
+    tp = sub.add_parser("tekton-plan")
+    tp.add_argument("--base", required=True)
+    tp.add_argument("--head", required=True)
+    tp.add_argument("--record-dir", required=True)
+    tp.add_argument("--result-path", required=True)
+    cg = sub.add_parser("ci-global")
+    cg.add_argument("--base", required=True)
+    cg.add_argument("--head", required=True)
+    cg.add_argument("--record-dir", required=True)
+    cc = sub.add_parser("ci-component")
+    cc.add_argument("--component", required=True)
+    cc.add_argument("--base", required=True)
+    cc.add_argument("--head", required=True)
+    cc.add_argument("--record-dir", required=True)
+    cf = sub.add_parser("ci-finalize")
+    cf.add_argument("--base", required=True)
+    cf.add_argument("--head", required=True)
+    cf.add_argument("--record-dir", required=True)
+    ep = sub.add_parser("evidence-publish")
+    ep.add_argument("--path", required=True)
+    ef = sub.add_parser("evidence-fetch")
+    ef.add_argument("--sha", required=True)
+    ec = sub.add_parser("evidence-compare")
+    ec.add_argument("--full", required=True)
+    ec.add_argument("--incremental", required=True)
     args = p.parse_args()
     try:
-        if args.cmd == "governance": return governance()
-        if args.cmd == "runtime-efficiency": return runtime_efficiency_check()
-        if args.cmd == "contracts": return contracts(args.base,args.head,args.generate)
-        if args.cmd == "automation-policy": return automation_policy()
-        if args.cmd == "lint": return lint_all()
-        if args.cmd == "test": return test_all()
-        if args.cmd == "security": return security()
-        if args.cmd == "terraform": return terraform_check()
-        if args.cmd == "ansible": return ansible_check()
-        if args.cmd == "system": return system_check()
-        if args.cmd == "frontend": return frontend(args.action,args.scope)
-        if args.cmd == "service": return service_check(args.service)
+        if args.cmd == "governance":
+            return governance()
+        if args.cmd == "runtime-efficiency":
+            return runtime_efficiency_check()
+        if args.cmd == "contracts":
+            return contracts(args.base, args.head, args.generate)
+        if args.cmd == "automation-policy":
+            return automation_policy()
+        if args.cmd == "lint":
+            return lint_all()
+        if args.cmd == "test":
+            return test_all()
+        if args.cmd == "security":
+            return security()
+        if args.cmd == "terraform":
+            return terraform_check()
+        if args.cmd == "ansible":
+            return ansible_check()
+        if args.cmd == "system":
+            return system_check()
+        if args.cmd == "frontend":
+            return frontend(args.action, args.scope)
+        if args.cmd == "service":
+            return service_check(args.service)
         if args.cmd == "affected":
-            comps=affected(args.base,args.head); print(json.dumps(comps) if args.json else "\n".join(comps)); return 0
-        if args.cmd == "verify-change": return verify_change(args.base,args.head)
-        if args.cmd == "diff-context": return diff_context(args.base)
-        if args.cmd == "failure-context": return failure_context(args.gate,args.component)
-        if args.cmd == "context": return run([sys.executable,"scripts/context-pack.py","--task",args.task]).returncode
-        if args.cmd == "api-generate": return api_generate(args.target,args.service)
+            comps = affected(args.base, args.head)
+            print(json.dumps(comps) if args.json else "\n".join(comps))
+            return 0
+        if args.cmd == "verify-change":
+            return verify_change(args.base, args.head)
+        if args.cmd == "diff-context":
+            return diff_context(args.base)
+        if args.cmd == "failure-context":
+            return failure_context(args.gate, args.component)
+        if args.cmd == "context":
+            return run([sys.executable, "scripts/context-pack.py", "--task", args.task]).returncode
+        if args.cmd == "api-generate":
+            return api_generate(args.target, args.service, args.check)
         if args.cmd == "api-mock":
-            spec=ruby_yaml("config/contracts/public-api-contracts.yaml").get("contracts",{}).get(args.service,{}).get("path")
-            if not spec: return fail(f"api-mock service not registered: {args.service}")
-            env=os.environ.copy(); env["SCARF_ANALYTICS"]="false"
-            return run(["corepack","pnpm","exec","prism","mock",f"../{spec}","--host","127.0.0.1","--port",str(args.port),"--dynamic"],cwd=ROOT/"frontend",env=env).returncode
+            spec = (
+                ruby_yaml("config/contracts/public-api-contracts.yaml")
+                .get("contracts", {})
+                .get(args.service, {})
+                .get("path")
+            )
+            if not spec:
+                return fail(f"api-mock service not registered: {args.service}")
+            env = os.environ.copy()
+            env["SCARF_ANALYTICS"] = "false"
+            return run(
+                [
+                    "corepack",
+                    "pnpm",
+                    "exec",
+                    "prism",
+                    "mock",
+                    f"../{spec}",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(args.port),
+                    "--dynamic",
+                ],
+                cwd=ROOT / "frontend",
+                env=env,
+            ).returncode
         if args.cmd == "nx-graph":
-            run([sys.executable,"scripts/nx-graph.py"]); out=ROOT/".context/nx-workspace"; return run(["nx","graph","--file",str(ROOT/".context/nx-graph.html"),"--focus","frontend-admin"],cwd=out).returncode
+            run([sys.executable, "scripts/nx-graph.py"])
+            out = ROOT / ".context/nx-workspace"
+            return run(
+                ["nx", "graph", "--file", str(ROOT / ".context/nx-graph.html"), "--focus", "frontend-admin"], cwd=out
+            ).returncode
         if args.cmd == "service-new":
-            cmd=[sys.executable,"scripts/servicegen.py","--service",args.service]+(["--dry-run"] if args.dry_run else []); return run(cmd,check=False).returncode
-        if args.cmd == "doctor": return doctor()
-        if args.cmd == "git-sync": return git_sync()
-        if args.cmd == "publish": return publish(args.base,args.message)
-        if args.cmd == "deliver": return deliver(args.base,args.title,args.message)
-        if args.cmd == "bundle-deliver": return isolated_bundle_deliver(ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable)
-        if args.cmd == "tekton-trigger-readiness": return tekton_trigger_readiness_command(args.runtime_config,args.evidence)
-        if args.cmd == "tekton-plan": return tekton_plan(args.base,args.head,args.record_dir,args.result_path)
-        if args.cmd == "ci-global": return ci_global(args.base,args.head,args.record_dir)
-        if args.cmd == "ci-component": return ci_component(args.component,args.base,args.head,args.record_dir)
-        if args.cmd == "ci-finalize": return ci_finalize(args.base,args.head,args.record_dir)
-        if args.cmd == "evidence-publish": return evidence_publish_command(args.path)
-        if args.cmd == "evidence-fetch": return evidence_fetch_command(args.sha)
-        if args.cmd == "evidence-compare": return evidence_compare_command(args.full,args.incremental)
-        if args.cmd == "precommit": return precommit()
-        if args.cmd == "prepush": return prepush()
+            cmd = [sys.executable, "scripts/servicegen.py", "--service", args.service] + (
+                ["--dry-run"] if args.dry_run else []
+            )
+            return run(cmd, check=False).returncode
+        if args.cmd == "doctor":
+            return doctor()
+        if args.cmd == "git-sync":
+            return git_sync()
+        if args.cmd == "publish":
+            return publish(args.base, args.message)
+        if args.cmd == "deliver":
+            return deliver(args.base, args.title, args.message)
+        if args.cmd == "bundle-deliver":
+            return isolated_bundle_deliver(
+                ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable
+            )
+        if args.cmd == "tekton-trigger-readiness":
+            return tekton_trigger_readiness_command(args.runtime_config, args.evidence)
+        if args.cmd == "tekton-plan":
+            return tekton_plan(args.base, args.head, args.record_dir, args.result_path)
+        if args.cmd == "ci-global":
+            return ci_global(args.base, args.head, args.record_dir)
+        if args.cmd == "ci-component":
+            return ci_component(args.component, args.base, args.head, args.record_dir)
+        if args.cmd == "ci-finalize":
+            return ci_finalize(args.base, args.head, args.record_dir)
+        if args.cmd == "evidence-publish":
+            return evidence_publish_command(args.path)
+        if args.cmd == "evidence-fetch":
+            return evidence_fetch_command(args.sha)
+        if args.cmd == "evidence-compare":
+            return evidence_compare_command(args.full, args.incremental)
+        if args.cmd == "precommit":
+            return precommit()
+        if args.cmd == "prepush":
+            return prepush()
     except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
-        return fail(str(exc),1)
+        return fail(str(exc), 1)
     return 2
 
 

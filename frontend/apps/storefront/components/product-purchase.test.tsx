@@ -41,14 +41,10 @@ describe("ProductPurchase", () => {
     if (!product) return;
 
     render(<ProductPurchase product={product} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Augmenter la quantité" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Augmenter la quantité" }));
     fireEvent.click(screen.getByRole("button", { name: /Ajouter au panier/ }));
 
-    expect(
-      screen.getByText(new RegExp(`2 × ${product.name}`)),
-    ).toBeInTheDocument();
+    expect(screen.getByText(new RegExp(`2 × ${product.name}`))).toBeInTheDocument();
     expect(screen.getByLabelText("Quantité")).toHaveTextContent("2");
   });
 });

@@ -34,8 +34,7 @@ export const products: readonly ProductViewModel[] = [
     reviewCount: 86,
     availability: "available",
     art: "lamp",
-    description:
-      "Une lampe de démonstration aux matières douces et au format compact.",
+    description: "Une lampe de démonstration aux matières douces et au format compact.",
     colors: ["Sable"],
     sizes: ["Taille unique"],
   },
@@ -50,8 +49,7 @@ export const products: readonly ProductViewModel[] = [
     availability: "low",
     badge: "Stock limité",
     art: "bag",
-    description:
-      "Un sac compact de démonstration pensé pour les déplacements quotidiens.",
+    description: "Un sac compact de démonstration pensé pour les déplacements quotidiens.",
     colors: ["Sable", "Charbon"],
     sizes: ["Taille unique"],
   },
@@ -65,8 +63,7 @@ export const products: readonly ProductViewModel[] = [
     reviewCount: 54,
     availability: "available",
     art: "headphones",
-    description:
-      "Un casque audio de démonstration au design enveloppant et minimal.",
+    description: "Un casque audio de démonstration au design enveloppant et minimal.",
     colors: ["Charbon"],
     sizes: ["Taille unique"],
   },
@@ -97,8 +94,7 @@ export const products: readonly ProductViewModel[] = [
     availability: "available",
     badge: "-20%",
     art: "throw",
-    description:
-      "Un plaid texturé de démonstration dans une tonalité ivoire chaleureuse.",
+    description: "Un plaid texturé de démonstration dans une tonalité ivoire chaleureuse.",
     colors: ["Ivoire"],
     sizes: ["130 × 170 cm"],
   },
@@ -126,8 +122,7 @@ export const products: readonly ProductViewModel[] = [
     reviewCount: 19,
     availability: "available",
     art: "mug",
-    description:
-      "Un mug isotherme de démonstration conçu pour les trajets quotidiens.",
+    description: "Un mug isotherme de démonstration conçu pour les trajets quotidiens.",
     colors: ["Sable"],
     sizes: ["350 ml"],
   },

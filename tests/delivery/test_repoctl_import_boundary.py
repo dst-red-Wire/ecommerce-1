@@ -19,7 +19,7 @@ class RepoctlImportBoundaryTest(unittest.TestCase):
             scripts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
             subprocess.run(["git", "init", "-q"], cwd=temp, check=True)
-            code = r'''
+            code = r"""
 import importlib.util
 from pathlib import Path
 import sys
@@ -40,7 +40,7 @@ except RuntimeError as exc:
         raise
 else:
     raise SystemExit("delivery helper boundary did not fail closed")
-'''
+"""
             result = subprocess.run(
                 [sys.executable, "-I", "-c", code, str(temp)],
                 cwd=temp,

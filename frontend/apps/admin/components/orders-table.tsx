@@ -53,11 +53,7 @@ export function OrdersTable({ orders }: { orders: readonly OrderViewModel[] }) {
           <Download aria-hidden="true" /> Exporter
         </button>
       </div>
-      <div
-        className="status-tabs"
-        role="tablist"
-        aria-label="Statut de commande"
-      >
+      <div className="status-tabs" role="tablist" aria-label="Statut de commande">
         {tabs.map((item, index) => (
           <button
             key={item}
@@ -98,10 +94,7 @@ export function OrdersTable({ orders }: { orders: readonly OrderViewModel[] }) {
             {visible.map((order) => (
               <tr key={order.id}>
                 <td>
-                  <input
-                    type="checkbox"
-                    aria-label={`Sélectionner ${order.id}`}
-                  />
+                  <input type="checkbox" aria-label={`Sélectionner ${order.id}`} />
                 </td>
                 <td>
                   <Link href={`/orders/${order.id}`}>{order.id}</Link>
@@ -123,11 +116,7 @@ export function OrdersTable({ orders }: { orders: readonly OrderViewModel[] }) {
                   <StatusBadge value={order.status} />
                 </td>
                 <td>
-                  <button
-                    className="icon-action"
-                    type="button"
-                    aria-label={`Actions ${order.id}`}
-                  >
+                  <button className="icon-action" type="button" aria-label={`Actions ${order.id}`}>
                     <MoreVertical aria-hidden="true" />
                   </button>
                 </td>

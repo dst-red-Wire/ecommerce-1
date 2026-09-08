@@ -4,11 +4,7 @@ import { notFound } from "next/navigation";
 import { PageHeader, StatusBadge } from "@/components/admin-ui";
 import { PaymentRefundDialog } from "@/components/payment-refund-dialog";
 
-export default async function PaymentPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
+export default async function PaymentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (id !== "PAY-2026-008471") {
     notFound();

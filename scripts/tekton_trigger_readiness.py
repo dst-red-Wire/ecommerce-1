@@ -5,6 +5,7 @@ The module never creates, patches, deletes, applies, rolls out, or otherwise mut
 Kubernetes resources. It inspects runtime prerequisites declared by
 config/contracts/tekton-trigger-runtime.yaml and writes a redacted JSON evidence file.
 """
+
 from __future__ import annotations
 
 import json
@@ -21,7 +22,15 @@ BLOCKED_EXIT = 3
 FAIL_EXIT = 2
 RUNNER_DIGEST_RE = re.compile(r"@sha256:([0-9a-f]{64})$")
 FORBIDDEN_MUTATING_KUBECTL = {
-    "apply", "create", "delete", "edit", "patch", "replace", "rollout", "scale", "set",
+    "apply",
+    "create",
+    "delete",
+    "edit",
+    "patch",
+    "replace",
+    "rollout",
+    "scale",
+    "set",
 }
 
 Executor = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -86,9 +95,7 @@ def validate_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(execution_budget, dict):
         raise ValueError("runtime config requires execution_budget mapping")
     normalized["execution_budget"] = {
-        "resource_quota_name": _require_string(
-            execution_budget, "resource_quota_name", "execution_budget"
-        ),
+        "resource_quota_name": _require_string(execution_budget, "resource_quota_name", "execution_budget"),
     }
 
     proofs = config.get("proofs")
@@ -235,7 +242,8 @@ def _check_execution_budget(
     if pod is None:
         return _result(BLOCKED, f"runner resource proof pod {pod_name} unavailable: {err}")
     containers = [
-        item for item in (pod.get("spec", {}).get("containers", []) or [])
+        item
+        for item in (pod.get("spec", {}).get("containers", []) or [])
         if isinstance(item, dict) and item.get("image") == runner_image
     ]
     if not containers:
@@ -268,7 +276,9 @@ def _check_execution_budget(
     )
 
 
-def _can_i(kube: ReadOnlyKubectl, namespace: str, service_account: str, verb: str, resource: str) -> tuple[bool | None, str]:
+def _can_i(
+    kube: ReadOnlyKubectl, namespace: str, service_account: str, verb: str, resource: str
+) -> tuple[bool | None, str]:
     subject = f"system:serviceaccount:{namespace}:{service_account}"
     text, err = kube.text(["auth", "can-i", verb, resource, "--as", subject, "-n", namespace])
     if text is None:
@@ -302,12 +312,18 @@ def _check_rbac(kube: ReadOnlyKubectl, namespace: str, event_sa: str, pipeline_s
         return _result(BLOCKED, f"cannot prove EventListener PipelineRun permission: {err}")
     if not create_pr:
         return _result(BLOCKED, f"EventListener service account {event_sa} cannot create PipelineRuns")
-    return _result(PASS, "service accounts exist, wildcard privilege is absent, and EventListener has bounded PipelineRun creation")
+    return _result(
+        PASS, "service accounts exist, wildcard privilege is absent, and EventListener has bounded PipelineRun creation"
+    )
 
 
 def _condition_ready(doc: dict[str, Any]) -> bool:
     for condition in doc.get("status", {}).get("conditions", []) or []:
-        if isinstance(condition, dict) and condition.get("type") == "Ready" and str(condition.get("status")).lower() == "true":
+        if (
+            isinstance(condition, dict)
+            and condition.get("type") == "Ready"
+            and str(condition.get("status")).lower() == "true"
+        ):
             return True
     return False
 
@@ -345,7 +361,13 @@ def _check_webhook_secret(kube: ReadOnlyKubectl, namespace: str, webhook: dict[s
     if secret_key not in keys:
         return _result(BLOCKED, f"synced Kubernetes Secret {secret_name} is missing required key {secret_key}")
     # Never put secret data into readiness evidence. Only names/keys/status are recorded.
-    return _result(PASS, "ESO reports Ready through a Vault/OpenBao-compatible store and the target key exists", external_secret=ext_name, secret=secret_name, key=secret_key)
+    return _result(
+        PASS,
+        "ESO reports Ready through a Vault/OpenBao-compatible store and the target key exists",
+        external_secret=ext_name,
+        secret=secret_name,
+        key=secret_key,
+    )
 
 
 def _ingress_backends(doc: dict[str, Any]) -> set[str]:
@@ -391,12 +413,19 @@ def _check_network(kube: ReadOnlyKubectl, namespace: str, network: dict[str, str
     annotations = probe.get("metadata", {}).get("annotations", {}) or {}
     if annotations.get("ecommerce-1.io/readiness-proof") != "network-egress":
         return _result(BLOCKED, f"network proof pod {proof_pod} lacks canonical readiness annotation")
-    targets = {item.strip() for item in str(annotations.get("ecommerce-1.io/readiness-targets", "")).split(",") if item.strip()}
+    targets = {
+        item.strip() for item in str(annotations.get("ecommerce-1.io/readiness-targets", "")).split(",") if item.strip()
+    }
     if targets != {"gitea", "harbor", "kubernetes-api"}:
         return _result(BLOCKED, f"network proof targets are {sorted(targets)}, expected gitea/harbor/kubernetes-api")
     if probe.get("status", {}).get("phase") != "Succeeded":
         return _result(BLOCKED, f"network proof pod {proof_pod} has not Succeeded")
-    return _result(PASS, "TLS ingress is EventListener-only, namespace is default-deny, and canonical egress proof succeeded", ingress=network["ingress_name"], proof_pod=proof_pod)
+    return _result(
+        PASS,
+        "TLS ingress is EventListener-only, namespace is default-deny, and canonical egress proof succeeded",
+        ingress=network["ingress_name"],
+        proof_pod=proof_pod,
+    )
 
 
 def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, executor: Executor | None = None) -> int:
@@ -421,7 +450,9 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
     proofs: dict[str, dict[str, Any]] = {
         "triggers-crds-present": _check_crds(kube),
         "dedicated-namespace-provisioned": _check_namespace(kube, namespace),
-        "runner-image-digest-pullable": _check_runner_pull(kube, namespace, runtime["runner_image"], runtime["proofs"]["runner_pull_pod"]),
+        "runner-image-digest-pullable": _check_runner_pull(
+            kube, namespace, runtime["runner_image"], runtime["proofs"]["runner_pull_pod"]
+        ),
         "bounded-execution-budget-proven": _check_execution_budget(
             kube,
             namespace,
@@ -429,9 +460,13 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
             runtime["runner_image"],
             runtime["proofs"]["runner_pull_pod"],
         ),
-        "least-privilege-rbac-proven": _check_rbac(kube, namespace, runtime["event_listener_service_account"], runtime["pipeline_service_account"]),
+        "least-privilege-rbac-proven": _check_rbac(
+            kube, namespace, runtime["event_listener_service_account"], runtime["pipeline_service_account"]
+        ),
         "webhook-secret-synced-from-openbao-via-eso": _check_webhook_secret(kube, namespace, runtime["webhook"]),
-        "ingress-tls-and-network-policy-proven": _check_network(kube, namespace, runtime["network"], runtime["proofs"]["network_probe_pod"]),
+        "ingress-tls-and-network-policy-proven": _check_network(
+            kube, namespace, runtime["network"], runtime["proofs"]["network_probe_pod"]
+        ),
     }
 
     overall = PASS if all(item["status"] == PASS for item in proofs.values()) else BLOCKED
@@ -458,7 +493,5 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
         print("PASS Tekton trigger runtime readiness")
         return 0
     missing = sum(1 for item in proofs.values() if item["status"] != PASS)
-    print(
-        f"BLOCKED Tekton trigger runtime readiness: {missing}/{len(proofs)} required proofs are not satisfied"
-    )
+    print(f"BLOCKED Tekton trigger runtime readiness: {missing}/{len(proofs)} required proofs are not satisfied")
     return BLOCKED_EXIT

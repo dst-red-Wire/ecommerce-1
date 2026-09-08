@@ -15,10 +15,7 @@ export default async function CatalogPage({
 }: {
   searchParams: Promise<{ q?: string }>;
 }) {
-  const [{ q = "" }, products] = await Promise.all([
-    searchParams,
-    getCatalogView(),
-  ]);
+  const [{ q = "" }, products] = await Promise.all([searchParams, getCatalogView()]);
   return (
     <main id="main" className="store-main catalog-page">
       <nav className="breadcrumb" aria-label="Fil d’Ariane">
@@ -29,8 +26,7 @@ export default async function CatalogPage({
       <div className="catalog-intro">
         <h1>Nouveautés</h1>
         <p>
-          Découvrez nos derniers arrivages : des nouveautés pensées pour
-          embellir votre quotidien.
+          Découvrez nos derniers arrivages : des nouveautés pensées pour embellir votre quotidien.
         </p>
         <strong>{products.length * 6} produits</strong>
       </div>

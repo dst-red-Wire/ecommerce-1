@@ -9,6 +9,7 @@ Amdahl-limited optimization potential.
 It never authorizes PASS reuse. Exact verdict reuse remains governed by
 config/contracts/ci-evidence.yaml and repoctl's direct-parent evidence rules.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -117,19 +118,12 @@ def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
     pod scheduling and finalizer overhead are not represented in per-gate evidence,
     so this is an execution-gate estimate rather than observed wall clock.
     """
-    active = [
-        record
-        for record in records
-        if record.get("status") != "SKIP" and not _is_reused(record)
-    ]
+    active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
     globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
     components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
     global_seconds = sum(_seconds(record.get("duration_seconds")) for record in globals_)
-    component_durations = [
-        (str(record.get("gate")), _seconds(record.get("duration_seconds")))
-        for record in components
-    ]
+    component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
     serial_seconds = global_seconds + sum(seconds for _, seconds in component_durations)
@@ -176,14 +170,16 @@ def amdahl_priorities(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fraction = seconds / total
         remainder = total - seconds
         max_speedup = (total / remainder) if remainder > 0.0 else None
-        priorities.append({
-            "gate": str(record.get("gate")),
-            "current_source": "reused" if _is_reused(record) else "executed",
-            "full_equivalent_seconds": _round(seconds),
-            "full_equivalent_fraction": round(fraction, 4),
-            "maximum_time_share_recoverable_percent": round(fraction * 100.0, 1),
-            "maximum_speedup_if_gate_cost_were_zero": round(max_speedup, 3) if max_speedup is not None else None,
-        })
+        priorities.append(
+            {
+                "gate": str(record.get("gate")),
+                "current_source": "reused" if _is_reused(record) else "executed",
+                "full_equivalent_seconds": _round(seconds),
+                "full_equivalent_fraction": round(fraction, 4),
+                "maximum_time_share_recoverable_percent": round(fraction * 100.0, 1),
+                "maximum_speedup_if_gate_cost_were_zero": round(max_speedup, 3) if max_speedup is not None else None,
+            }
+        )
     priorities.sort(key=lambda row: (-row["full_equivalent_seconds"], row["gate"]))
     return priorities
 
@@ -206,10 +202,14 @@ def cache_layers(root: Path) -> list[dict[str, Any]]:
     turbo_enabled = _file_contains(frontend_package, ("turbo run",)) and turbo_config.is_file()
     go_modules = list((root / "services").glob("*/go.mod")) if (root / "services").is_dir() else []
     component_task = root / "platform" / "tekton" / "tasks" / "component-gates.yaml"
-    go_pipeline_cache = _file_contains(
-        component_task,
-        ("name: GOCACHE", ".context/cache/go-build", "name: GOMODCACHE", ".context/cache/go-mod"),
-    ) if component_task.is_file() else False
+    go_pipeline_cache = (
+        _file_contains(
+            component_task,
+            ("name: GOCACHE", ".context/cache/go-build", "name: GOMODCACHE", ".context/cache/go-mod"),
+        )
+        if component_task.is_file()
+        else False
+    )
 
     buildkit_markers = ("cache-from", "cache-to", "buildx build", "buildctl")
     buildkit_registry_cache = False
@@ -227,7 +227,8 @@ def cache_layers(root: Path) -> list[dict[str, Any]]:
         for base in (root / "platform", root / "services", root / "frontend"):
             if base.exists():
                 candidates.extend(
-                    path for path in base.rglob("*")
+                    path
+                    for path in base.rglob("*")
                     if path.is_file() and not any(part in ignored_parts for part in path.parts)
                 )
 
@@ -313,50 +314,61 @@ def compare_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> dict[
         bwall = _seconds(baseline_wall)
         cwall = _seconds(current_wall)
         wall_saved = bwall - cwall
-        result.update({
-            "baseline_deliver_wall_seconds": _round(bwall),
-            "current_deliver_wall_seconds": _round(cwall),
-            "measured_deliver_time_saved_seconds": _round(wall_saved),
-            "measured_deliver_savings_percent": round((wall_saved / bwall) * 100.0, 1) if bwall else 0.0,
-        })
+        result.update(
+            {
+                "baseline_deliver_wall_seconds": _round(bwall),
+                "current_deliver_wall_seconds": _round(cwall),
+                "measured_deliver_time_saved_seconds": _round(wall_saved),
+                "measured_deliver_savings_percent": round((wall_saved / bwall) * 100.0, 1) if bwall else 0.0,
+            }
+        )
     return result
 
 
-def recommendations(inventory: dict[str, Any], critical: dict[str, Any], priorities: list[dict[str, Any]],
-                    caches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def recommendations(
+    inventory: dict[str, Any], critical: dict[str, Any], priorities: list[dict[str, Any]], caches: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     hit = float(inventory["evidence_reuse_hit_ratio"])
     if inventory["executed_gates"] and hit < 0.5:
-        items.append({
-            "priority": "high",
-            "action": "increase-safe-execution-avoidance",
-            "reason": f"evidence reuse hit ratio is {inventory['evidence_reuse_hit_percent']}%",
-            "constraint": "reuse verdicts only from exact direct-parent authenticated PASS evidence",
-        })
+        items.append(
+            {
+                "priority": "high",
+                "action": "increase-safe-execution-avoidance",
+                "reason": f"evidence reuse hit ratio is {inventory['evidence_reuse_hit_percent']}%",
+                "constraint": "reuse verdicts only from exact direct-parent authenticated PASS evidence",
+            }
+        )
     if float(critical["parallelization_headroom_seconds"]) > 0.0:
-        items.append({
-            "priority": "high",
-            "action": "preserve-tekton-dag-fanout",
-            "reason": f"gate-only parallelization headroom is {critical['parallelization_headroom_seconds']}s",
-            "constraint": "do not parallelize mutating gates inside one local worktree",
-        })
+        items.append(
+            {
+                "priority": "high",
+                "action": "preserve-tekton-dag-fanout",
+                "reason": f"gate-only parallelization headroom is {critical['parallelization_headroom_seconds']}s",
+                "constraint": "do not parallelize mutating gates inside one local worktree",
+            }
+        )
     executed_priorities = [row for row in priorities if row["current_source"] == "executed"]
     if executed_priorities:
         top = executed_priorities[0]
-        items.append({
-            "priority": "high",
-            "action": f"optimize-gate:{top['gate']}",
-            "reason": f"largest executed full-equivalent gate cost is {top['full_equivalent_seconds']}s",
-            "amdahl_max_recoverable_percent": top["maximum_time_share_recoverable_percent"],
-        })
+        items.append(
+            {
+                "priority": "high",
+                "action": f"optimize-gate:{top['gate']}",
+                "reason": f"largest executed full-equivalent gate cost is {top['full_equivalent_seconds']}s",
+                "amdahl_max_recoverable_percent": top["maximum_time_share_recoverable_percent"],
+            }
+        )
     missing_cache = [layer["layer"] for layer in caches if not layer["enabled"]]
     if missing_cache:
-        items.append({
-            "priority": "medium",
-            "action": "close-relevant-cache-gaps",
-            "reason": "disabled/not-observed cache layers: " + ", ".join(missing_cache),
-            "constraint": "adopt only where the corresponding workload exists and cache integrity remains deterministic",
-        })
+        items.append(
+            {
+                "priority": "medium",
+                "action": "close-relevant-cache-gaps",
+                "reason": "disabled/not-observed cache layers: " + ", ".join(missing_cache),
+                "constraint": "adopt only where the corresponding workload exists and cache integrity remains deterministic",
+            }
+        )
     return items
 
 
@@ -427,7 +439,9 @@ def _print_summary(report: dict[str, Any], destination: Path) -> None:
     critical = report["critical_path"]
     print("EXECUTION PERFORMANCE")
     print(f"head                 {report.get('head_sha')}")
-    print(f"executed/reused/skip {inventory['executed_gates']}/{inventory['reused_gates']}/{inventory['skipped_gates']}")
+    print(
+        f"executed/reused/skip {inventory['executed_gates']}/{inventory['reused_gates']}/{inventory['skipped_gates']}"
+    )
     print(f"executed gate time   {inventory['executed_seconds']:.3f}s")
     print(f"reused time saved    {inventory['estimated_saved_seconds']:.3f}s")
     print(f"evidence hit ratio   {inventory['evidence_reuse_hit_percent']:.1f}%")
@@ -436,10 +450,14 @@ def _print_summary(report: dict[str, Any], destination: Path) -> None:
     priorities = report.get("amdahl_priorities", [])
     if priorities:
         top = priorities[0]
-        print(f"top Amdahl target    {top['gate']} ({top['full_equivalent_seconds']:.3f}s, max {top['maximum_time_share_recoverable_percent']:.1f}% share)")
+        print(
+            f"top Amdahl target    {top['gate']} ({top['full_equivalent_seconds']:.3f}s, max {top['maximum_time_share_recoverable_percent']:.1f}% share)"
+        )
     comparison = report.get("comparison")
     if comparison:
-        print(f"vs baseline saved    {comparison['measured_gate_time_saved_seconds']:.3f}s ({comparison['measured_gate_savings_percent']:.1f}%)")
+        print(
+            f"vs baseline saved    {comparison['measured_gate_time_saved_seconds']:.3f}s ({comparison['measured_gate_savings_percent']:.1f}%)"
+        )
     print(f"PERFORMANCE_EVIDENCE {destination}")
 
 
@@ -465,7 +483,9 @@ def main(argv: list[str] | None = None) -> int:
             baseline = _load(baseline_path, label="baseline evidence")
         report = audit(evidence, root=root, baseline=baseline)
         identity = str(report.get("head_sha") or "worktree")
-        destination = Path(args.output).expanduser() if args.output else root / ".context" / "performance" / f"{identity}.json"
+        destination = (
+            Path(args.output).expanduser() if args.output else root / ".context" / "performance" / f"{identity}.json"
+        )
         if not destination.is_absolute():
             destination = root / destination
         destination.parent.mkdir(parents=True, exist_ok=True)

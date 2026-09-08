@@ -72,12 +72,19 @@ stateful:
 
 observability:
   telemetry: opentelemetry
-  metrics: prometheus
-  alerts: alertmanager
+  application_gateway: rotel
+  infrastructure_collector: opentelemetry-collector
+  metrics_protocol: prometheus
+  metrics_scraper: vmagent
+  metrics: victoriametrics
+  infrastructure_logs: victorialogs
+  application_observability_storage: clickhouse
+  application_observability_ui: hyperdx
+  alerts: vmalert
+  notifications: alertmanager
   dashboards: grafana
-  log_shipper: fluent-bit
-  log_pipeline: data-prepper
-  logs: opensearch-logs
+  security_pipeline: data-prepper
+  security_logs: opensearch
   security: wazuh
 
 supply_chain:
@@ -101,6 +108,7 @@ topology_contracts:
   deployment_dag: docs/architecture/DEPLOYMENT_DAG.md
   aiops: docs/architecture/AIOPS_TOPOLOGY_V1.md
   mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
+  observability: docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md
 
 machine_contracts:
   review_policy: config/contracts/review-policy.yaml
@@ -118,6 +126,7 @@ machine_contracts:
   public_api_contracts: config/contracts/public-api-contracts.yaml
   ci_topology: config/contracts/ci-topology.yaml
   runtime_efficiency: config/contracts/runtime-efficiency.yaml
+  observability_topology: config/contracts/observability-topology.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
@@ -144,7 +153,11 @@ superseded:
   fluxcd: rancher-fleet
   flagger: argo-rollouts
   minio-community: seaweedfs-s3
-  loki: opensearch-logs
+  loki: victorialogs
+  prometheus-server-tsdb: victoriametrics
+  fluent-bit-general-log-shipper: opentelemetry-collector
+  opensearch-general-logs: victorialogs
+  data-prepper-general-logs: security-only-data-prepper
   splunk: wazuh-opensearch
   prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
   rook-ceph-launch-baseline: no-default-ceph

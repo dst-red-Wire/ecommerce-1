@@ -2,7 +2,7 @@ version: 1
 status: exact
 
 pull_request_review:
-  forge: gitea
+  forge: github
   ci: tekton
 
   deterministic_gate:

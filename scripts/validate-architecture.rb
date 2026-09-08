@@ -366,9 +366,12 @@ module ArchitectureValidator
         "object_storage" => "seaweedfs-s3"
       },
       "observability" => {
-        "telemetry" => "opentelemetry", "metrics" => "prometheus", "alerts" => "alertmanager",
-        "dashboards" => "grafana", "log_shipper" => "fluent-bit", "log_pipeline" => "data-prepper",
-        "logs" => "opensearch-logs", "security" => "wazuh"
+        "telemetry" => "opentelemetry", "application_gateway" => "rotel",
+        "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
+        "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
+        "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
+        "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
+        "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
       },
       "supply_chain" => {
         "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",

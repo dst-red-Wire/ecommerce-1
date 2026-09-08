@@ -53,52 +53,102 @@ class FakeExecutor:
         if args[:3] == ["get", "resourcequota", "ci-budget"]:
             if self.missing_quota:
                 return self.done(cmd, 1, err="NotFound")
-            return self.done(cmd, out=json.dumps({
-                "status": {"hard": {
-                    "requests.cpu": "4",
-                    "requests.memory": "8Gi",
-                    "limits.cpu": "8",
-                    "limits.memory": "16Gi",
-                }}
-            }))
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {
+                        "status": {
+                            "hard": {
+                                "requests.cpu": "4",
+                                "requests.memory": "8Gi",
+                                "limits.cpu": "8",
+                                "limits.memory": "16Gi",
+                            }
+                        }
+                    }
+                ),
+            )
         if args[:3] == ["get", "pod", "runner-proof"]:
-            resources = {
-                "requests": {"cpu": "250m", "memory": "256Mi"},
-                "limits": {"cpu": "1", "memory": "1Gi"},
-            } if self.runner_resources else {}
-            return self.done(cmd, out=json.dumps({
-                "metadata": {"annotations": {"ecommerce-1.io/readiness-proof": "runner-image-pull"}},
-                "spec": {"containers": [{"name": "runner", "image": self.runner, "resources": resources}]},
-                "status": {"phase": "Succeeded", "containerStatuses": [{"name": "runner", "imageID": "docker-pullable://harbor.internal/ecommerce/ci-runner@sha256:" + "a" * 64}]},
-            }))
+            resources = (
+                {
+                    "requests": {"cpu": "250m", "memory": "256Mi"},
+                    "limits": {"cpu": "1", "memory": "1Gi"},
+                }
+                if self.runner_resources
+                else {}
+            )
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {
+                        "metadata": {"annotations": {"ecommerce-1.io/readiness-proof": "runner-image-pull"}},
+                        "spec": {"containers": [{"name": "runner", "image": self.runner, "resources": resources}]},
+                        "status": {
+                            "phase": "Succeeded",
+                            "containerStatuses": [
+                                {
+                                    "name": "runner",
+                                    "imageID": "docker-pullable://harbor.internal/ecommerce/ci-runner@sha256:"
+                                    + "a" * 64,
+                                }
+                            ],
+                        },
+                    }
+                ),
+            )
         if args[:3] == ["get", "pod", "network-proof"]:
-            return self.done(cmd, out=json.dumps({
-                "metadata": {"annotations": {
-                    "ecommerce-1.io/readiness-proof": "network-egress",
-                    "ecommerce-1.io/readiness-targets": "gitea,harbor,kubernetes-api",
-                }},
-                "status": {"phase": "Succeeded"},
-            }))
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {
+                        "metadata": {
+                            "annotations": {
+                                "ecommerce-1.io/readiness-proof": "network-egress",
+                                "ecommerce-1.io/readiness-targets": "gitea,harbor,kubernetes-api",
+                            }
+                        },
+                        "status": {"phase": "Succeeded"},
+                    }
+                ),
+            )
         if args[:2] == ["get", "externalsecrets.external-secrets.io"]:
-            return self.done(cmd, out=json.dumps({
-                "spec": {"target": {"name": "webhook-signing"}, "secretStoreRef": {"name": "openbao", "kind": "SecretStore"}},
-                "status": {"conditions": [{"type": "Ready", "status": "True"}]},
-            }))
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {
+                        "spec": {
+                            "target": {"name": "webhook-signing"},
+                            "secretStoreRef": {"name": "openbao", "kind": "SecretStore"},
+                        },
+                        "status": {"conditions": [{"type": "Ready", "status": "True"}]},
+                    }
+                ),
+            )
         if args[:2] == ["get", "secretstores.external-secrets.io"]:
-            return self.done(cmd, out=json.dumps({"spec": {"provider": {"vault": {"server": "https://openbao.internal"}}}}))
+            return self.done(
+                cmd, out=json.dumps({"spec": {"provider": {"vault": {"server": "https://openbao.internal"}}}})
+            )
         if args[:3] == ["get", "secret", "webhook-signing"]:
             return self.done(cmd, out=json.dumps({"data": {"hmac": "SUPERSECRET"}}))
         if args[:2] == ["get", "ingress.networking.k8s.io"]:
-            return self.done(cmd, out=json.dumps({
-                "spec": {
-                    "tls": [{"secretName": "trigger-tls"}],
-                    "rules": [{"http": {"paths": [{"backend": {"service": {"name": "el-gitea"}}}]}}],
-                }
-            }))
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {
+                        "spec": {
+                            "tls": [{"secretName": "trigger-tls"}],
+                            "rules": [{"http": {"paths": [{"backend": {"service": {"name": "el-gitea"}}}]}}],
+                        }
+                    }
+                ),
+            )
         if args[:2] == ["get", "networkpolicy.networking.k8s.io"]:
-            return self.done(cmd, out=json.dumps({
-                "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []}
-            }))
+            return self.done(
+                cmd,
+                out=json.dumps(
+                    {"spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"], "ingress": [], "egress": []}}
+                ),
+            )
         return self.done(cmd, 1, err="unhandled fake kubectl call")
 
 
@@ -152,7 +202,9 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             self.assertNotIn("SUPERSECRET", evidence.read_text())
 
             contract = (ROOT / "config" / "contracts" / "tekton-trigger-runtime.yaml").read_text(encoding="utf-8")
-            proof_block = contract.split("  required_proofs:\n", 1)[1].split("  static_contract_is_runtime_proof:", 1)[0]
+            proof_block = contract.split("  required_proofs:\n", 1)[1].split("  static_contract_is_runtime_proof:", 1)[
+                0
+            ]
             required = [line.strip()[2:] for line in proof_block.splitlines() if line.strip().startswith("- ")]
             self.assertEqual(set(required), set(data["proofs"]))
 
@@ -211,19 +263,19 @@ class TektonTriggerReadinessTests(unittest.TestCase):
         self.assertEqual("ecommerce-ci-trigger", config["namespace"])
         self.assertNotIn("secret_value", json.dumps(config))
 
-
     def test_repository_wiring_keeps_readiness_explicit_and_out_of_normal_ci(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         repoctl = (ROOT / "scripts" / "repoctl.py").read_text(encoding="utf-8")
         contract = (ROOT / "config" / "contracts" / "tekton-trigger-runtime.yaml").read_text(encoding="utf-8")
         self.assertIn("tekton-trigger-readiness:", makefile)
         self.assertIn("--runtime-config", makefile)
-        self.assertIn("sub.add_parser(\"tekton-trigger-readiness\")", repoctl)
+        self.assertIn('sub.add_parser("tekton-trigger-readiness")', repoctl)
         self.assertIn("readiness_gate:", contract)
         self.assertIn("mode: read-only", contract)
         self.assertIn("blocked_exit_code: 3", contract)
         ci_head = makefile.split("ci:", 1)[1].split("ci-full:", 1)[0]
         self.assertNotIn("tekton-trigger-readiness", ci_head)
+
 
 if __name__ == "__main__":
     unittest.main()
