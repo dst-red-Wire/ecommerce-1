@@ -68,6 +68,7 @@ security_telemetry:
 hyperdx:
   telemetry_storage: clickhouse
   metadata_store: mongodb
+  metadata_deployment: mongodb-oss-self-hosted
   metadata_scope: hyperdx-internal-only
   business_data_forbidden: true
 

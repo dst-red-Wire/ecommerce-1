@@ -2,15 +2,14 @@
 
 Status: `CHATGPT PREPARED — EXACT CONTRACTS BOUND`
 
-Codex must always read, in order:
+Codex must always read authorities in this order:
 
 1. `AGENTS.md`
-2. `docs/architecture/BASELINE_V2.md`
+2. the specialized machine contract(s) and exact topology/document(s) for the assigned work
 3. `architecture.lock.yaml`
-4. `docs/project/MASTER_EXECUTION_PLAN.md`
-5. the milestone issue assigned to the work
-6. the exact architecture contracts listed below
-7. relevant ADRs/domain docs
+4. `docs/architecture/BASELINE_V2.md`
+5. `docs/project/MASTER_EXECUTION_PLAN.md`, the assigned milestone issue and relevant handoff
+6. relevant ADRs/domain docs
 
 ## Mandatory exact architecture contracts
 
@@ -73,6 +72,14 @@ Goal: make Product the single proven service template for transport, persistence
 Use `SERVICE_OWNERSHIP_MATRIX.md`, `DATA_OWNERSHIP_MATRIX.md`, `EVENT_CONTRACT_MATRIX.md`, `dependency-map.yaml` and `SECURITY_TRUST_ZONES.md` as hard boundaries. Implement only Product deeply. REST and gRPC call the same application use-cases. Use pgx/sqlc, versioned migrations, transactional outbox, franz-go Kafka, Protobuf contracts, idempotence, OTel and structured logs. Provide unit, integration and contract tests. Provide non-root container, immutable dependencies, Fleet deployable configuration and Tekton CI stages for lint/test/build/scan/SBOM/sign/push. No other service may receive duplicated Product business logic.
 
 Deliver one or a small sequence of tightly-scoped PRs tied to #14.
+
+## M2.5 prompt — Persistent MGMT Bootstrap IaC
+
+Tracker: `#32`.
+
+Goal: establish the persistent management plane required before a real PREPROD `CREATE`. Use the exact MGMT inventory, access and network contracts. Implement only reproducible Terraform/Ansible/RKE2, Gitea, Harbor, Tekton, Fleet and OpenBao prerequisites; do not provision PREPROD or bypass the mandatory human apply gate.
+
+Deliver the static/offline proof separately from any real provider apply. M3 remains blocked for real PREPROD `CREATE` until this M2.5 evidence is PROVEN.
 
 ## M3 prompt — PREPROD Infrastructure
 

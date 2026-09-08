@@ -53,7 +53,7 @@ Critical invariants use tolerance zero. Drift is multi-signal and persistent; th
 - Fleet carries desired state.
 - Argo Rollouts manages progressive exposure where applicable.
 - double approval is required where governed by release/AIOps policy.
-- no model self-promotion.
+- no automatic model promotion: a human approval is required before the GitOps PR can be merged and promoted.
 
 ## Drift and retraining
 

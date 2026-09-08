@@ -454,6 +454,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[observability infrastructure_logs] => "loki",
       %w[observability security_pipeline] => "logstash",
       %w[observability security] => "splunk",
+      %w[observability hyperdx_metadata_store] => "mongodb-atlas",
       %w[mlops dataset_versioner] => "dvc",
       %w[mlops progressive_delivery] => "flagger"
     }

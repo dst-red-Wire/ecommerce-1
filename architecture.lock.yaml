@@ -88,6 +88,7 @@ observability:
   infrastructure_logs: victorialogs
   application_observability_storage: clickhouse
   application_observability_ui: hyperdx
+  hyperdx_metadata_store: mongodb-oss-self-hosted
   alerts: vmalert
   notifications: alertmanager
   dashboards: grafana
@@ -190,6 +191,7 @@ build_milestones:
   - M0-architecture-sync
   - M1-monorepo-bootstrap
   - M2-golden-service-product
+  - M2-5-persistent-mgmt-bootstrap
   - M3-preprod-infrastructure
   - M4-platform-baseline
   - M5-commerce-vertical-slice

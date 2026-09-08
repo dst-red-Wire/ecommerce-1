@@ -370,6 +370,7 @@ module ArchitectureValidator
         "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
         "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
         "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
+        "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
         "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
         "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
       },

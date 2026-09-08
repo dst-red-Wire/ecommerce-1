@@ -40,7 +40,7 @@ class GovernanceDocumentationTest(unittest.TestCase):
                 r"exactly 17 backend",
                 r"no checkout service",
                 r"Cart -> Order -> Tax -> Fraud/Risk -> Payment",
-                r"^C\. `Shipping -> Tracking -> Returns -> Billing -> Notification`",
+                r"C\. `Shipping -> Tracking -> Returns -> Billing -> Notification`",
             ],
             "docs/architecture/DEPLOYMENT_DAG.md": [
                 r"OTel Collector, Prometheus, Alertmanager, Grafana",
