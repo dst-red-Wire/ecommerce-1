@@ -31,7 +31,7 @@ class ArchitectureValidatorTest < Minitest::Test
   def test_rejects_missing_active_stateful_or_observability_component_from_deployment_waves
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
-        data["waves"].find { |wave| wave["id"] == "60-stateful" }["parallel_groups"][0].delete("lakefs")
+        data["waves"].find { |wave| wave["id"] == "60-stateful" }["serial_after_parallel"].delete("lakefs")
       end
       errors = ArchitectureValidator.validate(root)
       assert_includes errors, "deployment waves include lakefs: expected true, got false"
@@ -41,7 +41,7 @@ class ArchitectureValidatorTest < Minitest::Test
   def test_rejects_missing_mlops_storage_prerequisite_from_deployment_waves
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
-        data["waves"].find { |wave| wave["id"] == "60-stateful" }["parallel_groups"][0].delete("seaweedfs")
+        data["waves"].find { |wave| wave["id"] == "45-object-storage" }["components"].delete("seaweedfs")
       end
       errors = ArchitectureValidator.validate(root)
       assert_includes errors, "deployment waves include seaweedfs: expected true, got false"

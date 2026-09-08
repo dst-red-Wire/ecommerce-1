@@ -1,10 +1,38 @@
-version: 2
+version: 3
 status: exact
 policies:
   no_default_ceph: true
   no_minio_ce: true
   raw_data_devices: true
   shared_rw_storage_default: false
+
+storage_classes:
+  localpv-observability:
+    provisioner: kubernetes.io/no-provisioner
+    backing_pools: [localpv-a, localpv-b]
+    filesystem: xfs
+    access_mode: ReadWriteOnce
+    volume_binding_mode: WaitForFirstConsumer
+    reclaim_policy: Retain
+    encryption_at_rest: luks2
+    allocation: dedicated-static-pv-per-member
+    xfs_project_quota: required
+
+observability_defaults:
+  storage_class: localpv-observability
+  strict_replica_anti_affinity: true
+  secrets_authority: openbao
+  secret_delivery: external-secrets
+  secrets_in_git: forbidden
+  transport_encryption: required
+  backup_object_authority: seaweedfs-s3
+  backup_execution_authority: rancher-fleet-kubernetes-cronjob
+  prod_backup_failure_domain: opposite-prod-site
+  prod_cluster_scope: per-site
+  stretched_quorum_between_prod_sites: forbidden
+  capacity_sizing: measured-ingest-retention-replication
+  hardcoded_capacity_without_evidence: forbidden
+
 preprod:
   worker-01:
     nvme-1: localpv-a
@@ -34,6 +62,7 @@ prod:
     nvme-3: seaweedfs-volume-1
     nvme-4: spare
     nvme-5: seaweedfs-volume-2
+
 engines:
   postgresql:
     storage: localpv
@@ -60,8 +89,197 @@ engines:
   rabbitmq:
     nodes_per_site: 3
     queue_type: quorum
+
+  victoriametrics:
+    engine: victoriametrics-cluster
+    deployment_mode: fleet-managed-helm
+    storage:
+      class: localpv-observability
+      persistent_components: [vmstorage]
+      access_mode: ReadWriteOnce
+    topology:
+      vminsert: 2
+      vmselect: 2
+      vmstorage: 3
+      replication_factor: 2
+      anti_affinity: strict
+    retention: {preprod: 14d, prod: 90d}
+    backup:
+      method: vmbackup-vmrestore
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [vmagent]
+      readers: [grafana, vmalert]
+      public_access: forbidden
+    data_scope: {allowed: [sre-metrics], business_data: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_vmstorage_unavailable: serve-with-replicated-copy
+      replication_factor_reduction: forbidden
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  victorialogs:
+    engine: victorialogs-cluster
+    deployment_mode: fleet-managed-helm
+    storage:
+      class: localpv-observability
+      persistent_components: [vlstorage]
+      access_mode: ReadWriteOnce
+    topology:
+      vlinsert: 2
+      vlselect: 2
+      vlstorage: 3
+      replication: none-sharded
+      anti_affinity: strict
+    retention: {preprod: 14d, prod: 30d}
+    backup:
+      method: partition-snapshot-to-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [opentelemetry-collector]
+      readers: [grafana, vmalert]
+      public_access: forbidden
+    data_scope: {allowed: [infrastructure-logs], business_data: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      missing_vlstorage_query: fail-closed
+      surviving_vlstorage_ingestion: continue
+      lost_partition: restore-from-backup
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  clickhouse:
+    engine: clickhouse-oss
+    deployment_mode: fleet-managed-statefulsets
+    storage:
+      class: localpv-observability
+      persistent_components: [clickhouse-server, clickhouse-keeper]
+      access_mode: ReadWriteOnce
+    topology:
+      shards: 1
+      replicas_per_shard: 3
+      keeper_nodes: 3
+      replication: replicated-mergetree
+      anti_affinity: strict
+    retention: {preprod: 7d, prod: 30d}
+    backup:
+      method: clickhouse-native-backup-restore-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 4h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [rotel]
+      readers: [hyperdx]
+      public_access: forbidden
+    data_scope: {allowed: [application-traces, application-logs], business_data: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_replica_unavailable: continue
+      keeper_quorum_loss: stop-writes-fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  mongodb-oss-self-hosted:
+    engine: mongodb-community
+    deployment_mode: mongodb-community-operator
+    storage:
+      class: localpv-observability
+      persistent_components: [mongod]
+      access_mode: ReadWriteOnce
+    topology:
+      replica_set_members: 3
+      write_concern: majority
+      anti_affinity: strict
+    retention: {preprod: persistent-until-explicit-deletion, prod: persistent-until-explicit-deletion}
+    backup:
+      method: mongodump-oplog-archive-to-s3-mongorestore
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 2h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls}
+    network:
+      writers: [hyperdx]
+      readers: [hyperdx]
+      public_access: forbidden
+      ecommerce_services: forbidden
+    data_scope:
+      allowed: [hyperdx-metadata]
+      hyperdx_internal_only: true
+      business_data: forbidden
+    operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
+    dependencies: [seaweedfs, openbao, external-secrets, mongodb-community-operator]
+    failure_behavior:
+      one_member_unavailable: continue-majority
+      majority_lost: stop-writes-fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  opensearch-security:
+    engine: opensearch
+    deployment_mode: opensearch-operator
+    storage:
+      class: localpv-observability
+      persistent_components: [opensearch-security]
+      access_mode: ReadWriteOnce
+    topology:
+      cluster_manager_data_nodes: 3
+      index_replicas: 1
+      anti_affinity: strict
+    retention:
+      preprod_hot: 14d
+      prod_hot: 30d
+      prod_snapshots: 365d
+    backup:
+      method: opensearch-snapshot-repository-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 1h}
+      retention: {preprod: 30d, prod: 365d}
+      rpo: {preprod: 12h, prod: 1h}
+      rto: {preprod: 4h, prod: 4h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [data-prepper-security]
+      readers: [wazuh]
+      public_access: forbidden
+    data_scope:
+      allowed: [security-enrichment, siem]
+      forbidden: [general-application-logs, general-infrastructure-logs, business-data]
+    operational_authority: {desired_state: rancher-fleet, owner: platform-security}
+    dependencies: [seaweedfs, openbao, external-secrets, opensearch-operator]
+    failure_behavior:
+      one_node_unavailable: continue-with-replica
+      cluster_manager_quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
 validation:
-  reject_device_reuse: true
-  reject_shared_stateful_device: true
+  reject_static_pv_reuse: true
+  reject_localpv_path_reuse: true
+  require_xfs_project_quota: true
+  allow_distinct_pvs_on_same_backing_nvme: true
+  require_same_engine_replica_failure_domain_separation: true
   reject_default_ceph: true
   reject_minio_ce: true

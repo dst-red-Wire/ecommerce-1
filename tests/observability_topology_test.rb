@@ -41,11 +41,107 @@ class ObservabilityTopologyTest < Minitest::Test
     end
   end
 
+  def test_rejects_active_stateful_store_without_storage_contract
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") { |data| data["engines"].delete("victoriametrics") }
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "active stateful component victoriametrics lacks complete storage contract"
+    end
+  end
+
+  def test_rejects_incomplete_rpo
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["clickhouse"]["backup"]["rpo"].delete("prod")
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root), "clickhouse backup RPO is incomplete"
+    end
+  end
+
+  def test_rejects_minio_as_backup_authority
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["victorialogs"]["backup"]["target"] = "minio-community"
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "victorialogs backup target must be seaweedfs-s3"
+    end
+  end
+
+  def test_rejects_business_data_in_hyperdx_mongodb
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["mongodb-oss-self-hosted"]["data_scope"]["business_data"] = "allowed"
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "HyperDX MongoDB storage scope must forbid business data"
+    end
+  end
+
+  def test_rejects_general_logs_in_opensearch_security
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["opensearch-security"]["data_scope"]["forbidden"].delete("general-infrastructure-logs")
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "OpenSearch Security storage scope must remain SIEM-only"
+    end
+  end
+
+  def test_rejects_missing_active_store_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "50-observability-stateful" }["components"].delete("clickhouse")
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "deployment waves must include active stateful component clickhouse"
+    end
+  end
+
+  def test_rejects_store_before_seaweedfs
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        waves = data["waves"]
+        seaweed = waves.delete_at(waves.index { |wave| wave["id"] == "45-object-storage" })
+        stores = waves.index { |wave| wave["id"] == "50-observability-stateful" }
+        waves.insert(stores + 1, seaweed)
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "SeaweedFS must be healthy before victoriametrics"
+    end
+  end
+
+  def test_rejects_new_stateful_store_without_complete_contract
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/contracts/observability-topology.yaml") do |data|
+        data["stateful_storage"]["stores"]["accidental"] = {"component" => "accidental-store", "purpose" => "none"}
+      end
+      errors = ObservabilityTopologyValidator.validate(root)
+      assert_includes errors, "active observability stateful store set drift"
+      assert_includes errors, "active stateful component accidental-store lacks complete storage contract"
+    end
+  end
+
+  def test_rejects_forbidden_component_in_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "55-observability-services" }["components"] << "opensearch-general-log-store"
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "forbidden observability components active in deployment waves: opensearch-general-log-store"
+    end
+  end
+
   private
 
   def with_contract_copy
     Dir.mktmpdir("observability-topology") do |root|
-      %w[architecture.lock.yaml config/contracts/observability-topology.yaml].each do |relative|
+      %w[
+        architecture.lock.yaml
+        config/contracts/observability-topology.yaml
+        config/infrastructure/storage-plan.yaml
+        config/infrastructure/deployment-waves.yaml
+      ].each do |relative|
         target = File.join(root, relative)
         FileUtils.mkdir_p(File.dirname(target))
         FileUtils.cp(File.join(ROOT, relative), target)

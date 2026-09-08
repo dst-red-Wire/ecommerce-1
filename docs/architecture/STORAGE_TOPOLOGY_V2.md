@@ -81,6 +81,29 @@ Kafka replication is not a substitute for archival/backup or reproducible topic/
 - index rebuild path from authoritative data/events mandatory;
 - rebuild RTO measured in M7/M8.
 
+## Observability stateful storage
+
+The exact machine contract is `config/infrastructure/storage-plan.yaml`. The `localpv-observability` class uses
+static RWO LocalPV paths on `localpv-a`/`localpv-b`, XFS with project quotas, LUKS2 at rest,
+`WaitForFirstConsumer` and `Retain`. A single PV or LocalPV path is never reused. Multiple isolated PV paths may
+share a physical NVMe; same-engine replicas must remain in distinct worker/physical failure domains.
+
+| Engine | HA model | PREPROD retention / RPO / RTO | PROD retention / RPO / RTO | Backup method |
+|---|---|---|---|---|
+| VictoriaMetrics | 3 vmstorage, RF=2 | 14d / 12h / 4h | 90d / 6h / 2h | vmbackup/vmrestore -> SeaweedFS S3 |
+| VictoriaLogs | 3 sharded vlstorage, no replication | 14d / 12h / 4h | 30d / 6h / 2h | partition snapshots -> SeaweedFS S3 |
+| ClickHouse | 1 shard x 3 replicas + Keeper 3 | 7d / 12h / 4h | 30d / 6h / 4h | native BACKUP/RESTORE -> SeaweedFS S3 |
+| MongoDB Community | 3-member replica set | metadata lifecycle / 12h / 2h | metadata lifecycle / 6h / 2h | oplog-consistent dump/restore -> SeaweedFS S3 |
+| OpenSearch Security | 3 manager/data nodes, index replica=1 | 14d / 12h / 4h | 30d hot + 365d snapshots / 1h / 4h | snapshot repository-s3 -> SeaweedFS S3 |
+
+MGMT status is `deferred`; PREPROD and PROD are `required`. PROD deploys independent per-site clusters and
+forbids stretched database quorums. PROD backup objects must reside in the opposite PROD site failure domain.
+Secrets come from OpenBao through ESO and are never versioned. Network access is private and least-privilege.
+MongoDB is HyperDX-metadata-only; OpenSearch Security is SIEM/security-only.
+
+VictoriaLogs sharding is not replication. A missing `vlstorage` makes queries fail closed until the affected
+partition data is restored. This failure mode is intentional and machine-validated.
+
 ## Backup separation
 
 Backups for Tier-0/Tier-1 authoritative data must be restorable without relying on the cluster/site being recovered. Encryption keys/trust material must not be co-located only with the backups they protect.

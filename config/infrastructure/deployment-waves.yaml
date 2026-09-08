@@ -1,4 +1,4 @@
-version: 2
+version: 3
 status: exact
 waves:
   - id: 00-underlay
@@ -16,20 +16,29 @@ waves:
   - id: 40-secrets-registry-ci
     requires: [30-gitops-identity]
     components: [openbao, external-secrets, harbor, tekton]
-  - id: 50-observability
-    requires: [40-secrets-registry-ci]
-    components: [rotel, opentelemetry-collector, vmagent, victoriametrics, victorialogs, vmalert, alertmanager, grafana, clickhouse, mongodb-oss-self-hosted, hyperdx, data-prepper-security, opensearch-security, wazuh]
-  - id: 60-stateful
+  - id: 45-object-storage
     requires: [40-secrets-registry-ci, 20-network-security]
+    components: [seaweedfs]
+  - id: 48-observability-operators
+    requires: [45-object-storage]
+    components: [mongodb-community-operator, opensearch-operator]
+  - id: 50-observability-stateful
+    requires: [48-observability-operators]
+    components: [victoriametrics, victorialogs, clickhouse, mongodb-oss-self-hosted, opensearch-security]
+  - id: 55-observability-services
+    requires: [50-observability-stateful]
+    components: [rotel, opentelemetry-collector, vmagent, vmalert, alertmanager, grafana, hyperdx, data-prepper-security, wazuh]
+  - id: 60-stateful
+    requires: [45-object-storage, 40-secrets-registry-ci, 20-network-security]
     parallel_groups:
-      - [cloudnativepg, lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis, seaweedfs]
+      - [cloudnativepg, lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis]
       - [opensearch-business, apicurio]
     serial_after_parallel: [lakefs, mlflow]
   - id: 70-iam-edge
     requires: [60-stateful, 30-gitops-identity]
     components: [keycloak, haproxy, caddy, coraza, kong, ats, istio-gateway, squid-egress]
   - id: 80-golden-service
-    requires: [50-observability, 60-stateful, 70-iam-edge]
+    requires: [55-observability-services, 60-stateful, 70-iam-edge]
     components: [product]
   - id: 90-commerce
     requires: [80-golden-service]

@@ -56,16 +56,23 @@ Gate W3: default-deny policy test, SPIFFE issuance, Cilium health and policy adm
 
 Gate W4: GitOps reconciliation healthy, secret injection smoke passes, mesh identity/mTLS passes.
 
-## Wave 5 — Delivery/registry/observability
+## Waves 4.5-5.5 — Object storage and observability
 
-Parallel groups:
+The executable dependency chain is:
 
-A. Harbor integrations/robot accounts/signature verification hooks.
-B. Tekton pipelines/tasks.
-C. Rotel, OpenTelemetry Collector, vmagent, VictoriaMetrics, VictoriaLogs, vmalert, Alertmanager, Grafana, ClickHouse, MongoDB OSS self-hosted and HyperDX.
-D. Data Prepper -> OpenSearch -> Wazuh security/SIEM integrations only.
+`OpenBao/ESO -> SeaweedFS -> MongoDB/OpenSearch operators -> observability stateful stores -> telemetry/security consumers`
 
-Gate W5: pipeline dry-run, registry pull-by-digest, telemetry/log/security event flow pass.
+1. `45-object-storage`: SeaweedFS must be healthy before any observability store is considered backup-ready.
+2. `48-observability-operators`: MongoDB Community Operator and OpenSearch Operator.
+3. `50-observability-stateful`: VictoriaMetrics, VictoriaLogs, ClickHouse, MongoDB OSS self-hosted and OpenSearch Security.
+4. `55-observability-services`: Rotel, OpenTelemetry Collector, vmagent, vmalert, Alertmanager, Grafana, HyperDX, Data Prepper Security and Wazuh.
+
+HyperDX may start only after both ClickHouse and MongoDB are healthy. Data Prepper Security and Wazuh may start
+only after OpenSearch Security is healthy. No general log path may be redirected into OpenSearch Security.
+
+Gate W5 requires storage binding, anti-affinity, engine quorum where applicable, SeaweedFS backup repository
+reachability, latest backup age within the declared RPO, restore procedure presence, registry pull-by-digest and
+telemetry/log/security event-flow checks. Static validation does not claim that a backup has actually succeeded.
 
 ## Wave 6 — Stateful platform
 
@@ -78,7 +85,7 @@ May run in parallel after storage/network prerequisites:
 - RabbitMQ;
 - Redis Cluster;
 - OpenSearch;
-- SeaweedFS S3;
+- SeaweedFS S3 is already established by `45-object-storage`; Wave 6 consumes it rather than redeploying it;
 - Apicurio Registry.
 
 Gate W6 requires health, anti-affinity, storage binding, operator readiness and backup/restore prerequisites.
