@@ -54,6 +54,7 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Detect WSL2 without making it a global prerequisite", playbook)
         self.assertIn("Reconcile pinned Ruby Psych YAML runtime", workstation)
         self.assertIn("Validate explicitly provisioned Ruby and Psych runtime", workstation)
+        self.assertIn("- build-essential", workstation)
         self.assertIn("state: present", workstation)
 
     def test_prepush_reuses_evidence_only_for_current_base(self):

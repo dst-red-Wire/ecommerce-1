@@ -105,4 +105,13 @@ class ContractAuthorityClosureTest < Minitest::Test
     assert errors.any? { |error| error.include?("strimzi-operator must be ready in an earlier wave") }
   end
 
+  def test_keycloak_backup_must_survive_preprod_jit_destroy
+    lock = load_yaml("architecture.lock.yaml")
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    storage.dig("engines", "keycloak-database", "backup")["target"] = "seaweedfs-s3"
+    errors = []
+    ContractAuthorityValidator.validate_resilience_binding(errors, lock, ROOT, storage)
+    assert errors.any? { |error| error.include?("keycloak-database backup target must be persistent") }
+  end
+
 end

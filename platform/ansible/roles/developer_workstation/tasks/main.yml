@@ -6,6 +6,8 @@
       - curl
       - git
       - jq
+      - build-essential
+      - docker.io
       - make
       - libyaml-dev
       - pipx
@@ -226,6 +228,14 @@
   when: developer_is_wsl2 and docker_probe.rc != 0
   tags: [workstation, docker]
 
+- name: Start the native Ubuntu Docker daemon
+  ansible.builtin.service:
+    name: docker
+    state: started
+  when: not developer_is_wsl2 and docker_probe.rc != 0
+  become: true
+  tags: [workstation, docker]
+
 - name: Fall back to the official Docker Desktop executable through PowerShell
   ansible.builtin.command:
     argv:
@@ -247,7 +257,7 @@
   retries: 30
   delay: 2
   until: docker_ready.rc == 0
-  when: developer_is_wsl2 and docker_probe.rc != 0
+  when: docker_probe.rc != 0
   tags: [workstation, docker]
 
 - name: Inspect pinned Ruby Psych YAML runtime

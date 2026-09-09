@@ -498,6 +498,42 @@ module ContractAuthorityValidator
     errors << "persistent PREPROD archive must be external to JIT" unless archive["external_failure_domain_independence"] == "required" && archive["lifecycle"] == "persistent-independent-from-preprod-jit"
     errors << "persistent PREPROD archive provider must remain unresolved rather than fabricated" unless archive.dig("operational_prerequisites", "provider") == "required-unresolved"
 
+    keycloak_profile = authority.dig("profiles", "keycloak-database") || {}
+    errors << "resilience profile keycloak-database component set drift" unless Array(keycloak_profile["components"]) == ["keycloak-database"]
+    %w[schedule retention rpo rto].each do |field|
+      errors << "resilience profile keycloak-database #{field} must define exact positive preprod/prod durations" unless duration_map?(keycloak_profile[field])
+    end
+    {
+      "backup_method" => "barman-pitr-compatible",
+      "backup_object_authority" => "preprod-jit-external-archive",
+      "backup_execution_authority" => "rancher-fleet-kubernetes-cronjob",
+      "archive_before_preprod_destroy" => "required",
+      "archive_proof" => "required-not-yet-proven",
+      "destroy_without_verified_archive" => "forbidden",
+      "restore_validation" => "required",
+      "restore_proof" => "required-not-yet-proven",
+      "backup_failure_domain" => "external-to-preprod-jit",
+      "local_objective_override" => "forbidden"
+    }.each do |field, expected|
+      errors << "resilience profile keycloak-database #{field} drift" unless keycloak_profile[field] == expected
+    end
+
+    keycloak_backup = storage.dig("engines", "keycloak-database", "backup") || {}
+    unless keycloak_backup["objectives_authority"] == {"machine_contract" => "resilience_governance", "profile" => "keycloak-database"}
+      errors << "keycloak-database objectives authority must resolve through resilience governance"
+    end
+    errors << "keycloak-database local objective override must be forbidden" unless keycloak_backup["local_objective_override"] == "forbidden"
+    %w[schedule retention rpo rto].each do |field|
+      errors << "keycloak-database backup #{field} must match resilience governance" unless keycloak_backup[field] == keycloak_profile[field]
+    end
+    errors << "keycloak-database restore validation must match resilience governance" unless keycloak_backup["restore_validation"] == keycloak_profile["restore_validation"]
+    errors << "keycloak-database backup method must match resilience governance" unless keycloak_backup["method"] == keycloak_profile["backup_method"]
+    errors << "keycloak-database backup target must be persistent and external to PREPROD JIT" unless keycloak_backup["target"] == keycloak_profile["backup_object_authority"]
+    errors << "keycloak-database backup failure domain must be external to PREPROD JIT" unless keycloak_backup["target_failure_domain"] == keycloak_profile["backup_failure_domain"]
+    errors << "keycloak-database archive must precede PREPROD destroy" unless keycloak_backup["archive_before_preprod_destroy"] == keycloak_profile["archive_before_preprod_destroy"]
+    errors << "keycloak-database destroy must fail closed without verified archive" unless keycloak_backup["destroy_without_verified_archive"] == keycloak_profile["destroy_without_verified_archive"]
+    errors << "keycloak-database archive proof must remain unproven until runtime evidence exists" unless keycloak_backup["archive_proof"] == keycloak_profile["archive_proof"]
+
     engines = storage.fetch("engines", {})
     MLOPS_METADATA_COMPONENTS.each do |component|
       spec = engines[component]

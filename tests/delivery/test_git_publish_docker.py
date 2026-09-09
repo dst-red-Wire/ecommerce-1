@@ -11,6 +11,8 @@ class DockerPublishBoundaryTest(unittest.TestCase):
         self.assertIn("Probe Docker daemon", PLAYBOOK)
         self.assertIn("docker.exe", PLAYBOOK)
         self.assertIn("powershell.exe", PLAYBOOK)
+        self.assertIn("Start the native Ubuntu Docker daemon", PLAYBOOK)
+        self.assertIn("- docker.io", PLAYBOOK)
         self.assertIn("retries: 30", PLAYBOOK)
 
     def test_service_gate_requests_ansible_docker_capability(self):

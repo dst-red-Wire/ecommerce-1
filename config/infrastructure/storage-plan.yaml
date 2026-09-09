@@ -126,9 +126,17 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: seaweedfs-s3
+      target: preprod-jit-external-archive
+      target_failure_domain: external-to-preprod-jit
+      archive_before_preprod_destroy: required
+      archive_proof: required-not-yet-proven
+      destroy_without_verified_archive: forbidden
       schedule: {preprod: 12h, prod: 6h}
       retention: {preprod: 7d, prod: 30d}
+      objectives_authority:
+        machine_contract: resilience_governance
+        profile: keycloak-database
+      local_objective_override: forbidden
       rpo: {preprod: 12h, prod: 6h}
       rto: {preprod: 4h, prod: 2h}
       restore_validation: required
