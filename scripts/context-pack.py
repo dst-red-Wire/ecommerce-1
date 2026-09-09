@@ -17,7 +17,8 @@ import shutil
 import subprocess
 import sys
 
-from contract_paths import machine_contract_path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from contract_paths import machine_contract_path  # noqa: E402
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 ROUTER = ROOT / "config/context/router.yaml"
