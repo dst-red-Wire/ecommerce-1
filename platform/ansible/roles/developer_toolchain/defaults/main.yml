@@ -1,5 +1,6 @@
 ---
 versions_file: "{{ repo_root }}/config/toolchain/versions.env"
+psych_version: "{{ lookup('ansible.builtin.ini', 'PSYCH_VERSION', type='properties', file=versions_file) }}"
 ansible_core_version: "{{ lookup('ansible.builtin.ini', 'ANSIBLE_CORE_VERSION', type='properties', file=versions_file) }}"
 ansible_lint_version: "{{ lookup('ansible.builtin.ini', 'ANSIBLE_LINT_VERSION', type='properties', file=versions_file) }}"
 local_bin: "{{ ansible_env.HOME }}/.local/bin"

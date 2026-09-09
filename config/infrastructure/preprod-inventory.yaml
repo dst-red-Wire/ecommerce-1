@@ -4,6 +4,10 @@ site: preprod-jit
 provider: phoenixnap
 region: amsterdam
 lifecycle:
+  destroy_gate:
+    authority: resilience-governance
+    requires: verified-external-archive-and-integrity-proof
+    failure_behavior: fail-closed-preserve-jit-resources
   standard_ttl_hours: 24
   sequence:
     - create

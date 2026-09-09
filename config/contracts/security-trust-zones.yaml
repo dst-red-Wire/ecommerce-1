@@ -68,7 +68,9 @@ subjects:
   data-prepper-security: Z5
   wazuh: Z5
   cloudnativepg: Z5
+  strimzi-operator: Z5
   lakefs-metadata-cnpg: Z4
+  keycloak-database: Z4
   mlflow-metadata-cnpg: Z4
   strimzi-kafka: Z4
   rabbitmq: Z4

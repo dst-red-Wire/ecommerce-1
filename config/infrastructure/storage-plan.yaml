@@ -112,6 +112,41 @@ engines:
       empty_reinitialization: forbidden
     environments: {mgmt: deferred, preprod: required, prod: required}
 
+  keycloak-database:
+    engine: cloudnativepg-postgresql
+    deployment_mode: cloudnativepg
+    storage:
+      class: localpv
+      access_mode: ReadWriteOnce
+    topology:
+      instances: {preprod: 3, prod_per_site: 3}
+      replication: streaming-quorum
+      anti_affinity: strict
+      prod_write_authority: single-writer-home-site
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: barman-pitr-compatible
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [keycloak]
+      readers: [keycloak]
+      operators: [cloudnativepg]
+      public_access: forbidden
+    data_scope: {allowed: [keycloak-iam-state], service_owned_databases: forbidden, cross_service_reads: forbidden}
+    operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg, owner: platform-iam}
+    dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_instance_unavailable: continue-if-quorum-healthy
+      quorum_loss: fail-closed-block-keycloak
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
   lakefs-metadata-cnpg:
     engine: cloudnativepg-postgresql
     deployment_mode: cloudnativepg
@@ -125,8 +160,11 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: seaweedfs-s3
-      target_failure_domain: independent-from-source-site
+      target: preprod-jit-external-archive
+      target_failure_domain: external-to-preprod-jit
+      archive_before_preprod_destroy: required
+      archive_proof: required-not-yet-proven
+      destroy_without_verified_archive: forbidden
       schedule: {preprod: 12h, prod: 6h}
       retention: {preprod: 7d, prod: 30d}
       objectives_authority:
@@ -163,8 +201,11 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: seaweedfs-s3
-      target_failure_domain: independent-from-source-site
+      target: preprod-jit-external-archive
+      target_failure_domain: external-to-preprod-jit
+      archive_before_preprod_destroy: required
+      archive_proof: required-not-yet-proven
+      destroy_without_verified_archive: forbidden
       schedule: {preprod: 12h, prod: 6h}
       retention: {preprod: 7d, prod: 30d}
       objectives_authority:
@@ -217,7 +258,7 @@ engines:
       public_access: forbidden
     data_scope: {allowed: [domain-events], secrets: forbidden, unnecessary_pii: forbidden}
     operational_authority: {desired_state: rancher-fleet, owner: platform-messaging}
-    dependencies: [seaweedfs, openbao, external-secrets]
+    dependencies: [strimzi-operator, seaweedfs, openbao, external-secrets]
     failure_behavior:
       one_node_unavailable: continue-if-min-isr-healthy
       min_isr_loss: fail-closed

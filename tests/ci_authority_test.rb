@@ -160,8 +160,8 @@ class StoragePlanGovernanceTest < Minitest::Test
       assert_equal "strict", spec.dig("topology", "anti_affinity"), component
       assert_equal "single-writer-home-site", spec.dig("topology", "prod_write_authority"), component
       assert_equal "barman-pitr-compatible", spec.dig("backup", "method"), component
-      assert_equal "seaweedfs-s3", spec.dig("backup", "target"), component
-      assert_equal "independent-from-source-site", spec.dig("backup", "target_failure_domain"), component
+      assert_equal "preprod-jit-external-archive", spec.dig("backup", "target"), component
+      assert_equal "external-to-preprod-jit", spec.dig("backup", "target_failure_domain"), component
       assert_equal profile.fetch("schedule"), spec.dig("backup", "schedule"), component
       assert_equal profile.fetch("retention"), spec.dig("backup", "retention"), component
       assert_equal({"machine_contract" => "resilience_governance", "profile" => "mlops-metadata-cnpg"},

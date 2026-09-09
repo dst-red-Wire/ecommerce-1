@@ -137,7 +137,9 @@ component_execution_bindings:
   data-prepper-security: stateless
   wazuh: stateless
   cloudnativepg: operator
+  strimzi-operator: operator
   lakefs-metadata-cnpg: stateful
+  keycloak-database: stateful
   mlflow-metadata-cnpg: stateful
   strimzi-kafka: stateful
   rabbitmq: stateful
@@ -215,10 +217,13 @@ waves:
   - id: 58-stateful-operators
     requires: [45-object-storage, 40-secrets-registry-ci, 20-network-security]
     components: [cloudnativepg]
+  - id: 59-messaging-operators
+    requires: [58-stateful-operators]
+    components: [strimzi-operator]
   - id: 60-stateful
-    requires: [58-stateful-operators, 45-object-storage, 40-secrets-registry-ci, 20-network-security]
+    requires: [58-stateful-operators, 59-messaging-operators, 45-object-storage, 40-secrets-registry-ci, 20-network-security]
     parallel_groups:
-      - [lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis]
+      - [lakefs-metadata-cnpg, mlflow-metadata-cnpg, keycloak-database, strimzi-kafka, rabbitmq, redis]
       - [opensearch-business]
     serial_after_parallel: [apicurio, lakefs, mlflow]
   - id: 70-iam-edge

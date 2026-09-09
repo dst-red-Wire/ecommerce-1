@@ -54,7 +54,7 @@ Controls:
 
 ### Z4 — Stateful data
 
-PostgreSQL/CNPG (including lakeFS/MLflow metadata), Kafka, RabbitMQ, Redis, OpenSearch Business, SeaweedFS, Apicurio, VictoriaMetrics, VictoriaLogs, ClickHouse, MongoDB (HyperDX metadata only), OpenSearch Security.
+PostgreSQL/CNPG (including the dedicated Keycloak database and lakeFS/MLflow metadata), Kafka, RabbitMQ, Redis, OpenSearch Business, SeaweedFS, Apicurio, VictoriaMetrics, VictoriaLogs, ClickHouse, MongoDB (HyperDX metadata only), OpenSearch Security.
 
 Controls:
 - reachable only from approved workload/platform identities;
@@ -63,6 +63,8 @@ Controls:
 - storage access constrained to owning nodes/operators;
 - backups isolated from source failure domain;
 - stateful admin interfaces restricted to operator/MGMT paths.
+
+The Strimzi operator belongs to Z5 while Kafka data-plane workloads belong to Z4.
 
 ### Z5 — Permanent MGMT
 

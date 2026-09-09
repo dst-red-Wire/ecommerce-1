@@ -44,6 +44,18 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("ansible-core=={{ ansible_core_version }}", tasks)
         self.assertIn("ansible-lint=={{ ansible_lint_version }}", tasks)
 
+    def test_bootstrap_is_single_cross_linux_idempotent_contract(self):
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        playbook = (ROOT / "platform/ansible/developer.yml").read_text(encoding="utf-8")
+        workstation = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertEqual(1, len([line for line in makefile.splitlines() if line.startswith("bootstrap:")]))
+        self.assertNotIn("workstation-bootstrap:", makefile)
+        self.assertNotIn("Require WSL2", playbook)
+        self.assertIn("Detect WSL2 without making it a global prerequisite", playbook)
+        self.assertIn("Reconcile pinned Ruby Psych YAML runtime", workstation)
+        self.assertIn("Validate explicitly provisioned Ruby and Psych runtime", workstation)
+        self.assertIn("state: present", workstation)
+
     def test_prepush_reuses_evidence_only_for_current_base(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)

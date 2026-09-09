@@ -79,4 +79,30 @@ class ContractAuthorityClosureTest < Minitest::Test
     ContractAuthorityValidator.validate_trust_zones(errors, lock, ROOT, waves)
     assert_empty errors
   end
+  def test_keycloak_database_and_strimzi_operator_mutations_fail_closed
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    storage["engines"].delete("keycloak-database")
+    errors = []
+    ContractAuthorityValidator.validate_stateful_contracts(errors, storage)
+    assert errors.any? { |error| error.include?("keycloak-database lacks complete storage contract") }
+
+    waves["component_execution_bindings"]["strimzi-operator"] = "stateful"
+    errors = []
+    ContractAuthorityValidator.validate_dag(errors, waves)
+    assert errors.any? { |error| error.include?("Strimzi operator execution binding") }
+  end
+
+  def test_strimzi_operator_dependency_must_be_in_an_earlier_wave
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    operator_wave = waves["waves"].find { |wave| wave["id"] == "59-messaging-operators" }
+    stateful_wave = waves["waves"].find { |wave| wave["id"] == "60-stateful" }
+    operator_wave["components"].delete("strimzi-operator")
+    stateful_wave["parallel_groups"].first << "strimzi-operator"
+    errors = []
+    ContractAuthorityValidator.validate_storage_dependency_edges(errors, storage, waves)
+    assert errors.any? { |error| error.include?("strimzi-operator must be ready in an earlier wave") }
+  end
+
 end

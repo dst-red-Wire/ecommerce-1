@@ -36,11 +36,11 @@ Minimum topology:
 - versioning/Object Lock/immutability only where the workload/evidence/backup policy requires it;
 - encryption and restore validation required before PROD admission.
 
-SeaweedFS objects used as immutable evidence/backup must have an independent copy outside the failure domain they protect.
+SeaweedFS objects used as immutable evidence/backup must have an independent copy outside the failure domain they protect. For JIT PREPROD lakeFS/MLflow metadata, retention after teardown requires a persistent management-plane-governed external archive whose provider, endpoint, bucket and credential remain explicit unresolved prerequisites. Teardown fails closed until archive integrity and restore-validation evidence exist; static contracts never claim that evidence is already proven.
 
 ## PostgreSQL / CNPG
 
-- one domain-owned database boundary per owning service or approved shared platform database;
+- one domain-owned database boundary per owning service or approved shared platform database; `keycloak-database` is a dedicated platform-IAM CNPG boundary and never one of the 19 service-owned databases;
 - no cross-service table reads;
 - 3 instances for critical deployments where the environment/capacity model requires HA;
 - synchronous durability for Tier-0 paths according to release/stateful policy;

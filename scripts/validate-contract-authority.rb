@@ -14,7 +14,7 @@ module ContractAuthorityValidator
     victoriametrics victorialogs clickhouse mongodb-oss-self-hosted opensearch-security
   ].freeze
   PLATFORM_STATEFUL_COMPONENTS = %w[
-    postgresql strimzi-kafka rabbitmq redis opensearch-business seaweedfs apicurio
+    postgresql keycloak-database strimzi-kafka rabbitmq redis opensearch-business seaweedfs apicurio
   ].freeze
   REQUIRED_STATEFUL_FIELDS = %w[
     engine deployment_mode storage topology retention backup encryption network data_scope
@@ -218,6 +218,8 @@ module ContractAuthorityValidator
       errors << "deployment execution profile #{name} automatic destroy must be forbidden" unless failure["automatic_destroy"] == "forbidden"
     end
 
+    errors << "Keycloak database execution binding must be stateful" unless bindings["keycloak-database"] == "stateful"
+    errors << "Strimzi operator execution binding must be operator" unless bindings["strimzi-operator"] == "operator"
     unused_profiles = profiles.keys - bindings.values.uniq
     errors << "deployment execution profiles are unreferenced: #{unused_profiles.sort.join(', ')}" unless unused_profiles.empty?
   end
@@ -386,6 +388,27 @@ module ContractAuthorityValidator
     component_wave = {}
     waves.each { |wave| wave_components(wave).each { |component| component_wave[component] = wave["id"] } }
 
+    {"keycloak-database" => "cloudnativepg", "strimzi-kafka" => "strimzi-operator"}.each do |component, dependency|
+      spec = storage.dig("engines", component)
+      errors << "storage contract missing #{component}" unless spec.is_a?(Hash)
+      errors << "#{component} must declare dependency on #{dependency}" unless Array(spec && spec["dependencies"]).include?(dependency)
+      errors << "deployment waves must contain #{component}" unless component_wave.key?(component)
+      errors << "deployment waves must contain #{dependency}" unless component_wave.key?(dependency)
+    end
+
+    {"keycloak-database" => "cloudnativepg", "strimzi-kafka" => "strimzi-operator"}.each do |component, dependency|
+      next unless component_wave.key?(component) && component_wave.key?(dependency)
+      if component_wave[component] == component_wave[dependency]
+        errors << "#{dependency} must be ready in an earlier wave than #{component}"
+      end
+    end
+    if component_wave.key?("keycloak-database") && component_wave.key?("keycloak")
+      unless wave_dependency_reachable?(by_id, component_wave["keycloak-database"], component_wave["keycloak"]) &&
+             component_wave["keycloak-database"] != component_wave["keycloak"]
+        errors << "keycloak-database must be ready in an earlier wave than keycloak"
+      end
+    end
+
     storage.fetch("engines", {}).each do |component, spec|
       next unless spec.is_a?(Hash) && component_wave.key?(component)
 
@@ -438,6 +461,8 @@ module ContractAuthorityValidator
     errors << "security trust zone frontend catalogue drift" unless Array(contract["frontends"]) == frontends
     services.each { |service| errors << "business service #{service} must be in trust zone Z3" unless subjects[service] == "Z3" }
     frontends.each { |frontend| errors << "frontend #{frontend} must be in trust zone Z3" unless subjects[frontend] == "Z3" }
+    errors << "Keycloak database must be in stateful trust zone Z4" unless subjects["keycloak-database"] == "Z4"
+    errors << "Strimzi operator must be in permanent management trust zone Z5" unless subjects["strimzi-operator"] == "Z5"
   end
 
   def validate_resilience_binding(errors, lock, root, storage)
@@ -455,8 +480,12 @@ module ContractAuthorityValidator
     errors << "resilience profile mlops-metadata-cnpg restore validation must be required" unless profile["restore_validation"] == "required"
     errors << "resilience profile mlops-metadata-cnpg component set drift" unless Array(profile["components"]).sort == MLOPS_METADATA_COMPONENTS.sort
     errors << "resilience profile mlops-metadata-cnpg backup method drift" unless profile["backup_method"] == "barman-pitr-compatible"
-    errors << "resilience profile mlops-metadata-cnpg backup authority must be seaweedfs-s3" unless profile["backup_object_authority"] == "seaweedfs-s3"
-    errors << "resilience profile mlops-metadata-cnpg backup failure domain drift" unless profile["backup_failure_domain"] == "independent-from-source-site"
+    errors << "resilience profile mlops-metadata-cnpg backup authority must be persistent and external to PREPROD JIT" unless profile["backup_object_authority"] == "preprod-jit-external-archive"
+    errors << "resilience profile mlops-metadata-cnpg backup failure domain drift" unless profile["backup_failure_domain"] == "external-to-preprod-jit"
+    errors << "PREPROD archive must precede destroy" unless profile["archive_before_preprod_destroy"] == "required"
+    errors << "PREPROD destroy without verified archive must be forbidden" unless profile["destroy_without_verified_archive"] == "forbidden"
+    errors << "PREPROD archive proof must remain explicitly unproven until runtime evidence exists" unless profile["archive_proof"] == "required-not-yet-proven"
+    errors << "restore proof must remain explicitly unproven until runtime evidence exists" unless profile["restore_proof"] == "required-not-yet-proven"
     errors << "resilience profile mlops-metadata-cnpg backup execution authority drift" unless profile["backup_execution_authority"] == "rancher-fleet-kubernetes-cronjob"
     errors << "resilience profile mlops-metadata-cnpg local override must be forbidden" unless profile["local_objective_override"] == "forbidden"
     validation = authority["validation"] || {}
@@ -464,6 +493,10 @@ module ContractAuthorityValidator
     errors << "resilience governance null objectives must be forbidden" unless validation["null_objectives_forbidden"] == true
     errors << "resilience governance restore validation guard must be required" unless validation["restore_validation_required"] == true
     errors << "resilience governance undeclared profiles must be forbidden" unless validation["undeclared_profile_forbidden"] == true
+    errors << "resilience governance must fail closed when external copy is unproven" unless validation["fail_closed_when_external_copy_unproven"] == true
+    archive = authority.dig("persistent_archive_authorities", "preprod-jit-external-archive") || {}
+    errors << "persistent PREPROD archive must be external to JIT" unless archive["external_failure_domain_independence"] == "required" && archive["lifecycle"] == "persistent-independent-from-preprod-jit"
+    errors << "persistent PREPROD archive provider must remain unresolved rather than fabricated" unless archive.dig("operational_prerequisites", "provider") == "required-unresolved"
 
     engines = storage.fetch("engines", {})
     MLOPS_METADATA_COMPONENTS.each do |component|

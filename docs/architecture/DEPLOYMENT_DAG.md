@@ -79,20 +79,21 @@ telemetry/log/security event-flow checks. Static validation does not claim that 
 The CloudNativePG operator is a separate readiness boundary before any CNPG custom resource:
 
 1. `58-stateful-operators`: install CloudNativePG and prove its CRDs/controller ready.
-2. `60-stateful`: only after `58-stateful-operators` is healthy, create the dedicated lakeFS/MLflow CNPG metadata clusters and the remaining stateful services.
+2. `59-messaging-operators`: after the preceding operator gate, install Strimzi and prove CRDs established, controller ready and all declared gates passed.
+3. `60-stateful`: only after both operator boundaries are healthy, create the dedicated lakeFS/MLflow CNPG metadata clusters, the dedicated Keycloak CNPG database and the remaining stateful services.
 
 Within `60-stateful`, independent engines may run in parallel after their declared prerequisites:
 
 - dedicated CNPG metadata databases for lakeFS and MLflow;
 - after healthy SeaweedFS and dedicated CNPG metadata databases: lakeFS dataset version authority, then MLflow experiments, lineage and champion/challenger service;
-- Strimzi Kafka KRaft;
+- Strimzi Kafka KRaft, strictly after the Strimzi operator readiness boundary;
 - RabbitMQ;
 - Redis Cluster;
 - OpenSearch;
 - SeaweedFS S3 is already established by `45-object-storage`; Wave 6 consumes it rather than redeploying it;
 - Apicurio Registry.
 
-Gate W6 requires health, anti-affinity, storage binding, operator readiness and backup/restore prerequisites. No CNPG `Cluster` resource may be applied before the `58-stateful-operators` readiness gate passes.
+Gate W6 requires health, anti-affinity, storage binding, operator readiness and backup/restore prerequisites. No CNPG `Cluster` resource may be applied before the `58-stateful-operators` readiness gate passes; no Kafka custom resource may be applied before `59-messaging-operators` passes. Keycloak cannot start until its dedicated `keycloak-database` is healthy.
 
 ## Wave 7 — IAM and Edge/API
 

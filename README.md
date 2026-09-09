@@ -223,14 +223,10 @@ Une décision supersédée reste historique mais ne doit pas être réintroduite
 
 ## Développement
 
-Le bootstrap du poste WSL2 Ubuntu supporté ne suppose pas qu’Ansible soit déjà
-installé. `make workstation-bootstrap` lance la version verrouillée
-d’`ansible-core` via `pipx`, puis le playbook réconcilie les outils permanents.
-Les contrôleurs Python n’ont pas de dépendance PyYAML implicite : ils délèguent
-la lecture YAML à Psych, fourni par le runtime Ruby déjà requis par les gates.
+`make bootstrap` est l’unique entrée de provisioning pour Ubuntu Linux natif, WSL2, Codex Cloud et les runners Linux. Elle lance la version verrouillée d’`ansible-core` via `pipx`, réconcilie les collections et outils permanents, puis vérifie leurs versions. Ruby et Psych sont explicitement provisionnés; les adaptations Docker Desktop ne s’activent que sous WSL2.
 
 ```text
-make workstation-bootstrap
+make bootstrap
 make workstation-doctor
 ```
 

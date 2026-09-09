@@ -7,8 +7,12 @@
       - git
       - jq
       - make
+      - libyaml-dev
       - pipx
+      - python3
       - python3-venv
+      - ruby
+      - ruby-dev
     state: present
     update_cache: true
     cache_valid_time: 86400
@@ -219,7 +223,7 @@
   register: docker_desktop_start
   changed_when: true
   failed_when: false
-  when: docker_probe.rc != 0
+  when: developer_is_wsl2 and docker_probe.rc != 0
   tags: [workstation, docker]
 
 - name: Fall back to the official Docker Desktop executable through PowerShell
@@ -231,7 +235,7 @@
       - -NonInteractive
       - -Command
       - "$p = Join-Path $Env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $p) { Start-Process -FilePath $p; exit 0 } else { exit 1 }"
-  when: docker_probe.rc != 0 and docker_desktop_start.rc != 0
+  when: developer_is_wsl2 and docker_probe.rc != 0 and docker_desktop_start.rc != 0
   changed_when: true
   tags: [workstation, docker]
 
@@ -243,8 +247,36 @@
   retries: 30
   delay: 2
   until: docker_ready.rc == 0
-  when: docker_probe.rc != 0
+  when: developer_is_wsl2 and docker_probe.rc != 0
   tags: [workstation, docker]
+
+- name: Inspect pinned Ruby Psych YAML runtime
+  ansible.builtin.command:
+    argv: [ruby, -rpsych, -e, "print Psych::VERSION"]
+  register: developer_psych_version
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Reconcile pinned Ruby Psych YAML runtime
+  ansible.builtin.command:
+    argv: [gem, install, psych, --version, "{{ psych_version }}", --user-install, --no-document]
+  when: developer_psych_version.stdout | trim != psych_version
+  changed_when: true
+  tags: [workstation, bootstrap]
+
+- name: Validate explicitly provisioned Python runtime
+  ansible.builtin.command:
+    argv: [python3, --version]
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Validate explicitly provisioned Ruby and Psych runtime
+  ansible.builtin.command:
+    argv: [ruby, -rpsych, -e, "abort unless Psych::VERSION == ENV.fetch('EXPECTED_PSYCH_VERSION')"]
+  environment:
+    EXPECTED_PSYCH_VERSION: "{{ psych_version }}"
+  changed_when: false
+  tags: [workstation, bootstrap]
 
 - name: Install repository pre-commit hooks
   ansible.builtin.command:
