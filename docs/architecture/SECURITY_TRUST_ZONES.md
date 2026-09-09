@@ -38,7 +38,9 @@ Controls:
 
 ### Z3 — Application workloads
 
-Exactly 19 Go backend services, including `checkout` and `fulfillment`, plus Storefront/Admin workloads.
+Exactly 19 Go backend services, including `checkout` and `fulfillment`, plus Storefront/Admin workloads and the customer-facing Keycloak runtime endpoint.
+
+Keycloak is placed in Z3 because its `customers` realm is part of the application authentication path. This placement does not expose Keycloak administration to customers: admin and workforce-management endpoints remain reachable only from approved Z5/MGMT identities through explicit Z2 service-mesh policy.
 
 Controls:
 - Pod Security `restricted`;
@@ -64,12 +66,12 @@ Controls:
 
 ### Z5 — Permanent MGMT
 
-Gitea, Harbor, Rancher/Fleet management, Tekton control integrations, OpenBao administrative plane, NetBox, Grafana administrative plane, Terraform state backend, Backstage and supporting control services.
+Gitea, Harbor, Rancher/Fleet management, Tekton control integrations, OpenBao administrative plane, NetBox, Grafana administrative plane, Terraform state backend, Backstage and supporting control services. Keycloak administration and workforce-management access originate from this zone, but the customer authentication endpoint itself is not a Z5 subject.
 
 Controls:
 - workforce IAM only;
 - privileged accounts require hardware-backed WebAuthn/passkeys;
-- no customer identity access path;
+- no customer identity access path to MGMT administrative APIs;
 - administrative access via controlled WireGuard/management network;
 - audited privileged actions;
 - break-glass separately controlled.
@@ -86,9 +88,10 @@ Controls:
 
 ## Human IAM separation
 
-- Keycloak `customers` realm: customer identities.
+- Keycloak `customers` realm: customer identities served through the approved application ingress path to the Z3 Keycloak runtime.
 - Keycloak `workforce` realm: staff/operators.
 - privileged workforce flows require WebAuthn/passkeys backed by hardware keys.
+- Keycloak admin/workforce-management endpoints accept only approved Z5/MGMT identities and are not exposed on the customer route.
 - no customer token is accepted for MGMT administrative APIs.
 
 ## Workload identity
