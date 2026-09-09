@@ -122,6 +122,26 @@ class ObservabilityTopologyTest < Minitest::Test
     end
   end
 
+  def test_rejects_disabled_observability_encryption
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["opensearch-security"]["encryption"] = {"at_rest" => "none", "in_transit" => "none"}
+      end
+      errors = ObservabilityTopologyValidator.validate(root)
+      assert_includes errors, "opensearch-security at-rest encryption must be luks2"
+      assert_includes errors, "opensearch-security transport encryption must be tls or tls-mtls"
+    end
+  end
+
+  def test_rejects_disabled_transport_encryption_default
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["observability_defaults"]["transport_encryption"] = "optional"
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root), "observability storage defaults drift"
+    end
+  end
+
   def test_rejects_forbidden_component_in_deployment_waves
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|

@@ -123,7 +123,8 @@ module ObservabilityTopologyValidator
     defaults = storage["observability_defaults"] || {}
     errors << "observability storage defaults drift" unless defaults["storage_class"] == "localpv-observability" &&
       defaults["secrets_authority"] == "openbao" && defaults["secret_delivery"] == "external-secrets" &&
-      defaults["secrets_in_git"] == "forbidden" && defaults["backup_object_authority"] == "seaweedfs-s3" &&
+      defaults["secrets_in_git"] == "forbidden" && defaults["transport_encryption"] == "required" &&
+      defaults["backup_object_authority"] == "seaweedfs-s3" &&
       defaults["backup_execution_authority"] == "rancher-fleet-kubernetes-cronjob" &&
       defaults["prod_backup_failure_domain"] == "opposite-prod-site" && defaults["prod_cluster_scope"] == "per-site" &&
       defaults["stretched_quorum_between_prod_sites"] == "forbidden"
@@ -144,6 +145,9 @@ module ObservabilityTopologyValidator
       errors << "#{component} environment activation drift" unless spec["environments"] == {
         "mgmt" => "deferred", "preprod" => "required", "prod" => "required"
       }
+      encryption = spec["encryption"].is_a?(Hash) ? spec["encryption"] : {}
+      errors << "#{component} at-rest encryption must be luks2" unless encryption["at_rest"] == "luks2"
+      errors << "#{component} transport encryption must be tls or tls-mtls" unless %w[tls tls-mtls].include?(encryption["in_transit"])
       backup = spec["backup"] || {}
       errors << "#{component} backup target must be seaweedfs-s3" unless backup["target"] == "seaweedfs-s3"
       %w[rpo rto].each do |objective|

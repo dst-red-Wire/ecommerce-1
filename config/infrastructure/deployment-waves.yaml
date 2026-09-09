@@ -46,11 +46,8 @@ waves:
   - id: 90-commerce
     requires: [80-golden-service]
     parallel_groups:
-      - [catalog, inventory, pricing, tax, search]
-      - [cart, fraud-risk]
-      - [shipping, tracking]
-      - [review, user-profile, notification]
-    serial_after_parallel: [order, checkout, payment, fulfillment, returns, billing]
+      - [inventory, pricing, tax, order, payment, shipping, fraud-risk, search, user-profile, notification]
+    serial_after_parallel: [catalog, cart, tracking, review, fulfillment, returns, billing, checkout]
   - id: 100-frontends
     requires: [90-commerce]
     components: [storefront, admin]

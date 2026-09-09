@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "minitest/autorun"
+require "tmpdir"
+require "yaml"
 require_relative "../scripts/validate-openapi"
 
 class OpenApiValidatorTest < Minitest::Test
@@ -31,18 +34,50 @@ class OpenApiValidatorTest < Minitest::Test
     assert errors.any? { |error| error.include?("must match exact service ownership") }, errors.inspect
   end
 
-  def test_checkout_path_is_rejected
-    spec = product_spec
-    spec.fetch("paths")["/v1/checkout"] = {
-      "get" => {
-        "operationId" => "forbiddenCheckout",
-        "responses" => { "200" => { "description" => "forbidden" } }
+  def test_registered_checkout_contract_is_allowed
+    Dir.mktmpdir("openapi-checkout") do |root|
+      %w[
+        architecture.lock.yaml
+        config/contracts/dependency-map.yaml
+        config/contracts/public-api-contracts.yaml
+        config/contracts/service-ownership.yaml
+        contracts/openapi/common.v1.yaml
+        contracts/openapi/product.v1.yaml
+      ].each do |relative|
+        target = File.join(root, relative)
+        FileUtils.mkdir_p(File.dirname(target))
+        FileUtils.cp(File.join(ROOT, relative), target)
+      end
+
+      ownership = ArchitectureValidator.load_yaml(root, OWNERSHIP_PATH).fetch("services").fetch("checkout")
+      checkout = product_spec
+      checkout["x-ecommerce-service"] = "checkout"
+      checkout["x-ecommerce-authoritative-store"] = ownership.fetch("db")
+      checkout["x-ecommerce-ownership"] = ownership.fetch("owns")
+      checkout["x-ecommerce-audiences"] = ["storefront"]
+      checkout["paths"] = {
+        "/v1/checkout" => {
+          "get" => {
+            "operationId" => "getCheckoutSession",
+            "responses" => {"200" => {"description" => "ok"}}
+          }
+        }
       }
-    }
+      checkout_path = "contracts/openapi/checkout.v1.yaml"
+      File.write(File.join(root, checkout_path), YAML.dump(checkout))
 
-    errors = validate_product(spec)
+      registry_path = File.join(root, REGISTRY_PATH)
+      registry = YAML.safe_load_file(registry_path, aliases: false)
+      registry.fetch("contracts")["checkout"] = {
+        "path" => checkout_path,
+        "api_version" => "1.0.0",
+        "path_major" => "v1",
+        "audiences" => ["storefront"]
+      }
+      File.write(registry_path, YAML.dump(registry))
 
-    assert errors.any? { |error| error.include?("contains forbidden checkout service") }, errors.inspect
+      assert_empty OpenApiContractValidator.validate(root)
+    end
   end
 
   def test_write_without_idempotency_key_is_rejected

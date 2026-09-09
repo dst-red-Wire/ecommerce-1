@@ -88,11 +88,6 @@ module OpenApiContractValidator
         errors << "#{registry_path} contract #{service.inspect} is not a canonical service"
         next
       end
-      if service == "checkout"
-        errors << "checkout service is forbidden in #{registry_path}"
-        next
-      end
-
       entry = ArchitectureValidator.expect_mapping(entry, "#{registry_path} contracts.#{service}")
       service_ownership = ownership_services[service]
       unless service_ownership.is_a?(Hash)
@@ -169,7 +164,6 @@ module OpenApiContractValidator
 
     paths.each do |path, path_item|
       errors << "#{spec_path} path #{path} must start with #{expected_prefix}" unless path.start_with?(expected_prefix)
-      errors << "#{spec_path} path #{path} contains forbidden checkout service" if path.split("/").include?("checkout")
       unless path_item.is_a?(Hash)
         errors << "#{spec_path} path #{path} must map to an object"
         next
