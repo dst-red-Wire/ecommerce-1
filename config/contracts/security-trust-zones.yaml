@@ -77,7 +77,7 @@ subjects:
   apicurio: Z4
   lakefs: Z5
   mlflow: Z5
-  keycloak: Z5
+  keycloak: Z3
   haproxy: Z1
   caddy: Z1
   coraza: Z1
@@ -119,3 +119,5 @@ rules:
   unknown_subjects_forbidden: true
   business_services_must_be_z3: true
   frontends_must_be_z3: true
+  customer_identity_runtime_must_not_be_mgmt_only: true
+  keycloak_admin_paths_require_mgmt_identity: true
