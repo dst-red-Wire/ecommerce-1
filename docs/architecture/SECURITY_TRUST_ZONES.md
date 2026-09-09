@@ -48,7 +48,7 @@ Controls:
 
 ### Z4 — Stateful data
 
-PostgreSQL/CNPG, Kafka, RabbitMQ, Redis, OpenSearch, SeaweedFS, Apicurio.
+PostgreSQL/CNPG (including lakeFS/MLflow metadata), Kafka, RabbitMQ, Redis, OpenSearch Business, SeaweedFS, Apicurio, VictoriaMetrics, VictoriaLogs, ClickHouse, MongoDB (HyperDX metadata only), OpenSearch Security.
 
 Controls:
 - reachable only from approved workload/platform identities;

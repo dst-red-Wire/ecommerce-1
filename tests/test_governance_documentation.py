@@ -68,10 +68,39 @@ class GovernanceDocumentationTest(unittest.TestCase):
         security = (ROOT / "docs/architecture/SECURITY_TRUST_ZONES.md").read_text(encoding="utf-8")
         self.assertIn("Exactly 19 Go backend services", security)
         self.assertNotIn("17 Go services + Storefront/Admin workloads", security)
+        for component in [
+            "VictoriaMetrics",
+            "VictoriaLogs",
+            "ClickHouse",
+            "MongoDB (HyperDX metadata only)",
+            "OpenSearch Security",
+            "lakeFS/MLflow metadata",
+        ]:
+            self.assertIn(component, security)
 
         mlops = (ROOT / "docs/architecture/MLOPS_TOPOLOGY_V1.md").read_text(encoding="utf-8")
         self.assertIn("no automatic model promotion", mlops.lower())
         self.assertIn("a human approval is required", mlops.lower())
+
+    def test_m4_handoff_preserves_storage_first_dependency_order(self):
+        text = (ROOT / "docs/project/CODEX_HANDOFFS.md").read_text(encoding="utf-8")
+        m4 = text.split("## M4 prompt — Platform Baseline", 1)[1].split("## M5 prompt — Commerce Vertical Slice", 1)[0]
+        seaweed = m4.index("SeaweedFS S3")
+        observability_branch = [
+            m4.index("observability operators"),
+            m4.index("observability stateful stores"),
+            m4.index("observability/security services"),
+        ]
+        stateful_branch = [
+            m4.index("CloudNativePG"),
+            m4.index("remaining stateful platform"),
+            m4.index("IAM/edge"),
+        ]
+        self.assertTrue(all(position > seaweed for position in observability_branch + stateful_branch))
+        self.assertEqual(observability_branch, sorted(observability_branch))
+        self.assertEqual(stateful_branch, sorted(stateful_branch))
+        self.assertIn("independent branches may proceed in parallel", m4)
+        self.assertIn("`requires` graph", m4)
 
     def test_executable_handoffs_read_lock_before_baseline(self):
         for relative in [

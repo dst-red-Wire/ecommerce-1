@@ -84,16 +84,32 @@ module ObservabilityTopologyValidator
     Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
   end
 
-  def component_wave_indexes(waves)
-    indexes = {}
-    waves.each_with_index do |wave, index|
-      wave_components(wave).each { |component| indexes[component] = index }
+  def component_wave_ids(waves)
+    wave_ids = {}
+    waves.each do |wave|
+      wave_components(wave).each { |component| wave_ids[component] = wave["id"] }
     end
-    indexes
+    wave_ids
   end
 
-  def before?(indexes, prerequisite, consumer)
-    indexes.key?(prerequisite) && indexes.key?(consumer) && indexes[prerequisite] < indexes[consumer]
+  def wave_dependency_reachable?(waves_by_id, prerequisite_wave_id, consumer_wave_id, visited = {})
+    return false if prerequisite_wave_id.nil? || consumer_wave_id.nil? || prerequisite_wave_id == consumer_wave_id
+    return false if visited[consumer_wave_id]
+
+    consumer_wave = waves_by_id[consumer_wave_id]
+    return false unless consumer_wave
+
+    requirements = Array(consumer_wave["requires"])
+    return true if requirements.include?(prerequisite_wave_id)
+
+    next_visited = visited.merge(consumer_wave_id => true)
+    requirements.any? do |required_wave_id|
+      wave_dependency_reachable?(waves_by_id, prerequisite_wave_id, required_wave_id, next_visited)
+    end
+  end
+
+  def dependency_ready_before?(waves_by_id, component_waves, prerequisite, consumer)
+    wave_dependency_reachable?(waves_by_id, component_waves[prerequisite], component_waves[consumer])
   end
 
   def validate_stateful_storage(errors, lock, root, contract)
@@ -124,7 +140,7 @@ module ObservabilityTopologyValidator
     errors << "observability storage defaults drift" unless defaults["storage_class"] == "localpv-observability" &&
       defaults["secrets_authority"] == "openbao" && defaults["secret_delivery"] == "external-secrets" &&
       defaults["secrets_in_git"] == "forbidden" && defaults["transport_encryption"] == "required" &&
-      defaults["backup_object_authority"] == "seaweedfs-s3" &&
+      defaults["strict_replica_anti_affinity"] == true && defaults["backup_object_authority"] == "seaweedfs-s3" &&
       defaults["backup_execution_authority"] == "rancher-fleet-kubernetes-cronjob" &&
       defaults["prod_backup_failure_domain"] == "opposite-prod-site" && defaults["prod_cluster_scope"] == "per-site" &&
       defaults["stretched_quorum_between_prod_sites"] == "forbidden"
@@ -145,6 +161,7 @@ module ObservabilityTopologyValidator
       errors << "#{component} environment activation drift" unless spec["environments"] == {
         "mgmt" => "deferred", "preprod" => "required", "prod" => "required"
       }
+      errors << "#{component} replica anti-affinity must be strict" unless spec.dig("topology", "anti_affinity") == "strict"
       encryption = spec["encryption"].is_a?(Hash) ? spec["encryption"] : {}
       errors << "#{component} at-rest encryption must be luks2" unless encryption["at_rest"] == "luks2"
       errors << "#{component} transport encryption must be tls or tls-mtls" unless %w[tls tls-mtls].include?(encryption["in_transit"])
@@ -182,17 +199,18 @@ module ObservabilityTopologyValidator
       %w[general-application-logs general-infrastructure-logs business-data].all? { |purpose| forbidden_purposes.include?(purpose) }
 
     wave_list = Array(waves["waves"])
-    indexes = component_wave_indexes(wave_list)
+    waves_by_id = wave_list.to_h { |wave| [wave["id"], wave] }
+    component_waves = component_wave_ids(wave_list)
     stores.uniq.each do |component|
-      errors << "deployment waves must include active stateful component #{component}" unless indexes.key?(component)
-      errors << "SeaweedFS must be healthy before #{component}" unless before?(indexes, "seaweedfs", component)
+      errors << "deployment waves must include active stateful component #{component}" unless component_waves.key?(component)
+      errors << "SeaweedFS must be healthy before #{component}" unless dependency_ready_before?(waves_by_id, component_waves, "seaweedfs", component)
     end
-    errors << "MongoDB Community Operator must precede HyperDX MongoDB" unless before?(indexes, "mongodb-community-operator", "mongodb-oss-self-hosted")
-    errors << "OpenSearch Operator must precede OpenSearch Security" unless before?(indexes, "opensearch-operator", "opensearch-security")
-    errors << "HyperDX must start after ClickHouse" unless before?(indexes, "clickhouse", "hyperdx")
-    errors << "HyperDX must start after MongoDB" unless before?(indexes, "mongodb-oss-self-hosted", "hyperdx")
-    errors << "Data Prepper Security must start after OpenSearch Security" unless before?(indexes, "opensearch-security", "data-prepper-security")
-    errors << "Wazuh must start after OpenSearch Security" unless before?(indexes, "opensearch-security", "wazuh")
+    errors << "MongoDB Community Operator must precede HyperDX MongoDB" unless dependency_ready_before?(waves_by_id, component_waves, "mongodb-community-operator", "mongodb-oss-self-hosted")
+    errors << "OpenSearch Operator must precede OpenSearch Security" unless dependency_ready_before?(waves_by_id, component_waves, "opensearch-operator", "opensearch-security")
+    errors << "HyperDX must start after ClickHouse" unless dependency_ready_before?(waves_by_id, component_waves, "clickhouse", "hyperdx")
+    errors << "HyperDX must start after MongoDB" unless dependency_ready_before?(waves_by_id, component_waves, "mongodb-oss-self-hosted", "hyperdx")
+    errors << "Data Prepper Security must start after OpenSearch Security" unless dependency_ready_before?(waves_by_id, component_waves, "opensearch-security", "data-prepper-security")
+    errors << "Wazuh must start after OpenSearch Security" unless dependency_ready_before?(waves_by_id, component_waves, "opensearch-security", "wazuh")
 
     active_wave_components = wave_list.flat_map { |wave| wave_components(wave) }
     forbidden_active = Array(contract.dig("anti_duplication", "forbidden_active_components"))

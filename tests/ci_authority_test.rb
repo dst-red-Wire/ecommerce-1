@@ -117,4 +117,58 @@ class CIAuthorityTest < Minitest::Test
     refute_match(/\bnpm ci\b/, controller)
     refute_includes controller, "package-lock.json"
   end
+
+  def test_governance_documentation_regressions_run_in_governance
+    assert system("python3", File.join(ROOT, "tests/test_governance_documentation.py"))
+  end
+end
+
+class StoragePlanGovernanceTest < Minitest::Test
+  ROOT = File.expand_path("..", __dir__)
+  REQUIRED_MLOPS_METADATA_FIELDS = %w[
+    engine deployment_mode storage topology retention backup network data_scope encryption
+    operational_authority dependencies failure_behavior environments
+  ].freeze
+
+  def test_dedicated_mlops_metadata_storage_contracts_are_complete
+    storage = YAML.safe_load(File.read(File.join(ROOT, "config/infrastructure/storage-plan.yaml")))
+    assert_equal 4, storage.fetch("version")
+    engines = storage.fetch("engines")
+
+    {"lakefs-metadata-cnpg" => "lakefs", "mlflow-metadata-cnpg" => "mlflow"}.each do |component, consumer|
+      spec = engines.fetch(component)
+      assert_empty REQUIRED_MLOPS_METADATA_FIELDS - spec.keys, component
+      assert_equal "cloudnativepg-postgresql", spec.fetch("engine"), component
+      assert_equal "cloudnativepg", spec.fetch("deployment_mode"), component
+      assert_equal "localpv", spec.dig("storage", "class"), component
+      assert_equal "ReadWriteOnce", spec.dig("storage", "access_mode"), component
+      assert_equal({"preprod" => 3, "prod_per_site" => 3}, spec.dig("topology", "instances"), component)
+      assert_equal "strict", spec.dig("topology", "anti_affinity"), component
+      assert_equal "single-writer-home-site", spec.dig("topology", "prod_write_authority"), component
+      assert_equal "barman-pitr-compatible", spec.dig("backup", "method"), component
+      assert_equal "seaweedfs-s3", spec.dig("backup", "target"), component
+      assert_equal "independent-from-source-site", spec.dig("backup", "target_failure_domain"), component
+      assert_equal "resilience-governance", spec.dig("backup", "schedule"), component
+      assert_equal "resilience-governance", spec.dig("backup", "objectives_authority"), component
+      assert_equal "forbidden", spec.dig("backup", "local_objective_override"), component
+      %w[rpo rto].each do |objective|
+        assert_equal({"preprod" => "resilience-governance", "prod" => "resilience-governance"},
+                     spec.dig("backup", objective), "#{component} #{objective}")
+      end
+      assert_equal "required", spec.dig("backup", "restore_validation"), component
+      assert_equal [consumer], spec.dig("network", "writers"), component
+      assert_equal [consumer], spec.dig("network", "readers"), component
+      assert_equal "forbidden", spec.dig("network", "public_access"), component
+      assert_equal "forbidden", spec.dig("data_scope", "business_data"), component
+      assert_equal "required", spec.dig("encryption", "in_transit"), component
+      assert_equal "rancher-fleet", spec.dig("operational_authority", "desired_state"), component
+      assert_equal "cloudnativepg", spec.dig("operational_authority", "database_operator"), component
+      assert_includes spec.fetch("dependencies"), "cloudnativepg", component
+      assert_includes spec.fetch("dependencies"), "seaweedfs", component
+      assert_equal "fail-closed", spec.dig("failure_behavior", "quorum_loss"), component
+      assert_equal "forbidden", spec.dig("failure_behavior", "empty_reinitialization"), component
+      assert_equal({"mgmt" => "deferred", "preprod" => "required", "prod" => "required"},
+                   spec.fetch("environments"), component)
+    end
+  end
 end

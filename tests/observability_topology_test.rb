@@ -98,16 +98,37 @@ class ObservabilityTopologyTest < Minitest::Test
     end
   end
 
-  def test_rejects_store_before_seaweedfs
+  def test_rejects_store_without_seaweedfs_dependency_path
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
-        waves = data["waves"]
-        seaweed = waves.delete_at(waves.index { |wave| wave["id"] == "45-object-storage" })
-        stores = waves.index { |wave| wave["id"] == "50-observability-stateful" }
-        waves.insert(stores + 1, seaweed)
+        data["waves"].find { |wave| wave["id"] == "48-observability-operators" }["requires"].delete("45-object-storage")
       end
       assert_includes ObservabilityTopologyValidator.validate(root),
                       "SeaweedFS must be healthy before victoriametrics"
+    end
+  end
+
+  def test_accepts_declaration_reorder_when_requires_graph_is_unchanged
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        waves = data["waves"]
+        object_storage = waves.delete_at(waves.index { |wave| wave["id"] == "45-object-storage" })
+        services = waves.index { |wave| wave["id"] == "55-observability-services" }
+        waves.insert(services + 1, object_storage)
+      end
+      assert_empty ObservabilityTopologyValidator.validate(root)
+    end
+  end
+
+  def test_rejects_observability_consumer_without_stateful_dependency_edge
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "55-observability-services" }["requires"].delete("50-observability-stateful")
+      end
+      errors = ObservabilityTopologyValidator.validate(root)
+      assert_includes errors, "HyperDX must start after ClickHouse"
+      assert_includes errors, "Data Prepper Security must start after OpenSearch Security"
+      assert_includes errors, "Wazuh must start after OpenSearch Security"
     end
   end
 
@@ -139,6 +160,25 @@ class ObservabilityTopologyTest < Minitest::Test
         data["observability_defaults"]["transport_encryption"] = "optional"
       end
       assert_includes ObservabilityTopologyValidator.validate(root), "observability storage defaults drift"
+    end
+  end
+
+  def test_rejects_disabled_replica_anti_affinity_default
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["observability_defaults"]["strict_replica_anti_affinity"] = false
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root), "observability storage defaults drift"
+    end
+  end
+
+  def test_rejects_disabled_engine_replica_anti_affinity
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/storage-plan.yaml") do |data|
+        data["engines"]["clickhouse"]["topology"]["anti_affinity"] = "disabled"
+      end
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "clickhouse replica anti-affinity must be strict"
     end
   end
 

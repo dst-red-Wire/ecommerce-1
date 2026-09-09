@@ -1,4 +1,4 @@
-version: 3
+version: 4
 status: exact
 policies:
   no_default_ceph: true
@@ -68,6 +68,76 @@ engines:
     storage: localpv
     replication: cloudnativepg
     backup: barman-cloud-to-external-s3
+
+  lakefs-metadata-cnpg:
+    engine: cloudnativepg-postgresql
+    deployment_mode: cloudnativepg
+    storage:
+      class: localpv
+      access_mode: ReadWriteOnce
+    topology:
+      instances: {preprod: 3, prod_per_site: 3}
+      anti_affinity: strict
+      prod_write_authority: single-writer-home-site
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: barman-pitr-compatible
+      target: seaweedfs-s3
+      target_failure_domain: independent-from-source-site
+      schedule: resilience-governance
+      objectives_authority: resilience-governance
+      local_objective_override: forbidden
+      rpo: {preprod: resilience-governance, prod: resilience-governance}
+      rto: {preprod: resilience-governance, prod: resilience-governance}
+      restore_validation: required
+    network:
+      writers: [lakefs]
+      readers: [lakefs]
+      public_access: forbidden
+    data_scope: {allowed: [lakefs-metadata], business_data: forbidden}
+    encryption: {in_transit: required}
+    operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg}
+    dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_instance_unavailable: continue-if-quorum-healthy
+      quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  mlflow-metadata-cnpg:
+    engine: cloudnativepg-postgresql
+    deployment_mode: cloudnativepg
+    storage:
+      class: localpv
+      access_mode: ReadWriteOnce
+    topology:
+      instances: {preprod: 3, prod_per_site: 3}
+      anti_affinity: strict
+      prod_write_authority: single-writer-home-site
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: barman-pitr-compatible
+      target: seaweedfs-s3
+      target_failure_domain: independent-from-source-site
+      schedule: resilience-governance
+      objectives_authority: resilience-governance
+      local_objective_override: forbidden
+      rpo: {preprod: resilience-governance, prod: resilience-governance}
+      rto: {preprod: resilience-governance, prod: resilience-governance}
+      restore_validation: required
+    network:
+      writers: [mlflow]
+      readers: [mlflow]
+      public_access: forbidden
+    data_scope: {allowed: [mlflow-metadata], business_data: forbidden}
+    encryption: {in_transit: required}
+    operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg}
+    dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_instance_unavailable: continue-if-quorum-healthy
+      quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
   kafka:
     storage: localpv
     replication: strimzi-kafka-native

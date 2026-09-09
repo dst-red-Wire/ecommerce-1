@@ -110,15 +110,19 @@ Tracker: `#17`.
 Goal: install the minimum complete platform needed to run and prove application slices, following `DEPLOYMENT_DAG.md`, `deployment-waves.yaml`, `STORAGE_TOPOLOGY_V2.md`, `storage-plan.yaml` and `SECURITY_TRUST_ZONES.md`.
 
 Order:
-`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> stateful platform`.
+The executable order is the `requires` graph in `config/infrastructure/deployment-waves.yaml`; this prose must not weaken or add dependencies to that graph. After the common storage prerequisite, independent branches may proceed in parallel:
+`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> SeaweedFS S3 -> { observability operators -> observability stateful stores -> observability/security services | CloudNativePG -> remaining stateful platform -> IAM/edge }`.
 
 Stateful baseline:
-- CNPG/PostgreSQL;
+- SeaweedFS S3 becomes healthy before stateful observability stores that depend on its backup authority;
+- MongoDB Community/OpenSearch operators precede their observability stateful custom resources;
+- VictoriaMetrics, VictoriaLogs, ClickHouse, HyperDX metadata MongoDB and OpenSearch Security precede their observability/security consumers;
+- CNPG/PostgreSQL, including separate `lakefs-metadata-cnpg` and `mlflow-metadata-cnpg` clusters;
+- lakeFS/MLflow metadata RPO/RTO remain owned by resilience governance; local numeric overrides are forbidden until that authority binds them;
 - Strimzi Kafka KRaft + MirrorMaker2 hooks;
 - RabbitMQ Quorum Queues;
 - Redis Cluster;
-- OpenSearch;
-- SeaweedFS S3;
+- OpenSearch Business;
 - Apicurio Registry where contract workflow requires it.
 
 Requirements:
