@@ -500,7 +500,7 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
 
 def api_compat(base: str, head: str) -> int:
     require("oasdiff")
-    args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
+    args = ["diff", "--name-only", "--diff-filter=ACMRTUXBD", base]
     if head != "WORKTREE":
         args.append(head)
     base_registry = machine_contract_relative_at(base, "public_api_contracts")
@@ -511,9 +511,6 @@ def api_compat(base: str, head: str) -> int:
     if not changed:
         print("SKIP OpenAPI compatibility: no API contract changes")
         return 0
-    registry = ruby_yaml(str(public_api_registry_path()))
-    common = registry.get("common_components")
-    specs = [entry["path"] for entry in registry.get("contracts", {}).values()]
     with (
         tempfile.TemporaryDirectory(prefix="ecommerce-oas-old-") as old_s,
         tempfile.TemporaryDirectory(prefix="ecommerce-oas-new-") as new_s,
@@ -539,15 +536,41 @@ def api_compat(base: str, head: str) -> int:
                 rc = proc1.wait()
                 if rc or proc2.returncode:
                     raise RuntimeError(f"git archive failed for {ref}")
-        common_changed = bool(common and common in changed)
-        for spec in specs:
-            if not common_changed and spec not in changed:
+        base_registry_doc = ruby_yaml(str(old / base_registry))
+        head_registry_doc = ruby_yaml(str(new / head_registry))
+        base_contracts = base_registry_doc.get("contracts") or {}
+        head_contracts = head_registry_doc.get("contracts") or {}
+        removed = sorted(set(base_contracts) - set(head_contracts))
+        if removed:
+            raise RuntimeError(
+                "OpenAPI public contract removal is forbidden without an explicit compatibility migration: "
+                + ", ".join(removed)
+            )
+        added = sorted(set(head_contracts) - set(base_contracts))
+        for name in added:
+            print(f"SKIP OpenAPI compatibility: {head_contracts[name]['path']} is a new contract")
+
+        base_common = base_registry_doc.get("common_components")
+        head_common = head_registry_doc.get("common_components")
+        common_changed = any(path and path in changed for path in {base_common, head_common})
+        authority_changed = base_registry != head_registry
+        for name in sorted(set(base_contracts) & set(head_contracts)):
+            base_entry = base_contracts[name]
+            head_entry = head_contracts[name]
+            base_spec = base_entry["path"]
+            head_spec = head_entry["path"]
+            if not (
+                authority_changed
+                or common_changed
+                or base_entry != head_entry
+                or base_spec in changed
+                or head_spec in changed
+            ):
                 continue
-            if not (old / spec).is_file():
-                print(f"SKIP OpenAPI compatibility: {spec} is new relative to {base}")
-                continue
-            print(f"CHECK OpenAPI compatibility: {spec}")
-            run(["oasdiff", "breaking", "--fail-on", "ERR", str(old / spec), str(new / spec)])
+            if not (old / base_spec).is_file() or not (new / head_spec).is_file():
+                raise RuntimeError(f"OpenAPI contract {name} points to a missing base/head specification")
+            print(f"CHECK OpenAPI compatibility: {name} ({base_spec} -> {head_spec})")
+            run(["oasdiff", "breaking", "--fail-on", "ERR", str(old / base_spec), str(new / head_spec)])
     print("PASS OpenAPI compatibility checks completed")
     return 0
 

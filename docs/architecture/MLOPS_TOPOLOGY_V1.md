@@ -81,5 +81,7 @@ Required recovery assets:
 - deploy by immutable digest only;
 - KServe/vLLM GPU JIT has no source-of-truth or promotion authority;
 - rollback selects a previously approved immutable release bundle.
+- the KServe control plane is installed first; established CRDs and controller readiness form a blocking deployment
+  boundary before the separately bound KServe/vLLM inference workload can run;
 - recovery order is IAM/OpenBao -> GitOps/Harbor -> CNPG -> S3 -> lakeFS/MLflow -> integrity/lineage verification -> runtimes; resilience governance remains authoritative for RTO/RPO.
 - GPU JIT is for qualification or inference only; after a temporary campaign archive evidence, destroy resources and prove `GPU_ZERO_RESOURCE=true`.

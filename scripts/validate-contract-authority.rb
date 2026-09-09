@@ -235,6 +235,9 @@ module ContractAuthorityValidator
 
     errors << "Keycloak database execution binding must be stateful" unless bindings["keycloak-database"] == "stateful"
     errors << "Strimzi operator execution binding must be operator" unless bindings["strimzi-operator"] == "operator"
+    errors << "platform-backup-jobs execution binding must be backup" unless bindings["platform-backup-jobs"] == "backup"
+    errors << "KServe operator execution binding must be operator" unless bindings["kserve-operator"] == "operator"
+    errors << "KServe inference execution binding must be inference" unless bindings["kserve-vllm-inference"] == "inference"
     unused_profiles = profiles.keys - bindings.values.uniq
     errors << "deployment execution profiles are unreferenced: #{unused_profiles.sort.join(', ')}" unless unused_profiles.empty?
   end
@@ -444,6 +447,34 @@ module ContractAuthorityValidator
     end
   end
 
+  def validate_executable_platform_authorities(errors, lock, storage, waves_contract)
+    waves = Array(waves_contract["waves"])
+    by_id = waves.to_h { |wave| [wave["id"], wave] }
+    component_wave = {}
+    waves.each { |wave| wave_components(wave).each { |component| component_wave[component] = wave["id"] } }
+
+    kafka_writers = Array(storage.dig("engines", "strimzi-kafka", "network", "writers"))
+    errors << "strimzi-kafka writers must be exactly ecommerce-services and apicurio" unless kafka_writers.sort == %w[apicurio ecommerce-services]
+
+    backup_wave = component_wave["platform-backup-jobs"]
+    qualification_wave = component_wave["chaos-dr"]
+    errors << "platform-backup-jobs must be present in deployment DAG" unless backup_wave
+    if backup_wave && qualification_wave && !wave_dependency_reachable?(by_id, backup_wave, qualification_wave)
+      errors << "platform-backup-jobs must be reachable before archive/destruction qualification gate"
+    end
+
+    return unless lock.dig("mlops", "runtime") == "kserve-vllm"
+
+    operator_wave = component_wave["kserve-operator"]
+    workload_wave = component_wave["kserve-vllm-inference"]
+    errors << "kserve-vllm lock runtime requires KServe operator in deployment DAG" unless operator_wave
+    errors << "kserve-vllm lock runtime requires executable KServe inference workload" unless workload_wave
+    if operator_wave && workload_wave &&
+       (operator_wave == workload_wave || !wave_dependency_reachable?(by_id, operator_wave, workload_wave))
+      errors << "KServe operator CRDs/controller must be ready in an earlier wave than inference workload"
+    end
+  end
+
   def validate_superseded_components(errors, lock, waves_contract)
     superseded = lock["superseded"]
     unless superseded.is_a?(Hash)
@@ -488,6 +519,9 @@ module ContractAuthorityValidator
     frontends.each { |frontend| errors << "frontend #{frontend} must be in trust zone Z3" unless subjects[frontend] == "Z3" }
     errors << "Keycloak database must be in stateful trust zone Z4" unless subjects["keycloak-database"] == "Z4"
     errors << "Strimzi operator must be in permanent management trust zone Z5" unless subjects["strimzi-operator"] == "Z5"
+    errors << "KServe operator must be in permanent management trust zone Z5" unless subjects["kserve-operator"] == "Z5"
+    errors << "KServe inference workload must be in application trust zone Z3" unless subjects["kserve-vllm-inference"] == "Z3"
+    errors << "platform-backup-jobs must be in evidence trust zone Z6" unless subjects["platform-backup-jobs"] == "Z6"
   end
 
   def validate_resilience_binding(errors, lock, root, storage)
@@ -659,6 +693,7 @@ module ContractAuthorityValidator
     validate_storage_classes(errors, storage)
     validate_stateful_contracts(errors, storage)
     validate_storage_dependency_edges(errors, storage, waves)
+    validate_executable_platform_authorities(errors, lock, storage, waves)
     validate_resilience_binding(errors, lock, root, storage)
     validate_trust_zones(errors, lock, root, waves)
     errors

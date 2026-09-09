@@ -148,3 +148,11 @@ inventing values from prose or controller defaults.
 
 The machine graph MUST reject duplicate wave IDs, unknown `requires` targets, dependency cycles and unreachable waves from the declared root. A wave may execute only after all transitive `requires` dependencies are healthy.
 Static validation proves graph and contract consistency; it never claims runtime readiness or successful restore.
+
+The executable graph places `platform-backup-jobs` after its stateful sources, OpenBao/ESO credentials authority,
+and SeaweedFS destination authority, and makes qualification/archive evidence depend on that ready job. Destruction
+remains fail-closed until archive creation, integrity verification, and required restore evidence are proven.
+
+KServe is split across a `kserve-operator` control-plane component and a later `kserve-vllm-inference` workload.
+The workload wave depends on the operator wave readiness boundary; established CRDs and a ready controller are
+mandatory evidence before applying inference resources.

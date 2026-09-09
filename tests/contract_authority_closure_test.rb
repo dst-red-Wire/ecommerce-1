@@ -134,6 +134,76 @@ class ContractAuthorityClosureTest < Minitest::Test
     assert errors.any? { |error| error.include?("strimzi-operator must be ready in an earlier wave") }
   end
 
+  def test_backup_job_dag_binding_and_reachability_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    baseline = load_yaml("config/infrastructure/deployment-waves.yaml")
+    [
+      lambda { |waves| waves["waves"].find { |wave| wave["id"] == "72-backup-archive-jobs" }["components"].delete("platform-backup-jobs") },
+      lambda { |waves| waves["component_execution_bindings"].delete("platform-backup-jobs") },
+      lambda { |waves| waves["waves"].find { |wave| wave["id"] == "110-qualification" }["requires"].delete("72-backup-archive-jobs") }
+    ].each do |mutation|
+      waves = Marshal.load(Marshal.dump(baseline))
+      mutation.call(waves)
+      errors = []
+      ContractAuthorityValidator.validate_dag(errors, waves)
+      ContractAuthorityValidator.validate_executable_platform_authorities(errors, lock, storage, waves)
+      refute_empty errors
+    end
+  end
+
+  def test_apicurio_kafka_writer_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    [["ecommerce-services"], ["ecommerce-services", "unauthorized-writer"]].each do |writers|
+      storage = load_yaml("config/infrastructure/storage-plan.yaml")
+      storage.dig("engines", "strimzi-kafka", "network")["writers"] = writers
+      errors = []
+      ContractAuthorityValidator.validate_executable_platform_authorities(errors, lock, storage, waves)
+      assert errors.any? { |error| error.include?("strimzi-kafka writers") }
+    end
+  end
+
+  def test_kserve_operator_readiness_and_binding_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    baseline = load_yaml("config/infrastructure/deployment-waves.yaml")
+    [
+      lambda { |waves| waves["waves"].find { |wave| wave["id"] == "58-stateful-operators" }["components"].delete("kserve-operator") },
+      lambda { |waves| waves["component_execution_bindings"].delete("kserve-vllm-inference") },
+      lambda { |waves| waves["waves"].find { |wave| wave["id"] == "75-mlops-inference" }["requires"] = ["40-secrets-registry-ci"] },
+      lambda do |waves|
+        operator = waves["waves"].find { |wave| wave["id"] == "58-stateful-operators" }
+        operator["components"].delete("kserve-operator")
+        waves["waves"].find { |wave| wave["id"] == "75-mlops-inference" }["components"] << "kserve-operator"
+      end
+    ].each do |mutation|
+      waves = Marshal.load(Marshal.dump(baseline))
+      mutation.call(waves)
+      errors = []
+      ContractAuthorityValidator.validate_dag(errors, waves)
+      ContractAuthorityValidator.validate_executable_platform_authorities(errors, lock, storage, waves)
+      refute_empty errors
+    end
+  end
+
+  def test_backup_and_kserve_trust_zone_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    %w[platform-backup-jobs kserve-operator kserve-vllm-inference].each do |subject|
+      Dir.mktmpdir do |root|
+        FileUtils.cp_r(Dir.glob(File.join(ROOT, "*")), root)
+        path = File.join(root, "config/contracts/security-trust-zones.yaml")
+        contract = YAML.safe_load(File.read(path), aliases: false)
+        contract.fetch("subjects").delete(subject)
+        File.write(path, YAML.dump(contract))
+        errors = []
+        ContractAuthorityValidator.validate_trust_zones(errors, lock, root, waves)
+        refute_empty errors, subject
+      end
+    end
+  end
+
   def test_keycloak_backup_must_survive_preprod_jit_destroy
     lock = load_yaml("architecture.lock.yaml")
     storage = load_yaml("config/infrastructure/storage-plan.yaml")

@@ -99,6 +99,18 @@ execution_profiles:
       behavior: fail-closed
       hook: none
       automatic_destroy: forbidden
+  backup:
+    timeout: 60m
+    retry: {max_attempts: 1, backoff: 60s}
+    health_checks: [job-ready, archive-created, integrity-verified, restore-evidence-gate-pass]
+    evidence: {exact_sha: required, environment: required, component: required, wave: required, observed_revision: required, gate_results: required}
+    failure: {behavior: fail-closed-block-destroy, hook: preserve-data-and-evidence, automatic_destroy: forbidden}
+  inference:
+    timeout: 30m
+    retry: {max_attempts: 1, backoff: 30s}
+    health_checks: [crds-established, controller-ready, immutable-model-digest, shadow-canary-gates-pass, manual-promotion-approval]
+    evidence: {exact_sha: required, environment: required, component: required, wave: required, observed_revision: required, gate_results: required}
+    failure: {behavior: fail-closed-no-automatic-model-promotion, hook: reconcile-last-approved-state, automatic_destroy: forbidden}
 
 component_execution_bindings:
   network: infrastructure
@@ -138,6 +150,7 @@ component_execution_bindings:
   wazuh: stateless
   cloudnativepg: operator
   strimzi-operator: operator
+  kserve-operator: operator
   lakefs-metadata-cnpg: stateful
   keycloak-database: stateful
   mlflow-metadata-cnpg: stateful
@@ -146,6 +159,8 @@ component_execution_bindings:
   redis: stateful
   opensearch-business: stateful
   apicurio: stateless
+  platform-backup-jobs: backup
+  kserve-vllm-inference: inference
   lakefs: stateless
   mlflow: stateless
   keycloak: stateless
@@ -216,7 +231,7 @@ waves:
     components: [rotel, opentelemetry-collector, vmagent, vmalert, alertmanager, grafana, hyperdx, data-prepper-security, wazuh]
   - id: 58-stateful-operators
     requires: [45-object-storage, 40-secrets-registry-ci, 20-network-security]
-    components: [cloudnativepg]
+    components: [cloudnativepg, kserve-operator]
   - id: 59-messaging-operators
     requires: [58-stateful-operators]
     components: [strimzi-operator]
@@ -229,6 +244,12 @@ waves:
   - id: 70-iam-edge
     requires: [60-stateful, 30-gitops-identity]
     components: [keycloak, haproxy, caddy, coraza, kong, ats, istio-gateway, squid-egress]
+  - id: 72-backup-archive-jobs
+    requires: [60-stateful, 50-observability-stateful, 40-secrets-registry-ci, 45-object-storage]
+    components: [platform-backup-jobs]
+  - id: 75-mlops-inference
+    requires: [58-stateful-operators, 60-stateful, 70-iam-edge, 55-observability-services]
+    components: [kserve-vllm-inference]
   - id: 80-golden-service
     requires: [55-observability-services, 60-stateful, 70-iam-edge]
     components: [product]
@@ -241,7 +262,7 @@ waves:
     requires: [90-commerce]
     components: [storefront, admin]
   - id: 110-qualification
-    requires: [100-frontends]
+    requires: [100-frontends, 72-backup-archive-jobs, 75-mlops-inference]
     components: [smoke, security, contracts, integration, bdd, e2e, performance, chaos-dr]
 rules:
   wait_only_on_declared_dependencies: true

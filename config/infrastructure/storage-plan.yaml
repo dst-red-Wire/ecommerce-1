@@ -261,7 +261,7 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
-      writers: [ecommerce-services]
+      writers: [ecommerce-services, apicurio]
       readers: [ecommerce-services, apicurio]
       public_access: forbidden
     data_scope: {allowed: [domain-events], secrets: forbidden, unnecessary_pii: forbidden}

@@ -69,6 +69,7 @@ subjects:
   wazuh: Z5
   cloudnativepg: Z5
   strimzi-operator: Z5
+  kserve-operator: Z5
   lakefs-metadata-cnpg: Z4
   keycloak-database: Z4
   mlflow-metadata-cnpg: Z4
@@ -77,6 +78,8 @@ subjects:
   redis: Z4
   opensearch-business: Z4
   apicurio: Z4
+  platform-backup-jobs: Z6
+  kserve-vllm-inference: Z3
   lakefs: Z5
   mlflow: Z5
   keycloak: Z3
