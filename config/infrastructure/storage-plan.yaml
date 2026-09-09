@@ -160,7 +160,7 @@ engines:
       instances: {preprod: 3, prod_per_site: 3}
       anti_affinity: strict
       prod_write_authority: single-writer-home-site
-    retention: persistent-until-explicit-deletion
+    retention: persistent-until-exp-d eletion
     backup:
       method: barman-pitr-compatible
       target: seaweedfs-s3
@@ -423,8 +423,8 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
-      writers: [vmagent]
-      readers: [grafana, vmalert]
+      writers: [vmagent, platform-backup-jobs]
+      readers: [grafana, vmalert, platform-backup-jobs]
       public_access: forbidden
     data_scope: {allowed: [sre-metrics], business_data: forbidden}
     operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
@@ -459,8 +459,8 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
-      writers: [opentelemetry-collector]
-      readers: [grafana, vmalert]
+      writers: [opentelemetry-collector, platform-backup-jobs]
+      readers: [grafana, vmalert, platform-backup-jobs]
       public_access: forbidden
     data_scope: {allowed: [infrastructure-logs], business_data: forbidden}
     operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
@@ -495,8 +495,8 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
-      writers: [rotel]
-      readers: [hyperdx]
+      writers: [rotel, platform-backup-jobs]
+      readers: [hyperdx, platform-backup-jobs]
       public_access: forbidden
     data_scope: {allowed: [application-traces, application-logs], business_data: forbidden}
     operational_authority: {desired_state: rancher-fleet, owner: platform-sre}
@@ -529,8 +529,8 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls}
     network:
-      writers: [hyperdx]
-      readers: [hyperdx]
+      writers: [hyperdx, platform-backup-jobs]
+      readers: [hyperdx, platform-backup-jobs]
       public_access: forbidden
       ecommerce_services: forbidden
     data_scope:
@@ -570,8 +570,8 @@ engines:
       restore_validation: required
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
-      writers: [data-prepper-security]
-      readers: [wazuh]
+      writers: [data-prepper-security, platform-backup-jobs]
+      readers: [wazuh, platform-backup-jobs]
       public_access: forbidden
     data_scope:
       allowed: [security-enrichment, siem]
