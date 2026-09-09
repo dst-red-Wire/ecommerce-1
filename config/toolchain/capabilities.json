@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "supported": {
+    "os": ["linux", "darwin", "windows"],
+    "arch": ["amd64", "arm64"]
+  },
+  "capabilities": [
+    {"name": "python", "requires": [], "command": "python3", "version_args": ["--version"]},
+    {"name": "pip", "requires": ["python"], "command": "pip3", "version_args": ["--version"]},
+    {"name": "ruby", "requires": [], "command": "ruby", "version_args": ["--version"]},
+    {"name": "psych", "requires": ["ruby"], "command": "ruby", "version_args": ["-rpsych", "-e", "print Psych::VERSION"]},
+    {"name": "ansible-core", "requires": ["pip"], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION", "provision": {"type": "pip", "package": "ansible-core"}},
+    {"name": "ansible-playbook", "requires": ["ansible-core"], "command": "ansible-playbook", "version_args": ["--version"]},
+    {"name": "node", "requires": [], "provision_requires": ["ansible-playbook"], "command": "node", "version_args": ["--version"], "version_file": "frontend/.node-version", "provision": {"type": "ansible", "tags": "node"}},
+    {"name": "corepack", "requires": ["node"], "command": "corepack", "version_args": ["--version"], "provision": {"type": "ansible", "tags": "node"}},
+    {"name": "pnpm", "requires": ["corepack"], "probe": ["corepack", "pnpm", "--version"]},
+    {"name": "go", "requires": [], "provision_requires": ["ansible-playbook"], "command": "go", "version_args": ["version"], "version_key": "GO_VERSION", "provision": {"type": "ansible", "tags": "go"}},
+    {"name": "sqlc", "requires": [], "provision_requires": ["ansible-playbook"], "command": "sqlc", "version_args": ["version"], "version_key": "SQLC_VERSION", "provision": {"type": "ansible", "tags": "sqlc"}},
+    {"name": "yq", "requires": [], "provision_requires": ["ansible-playbook"], "command": "yq", "version_args": ["--version"], "version_key": "YQ_VERSION", "provision": {"type": "ansible", "tags": "context_tools"}},
+    {"name": "oasdiff", "requires": [], "provision_requires": ["ansible-playbook"], "command": "oasdiff", "version_args": ["--version"], "version_key": "OASDIFF_VERSION", "provision": {"type": "ansible", "tags": "agent_tools"}},
+    {"name": "rg", "requires": [], "provision_requires": ["ansible-playbook"], "command": "rg", "version_args": ["--version"], "version_key": "RIPGREP_VERSION", "provision": {"type": "ansible", "tags": "context_tools"}},
+    {"name": "fd", "requires": [], "provision_requires": ["ansible-playbook"], "command": "fd", "version_args": ["--version"], "version_key": "FD_VERSION", "provision": {"type": "ansible", "tags": "context_tools"}},
+    {"name": "ast-grep", "requires": [], "provision_requires": ["ansible-playbook"], "command": "ast-grep", "version_args": ["--version"], "version_key": "AST_GREP_VERSION", "provision": {"type": "ansible", "tags": "context_tools"}},
+    {"name": "oras", "requires": [], "provision_requires": ["ansible-playbook"], "command": "oras", "version_args": ["version"], "version_key": "ORAS_VERSION", "provision": {"type": "ansible", "tags": "agent_tools"}},
+    {"name": "bazel", "requires": [], "provision_requires": ["ansible-playbook"], "command": "bazel", "version_args": ["--version"], "version_key": "BAZEL_VERSION", "provision": {"type": "ansible", "tags": "agent_tools"}},
+    {"name": "oapi-codegen", "requires": ["go"], "provision_requires": ["ansible-playbook"], "command": "oapi-codegen", "version_args": ["--version"], "version_key": "OAPI_CODEGEN_VERSION", "provision": {"type": "ansible", "tags": "agent_tools"}},
+    {"name": "oxlint", "requires": [], "provision_requires": ["ansible-playbook"], "command": "oxlint", "version_args": ["--version"], "version_key": "OXLINT_VERSION", "provision": {"type": "ansible", "tags": "quality_tools"}},
+    {"name": "oxfmt", "requires": [], "provision_requires": ["ansible-playbook"], "command": "oxfmt", "version_args": ["--version"], "version_key": "OXFMT_VERSION", "provision": {"type": "ansible", "tags": "quality_tools"}},
+    {"name": "ruff", "requires": [], "provision_requires": ["ansible-playbook"], "command": "ruff", "version_args": ["--version"], "version_key": "RUFF_VERSION", "provision": {"type": "ansible", "tags": "quality_tools"}},
+    {"name": "docker-client-installed", "requires": [], "command": "docker", "version_args": ["--version"]},
+    {"name": "docker-user-access", "requires": ["docker-client-installed"], "probe": ["docker", "info"], "external_failure": true},
+    {"name": "docker-daemon-ready", "requires": ["docker-user-access"], "probe": ["docker", "info"], "external_failure": true},
+    {"name": "docker", "requires": ["docker-daemon-ready"], "probe": ["docker", "info"], "external_failure": true},
+    {"name": "kubectl", "requires": [], "command": "kubectl", "version_args": ["version", "--client"]},
+    {"name": "helm", "requires": [], "command": "helm", "version_args": ["version", "--short"]},
+    {"name": "terraform", "requires": [], "command": "terraform", "version_args": ["version"]},
+    {"name": "kustomize", "requires": [], "command": "kustomize", "version_args": ["version"]},
+    {"name": "kind", "requires": ["docker"], "command": "kind", "version_args": ["version"]},
+    {"name": "container-tests", "requires": ["docker"], "virtual": true}
+  ]
+}

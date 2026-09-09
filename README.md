@@ -2,6 +2,14 @@
 
 Plateforme e-commerce B2C mono-vendeur, cloud-native, self-hosted, multi-site A/B, construite autour de microservices Go, de Kubernetes RKE2 et d'un modèle GitOps strict.
 
+## Environnement reproductible
+
+`make bootstrap` réconcilie l'environnement selon le graphe de capacités. `make env-check`
+effectue le même audit sans installation. Les états normalisés sont `PASS`, `FAIL`,
+`BLOCKED`, `SKIP` et `UNSUPPORTED`; un daemon Docker indisponible ne bloque que ses vrais
+dépendants, tels Kind et les tests conteneurisés. Voir
+[ADR-0002](docs/adr/ADR-0002-capability-aware-bootstrap.md).
+
 ## Statut
 
 Le dépôt est en phase `BUILD`, avec `M2-golden-service-product` comme jalon applicatif courant. Le monorepo applicatif existe déjà (`frontend/`, `services/product/`) et l'IaC MGMT est amorcée sous `platform/terraform` et `platform/ansible`; les autres services et couches de plateforme sont ajoutés progressivement selon `architecture.lock.yaml`.

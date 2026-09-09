@@ -5,7 +5,13 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help bootstrap env-check ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+
+bootstrap: ## Reconcile capabilities independently in dependency order
+	@$(PYTHON) scripts/capability_bootstrap.py bootstrap
+
+env-check: ## Audit capabilities without changing the workstation
+	@$(PYTHON) scripts/capability_bootstrap.py env-check
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
