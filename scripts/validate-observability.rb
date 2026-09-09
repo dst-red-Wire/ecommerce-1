@@ -76,12 +76,12 @@ module ObservabilityTopologyValidator
   end
 
   def duration_map?(value, keys = %w[preprod prod])
-    value.is_a?(Hash) && keys.all? { |key| duration?(value[key]) }
+    value.is_a?(Hash) && value.keys.sort == keys.sort && keys.all? { |key| duration?(value[key]) }
   end
 
-  def retention_contract?(value)
+  def retention_contract?(value, keys = %w[preprod prod])
     return value == PERSISTENT_RETENTION if value.is_a?(String)
-    return false unless value.is_a?(Hash) && !value.empty?
+    return false unless value.is_a?(Hash) && value.keys.sort == keys.sort
 
     value.values.all? { |entry| duration?(entry) || entry == PERSISTENT_RETENTION }
   end
@@ -152,7 +152,7 @@ module ObservabilityTopologyValidator
       storage_class["backing_pools"] == %w[localpv-a localpv-b] && storage_class["filesystem"] == "xfs" &&
       storage_class["access_mode"] == "ReadWriteOnce" && storage_class["volume_binding_mode"] == "WaitForFirstConsumer" &&
       storage_class["reclaim_policy"] == "Retain" && storage_class["encryption_at_rest"] == "luks2" &&
-      storage_class["xfs_project_quota"] == "required"
+      storage_class["xfs_project_quota"] == "required" && storage_class["failure_domain"] == "host-and-site"
 
     defaults = storage["observability_defaults"] || {}
     errors << "observability storage defaults drift" unless defaults["storage_class"] == "localpv-observability" &&
@@ -183,7 +183,8 @@ module ObservabilityTopologyValidator
       encryption = spec["encryption"].is_a?(Hash) ? spec["encryption"] : {}
       errors << "#{component} at-rest encryption must be luks2" unless encryption["at_rest"] == "luks2"
       errors << "#{component} transport encryption must be tls or tls-mtls" unless %w[tls tls-mtls].include?(encryption["in_transit"])
-      errors << "#{component} retention contract is incomplete" unless retention_contract?(spec["retention"])
+      retention_keys = component == "opensearch-security" ? %w[preprod_hot prod_hot prod_snapshots] : %w[preprod prod]
+      errors << "#{component} retention contract is incomplete" unless retention_contract?(spec["retention"], retention_keys)
       backup = spec["backup"] || {}
       errors << "#{component} backup target must be seaweedfs-s3" unless backup["target"] == "seaweedfs-s3"
       %w[schedule retention rpo rto].each do |field|

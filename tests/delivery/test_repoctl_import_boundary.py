@@ -18,6 +18,7 @@ class RepoctlImportBoundaryTest(unittest.TestCase):
             scripts = temp / "scripts"
             scripts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
+            shutil.copy2(ROOT / "scripts/contract_paths.py", scripts / "contract_paths.py")
             subprocess.run(["git", "init", "-q"], cwd=temp, check=True)
             code = r"""
 import importlib.util

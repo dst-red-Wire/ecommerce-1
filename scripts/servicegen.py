@@ -15,7 +15,11 @@ import subprocess
 import sys
 import json
 
-from contract_paths import machine_contract_path
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from contract_paths import machine_contract_path  # noqa: E402 - script-local path is established above
 
 
 def load_yaml(path: Path) -> dict:

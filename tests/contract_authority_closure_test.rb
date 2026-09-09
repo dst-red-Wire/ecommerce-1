@@ -1,0 +1,82 @@
+# frozen_string_literal: true
+
+require "minitest/autorun"
+require "yaml"
+require_relative "../scripts/validate-contract-authority"
+
+class ContractAuthorityClosureTest < Minitest::Test
+  ROOT = File.expand_path("..", __dir__)
+
+  def load_yaml(path)
+    YAML.safe_load(File.read(File.join(ROOT, path)), aliases: false)
+  end
+
+  def test_exact_m0_to_m9_graph_passes
+    errors = []
+    ContractAuthorityValidator.validate_milestone_dependencies(errors, load_yaml("architecture.lock.yaml"))
+    assert_empty errors
+  end
+
+  def test_m9_dependency_drift_is_rejected
+    lock = load_yaml("architecture.lock.yaml")
+    lock["milestone_dependencies"]["M9-prod-ab"] = []
+    errors = []
+    ContractAuthorityValidator.validate_milestone_dependencies(errors, lock)
+    assert errors.any? { |error| error.include?("M9-prod-ab dependency drift") }
+  end
+
+  def test_every_wave_component_has_exactly_one_execution_binding
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    errors = []
+    ContractAuthorityValidator.validate_dag(errors, waves)
+    assert_empty errors
+
+    component = waves.fetch("component_execution_bindings").keys.first
+    waves["component_execution_bindings"].delete(component)
+    errors = []
+    ContractAuthorityValidator.validate_dag(errors, waves)
+    assert errors.any? { |error| error.include?("bindings must cover every wave component exactly") }
+  end
+
+  def test_unknown_execution_profile_is_rejected
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    waves["component_execution_bindings"]["product"] = "missing-profile"
+    errors = []
+    ContractAuthorityValidator.validate_dag(errors, waves)
+    assert errors.any? { |error| error.include?("unknown profile missing-profile") }
+  end
+
+  def test_unknown_storage_dependency_is_rejected
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    storage["engines"]["victoriametrics"]["dependencies"] << "unknown-store"
+    errors = []
+    ContractAuthorityValidator.validate_storage_dependency_edges(errors, storage, waves)
+    assert errors.any? { |error| error.include?("unknown-store") && error.include?("not located") }
+  end
+
+  def test_storage_classes_and_active_stateful_contracts_are_complete
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    errors = []
+    ContractAuthorityValidator.validate_storage_classes(errors, storage)
+    ContractAuthorityValidator.validate_stateful_contracts(errors, storage)
+    assert_empty errors
+  end
+
+  def test_superseded_component_is_rejected_generically
+    lock = load_yaml("architecture.lock.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    waves["waves"].first["components"] << "fluxcd"
+    errors = []
+    ContractAuthorityValidator.validate_superseded_components(errors, lock, waves)
+    assert errors.any? { |error| error.include?("fluxcd") }
+  end
+
+  def test_trust_zone_contract_covers_all_active_components
+    lock = load_yaml("architecture.lock.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    errors = []
+    ContractAuthorityValidator.validate_trust_zones(errors, lock, ROOT, waves)
+    assert_empty errors
+  end
+end

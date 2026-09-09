@@ -88,12 +88,13 @@ class GovernanceDocumentationTest(unittest.TestCase):
 
     def test_deployment_dag_requires_machine_graph_and_runtime_binding(self):
         text = (ROOT / "docs/architecture/DEPLOYMENT_DAG.md").read_text(encoding="utf-8")
-        self.assertIn("is the machine authority for graph topology", text)
+        self.assertIn("is the single machine authority for both graph topology and activation", text)
         self.assertIn("duplicate wave IDs", text)
         self.assertIn("unknown `requires` targets", text)
         self.assertIn("cycles", text)
         self.assertIn("unreachable waves", text)
-        self.assertIn("must not be invented", text.lower())
+        self.assertIn("Runtime tooling MUST consume these bindings", text)
+        self.assertRegex(text, r"rather than\s+inventing values")
 
     def test_m4_handoff_preserves_storage_first_dependency_order(self):
         text = (ROOT / "docs/project/CODEX_HANDOFFS.md").read_text(encoding="utf-8")

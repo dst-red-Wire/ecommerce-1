@@ -33,7 +33,10 @@ def _resolve(root: Path, section: str, key: str, *, must_exist: bool = True) -> 
     relative = mapping.get(key)
     if not isinstance(relative, str) or not relative.strip():
         raise ContractPathError(f"architecture.lock.yaml {section}.{key} must declare a non-empty relative path")
-    candidate = (root / relative).resolve()
+    relative_path = Path(relative)
+    if relative_path.is_absolute():
+        raise ContractPathError(f"architecture.lock.yaml {section}.{key} must declare a relative path: {relative!r}")
+    candidate = (root / relative_path).resolve()
     repository = root.resolve()
     if candidate == repository or repository not in candidate.parents:
         raise ContractPathError(f"architecture.lock.yaml {section}.{key} resolves outside the repository: {relative!r}")

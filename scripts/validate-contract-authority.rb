@@ -8,11 +8,19 @@ module ContractAuthorityValidator
   module_function
 
   DURATION = /\A[1-9]\d*[hd]\z/
+  EXECUTION_DURATION = /\A[1-9]\d*[smh]\z/
   MLOPS_METADATA_COMPONENTS = %w[lakefs-metadata-cnpg mlflow-metadata-cnpg].freeze
-  REQUIRED_MLOPS_STORAGE_FIELDS = %w[
-    engine deployment_mode storage topology retention backup network data_scope encryption
+  OBSERVABILITY_STATEFUL_COMPONENTS = %w[
+    victoriametrics victorialogs clickhouse mongodb-oss-self-hosted opensearch-security
+  ].freeze
+  PLATFORM_STATEFUL_COMPONENTS = %w[
+    postgresql strimzi-kafka rabbitmq redis opensearch-business seaweedfs apicurio
+  ].freeze
+  REQUIRED_STATEFUL_FIELDS = %w[
+    engine deployment_mode storage topology retention backup encryption network data_scope
     operational_authority dependencies failure_behavior environments
   ].freeze
+  REQUIRED_MLOPS_STORAGE_FIELDS = REQUIRED_STATEFUL_FIELDS.freeze
   REQUIRED_GRAPH_POLICY = {
     "unique_wave_ids_required" => true,
     "requires_must_resolve" => true,
@@ -20,12 +28,38 @@ module ContractAuthorityValidator
     "unreachable_waves_forbidden" => true
   }.freeze
   REQUIRED_EXECUTION_POLICY = {
-    "health_condition" => "all-components-ready-and-declared-gates-pass",
-    "timeout" => "required-runtime-binding-before-activation",
-    "retry_semantics" => "bounded-controller-retry-required",
-    "failure_behavior" => "fail-closed-block-dependent-waves",
-    "evidence_output" => "exact-sha-environment-reference-required",
-    "rollback_destroy_hook" => "required-before-activation"
+    "activation_requires_resolved_binding" => true,
+    "placeholders_forbidden" => true,
+    "unbound_components_forbidden" => true,
+    "unknown_bindings_forbidden" => true,
+    "automatic_destroy" => "forbidden"
+  }.freeze
+  REQUIRED_EVIDENCE_FIELDS = %w[
+    exact_sha environment component wave observed_revision gate_results
+  ].freeze
+  EXPECTED_MILESTONE_DEPENDENCIES = {
+    "M0-architecture-sync" => [],
+    "M1-monorepo-bootstrap" => ["M0-architecture-sync"],
+    "M2-golden-service-product" => ["M1-monorepo-bootstrap"],
+    "M2-5-persistent-mgmt-bootstrap" => ["M1-monorepo-bootstrap"],
+    "M3-preprod-infrastructure" => ["M2-5-persistent-mgmt-bootstrap"],
+    "M4-platform-baseline" => ["M3-preprod-infrastructure"],
+    "M5-commerce-vertical-slice" => ["M2-golden-service-product", "M4-platform-baseline"],
+    "M6-full-application" => ["M5-commerce-vertical-slice"],
+    "M7-qualification" => ["M6-full-application"],
+    "M8-preprod-certification" => ["M7-qualification"],
+    "M9-prod-ab" => ["M8-preprod-certification"]
+  }.freeze
+  REQUIRED_STORAGE_CLASS_FIELDS = {
+    "provisioner" => "kubernetes.io/no-provisioner",
+    "filesystem" => "xfs",
+    "access_mode" => "ReadWriteOnce",
+    "volume_binding_mode" => "WaitForFirstConsumer",
+    "reclaim_policy" => "Retain",
+    "encryption_at_rest" => "luks2",
+    "allocation" => "dedicated-static-pv-per-member",
+    "xfs_project_quota" => "required",
+    "failure_domain" => "host-and-site"
   }.freeze
 
   def load_yaml(root, relative)
@@ -60,6 +94,20 @@ module ContractAuthorityValidator
     Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
   end
 
+  def duration_map?(value, keys = %w[preprod prod])
+    value.is_a?(Hash) && value.keys.sort == keys.sort &&
+      keys.all? { |key| value[key].is_a?(String) && value[key].match?(DURATION) }
+  end
+
+  def retention_contract?(value, keys = %w[preprod prod])
+    return value == "persistent-until-explicit-deletion" if value.is_a?(String)
+    return false unless value.is_a?(Hash) && value.keys.sort == keys.sort
+
+    value.values.all? do |entry|
+      entry == "persistent-until-explicit-deletion" || (entry.is_a?(String) && entry.match?(DURATION))
+    end
+  end
+
   def validate_exact_contracts(errors, lock, root)
     declared = lock["machine_contracts"]
     unless declared.is_a?(Hash)
@@ -82,9 +130,9 @@ module ContractAuthorityValidator
       errors << "architecture.lock.yaml milestone_dependencies must be a mapping"
       return
     end
-    unless dependencies.keys.sort == milestones.sort
-      errors << "milestone dependency keys must match build_milestones"
-    end
+    errors << "milestone dependency keys must match build_milestones" unless dependencies.keys.sort == milestones.sort
+    errors << "build milestone catalogue drift" unless milestones == EXPECTED_MILESTONE_DEPENDENCIES.keys
+
     dependencies.each do |milestone, required|
       unless required.is_a?(Array)
         errors << "milestone #{milestone} dependencies must be an array"
@@ -97,14 +145,7 @@ module ContractAuthorityValidator
       end
     end
 
-    expected = {
-      "M2-golden-service-product" => ["M1-monorepo-bootstrap"],
-      "M2-5-persistent-mgmt-bootstrap" => ["M1-monorepo-bootstrap"],
-      "M3-preprod-infrastructure" => ["M2-5-persistent-mgmt-bootstrap"],
-      "M4-platform-baseline" => ["M3-preprod-infrastructure"],
-      "M5-commerce-vertical-slice" => ["M2-golden-service-product", "M4-platform-baseline"]
-    }
-    expected.each do |milestone, required|
+    EXPECTED_MILESTONE_DEPENDENCIES.each do |milestone, required|
       errors << "milestone #{milestone} dependency drift" unless Array(dependencies[milestone]).sort == required.sort
     end
 
@@ -127,6 +168,60 @@ module ContractAuthorityValidator
     dependencies.each_key { |milestone| visit.call(milestone) }
   end
 
+  def validate_execution_bindings(errors, waves_contract, waves)
+    policy = waves_contract["execution_policy"] || {}
+    REQUIRED_EXECUTION_POLICY.each do |field, expected|
+      errors << "deployment execution policy #{field} drift" unless policy[field] == expected
+    end
+    extra_policy = policy.keys - REQUIRED_EXECUTION_POLICY.keys
+    errors << "deployment execution policy has unknown fields: #{extra_policy.sort.join(', ')}" unless extra_policy.empty?
+
+    profiles = waves_contract["execution_profiles"]
+    bindings = waves_contract["component_execution_bindings"]
+    unless profiles.is_a?(Hash) && !profiles.empty?
+      errors << "deployment execution_profiles must be a non-empty mapping"
+      profiles = {}
+    end
+    unless bindings.is_a?(Hash)
+      errors << "deployment component_execution_bindings must be a mapping"
+      bindings = {}
+    end
+
+    components = waves.flat_map { |wave| wave_components(wave) }
+    component_set = components.uniq.sort
+    errors << "deployment component execution bindings must cover every wave component exactly" unless bindings.keys.sort == component_set
+
+    bindings.each do |component, profile_name|
+      errors << "deployment execution binding references unknown component #{component}" unless component_set.include?(component)
+      errors << "deployment execution binding for #{component} references unknown profile #{profile_name}" unless profiles.key?(profile_name)
+    end
+
+    profiles.each do |name, profile|
+      unless profile.is_a?(Hash)
+        errors << "deployment execution profile #{name} must be a mapping"
+        next
+      end
+      timeout = profile["timeout"]
+      errors << "deployment execution profile #{name} timeout must be a positive s/m/h duration" unless timeout.is_a?(String) && timeout.match?(EXECUTION_DURATION)
+      retry_policy = profile["retry"] || {}
+      attempts = retry_policy["max_attempts"]
+      backoff = retry_policy["backoff"]
+      errors << "deployment execution profile #{name} retry.max_attempts must be between 1 and 5" unless attempts.is_a?(Integer) && attempts.between?(1, 5)
+      errors << "deployment execution profile #{name} retry.backoff must be a positive s/m/h duration" unless backoff.is_a?(String) && backoff.match?(EXECUTION_DURATION)
+      checks = profile["health_checks"]
+      errors << "deployment execution profile #{name} health_checks must be non-empty and unique" unless checks.is_a?(Array) && !checks.empty? && checks.uniq == checks && checks.all? { |entry| entry.is_a?(String) && !entry.empty? }
+      evidence = profile["evidence"] || {}
+      errors << "deployment execution profile #{name} evidence fields drift" unless evidence.keys.sort == REQUIRED_EVIDENCE_FIELDS.sort && REQUIRED_EVIDENCE_FIELDS.all? { |field| evidence[field] == "required" }
+      failure = profile["failure"] || {}
+      errors << "deployment execution profile #{name} failure.behavior must be explicit" unless failure["behavior"].is_a?(String) && !failure["behavior"].empty?
+      errors << "deployment execution profile #{name} failure.hook must be explicit" unless failure["hook"].is_a?(String) && !failure["hook"].empty?
+      errors << "deployment execution profile #{name} automatic destroy must be forbidden" unless failure["automatic_destroy"] == "forbidden"
+    end
+
+    unused_profiles = profiles.keys - bindings.values.uniq
+    errors << "deployment execution profiles are unreferenced: #{unused_profiles.sort.join(', ')}" unless unused_profiles.empty?
+  end
+
   def validate_dag(errors, waves_contract)
     errors << "deployment-waves status must be exact" unless waves_contract["status"] == "exact"
     graph_policy = waves_contract["graph_policy"] || {}
@@ -134,10 +229,6 @@ module ContractAuthorityValidator
     errors << "deployment graph policy must declare a root_wave" unless root_id.is_a?(String) && !root_id.empty?
     REQUIRED_GRAPH_POLICY.each do |field, expected|
       errors << "deployment graph policy #{field} must be #{expected}" unless graph_policy[field] == expected
-    end
-    execution_policy = waves_contract.dig("execution_policy", "default") || {}
-    REQUIRED_EXECUTION_POLICY.each do |field, expected|
-      errors << "deployment execution policy #{field} drift" unless execution_policy[field] == expected
     end
 
     waves = Array(waves_contract["waves"])
@@ -155,6 +246,8 @@ module ContractAuthorityValidator
     duplicate_components.each do |component, locations|
       errors << "deployment component #{component} appears in multiple waves: #{locations.join(', ')}"
     end
+
+    validate_execution_bindings(errors, waves_contract, waves)
 
     by_id = waves.each_with_object({}) { |wave, memo| memo[wave["id"]] ||= wave if wave["id"].is_a?(String) }
     waves.each do |wave|
@@ -233,6 +326,60 @@ module ContractAuthorityValidator
     end
   end
 
+  def validate_storage_classes(errors, storage)
+    classes = storage["storage_classes"]
+    unless classes.is_a?(Hash)
+      errors << "storage_classes must be a mapping"
+      return
+    end
+    classes.each do |name, spec|
+      unless spec.is_a?(Hash)
+        errors << "storage class #{name} must be a mapping"
+        next
+      end
+      REQUIRED_STORAGE_CLASS_FIELDS.each do |field, expected|
+        errors << "storage class #{name} #{field} drift" unless spec[field] == expected
+      end
+      pools = spec["backing_pools"]
+      errors << "storage class #{name} backing_pools must be non-empty and unique" unless pools.is_a?(Array) && !pools.empty? && pools.uniq == pools
+    end
+
+    storage.fetch("engines", {}).each do |component, spec|
+      next unless spec.is_a?(Hash)
+      storage_class = spec.dig("storage", "class")
+      next if storage_class.nil? || storage_class == "none"
+      errors << "storage component #{component} references unknown storage class #{storage_class}" unless classes.key?(storage_class)
+    end
+  end
+
+  def validate_stateful_contracts(errors, storage)
+    engines = storage.fetch("engines", {})
+    required_components = (PLATFORM_STATEFUL_COMPONENTS + MLOPS_METADATA_COMPONENTS + OBSERVABILITY_STATEFUL_COMPONENTS).uniq
+    required_components.each do |component|
+      spec = engines[component]
+      unless spec.is_a?(Hash)
+        errors << "stateful component #{component} lacks complete storage contract"
+        next
+      end
+      missing = REQUIRED_STATEFUL_FIELDS.reject { |field| spec.key?(field) && !spec[field].nil? }
+      errors << "stateful component #{component} missing storage fields: #{missing.join(', ')}" unless missing.empty?
+      next unless missing.empty?
+
+      retention_keys = component == "opensearch-security" ? %w[preprod_hot prod_hot prod_snapshots] : %w[preprod prod]
+      errors << "stateful component #{component} retention contract is incomplete" unless retention_contract?(spec["retention"], retention_keys)
+      backup = spec["backup"] || {}
+      %w[schedule retention rpo rto].each do |field|
+        errors << "stateful component #{component} backup #{field} must define exact preprod/prod durations" unless duration_map?(backup[field])
+      end
+      errors << "stateful component #{component} restore validation is required" unless backup["restore_validation"] == "required"
+      errors << "stateful component #{component} public access must be forbidden" unless spec.dig("network", "public_access") == "forbidden"
+      errors << "stateful component #{component} desired-state authority must remain Rancher Fleet" unless spec.dig("operational_authority", "desired_state") == "rancher-fleet"
+      errors << "stateful component #{component} environment activation drift" unless spec["environments"] == {
+        "mgmt" => "deferred", "preprod" => "required", "prod" => "required"
+      }
+    end
+  end
+
   def validate_storage_dependency_edges(errors, storage, waves_contract)
     waves = Array(waves_contract["waves"])
     by_id = waves.to_h { |wave| [wave["id"], wave] }
@@ -243,12 +390,54 @@ module ContractAuthorityValidator
       next unless spec.is_a?(Hash) && component_wave.key?(component)
 
       Array(spec["dependencies"]).each do |dependency|
-        next unless component_wave.key?(dependency)
+        unless component_wave.key?(dependency)
+          errors << "storage dependency #{dependency} for #{component} is not located in deployment waves"
+          next
+        end
         next if wave_dependency_reachable?(by_id, component_wave[dependency], component_wave[component])
 
         errors << "deployment wave for #{component} must depend on wave containing #{dependency}"
       end
     end
+  end
+
+  def validate_superseded_components(errors, lock, waves_contract)
+    superseded = lock["superseded"]
+    unless superseded.is_a?(Hash)
+      errors << "architecture.lock.yaml superseded must be a mapping"
+      return
+    end
+    active = Array(waves_contract["waves"]).flat_map { |wave| wave_components(wave) }
+    present = active & superseded.keys
+    errors << "superseded components active in deployment waves: #{present.sort.join(', ')}" unless present.empty?
+  end
+
+  def validate_trust_zones(errors, lock, root, waves_contract)
+    path = machine_path(lock, root, "security_trust_zones")
+    contract = load_yaml(root, path)
+    errors << "security trust zones status must be exact" unless contract["status"] == "exact"
+    documentation = lock.dig("topology_contracts", "security_zones")
+    errors << "security trust zones documentation authority drift" unless contract["documentation"] == documentation
+
+    zones = contract["zones"]
+    errors << "security trust zones must define exactly Z0 through Z6" unless zones.is_a?(Hash) && zones.keys.sort == %w[Z0 Z1 Z2 Z3 Z4 Z5 Z6]
+    active = Array(waves_contract["waves"]).flat_map { |wave| wave_components(wave) }.uniq.sort
+    subjects = contract["subjects"]
+    unless subjects.is_a?(Hash)
+      errors << "security trust zone subjects must be a mapping"
+      return
+    end
+    errors << "security trust zone subjects must exactly cover active deployment components" unless subjects.keys.sort == active
+    subjects.each do |component, zone|
+      errors << "security trust zone subject #{component} references unknown zone #{zone}" unless zones.is_a?(Hash) && zones.key?(zone)
+    end
+
+    services = Array(lock.dig("business", "services"))
+    frontends = Array(lock.dig("business", "frontends"))
+    errors << "security trust zone business service catalogue drift" unless Array(contract["business_services"]) == services
+    errors << "security trust zone frontend catalogue drift" unless Array(contract["frontends"]) == frontends
+    services.each { |service| errors << "business service #{service} must be in trust zone Z3" unless subjects[service] == "Z3" }
+    frontends.each { |frontend| errors << "frontend #{frontend} must be in trust zone Z3" unless subjects[frontend] == "Z3" }
   end
 
   def validate_resilience_binding(errors, lock, root, storage)
@@ -261,11 +450,7 @@ module ContractAuthorityValidator
     end
 
     %w[schedule retention rpo rto].each do |field|
-      values = profile[field]
-      valid = values.is_a?(Hash) && %w[preprod prod].all? do |env|
-        values[env].is_a?(String) && values[env].match?(DURATION)
-      end
-      errors << "resilience profile mlops-metadata-cnpg #{field} must define positive measurable preprod/prod durations" unless valid
+      errors << "resilience profile mlops-metadata-cnpg #{field} must define exact positive preprod/prod durations" unless duration_map?(profile[field])
     end
     errors << "resilience profile mlops-metadata-cnpg restore validation must be required" unless profile["restore_validation"] == "required"
     errors << "resilience profile mlops-metadata-cnpg component set drift" unless Array(profile["components"]).sort == MLOPS_METADATA_COMPONENTS.sort
@@ -314,9 +499,7 @@ module ContractAuthorityValidator
       %w[schedule retention rpo rto].each do |field|
         errors << "#{component} backup #{field} must match resilience governance" unless backup[field] == profile[field]
       end
-      unless backup["restore_validation"] == profile["restore_validation"]
-        errors << "#{component} restore validation must match resilience governance"
-      end
+      errors << "#{component} restore validation must match resilience governance" unless backup["restore_validation"] == profile["restore_validation"]
       errors << "#{component} backup method must match resilience governance" unless backup["method"] == profile["backup_method"]
       errors << "#{component} backup target must match resilience governance" unless backup["target"] == profile["backup_object_authority"]
       errors << "#{component} backup failure domain must match resilience governance" unless backup["target_failure_domain"] == profile["backup_failure_domain"]
@@ -333,8 +516,12 @@ module ContractAuthorityValidator
     storage = load_yaml(root, storage_path)
     waves = load_yaml(root, waves_path)
     validate_dag(errors, waves)
+    validate_superseded_components(errors, lock, waves)
+    validate_storage_classes(errors, storage)
+    validate_stateful_contracts(errors, storage)
     validate_storage_dependency_edges(errors, storage, waves)
     validate_resilience_binding(errors, lock, root, storage)
+    validate_trust_zones(errors, lock, root, waves)
     errors
   rescue ArgumentError, KeyError, TypeError, NoMethodError => e
     ["contract authority structure is invalid: #{e.message}"]

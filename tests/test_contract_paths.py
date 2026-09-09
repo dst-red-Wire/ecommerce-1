@@ -49,6 +49,17 @@ class ContractPathResolutionTests(unittest.TestCase):
             finally:
                 outside.unlink(missing_ok=True)
 
+    def test_absolute_path_inside_repository_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            contract = root / "config" / "alternate" / "network.yaml"
+            contract.parent.mkdir(parents=True)
+            contract.write_text("status: exact\n", encoding="utf-8")
+            self.write_lock(root, str(contract))
+
+            with self.assertRaisesRegex(ContractPathError, "must declare a relative path"):
+                machine_contract_path(root, "network_plan")
+
 
 if __name__ == "__main__":
     unittest.main()

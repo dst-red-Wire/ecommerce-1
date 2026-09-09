@@ -150,6 +150,7 @@ machine_contracts:
   runtime_efficiency: config/contracts/runtime-efficiency.yaml
   observability_topology: config/contracts/observability-topology.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
+  security_trust_zones: config/contracts/security-trust-zones.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6

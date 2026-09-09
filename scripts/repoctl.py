@@ -24,6 +24,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from contract_paths import machine_contract_path, repository_relative  # noqa: E402
+
 
 def _missing_repository_delivery(*_args, **_kwargs):
     raise RuntimeError(
@@ -109,6 +111,41 @@ def git(*args: str, check: bool = True) -> str:
 def ruby_yaml(path: str) -> dict:
     script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
     return json.loads(output(["ruby", "-e", script, path]))
+
+
+def ruby_yaml_text(contents: str) -> dict:
+    script = "require 'yaml'; require 'json'; d=YAML.safe_load(STDIN.read, aliases: false) || {}; print JSON.generate(d)"
+    p = subprocess.run(
+        ["ruby", "-e", script],
+        input=contents,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if p.returncode:
+        raise RuntimeError((p.stderr or "invalid YAML").strip())
+    return json.loads(p.stdout)
+
+
+def public_api_registry_path() -> Path:
+    return machine_contract_path(ROOT, "public_api_contracts")
+
+
+def public_api_registry_relative() -> str:
+    return repository_relative(ROOT, public_api_registry_path())
+
+
+def machine_contract_relative_at(ref: str, key: str) -> str:
+    if ref == "WORKTREE":
+        return repository_relative(ROOT, machine_contract_path(ROOT, key))
+    lock = ruby_yaml_text(git("show", f"{ref}:architecture.lock.yaml"))
+    relative = (lock.get("machine_contracts") or {}).get(key)
+    if not isinstance(relative, str) or not relative.strip():
+        raise RuntimeError(f"{ref}: architecture.lock.yaml machine_contracts.{key} is missing")
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise RuntimeError(f"{ref}: architecture.lock.yaml machine_contracts.{key} must be repository-relative")
+    return relative_path.as_posix()
 
 
 def pinned_versions() -> dict[str, str]:
@@ -386,7 +423,7 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
 def api_generate(target: str = "all", service: str = "", check: bool = False) -> int:
     if target not in {"all", "go", "ts"}:
         return fail("api-generate target must be all, go, or ts")
-    registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
+    registry = ruby_yaml(str(public_api_registry_path()))
     contracts = registry.get("contracts", {})
     common_entry = registry.get("common_components")
     if not common_entry:
@@ -466,12 +503,15 @@ def api_compat(base: str, head: str) -> int:
     args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
     if head != "WORKTREE":
         args.append(head)
-    args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
+    base_registry = machine_contract_relative_at(base, "public_api_contracts")
+    head_registry = machine_contract_relative_at(head, "public_api_contracts")
+    registry_paths = sorted({base_registry, head_registry})
+    args += ["--", "contracts/openapi", "architecture.lock.yaml", *registry_paths]
     changed = [x for x in git(*args).splitlines() if x]
     if not changed:
         print("SKIP OpenAPI compatibility: no API contract changes")
         return 0
-    registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
+    registry = ruby_yaml(str(public_api_registry_path()))
     common = registry.get("common_components")
     specs = [entry["path"] for entry in registry.get("contracts", {}).values()]
     with (
@@ -480,18 +520,16 @@ def api_compat(base: str, head: str) -> int:
     ):
         old = Path(old_s)
         new = Path(new_s)
-        for tree, ref in ((old, base), (new, head)):
+        for tree, ref, registry_relative in ((old, base, base_registry), (new, head, head_registry)):
             if ref == "WORKTREE":
                 shutil.copytree(ROOT / "contracts" / "openapi", tree / "contracts" / "openapi", dirs_exist_ok=True)
-                (tree / "config" / "contracts").mkdir(parents=True, exist_ok=True)
-                shutil.copy2(
-                    ROOT / "config" / "contracts" / "public-api-contracts.yaml",
-                    tree / "config" / "contracts" / "public-api-contracts.yaml",
-                )
+                destination = tree / registry_relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(ROOT / registry_relative, destination)
             else:
                 # git archive is binary; stream it directly to tar.
                 proc1 = subprocess.Popen(
-                    ["git", "archive", ref, "contracts/openapi", "config/contracts/public-api-contracts.yaml"],
+                    ["git", "archive", ref, "contracts/openapi", "architecture.lock.yaml", registry_relative],
                     cwd=ROOT,
                     stdout=subprocess.PIPE,
                 )
@@ -524,7 +562,8 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
         if head != "WORKTREE":
             args.append(head)
-        args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
+        registry_relative = public_api_registry_relative()
+        args += ["--", "contracts/openapi", "architecture.lock.yaml", registry_relative]
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
     if generate or contract_changed:
@@ -1942,7 +1981,7 @@ def main() -> int:
             return api_generate(args.target, args.service, args.check)
         if args.cmd == "api-mock":
             spec = (
-                ruby_yaml("config/contracts/public-api-contracts.yaml")
+                ruby_yaml(str(public_api_registry_path()))
                 .get("contracts", {})
                 .get(args.service, {})
                 .get("path")

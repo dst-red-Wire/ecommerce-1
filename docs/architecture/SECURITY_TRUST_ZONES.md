@@ -2,6 +2,10 @@
 
 Status: `EXACT`
 
+Machine authority: `config/contracts/security-trust-zones.yaml`, resolved through
+`architecture.lock.yaml.machine_contracts.security_trust_zones`. The machine contract maps every active deployment
+component and all 19 canonical services to exactly one trust zone; this document describes the corresponding controls.
+
 ## Zones
 
 ### Z0 — Internet / untrusted

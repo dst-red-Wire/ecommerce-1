@@ -7,6 +7,18 @@ policies:
   shared_rw_storage_default: false
 
 storage_classes:
+  localpv:
+    provisioner: kubernetes.io/no-provisioner
+    backing_pools: [localpv-a, localpv-b]
+    filesystem: xfs
+    access_mode: ReadWriteOnce
+    volume_binding_mode: WaitForFirstConsumer
+    reclaim_policy: Retain
+    encryption_at_rest: luks2
+    allocation: dedicated-static-pv-per-member
+    xfs_project_quota: required
+    failure_domain: host-and-site
+
   localpv-observability:
     provisioner: kubernetes.io/no-provisioner
     backing_pools: [localpv-a, localpv-b]
@@ -17,6 +29,7 @@ storage_classes:
     encryption_at_rest: luks2
     allocation: dedicated-static-pv-per-member
     xfs_project_quota: required
+    failure_domain: host-and-site
 
 observability_defaults:
   storage_class: localpv-observability
@@ -65,9 +78,39 @@ prod:
 
 engines:
   postgresql:
-    storage: localpv
-    replication: cloudnativepg
-    backup: barman-cloud-to-external-s3
+    engine: cloudnativepg-postgresql
+    deployment_mode: cloudnativepg
+    storage:
+      class: localpv
+      persistent_components: [postgresql-instance]
+      access_mode: ReadWriteOnce
+    topology:
+      instances: {preprod: 3, prod_per_site: 3}
+      replication: streaming-quorum
+      anti_affinity: strict
+      prod_write_authority: single-writer-home-site
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: barman-pitr-compatible
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [service-ownership-derived]
+      readers: [service-ownership-derived]
+      public_access: forbidden
+    data_scope: {allowed: [service-owned-databases], cross_service_reads: forbidden}
+    operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg}
+    dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_instance_unavailable: continue-if-quorum-healthy
+      quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
 
   lakefs-metadata-cnpg:
     engine: cloudnativepg-postgresql
@@ -98,7 +141,7 @@ engines:
       readers: [lakefs]
       public_access: forbidden
     data_scope: {allowed: [lakefs-metadata], business_data: forbidden}
-    encryption: {in_transit: required}
+    encryption: {at_rest: luks2, in_transit: required}
     operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg}
     dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
     failure_behavior:
@@ -136,7 +179,7 @@ engines:
       readers: [mlflow]
       public_access: forbidden
     data_scope: {allowed: [mlflow-metadata], business_data: forbidden}
-    encryption: {in_transit: required}
+    encryption: {at_rest: luks2, in_transit: required}
     operational_authority: {desired_state: rancher-fleet, database_operator: cloudnativepg}
     dependencies: [cloudnativepg, seaweedfs, openbao, external-secrets]
     failure_behavior:
@@ -144,27 +187,217 @@ engines:
       quorum_loss: fail-closed
       empty_reinitialization: forbidden
     environments: {mgmt: deferred, preprod: required, prod: required}
-  kafka:
-    storage: localpv
-    replication: strimzi-kafka-native
-    inter_site: mirrormaker2
-  opensearch-business:
-    storage: localpv
-    authority: reconstructible
-  seaweedfs:
-    masters_per_site: 3
-    volume_servers_per_site: 3
-    volume_devices_per_server: 2
-    filers_min_per_site: 2
-    s3_gateways_min_per_site: 2
-    object_lock: required-by-class
-    versioning: required-by-class
-  redis:
-    topology: 3-primary-3-replica
-    authority: non-authoritative
+
+  strimzi-kafka:
+    engine: kafka-kraft
+    deployment_mode: fleet-managed-strimzi
+    storage:
+      class: localpv
+      persistent_components: [kafka-broker-controller]
+      access_mode: ReadWriteOnce
+    topology:
+      nodes: 3
+      replication_factor: 3
+      min_in_sync_replicas: 2
+      anti_affinity: strict
+      inter_site: mirrormaker2
+    retention: {preprod: 7d, prod: 30d}
+    backup:
+      method: mirrormaker2-dr-plus-topic-config-export
+      target: seaweedfs-s3
+      schedule: {preprod: 6h, prod: 1h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 6h, prod: 1h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [ecommerce-services]
+      readers: [ecommerce-services, apicurio]
+      public_access: forbidden
+    data_scope: {allowed: [domain-events], secrets: forbidden, unnecessary_pii: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-messaging}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_node_unavailable: continue-if-min-isr-healthy
+      min_isr_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
   rabbitmq:
-    nodes_per_site: 3
-    queue_type: quorum
+    engine: rabbitmq
+    deployment_mode: fleet-managed-cluster
+    storage:
+      class: localpv
+      persistent_components: [rabbitmq-node]
+      access_mode: ReadWriteOnce
+    topology:
+      nodes: 3
+      queue_type: quorum
+      replicas_per_quorum_queue: 3
+      anti_affinity: strict
+    retention: {preprod: 7d, prod: 14d}
+    backup:
+      method: definitions-export-plus-quorum-data-archive
+      target: seaweedfs-s3
+      schedule: {preprod: 6h, prod: 1h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 6h, prod: 1h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [ecommerce-services]
+      readers: [ecommerce-services]
+      public_access: forbidden
+    data_scope: {allowed: [asynchronous-jobs], authoritative_business_record: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-messaging}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_node_unavailable: continue-if-quorum-healthy
+      quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  redis:
+    engine: redis-cluster
+    deployment_mode: fleet-managed-statefulsets
+    storage:
+      class: localpv
+      persistent_components: [redis-primary, redis-replica]
+      access_mode: ReadWriteOnce
+    topology:
+      primaries: 3
+      replicas_per_primary: 1
+      anti_affinity: strict
+    retention: {preprod: 3d, prod: 7d}
+    backup:
+      method: rdb-aof-archive-to-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 6h, prod: 1h}
+      retention: {preprod: 7d, prod: 14d}
+      rpo: {preprod: 6h, prod: 1h}
+      rto: {preprod: 2h, prod: 1h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [ecommerce-services]
+      readers: [ecommerce-services]
+      public_access: forbidden
+    data_scope: {allowed: [cache-session-ephemeral], authoritative_business_record: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-cache}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_replica_unavailable: continue
+      primary_without_failover: fail-closed-for-affected-shard
+      empty_reinitialization: rebuild-only-from-authoritative-sources
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  opensearch-business:
+    engine: opensearch
+    deployment_mode: fleet-managed-statefulsets
+    storage:
+      class: localpv
+      persistent_components: [opensearch-business]
+      access_mode: ReadWriteOnce
+    topology:
+      cluster_manager_data_nodes: 3
+      index_replicas: 1
+      anti_affinity: strict
+    retention: {preprod: 14d, prod: 30d}
+    backup:
+      method: opensearch-snapshot-repository-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 14d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [search]
+      readers: [search]
+      public_access: forbidden
+    data_scope: {allowed: [business-search-projections], source_of_truth: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: search}
+    dependencies: [seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_node_unavailable: continue-with-replica
+      cluster_manager_quorum_loss: fail-closed
+      empty_reinitialization: rebuild-from-authoritative-services
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  seaweedfs:
+    engine: seaweedfs
+    deployment_mode: fleet-managed-cluster
+    storage:
+      class: localpv
+      persistent_components: [master, volume-server, filer]
+      access_mode: ReadWriteOnce
+    topology:
+      masters_per_site: 3
+      volume_servers_per_site: 3
+      volume_devices_per_server: 2
+      filers_min_per_site: 2
+      s3_gateways_min_per_site: 2
+      anti_affinity: strict
+      prod_cluster_scope: per-site
+      stretched_quorum_between_prod_sites: forbidden
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: cross-site-object-replication-plus-inventory-validation
+      target: opposite-prod-site
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 6h, prod: 4h}
+      restore_validation: required
+    encryption: {at_rest: luks2, in_transit: tls-mtls}
+    network:
+      writers: [platform-backup-jobs, lakefs, mlflow]
+      readers: [platform-backup-jobs, lakefs, mlflow]
+      public_access: forbidden
+    data_scope: {allowed: [object-storage, backups, ml-artifacts], object_lock: required-by-class, versioning: required-by-class}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-storage}
+    dependencies: [openbao, external-secrets]
+    failure_behavior:
+      one_volume_server_unavailable: continue-if-replica-healthy
+      master_quorum_loss: fail-closed
+      empty_reinitialization: forbidden
+    environments: {mgmt: deferred, preprod: required, prod: required}
+
+  apicurio:
+    engine: apicurio-registry
+    deployment_mode: fleet-managed-deployment-kafka-backed
+    storage:
+      class: none
+      persistent_components: []
+      backing_authority: strimzi-kafka
+    topology:
+      replicas: {preprod: 2, prod_per_site: 2}
+      anti_affinity: strict
+    retention: persistent-until-explicit-deletion
+    backup:
+      method: registry-export-to-s3
+      target: seaweedfs-s3
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 2h, prod: 1h}
+      restore_validation: required
+    encryption: {at_rest: kafka-authority, in_transit: tls-mtls}
+    network:
+      writers: [tekton, platform-operators]
+      readers: [ecommerce-services, tekton]
+      public_access: forbidden
+    data_scope: {allowed: [event-schemas], business_data: forbidden}
+    operational_authority: {desired_state: rancher-fleet, owner: platform-contracts}
+    dependencies: [strimzi-kafka, seaweedfs, openbao, external-secrets]
+    failure_behavior:
+      one_replica_unavailable: continue
+      kafka_unavailable: fail-closed
+      empty_reinitialization: restore-from-export-or-kafka
+    environments: {mgmt: deferred, preprod: required, prod: required}
 
   victoriametrics:
     engine: victoriametrics-cluster

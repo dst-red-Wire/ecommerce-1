@@ -6,10 +6,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import sys
 
-from contract_paths import machine_contract_path
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+from contract_paths import machine_contract_path  # noqa: E402 - script-local path is established above
+
+ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / ".context/nx-workspace"
 
 
