@@ -15,7 +15,13 @@ class ServicegenTest(unittest.TestCase):
         root = pathlib.Path(temp.name)
         (root / "config/contracts").mkdir(parents=True)
         (root / "services").mkdir()
-        (root / "architecture.lock.yaml").write_text("business:\n  services: [product, inventory]\n", encoding="utf-8")
+        (root / "architecture.lock.yaml").write_text(
+            "business:\n"
+            "  services: [product, inventory]\n"
+            "machine_contracts:\n"
+            "  public_api_contracts: config/contracts/public-api-contracts.yaml\n",
+            encoding="utf-8",
+        )
         (root / "config/contracts/public-api-contracts.yaml").write_text(
             f"current_milestone: {milestone}\n", encoding="utf-8"
         )
