@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
+from yaml_loader import load_yaml
 
 
 class ContractPathError(ValueError):
@@ -19,7 +19,7 @@ class ContractPathError(ValueError):
 
 def load_lock(root: Path) -> dict[str, Any]:
     path = root / "architecture.lock.yaml"
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data = load_yaml(path)
     if not isinstance(data, dict):
         raise ContractPathError("architecture.lock.yaml must be a mapping")
     return data

@@ -13,14 +13,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from contract_paths import machine_contract_path  # noqa: E402 - script-local path is established above
+from yaml_loader import load_yaml  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / ".context/nx-workspace"
-
-
-def yaml_json(path: str) -> dict:
-    raw = subprocess.check_output(["yq", "-o=json", ".", path], cwd=ROOT, text=True)
-    return json.loads(raw)
 
 
 def name_service(service: str) -> str:
@@ -28,9 +24,9 @@ def name_service(service: str) -> str:
 
 
 def main() -> int:
-    ownership = yaml_json(str(machine_contract_path(ROOT, "service_ownership")))
-    deps = yaml_json(str(machine_contract_path(ROOT, "dependency_map")))
-    public = yaml_json(str(machine_contract_path(ROOT, "public_api_contracts")))
+    ownership = load_yaml(machine_contract_path(ROOT, "service_ownership"))
+    deps = load_yaml(machine_contract_path(ROOT, "dependency_map"))
+    public = load_yaml(machine_contract_path(ROOT, "public_api_contracts"))
     services = sorted(ownership["services"])
     frontends = ["storefront", "admin"]
 

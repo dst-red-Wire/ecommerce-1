@@ -1,9 +1,11 @@
 PYTHON := python3
+include config/toolchain/versions.env
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
+ANSIBLE_BOOTSTRAP := pipx run --spec ansible-core==$(ANSIBLE_CORE_VERSION) ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
 .PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
@@ -91,7 +93,7 @@ workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+	@$(ANSIBLE_BOOTSTRAP) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
 	@$(ANSIBLE_LOCAL) --tags quality_tools

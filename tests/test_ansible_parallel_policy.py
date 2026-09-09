@@ -1,7 +1,10 @@
 from pathlib import Path
+import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from yaml_loader import load_yaml  # noqa: E402
 
 
 class AnsibleParallelPolicyTests(unittest.TestCase):
@@ -10,11 +13,9 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
         self.assertIn("forks = 30", cfg)
 
     def test_mgmt_uses_free_serial_and_throttle_deliberately(self):
-        import yaml
-
         path = ROOT / "platform/ansible/mgmt.yml"
         text = path.read_text()
-        data = yaml.safe_load(text)
+        data = load_yaml(path)
 
         self.assertIn("strategy: free", text)
         self.assertIn("serial: 1", text)

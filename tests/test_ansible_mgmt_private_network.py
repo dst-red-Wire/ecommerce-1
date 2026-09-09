@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from yaml_loader import load_yaml  # noqa: E402
+
 INVENTORY = ROOT / "platform/ansible/inventories/mgmt/inventory.rb"
 NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
 MGMT_INVENTORY = ROOT / "config/infrastructure/mgmt-inventory.yaml"
@@ -32,28 +34,28 @@ def load_runtime_module():
 
 class MgmtPrivateNetworkTest(unittest.TestCase):
     def test_dynamic_inventory_derives_aliases_from_canonical_network_plan(self):
-        network = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))
-        inventory = yaml.safe_load(MGMT_INVENTORY.read_text(encoding="utf-8"))
+        network = load_yaml(NETWORK_PLAN)
+        inventory = load_yaml(MGMT_INVENTORY)
         rendered = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT))
         hostvars = rendered["_meta"]["hostvars"]
         segments = network["vlans"]["mgmt"]
 
-        def cidr(ip: str, segment: int) -> str:
+        def cidr(ip: str, segment: str) -> str:
             prefix = str(segments[segment]["cidr"]).split("/", 1)[1]
             return f"{ip}/{prefix}"
 
         for name, node in inventory["control_planes"].items():
             self.assertEqual(hostvars[name]["mgmt_ip"], node["mgmt_ip"])
-            self.assertEqual(hostvars[name]["mgmt_private_alias_cidrs"], [cidr(node["k8s_ip"], 402)])
+            self.assertEqual(hostvars[name]["mgmt_private_alias_cidrs"], [cidr(node["k8s_ip"], "402")])
 
         for name, node in inventory["workers"].items():
             self.assertEqual(
                 hostvars[name]["mgmt_private_alias_cidrs"],
-                [cidr(node["k8s_ip"], 402), cidr(node["storage_ip"], 403), cidr(node["backup_ip"], 405)],
+                [cidr(node["k8s_ip"], "402"), cidr(node["storage_ip"], "403"), cidr(node["backup_ip"], "405")],
             )
 
     def test_transport_overlay_changes_only_ansible_transport_address(self):
-        canonical = yaml.safe_load(MGMT_INVENTORY.read_text(encoding="utf-8"))
+        canonical = load_yaml(MGMT_INVENTORY)
         names = [*canonical["control_planes"].keys(), *canonical["workers"].keys()]
         hosts = {name: f"203.0.113.{index + 10}" for index, name in enumerate(names)}
         overlay = {"version": 1, "source": "test", "contains_secrets": False, "hosts": hosts}

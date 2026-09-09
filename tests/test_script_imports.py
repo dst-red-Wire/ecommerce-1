@@ -27,6 +27,10 @@ def import_from_external_cwd(module_name: str, relative_path: str):
 
 
 class ScriptImportTest(unittest.TestCase):
+    def test_yaml_loader_imports_outside_repository_root(self):
+        module = import_from_external_cwd("yaml_loader_external", "scripts/yaml_loader.py")
+        self.assertTrue(callable(module.load_yaml))
+
     def test_servicegen_imports_outside_repository_root(self):
         module = import_from_external_cwd("servicegen_external", "scripts/servicegen.py")
         self.assertTrue(callable(module.build_files))

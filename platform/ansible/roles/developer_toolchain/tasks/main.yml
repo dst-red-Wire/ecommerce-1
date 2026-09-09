@@ -417,6 +417,8 @@
 - name: Define isolated Python CLI pins
   ansible.builtin.set_fact:
     developer_pipx_packages:
+      - { name: ansible-core, package: ansible-core, version: "{{ ansible_core_version }}", spec: "ansible-core=={{ ansible_core_version }}" }
+      - { name: ansible-lint, package: ansible-lint, version: "{{ ansible_lint_version }}", spec: "ansible-lint=={{ ansible_lint_version }}" }
       - { name: pre-commit, package: pre-commit, version: "{{ pre_commit_version }}", spec: "pre-commit=={{ pre_commit_version }}" }
       - { name: molecule, package: molecule, version: "{{ molecule_version }}", spec: "molecule=={{ molecule_version }}" }
       - { name: ansible-runner, package: ansible-runner, version: "{{ ansible_runner_version }}", spec: "ansible-runner=={{ ansible_runner_version }}" }

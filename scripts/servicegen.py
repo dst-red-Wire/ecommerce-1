@@ -13,28 +13,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import json
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from contract_paths import machine_contract_path  # noqa: E402 - script-local path is established above
-
-
-def load_yaml(path: Path) -> dict:
-    output = subprocess.check_output(
-        [
-            "ruby",
-            "-ryaml",
-            "-rjson",
-            "-e",
-            "d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)",
-            str(path),
-        ],
-        text=True,
-    )
-    return json.loads(output)
+from yaml_loader import load_yaml  # noqa: E402
 
 
 def canonical_services(root: Path) -> list[str]:

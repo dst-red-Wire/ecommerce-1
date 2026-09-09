@@ -19,7 +19,11 @@ import subprocess
 import sys
 from typing import Any
 
-import yaml
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from yaml_loader import load_yaml
 
 MGMT_MODULE_ADDRESS = "module.hcloud_mgmt"
 MGMT_SERVER_TYPE = "hcloud_server"
@@ -29,7 +33,7 @@ MGMT_SITE_LABEL = "mgmt"
 
 
 def load_canonical_nodes(root: Path) -> list[str]:
-    doc = yaml.safe_load((root / "config/infrastructure/mgmt-inventory.yaml").read_text(encoding="utf-8"))
+    doc = load_yaml(root / "config/infrastructure/mgmt-inventory.yaml")
     nodes = [*doc["control_planes"].keys(), *doc["workers"].keys()]
     if len(nodes) != len(set(nodes)):
         raise ValueError("canonical MGMT inventory contains duplicate node names")

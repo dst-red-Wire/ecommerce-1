@@ -34,6 +34,16 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Download pinned Node archive", tasks)
         self.assertIn("Link Node and Corepack commands", tasks)
 
+    def test_ansible_bootstrap_is_versioned_and_self_hosting(self):
+        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn("ANSIBLE_CORE_VERSION=2.21.4", versions)
+        self.assertIn("ANSIBLE_LINT_VERSION=26.8.0", versions)
+        self.assertIn("pipx run --spec ansible-core==$(ANSIBLE_CORE_VERSION)", makefile)
+        self.assertIn("ansible-core=={{ ansible_core_version }}", tasks)
+        self.assertIn("ansible-lint=={{ ansible_lint_version }}", tasks)
+
     def test_prepush_reuses_evidence_only_for_current_base(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)

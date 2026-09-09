@@ -5,8 +5,6 @@ import sys
 import tempfile
 import unittest
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 from contract_paths import ContractPathError, machine_contract_path  # noqa: E402
@@ -15,7 +13,7 @@ from contract_paths import ContractPathError, machine_contract_path  # noqa: E40
 class ContractPathResolutionTests(unittest.TestCase):
     def write_lock(self, root: Path, relative: str) -> None:
         (root / "architecture.lock.yaml").write_text(
-            yaml.safe_dump({"machine_contracts": {"network_plan": relative}}),
+            f"machine_contracts:\n  network_plan: {relative}\n",
             encoding="utf-8",
         )
 

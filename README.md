@@ -223,6 +223,17 @@ Une décision supersédée reste historique mais ne doit pas être réintroduite
 
 ## Développement
 
+Le bootstrap du poste WSL2 Ubuntu supporté ne suppose pas qu’Ansible soit déjà
+installé. `make workstation-bootstrap` lance la version verrouillée
+d’`ansible-core` via `pipx`, puis le playbook réconcilie les outils permanents.
+Les contrôleurs Python n’ont pas de dépendance PyYAML implicite : ils délèguent
+la lecture YAML à Psych, fourni par le runtime Ruby déjà requis par les gates.
+
+```text
+make workstation-bootstrap
+make workstation-doctor
+```
+
 Avant toute PR :
 
 1. identifier le domaine propriétaire ;
