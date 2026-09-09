@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import platform
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/toolchain/capabilities.json"
 VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
+CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,85 @@ def load_versions(path: Path = VERSIONS) -> dict[str, str]:
 
 def load_contract(path: Path = CONTRACT) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def validate_contract(contract: dict, versions: dict[str, str] | None = None) -> None:
+    """Fail closed when a gate command is outside the explicit toolchain closure.
+
+    Gate requirements are intentionally declarative. Trying to infer arbitrary
+    subprocesses or shell fragments would create a misleading, incomplete parser.
+    Tests and review keep this small authority aligned with executable gate paths.
+    """
+    versions = versions or load_versions()
+    graph = Graph(contract["capabilities"])
+    command_aliases = contract.get("command_capabilities", {})
+    external = {}
+    for classification, key in (
+        ("seed-prerequisite", "seed_prerequisites"),
+        ("platform-provided", "platform_primitives"),
+    ):
+        for entry in contract.get(key, []):
+            command = entry.get("command", "")
+            if not command or not entry.get("justification"):
+                raise ValueError(f"{key}: command and contractual justification are required")
+            if command in external:
+                raise ValueError(f"command has multiple external classifications: {command}")
+            external[command] = classification
+
+    commands: dict[str, str] = {}
+    for name, item in graph.items.items():
+        classification = item.get("classification")
+        if classification not in CLASSIFICATIONS:
+            raise ValueError(f"{name}: invalid or missing classification")
+        command = item.get("command")
+        if command:
+            commands[command] = name
+        version_key = item.get("version_key")
+        if version_key and not versions.get(version_key):
+            raise ValueError(f"{name}: missing version authority {version_key}")
+        if classification == "managed" and item.get("provision") and not (
+            version_key or item.get("version_file")
+        ):
+            raise ValueError(f"{name}: provisioned capability has no version authority")
+        if classification == "platform-provided" and not item.get("justification"):
+            raise ValueError(f"{name}: platform-provided capability needs justification")
+        checksum_key = item.get("checksum_key")
+        if checksum_key:
+            checksum = versions.get(checksum_key, "")
+            if len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum.lower()):
+                raise ValueError(f"{name}: invalid checksum authority {checksum_key}")
+
+    for command, capability in command_aliases.items():
+        if capability not in graph.items:
+            raise ValueError(f"command {command}: missing capability {capability}")
+    known = set(commands) | set(command_aliases) | set(external)
+    if not contract.get("gate_requirements"):
+        raise ValueError("gate_requirements must not be empty")
+    for gate, required in contract["gate_requirements"].items():
+        if not required:
+            raise ValueError(f"gate {gate}: requirements must not be empty")
+        unknown = sorted(set(required) - known)
+        if unknown:
+            raise ValueError(f"gate {gate}: undeclared commands: {', '.join(unknown)}")
+
+    declared = {command for required in contract["gate_requirements"].values() for command in required}
+    for relative in contract.get("gate_sources", []):
+        source = ROOT / relative
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=relative)
+        discovered: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+            if function == "require" and node.args and isinstance(node.args[0], ast.Constant):
+                discovered.add(str(node.args[0].value))
+            if function in {"run", "output", "Popen"} and node.args and isinstance(node.args[0], ast.List):
+                elements = node.args[0].elts
+                if elements and isinstance(elements[0], ast.Constant) and isinstance(elements[0].value, str):
+                    discovered.add(elements[0].value)
+        missing = sorted(discovered - declared)
+        if missing:
+            raise ValueError(f"{relative}: executable commands absent from gate requirements: {', '.join(missing)}")
 
 
 def normalized_platform(system: str | None = None, machine: str | None = None) -> tuple[str, str, str]:
@@ -99,16 +180,20 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
 class Auditor:
     def __init__(self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which):
         self.contract = contract
+        validate_contract(contract)
         self.graph = Graph(contract["capabilities"])
         self.runner = runner
         self.which = which
         self.versions = load_versions()
 
-    def platform_result(self, os_name: str, arch: str) -> Result | None:
+    def platform_result(self, os_name: str, arch: str, item: dict | None = None) -> Result | None:
         if os_name not in self.contract["supported"]["os"]:
             return Result("UNSUPPORTED", f"os {os_name}")
         if arch not in self.contract["supported"]["arch"]:
             return Result("UNSUPPORTED", f"architecture {arch}")
+        supported = (item or {}).get("platforms")
+        if supported and f"{os_name}/{arch}" not in supported:
+            return Result("UNSUPPORTED", f"{os_name}/{arch} has no contracted provisioner")
         return None
 
     def check(self, item: dict) -> Result:
@@ -141,7 +226,7 @@ class Auditor:
         if not spec:
             return self.check(item)
         if spec["type"] == "pip":
-            version = self.versions["ANSIBLE_CORE_VERSION"]
+            version = self.versions[item["version_key"]]
             command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]
         else:
             command = ["ansible-playbook", "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "--tags", spec["tags"]]
@@ -152,10 +237,10 @@ class Auditor:
         return self.check(item)
 
     def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
-        platform_failure = self.platform_result(os_name, arch)
         results: dict[str, Result] = {}
         for name in self.graph.order():
             item = self.graph.items[name]
+            platform_failure = self.platform_result(os_name, arch, item)
             if platform_failure:
                 results[name] = platform_failure
                 continue

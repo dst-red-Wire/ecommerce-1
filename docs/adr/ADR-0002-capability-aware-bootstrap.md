@@ -45,6 +45,28 @@ The existing Ansible role remains the owner of repeatable tool installation. Its
 is represented as a provisioning dependency, not falsely as a runtime dependency. Downloads
 continue to consume pinned versions and checksums from the existing authority.
 
+## Gate executable closure
+
+The contract also owns `gate_requirements`, the explicit executable closure for bootstrap,
+governance, contracts, lint, tests, security, Terraform, Ansible, Kubernetes readiness,
+context generation and delivery. `gate_sources` identifies Python orchestration entrypoints;
+their literal subprocess and `require()` commands are checked with Python's AST rather than
+with a partial shell parser. Contract validation rejects an executable that has no managed
+capability, seed prerequisite or justified platform primitive, as well as missing graph
+dependencies, cycles, absent version pins and malformed checksum authorities.
+
+The minimal seed is Python (to start the controller), Git (to locate and inspect the
+checkout), and Make (the public dispatcher). Ruby, `tar`, `diff`, a C compiler, `gh`, `curl`
+and `unzip` are explicitly justified platform primitives. This classification does not
+silently turn them into managed downloads; it records who supplies them and prevents an
+undeclared assumption.
+
+Gitleaks, kubectl, Helm, Terraform, Kustomize and Kind use independent, checksum-pinned
+Linux/amd64 release assets. Their contract says `UNSUPPORTED` on combinations for which this
+repository does not yet implement a provisioner. `oapi-codegen` has no Go runtime dependency;
+Go and Ansible are only provisioning dependencies. Kind alone retains the real Docker
+runtime edge.
+
 ## Consequences and rollback
 
 Audits report all reachable branches and return non-zero whenever the complete platform

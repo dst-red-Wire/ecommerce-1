@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools]
+  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, gitleaks, kubectl, helm, terraform, kustomize, kind]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -314,7 +314,7 @@
   register: oapi_codegen_current
   failed_when: false
   changed_when: false
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, oapi_codegen]
 
 - name: Install pinned oapi-codegen with the pinned Go toolchain
   ansible.builtin.command:
@@ -324,10 +324,11 @@
       - "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v{{ oapi_codegen_version }}"
   environment:
     GOBIN: "{{ local_bin }}"
+    GOROOT: "{{ local_share }}/toolchains/go/{{ go_version }}/go"
     PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
   when: oapi_codegen_current.rc != 0 or ('v' + oapi_codegen_version) not in oapi_codegen_current.stdout
   changed_when: true
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, oapi_codegen]
 
 - name: Create isolated Nx tool workspace
   ansible.builtin.file:
@@ -417,6 +418,7 @@
 - name: Define isolated Python CLI pins
   ansible.builtin.set_fact:
     developer_pipx_packages:
+      - { name: ansible-lint, package: ansible-lint, version: "{{ ansible_lint_version }}", spec: "ansible-lint=={{ ansible_lint_version }}" }
       - { name: pre-commit, package: pre-commit, version: "{{ pre_commit_version }}", spec: "pre-commit=={{ pre_commit_version }}" }
       - { name: molecule, package: molecule, version: "{{ molecule_version }}", spec: "molecule=={{ molecule_version }}" }
       - { name: ansible-runner, package: ansible-runner, version: "{{ ansible_runner_version }}", spec: "ansible-runner=={{ ansible_runner_version }}" }
@@ -492,3 +494,118 @@
 - name: Reconcile pinned source quality tools
   ansible.builtin.import_tasks: quality.yml
   tags: [toolchain, quality_tools]
+
+# These gate tools deliberately have distinct tags: one failed download must not
+# prevent the capability controller from reconciling unrelated source branches.
+- name: Download pinned standalone gate archives
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ local_cache }}/{{ item.archive }}"
+    checksum: "sha256:{{ item.checksum }}"
+    mode: '0644'
+  loop:
+    - name: gitleaks
+      url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ gitleaks_version }}/gitleaks_{{ gitleaks_version }}_linux_x64.tar.gz"
+      archive: "gitleaks-{{ gitleaks_version }}.tar.gz"
+      checksum: "{{ gitleaks_sha256 }}"
+      tag: gitleaks
+    - name: helm
+      url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
+      archive: "helm-{{ helm_version }}.tar.gz"
+      checksum: "{{ helm_sha256 }}"
+      tag: helm
+    - name: terraform
+      url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
+      archive: "terraform-{{ terraform_version }}.zip"
+      checksum: "{{ terraform_sha256 }}"
+      tag: terraform
+    - name: kustomize
+      # yamllint disable-line rule:line-length
+      url: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
+      archive: "kustomize-{{ kustomize_version }}.tar.gz"
+      checksum: "{{ kustomize_sha256 }}"
+      tag: kustomize
+  when: item.tag in ansible_run_tags
+  tags: [gitleaks, helm, terraform, kustomize]
+
+- name: Create standalone gate tool directories
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - {name: gitleaks, version: "{{ gitleaks_version }}", tag: gitleaks}
+    - {name: helm, version: "{{ helm_version }}", tag: helm}
+    - {name: terraform, version: "{{ terraform_version }}", tag: terraform}
+    - {name: kustomize, version: "{{ kustomize_version }}", tag: kustomize}
+  when: item.tag in ansible_run_tags
+  tags: [gitleaks, helm, terraform, kustomize]
+
+- name: Extract pinned standalone gate tools
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/{{ item.archive }}"
+    dest: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}"
+    remote_src: true
+    creates: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}/{{ item.creates }}"
+  loop:
+    - {name: gitleaks, version: "{{ gitleaks_version }}", archive: "gitleaks-{{ gitleaks_version }}.tar.gz", creates: gitleaks, tag: gitleaks}
+    - {name: helm, version: "{{ helm_version }}", archive: "helm-{{ helm_version }}.tar.gz", creates: linux-amd64/helm, tag: helm}
+    - {name: terraform, version: "{{ terraform_version }}", archive: "terraform-{{ terraform_version }}.zip", creates: terraform, tag: terraform}
+    - {name: kustomize, version: "{{ kustomize_version }}", archive: "kustomize-{{ kustomize_version }}.tar.gz", creates: kustomize, tag: kustomize}
+  when: item.tag in ansible_run_tags
+  tags: [gitleaks, helm, terraform, kustomize]
+
+- name: Link standalone gate tools into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}/{{ item.relative }}"
+    dest: "{{ local_bin }}/{{ item.name }}"
+    state: link
+    force: true
+  loop:
+    - {name: gitleaks, version: "{{ gitleaks_version }}", relative: gitleaks, tag: gitleaks}
+    - {name: helm, version: "{{ helm_version }}", relative: linux-amd64/helm, tag: helm}
+    - {name: terraform, version: "{{ terraform_version }}", relative: terraform, tag: terraform}
+    - {name: kustomize, version: "{{ kustomize_version }}", relative: kustomize, tag: kustomize}
+  when: item.tag in ansible_run_tags
+  tags: [gitleaks, helm, terraform, kustomize]
+
+- name: Download pinned kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
+    dest: "{{ local_share }}/tools/kubectl-{{ kubectl_version }}"
+    checksum: "sha256:{{ kubectl_sha256 }}"
+    mode: '0755'
+  tags: [kubectl]
+
+- name: Link kubectl into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/kubectl-{{ kubectl_version }}"
+    dest: "{{ local_bin }}/kubectl"
+    state: link
+    force: true
+  tags: [kubectl]
+
+- name: Download pinned kind
+  ansible.builtin.get_url:
+    url: "https://github.com/kubernetes-sigs/kind/releases/download/v{{ kind_version }}/kind-linux-amd64"
+    dest: "{{ local_share }}/tools/kind-{{ kind_version }}"
+    checksum: "sha256:{{ kind_sha256 }}"
+    mode: '0755'
+  tags: [kind]
+
+- name: Link kind into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/kind-{{ kind_version }}"
+    dest: "{{ local_bin }}/kind"
+    state: link
+    force: true
+  tags: [kind]
+
+- name: Install distribution-provided Docker client
+  ansible.builtin.apt:
+    name: docker.io
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [docker_client]
