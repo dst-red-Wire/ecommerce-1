@@ -68,6 +68,7 @@ module ObservabilityTopologyValidator
     data-prepper-general-log-pipeline
   ].freeze
 
+  BACKUP_RESTORE_IDENTITY = "platform-backup-jobs"
   DURATION = /\A[1-9]\d*[hd]\z/
   PERSISTENT_RETENTION = "persistent-until-explicit-deletion"
 
@@ -130,7 +131,7 @@ module ObservabilityTopologyValidator
   end
 
   def validate_stateful_storage(errors, lock, root, contract)
-    storage, storage_path = machine_contract(lock, root, "storage_plan")
+    storage, = machine_contract(lock, root, "storage_plan")
     waves, = machine_contract(lock, root, "deployment_waves")
     stateful = contract["stateful_storage"] || {}
 
@@ -193,6 +194,8 @@ module ObservabilityTopologyValidator
       end
       errors << "#{component} restore validation is required" unless backup["restore_validation"] == "required"
       errors << "#{component} public storage access is forbidden" unless spec.dig("network", "public_access") == "forbidden"
+      errors << "#{component} backup jobs require read access" unless Array(spec.dig("network", "readers")).include?(BACKUP_RESTORE_IDENTITY)
+      errors << "#{component} restore jobs require write access" unless Array(spec.dig("network", "writers")).include?(BACKUP_RESTORE_IDENTITY)
       errors << "#{component} desired-state authority must remain Rancher Fleet" unless spec.dig("operational_authority", "desired_state") == "rancher-fleet"
       unless component == "opensearch-security" || spec.dig("data_scope", "business_data") == "forbidden"
         errors << "#{component} data scope must forbid business data"
@@ -227,24 +230,24 @@ module ObservabilityTopologyValidator
     security_telemetry = contract["security_telemetry"] || {}
     expected_network = {
       "victoriametrics" => {
-        "writers" => [metrics["scraper"]],
-        "readers" => [metrics["dashboard_consumer"], metrics["rule_evaluator"]]
+        "writers" => [metrics["scraper"], BACKUP_RESTORE_IDENTITY],
+        "readers" => [metrics["dashboard_consumer"], metrics["rule_evaluator"], BACKUP_RESTORE_IDENTITY]
       },
       "victorialogs" => {
-        "writers" => [logs["collector"]],
-        "readers" => [logs["dashboard_consumer"], logs["rule_evaluator"]]
+        "writers" => [logs["collector"], BACKUP_RESTORE_IDENTITY],
+        "readers" => [logs["dashboard_consumer"], logs["rule_evaluator"], BACKUP_RESTORE_IDENTITY]
       },
       "clickhouse" => {
-        "writers" => [authorities["application_telemetry_gateway"]],
-        "readers" => [authorities["application_observability_ui"]]
+        "writers" => [authorities["application_telemetry_gateway"], BACKUP_RESTORE_IDENTITY],
+        "readers" => [authorities["application_observability_ui"], BACKUP_RESTORE_IDENTITY]
       },
       "mongodb-oss-self-hosted" => {
-        "writers" => [authorities["application_observability_ui"]],
-        "readers" => [authorities["application_observability_ui"]]
+        "writers" => [authorities["application_observability_ui"], BACKUP_RESTORE_IDENTITY],
+        "readers" => [authorities["application_observability_ui"], BACKUP_RESTORE_IDENTITY]
       },
       "opensearch-security" => {
-        "writers" => [security_telemetry["deployment_component"]],
-        "readers" => [security_telemetry["analytics"]]
+        "writers" => [security_telemetry["deployment_component"], BACKUP_RESTORE_IDENTITY],
+        "readers" => [security_telemetry["analytics"], BACKUP_RESTORE_IDENTITY]
       }
     }
     expected_network.each do |component, expected|
@@ -295,7 +298,7 @@ module ObservabilityTopologyValidator
     errors = []
     lock_path = File.join(root, "architecture.lock.yaml")
     lock = load_yaml(lock_path)
-    contract, relative_contract = machine_contract(lock, root, "observability_topology")
+    contract, = machine_contract(lock, root, "observability_topology")
     errors << "observability topology status must be exact" unless contract["status"] == "exact"
 
     summary = lock["observability"] || {}
