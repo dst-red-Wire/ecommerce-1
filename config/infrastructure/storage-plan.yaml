@@ -160,7 +160,7 @@ engines:
       instances: {preprod: 3, prod_per_site: 3}
       anti_affinity: strict
       prod_write_authority: single-writer-home-site
-    retention: persistent-until-exp-d eletion
+    retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
       target: seaweedfs-s3
