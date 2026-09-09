@@ -219,8 +219,8 @@ waves:
     requires: [58-stateful-operators, 45-object-storage, 40-secrets-registry-ci, 20-network-security]
     parallel_groups:
       - [lakefs-metadata-cnpg, mlflow-metadata-cnpg, strimzi-kafka, rabbitmq, redis]
-      - [opensearch-business, apicurio]
-    serial_after_parallel: [lakefs, mlflow]
+      - [opensearch-business]
+    serial_after_parallel: [apicurio, lakefs, mlflow]
   - id: 70-iam-edge
     requires: [60-stateful, 30-gitops-identity]
     components: [keycloak, haproxy, caddy, coraza, kong, ats, istio-gateway, squid-egress]
