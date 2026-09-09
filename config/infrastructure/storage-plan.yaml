@@ -1,4 +1,4 @@
-version: 4
+version: 5
 status: exact
 policies:
   no_default_ceph: true
@@ -84,11 +84,14 @@ engines:
       method: barman-pitr-compatible
       target: seaweedfs-s3
       target_failure_domain: independent-from-source-site
-      schedule: resilience-governance
-      objectives_authority: resilience-governance
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      objectives_authority:
+        machine_contract: resilience_governance
+        profile: mlops-metadata-cnpg
       local_objective_override: forbidden
-      rpo: {preprod: resilience-governance, prod: resilience-governance}
-      rto: {preprod: resilience-governance, prod: resilience-governance}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
       restore_validation: required
     network:
       writers: [lakefs]
@@ -119,11 +122,14 @@ engines:
       method: barman-pitr-compatible
       target: seaweedfs-s3
       target_failure_domain: independent-from-source-site
-      schedule: resilience-governance
-      objectives_authority: resilience-governance
+      schedule: {preprod: 12h, prod: 6h}
+      retention: {preprod: 7d, prod: 30d}
+      objectives_authority:
+        machine_contract: resilience_governance
+        profile: mlops-metadata-cnpg
       local_objective_override: forbidden
-      rpo: {preprod: resilience-governance, prod: resilience-governance}
-      rto: {preprod: resilience-governance, prod: resilience-governance}
+      rpo: {preprod: 12h, prod: 6h}
+      rto: {preprod: 4h, prod: 2h}
       restore_validation: required
     network:
       writers: [mlflow]

@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 import subprocess
 
+from contract_paths import machine_contract_path
+
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 OUT = ROOT / ".context/nx-workspace"
 
@@ -21,9 +23,9 @@ def name_service(service: str) -> str:
 
 
 def main() -> int:
-    ownership = yaml_json("config/contracts/service-ownership.yaml")
-    deps = yaml_json("config/contracts/dependency-map.yaml")
-    public = yaml_json("config/contracts/public-api-contracts.yaml")
+    ownership = yaml_json(str(machine_contract_path(ROOT, "service_ownership")))
+    deps = yaml_json(str(machine_contract_path(ROOT, "dependency_map")))
+    public = yaml_json(str(machine_contract_path(ROOT, "public_api_contracts")))
     services = sorted(ownership["services"])
     frontends = ["storefront", "admin"]
 

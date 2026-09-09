@@ -2,24 +2,29 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "validate-contract-authority"
 
 module ContractConsistency
   module_function
 
-  FILES = {
-    lock: "architecture.lock.yaml",
-    ownership: "config/contracts/service-ownership.yaml",
-    dependencies: "config/contracts/dependency-map.yaml",
-    events: "config/contracts/event-contracts.yaml",
-    public_api: "config/contracts/public-api-contracts.yaml"
-  }.freeze
+  def contract_paths(lock, root)
+    {
+      lock: "architecture.lock.yaml",
+      ownership: ContractAuthorityValidator.machine_path(lock, root, "service_ownership"),
+      dependencies: ContractAuthorityValidator.machine_path(lock, root, "dependency_map"),
+      events: ContractAuthorityValidator.machine_path(lock, root, "event_contracts"),
+      public_api: ContractAuthorityValidator.machine_path(lock, root, "public_api_contracts")
+    }
+  end
+
 
   def load_yaml(root, relative)
     YAML.safe_load(File.read(File.join(root, relative)), aliases: false) || {}
   end
 
   def validate(root)
-    data = FILES.transform_values { |path| load_yaml(root, path) }
+    lock = load_yaml(root, "architecture.lock.yaml")
+    data = contract_paths(lock, root).transform_values { |path| load_yaml(root, path) }
     errors = []
     canonical_services = Array(data[:lock].dig("business", "services"))
     frontends = Array(data[:lock].dig("business", "frontends"))

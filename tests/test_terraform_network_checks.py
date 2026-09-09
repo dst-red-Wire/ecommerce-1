@@ -1,19 +1,23 @@
 import ipaddress
 from pathlib import Path
+import sys
 import unittest
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from contract_paths import machine_contract_path  # noqa: E402
+
 LOCALS = ROOT / "platform/terraform/environments/mgmt/locals.tf"
 CHECKS = ROOT / "platform/terraform/environments/mgmt/checks.tf"
 ENV_MAIN = ROOT / "platform/terraform/environments/mgmt/main.tf"
 ENV_VARIABLES = ROOT / "platform/terraform/environments/mgmt/variables.tf"
 ENV_OUTPUTS = ROOT / "platform/terraform/environments/mgmt/outputs.tf"
 MODULE_MAIN = ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf"
-INVENTORY = ROOT / "config/infrastructure/mgmt-inventory.yaml"
-NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
+INVENTORY = machine_contract_path(ROOT, "mgmt_inventory")
+NETWORK_PLAN = machine_contract_path(ROOT, "network_plan")
 
 
 class TerraformNetworkChecksTest(unittest.TestCase):

@@ -138,12 +138,10 @@ No destroy step may delete required forensic evidence while resilience governanc
 
 ## Codex implementation requirement
 
-Represent this DAG as code/data, not only prose. Each node must have:
+`config/infrastructure/deployment-waves.yaml` is the machine authority for graph topology. Every wave inherits
+`execution_policy.default`, which defines the mandatory health, timeout-binding, bounded-retry, fail-closed,
+evidence and rollback/destroy semantics. A component-specific numeric timeout or retry budget is an implementation
+binding, not an architecture constant: it MUST be explicitly versioned before that component is activated and MUST NOT be invented from prose or tool defaults.
 
-- dependencies;
-- health condition;
-- timeout;
-- retry semantics;
-- failure behavior;
-- evidence output reference;
-- rollback/destroy hook where applicable.
+The machine graph MUST reject duplicate wave IDs, unknown `requires` targets, dependency cycles and unreachable waves from the declared root. A wave may execute only after all transitive `requires` dependencies are healthy.
+Static validation proves graph and contract consistency; it never claims runtime readiness or successful restore.

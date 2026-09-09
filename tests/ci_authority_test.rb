@@ -1,8 +1,11 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "json"
 require "minitest/autorun"
+require "tmpdir"
 require "yaml"
+require_relative "../scripts/validate-contract-authority"
 
 class CIAuthorityTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -26,10 +29,13 @@ class CIAuthorityTest < Minitest::Test
 
   def read(relative) = File.read(File.join(ROOT, relative))
   def yaml(relative) = YAML.safe_load(read(relative))
+  def machine_contract_path(key)
+    ContractAuthorityValidator.machine_path(yaml("architecture.lock.yaml"), ROOT, key)
+  end
 
   def test_single_control_plane_authorities
     lock = yaml("architecture.lock.yaml")
-    topology = yaml("config/contracts/ci-topology.yaml")
+    topology = yaml(machine_contract_path("ci_topology"))
     assert_equal "tekton", lock.dig("platform", "ci")
     assert_equal "tekton", lock.dig("management_plane", "ci")
     assert_equal "rancher-fleet", lock.dig("platform", "gitops")
@@ -42,7 +48,7 @@ class CIAuthorityTest < Minitest::Test
   end
 
   def test_developer_accelerators_are_not_control_planes
-    accelerators = yaml("config/contracts/ci-topology.yaml").fetch("developer_accelerators")
+    accelerators = yaml(machine_contract_path("ci_topology")).fetch("developer_accelerators")
     assert_equal %w[bazel nx turborepo], accelerators.keys.sort
     accelerators.each do |name, contract|
       assert_equal false, contract["source_of_truth"], name
@@ -52,7 +58,7 @@ class CIAuthorityTest < Minitest::Test
   end
 
   def test_ansible_first_developer_automation_contract
-    automation = yaml("config/contracts/ci-topology.yaml").fetch("developer_automation")
+    automation = yaml(machine_contract_path("ci_topology")).fetch("developer_automation")
     assert_equal "ansible", automation.fetch("state_reconciliation")
     assert_equal "python", automation.fetch("stateless_controller")
     assert_equal "forbidden", automation.fetch("shell_policy")
@@ -87,7 +93,7 @@ class CIAuthorityTest < Minitest::Test
   end
 
   def test_tekton_trigger_runtime_prerequisites_are_fail_closed
-    topology = yaml("config/contracts/ci-topology.yaml")
+    topology = yaml(machine_contract_path("ci_topology"))
     runtime_path = topology.dig("trigger_flow", "runtime_prerequisites_contract")
     assert_equal "config/contracts/tekton-trigger-runtime.yaml", runtime_path
     runtime = yaml(runtime_path)
@@ -131,8 +137,16 @@ class StoragePlanGovernanceTest < Minitest::Test
   ].freeze
 
   def test_dedicated_mlops_metadata_storage_contracts_are_complete
-    storage = YAML.safe_load(File.read(File.join(ROOT, "config/infrastructure/storage-plan.yaml")))
-    assert_equal 4, storage.fetch("version")
+    lock = YAML.safe_load(File.read(File.join(ROOT, "architecture.lock.yaml")), aliases: false)
+    storage_path = ContractAuthorityValidator.machine_path(lock, ROOT, "storage_plan")
+    resilience_path = ContractAuthorityValidator.machine_path(lock, ROOT, "resilience_governance")
+    storage = YAML.safe_load(File.read(File.join(ROOT, storage_path)), aliases: false)
+    resilience = YAML.safe_load(File.read(File.join(ROOT, resilience_path)), aliases: false)
+    profile = resilience.dig("profiles", "mlops-metadata-cnpg")
+    assert_equal 5, storage.fetch("version")
+    assert_equal "exact", storage.fetch("status")
+    assert_equal "exact", resilience.fetch("status")
+    refute_nil profile
     engines = storage.fetch("engines")
 
     {"lakefs-metadata-cnpg" => "lakefs", "mlflow-metadata-cnpg" => "mlflow"}.each do |component, consumer|
@@ -148,14 +162,15 @@ class StoragePlanGovernanceTest < Minitest::Test
       assert_equal "barman-pitr-compatible", spec.dig("backup", "method"), component
       assert_equal "seaweedfs-s3", spec.dig("backup", "target"), component
       assert_equal "independent-from-source-site", spec.dig("backup", "target_failure_domain"), component
-      assert_equal "resilience-governance", spec.dig("backup", "schedule"), component
-      assert_equal "resilience-governance", spec.dig("backup", "objectives_authority"), component
+      assert_equal profile.fetch("schedule"), spec.dig("backup", "schedule"), component
+      assert_equal profile.fetch("retention"), spec.dig("backup", "retention"), component
+      assert_equal({"machine_contract" => "resilience_governance", "profile" => "mlops-metadata-cnpg"},
+                   spec.dig("backup", "objectives_authority"), component)
       assert_equal "forbidden", spec.dig("backup", "local_objective_override"), component
       %w[rpo rto].each do |objective|
-        assert_equal({"preprod" => "resilience-governance", "prod" => "resilience-governance"},
-                     spec.dig("backup", objective), "#{component} #{objective}")
+        assert_equal profile.fetch(objective), spec.dig("backup", objective), "#{component} #{objective}"
       end
-      assert_equal "required", spec.dig("backup", "restore_validation"), component
+      assert_equal profile.fetch("restore_validation"), spec.dig("backup", "restore_validation"), component
       assert_equal [consumer], spec.dig("network", "writers"), component
       assert_equal [consumer], spec.dig("network", "readers"), component
       assert_equal "forbidden", spec.dig("network", "public_access"), component
@@ -169,6 +184,99 @@ class StoragePlanGovernanceTest < Minitest::Test
       assert_equal "forbidden", spec.dig("failure_behavior", "empty_reinitialization"), component
       assert_equal({"mgmt" => "deferred", "preprod" => "required", "prod" => "required"},
                    spec.fetch("environments"), component)
+    end
+  end
+end
+
+class DeploymentWaveAuthorityTest < Minitest::Test
+  def base_contract
+    {
+      "status" => "exact",
+      "graph_policy" => {
+        "root_wave" => "root",
+        "unique_wave_ids_required" => true,
+        "requires_must_resolve" => true,
+        "cycles_forbidden" => true,
+        "unreachable_waves_forbidden" => true
+      },
+      "execution_policy" => {"default" => ContractAuthorityValidator::REQUIRED_EXECUTION_POLICY.dup},
+      "waves" => [
+        {"id" => "root", "requires" => [], "components" => ["foundation"]},
+        {"id" => "a", "requires" => ["root"], "components" => ["store-a"]},
+        {"id" => "b", "requires" => ["a"], "components" => ["consumer-b"]}
+      ]
+    }
+  end
+
+  def validate(contract)
+    errors = []
+    ContractAuthorityValidator.validate_dag(errors, contract)
+    errors
+  end
+
+  def test_rejects_unknown_wave_dependency
+    contract = base_contract
+    contract["waves"].last["requires"] = ["missing"]
+    assert validate(contract).any? { |error| error.include?("unknown dependency missing") }
+  end
+
+  def test_rejects_wave_cycle
+    contract = base_contract
+    contract["waves"].first["requires"] = ["b"]
+    assert validate(contract).any? { |error| error.include?("cycle detected") }
+  end
+
+  def test_rejects_duplicate_wave_ids_and_components
+    contract = base_contract
+    contract["waves"] << {"id" => "a", "requires" => ["root"], "components" => ["store-a"]}
+    errors = validate(contract)
+    assert errors.any? { |error| error.include?("ids must be unique") }
+    assert errors.any? { |error| error.include?("appears in multiple waves") }
+  end
+
+  def test_rejects_unreachable_wave
+    contract = base_contract
+    contract["waves"] << {"id" => "orphan", "requires" => [], "components" => ["orphan-component"]}
+    assert validate(contract).any? { |error| error.include?("unreachable from root") }
+  end
+end
+
+class MilestoneAuthorityTest < Minitest::Test
+  def canonical_lock
+    YAML.safe_load(File.read(File.join(File.expand_path("..", __dir__), "architecture.lock.yaml")), aliases: false)
+  end
+
+  def validate(lock)
+    errors = []
+    ContractAuthorityValidator.validate_milestone_dependencies(errors, lock)
+    errors
+  end
+
+  def test_m3_depends_on_m25_but_not_m2
+    lock = canonical_lock
+    assert_equal ["M2-5-persistent-mgmt-bootstrap"],
+                 lock.fetch("milestone_dependencies").fetch("M3-preprod-infrastructure")
+    assert_empty validate(lock)
+  end
+
+  def test_rejects_m2_as_m3_prerequisite
+    lock = canonical_lock
+    lock["milestone_dependencies"]["M3-preprod-infrastructure"] << "M2-golden-service-product"
+    assert_includes validate(lock), "milestone M3-preprod-infrastructure dependency drift"
+  end
+end
+
+class MachineContractExactStatusTest < Minitest::Test
+  def test_rejects_draft_locked_machine_contract
+    Dir.mktmpdir("machine-contract-status") do |root|
+      relative = "config/contracts/example.yaml"
+      absolute = File.join(root, relative)
+      FileUtils.mkdir_p(File.dirname(absolute))
+      File.write(absolute, "version: 1\nstatus: draft\n")
+      lock = {"machine_contracts" => {"example" => relative}}
+      errors = []
+      ContractAuthorityValidator.validate_exact_contracts(errors, lock, root)
+      assert_includes errors, "machine contract example must have status exact"
     end
   end
 end

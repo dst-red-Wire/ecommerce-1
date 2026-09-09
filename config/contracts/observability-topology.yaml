@@ -62,6 +62,7 @@ security_telemetry:
   pipeline: data-prepper
   storage: opensearch
   analytics: wazuh
+  deployment_component: data-prepper-security
   allowed_purposes: [security-enrichment, siem]
   forbidden_purposes: [general-application-logs, general-infrastructure-logs]
 
@@ -74,7 +75,8 @@ hyperdx:
 
 stateful_storage:
   profile: observability-stateful-v1
-  contract: config/infrastructure/storage-plan.yaml
+  contract_authority:
+    machine_contract: storage_plan
   backup_object_authority: seaweedfs-s3
   prod_placement: per-site-independent
   stretched_quorum_between_prod_sites: forbidden

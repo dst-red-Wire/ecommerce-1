@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "validate-contract-authority"
 
 module RuntimeEfficiencyValidator
   EXPECTED_PLATFORMS = %w[linux/amd64 linux/arm64].freeze
@@ -20,10 +21,9 @@ module RuntimeEfficiencyValidator
   def validate(root)
     errors = []
     lock = yaml(root, "architecture.lock.yaml")
-    policy = yaml(root, "config/contracts/runtime-efficiency.yaml")
+    policy_path = ContractAuthorityValidator.machine_path(lock, root, "runtime_efficiency")
+    policy = yaml(root, policy_path)
 
-    add(errors, lock.dig("machine_contracts", "runtime_efficiency") == "config/contracts/runtime-efficiency.yaml",
-        "architecture.lock.yaml must register the runtime efficiency machine contract")
     add(errors, lock.dig("platform", "autoscaling", "synchronous_pods") == "kubernetes-hpa",
         "synchronous pod autoscaling authority must be kubernetes-hpa")
     add(errors, lock.dig("platform", "autoscaling", "event_driven_pods") == "keda",

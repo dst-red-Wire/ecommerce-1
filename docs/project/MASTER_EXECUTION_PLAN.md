@@ -47,13 +47,14 @@ Only these statuses are allowed:
 
 ## 4. Critical path
 
-`M0 -> M1 -> { M2, M2.5 } -> M3`
+`M0 -> M1`
+
+After M1, the two branches are independent:
+
+- `M1 -> M2`
+- `M1 -> M2.5 -> M3 -> M4`
 
 After M1 is PROVEN, M2 and M2.5 may proceed in parallel. M3's architecture/topology/network/storage specifications are already merged, but real `PREPROD CREATE` also requires the M2.5 management-plane prerequisites. Offline/static preparation may proceed before provider access.
-
-Then:
-
-`M3 -> M4`
 
 M5 requires both the golden service pattern and platform baseline:
 

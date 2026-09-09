@@ -1,5 +1,20 @@
-version: 3
+version: 4
 status: exact
+graph_policy:
+  root_wave: 00-underlay
+  unique_wave_ids_required: true
+  requires_must_resolve: true
+  cycles_forbidden: true
+  unreachable_waves_forbidden: true
+execution_policy:
+  default:
+    health_condition: all-components-ready-and-declared-gates-pass
+    timeout: required-runtime-binding-before-activation
+    retry_semantics: bounded-controller-retry-required
+    failure_behavior: fail-closed-block-dependent-waves
+    evidence_output: exact-sha-environment-reference-required
+    rollback_destroy_hook: required-before-activation
+
 waves:
   - id: 00-underlay
     requires: []

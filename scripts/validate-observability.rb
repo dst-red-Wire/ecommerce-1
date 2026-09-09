@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "yaml"
+require_relative "validate-contract-authority"
 
 module ObservabilityTopologyValidator
   module_function
@@ -67,6 +68,24 @@ module ObservabilityTopologyValidator
     data-prepper-general-log-pipeline
   ].freeze
 
+  DURATION = /\A[1-9]\d*[hd]\z/
+  PERSISTENT_RETENTION = "persistent-until-explicit-deletion"
+
+  def duration?(value)
+    value.is_a?(String) && value.match?(DURATION)
+  end
+
+  def duration_map?(value, keys = %w[preprod prod])
+    value.is_a?(Hash) && keys.all? { |key| duration?(value[key]) }
+  end
+
+  def retention_contract?(value)
+    return value == PERSISTENT_RETENTION if value.is_a?(String)
+    return false unless value.is_a?(Hash) && !value.empty?
+
+    value.values.all? { |entry| duration?(entry) || entry == PERSISTENT_RETENTION }
+  end
+
   def load_yaml(path)
     YAML.safe_load(File.read(path), aliases: false) || {}
   rescue Psych::Exception, SystemCallError => e
@@ -74,9 +93,7 @@ module ObservabilityTopologyValidator
   end
 
   def machine_contract(lock, root, key)
-    relative = lock.dig("machine_contracts", key)
-    raise ArgumentError, "architecture.lock.yaml machine_contracts.#{key} must declare a path" unless relative.is_a?(String) && !relative.empty?
-
+    relative = ContractAuthorityValidator.machine_path(lock, root, key)
     [load_yaml(File.join(root, relative)), relative]
   end
 
@@ -118,7 +135,8 @@ module ObservabilityTopologyValidator
     stateful = contract["stateful_storage"] || {}
 
     errors << "observability stateful storage profile drift" unless stateful["profile"] == "observability-stateful-v1"
-    errors << "observability stateful storage contract drift" unless stateful["contract"] == storage_path
+    errors << "observability stateful storage contract authority drift" unless stateful["contract_authority"] == {"machine_contract" => "storage_plan"}
+    errors << "storage plan status must be exact" unless storage["status"] == "exact"
     errors << "SeaweedFS S3 must remain observability backup object authority" unless stateful["backup_object_authority"] == "seaweedfs-s3"
     errors << "PROD observability clusters must be independent per site" unless stateful["prod_placement"] == "per-site-independent" &&
       stateful["stretched_quorum_between_prod_sites"] == "forbidden"
@@ -165,15 +183,19 @@ module ObservabilityTopologyValidator
       encryption = spec["encryption"].is_a?(Hash) ? spec["encryption"] : {}
       errors << "#{component} at-rest encryption must be luks2" unless encryption["at_rest"] == "luks2"
       errors << "#{component} transport encryption must be tls or tls-mtls" unless %w[tls tls-mtls].include?(encryption["in_transit"])
+      errors << "#{component} retention contract is incomplete" unless retention_contract?(spec["retention"])
       backup = spec["backup"] || {}
       errors << "#{component} backup target must be seaweedfs-s3" unless backup["target"] == "seaweedfs-s3"
-      %w[rpo rto].each do |objective|
-        values = backup[objective]
-        errors << "#{component} backup #{objective.upcase} is incomplete" unless values.is_a?(Hash) && values.key?("preprod") && values.key?("prod")
+      %w[schedule retention rpo rto].each do |field|
+        label = %w[rpo rto].include?(field) ? field.upcase : field
+        errors << "#{component} backup #{label} is incomplete" unless duration_map?(backup[field])
       end
       errors << "#{component} restore validation is required" unless backup["restore_validation"] == "required"
       errors << "#{component} public storage access is forbidden" unless spec.dig("network", "public_access") == "forbidden"
       errors << "#{component} desired-state authority must remain Rancher Fleet" unless spec.dig("operational_authority", "desired_state") == "rancher-fleet"
+      unless component == "opensearch-security" || spec.dig("data_scope", "business_data") == "forbidden"
+        errors << "#{component} data scope must forbid business data"
+      end
     end
 
     vm = engines["victoriametrics"] || {}
@@ -198,6 +220,44 @@ module ObservabilityTopologyValidator
       security.dig("topology", "index_replicas") == 1 &&
       %w[general-application-logs general-infrastructure-logs business-data].all? { |purpose| forbidden_purposes.include?(purpose) }
 
+    authorities = contract["authorities"] || {}
+    metrics = contract["sre_metrics"] || {}
+    logs = contract["infrastructure_logs"] || {}
+    security_telemetry = contract["security_telemetry"] || {}
+    expected_network = {
+      "victoriametrics" => {
+        "writers" => [metrics["scraper"]],
+        "readers" => [metrics["dashboard_consumer"], metrics["rule_evaluator"]]
+      },
+      "victorialogs" => {
+        "writers" => [logs["collector"]],
+        "readers" => [logs["dashboard_consumer"], logs["rule_evaluator"]]
+      },
+      "clickhouse" => {
+        "writers" => [authorities["application_telemetry_gateway"]],
+        "readers" => [authorities["application_observability_ui"]]
+      },
+      "mongodb-oss-self-hosted" => {
+        "writers" => [authorities["application_observability_ui"]],
+        "readers" => [authorities["application_observability_ui"]]
+      },
+      "opensearch-security" => {
+        "writers" => [security_telemetry["deployment_component"]],
+        "readers" => [security_telemetry["analytics"]]
+      }
+    }
+    expected_network.each do |component, expected|
+      network = engines.dig(component, "network") || {}
+      %w[writers readers].each do |direction|
+        expected_identities = Array(expected[direction]).compact.sort
+        actual_identities = Array(network[direction]).compact.sort
+        unless actual_identities == expected_identities
+          errors << "#{component} network #{direction} drift: expected #{expected_identities.inspect}, got #{actual_identities.inspect}"
+        end
+      end
+    end
+
+    ContractAuthorityValidator.validate_dag(errors, waves)
     wave_list = Array(waves["waves"])
     waves_by_id = wave_list.to_h { |wave| [wave["id"], wave] }
     component_waves = component_wave_ids(wave_list)
@@ -217,7 +277,12 @@ module ObservabilityTopologyValidator
     present_forbidden = forbidden_active & active_wave_components
     errors << "forbidden observability components active in deployment waves: #{present_forbidden.sort.join(', ')}" unless present_forbidden.empty?
 
+    policies = storage["policies"] || {}
     validation = storage["validation"] || {}
+    errors << "storage policy must forbid MinIO CE" unless policies["no_minio_ce"] == true
+    errors << "storage MinIO policy and validation guard must agree" unless policies["no_minio_ce"] == validation["reject_minio_ce"]
+    errors << "storage policy must reject default Ceph" unless policies["no_default_ceph"] == true
+    errors << "storage Ceph policy and validation guard must agree" unless policies["no_default_ceph"] == validation["reject_default_ceph"]
     errors << "observability LocalPV isolation validation drift" unless validation["reject_static_pv_reuse"] == true &&
       validation["reject_localpv_path_reuse"] == true && validation["require_xfs_project_quota"] == true &&
       validation["allow_distinct_pvs_on_same_backing_nvme"] == true &&
@@ -229,14 +294,7 @@ module ObservabilityTopologyValidator
     errors = []
     lock_path = File.join(root, "architecture.lock.yaml")
     lock = load_yaml(lock_path)
-    relative_contract = lock.dig("machine_contracts", "observability_topology")
-    unless relative_contract == "config/contracts/observability-topology.yaml"
-      errors << "architecture.lock.yaml machine_contracts.observability_topology must point to config/contracts/observability-topology.yaml"
-      return errors
-    end
-
-    contract_path = File.join(root, relative_contract)
-    contract = load_yaml(contract_path)
+    contract, relative_contract = machine_contract(lock, root, "observability_topology")
     errors << "observability topology status must be exact" unless contract["status"] == "exact"
 
     summary = lock["observability"] || {}
@@ -264,6 +322,7 @@ module ObservabilityTopologyValidator
 
     security = contract["security_telemetry"] || {}
     errors << "Data Prepper must remain security-only" unless security["pipeline"] == "data-prepper" &&
+      security["deployment_component"] == "data-prepper-security" &&
       Array(security["forbidden_purposes"]).sort == %w[general-application-logs general-infrastructure-logs].sort
 
     hyperdx = contract["hyperdx"] || {}
@@ -284,7 +343,7 @@ end
 
 if $PROGRAM_NAME == __FILE__
   root = ARGV.fetch(0, File.expand_path("..", __dir__))
-  errors = ObservabilityTopologyValidator.validate(root)
+  errors = ContractAuthorityValidator.validate(root) + ObservabilityTopologyValidator.validate(root)
   if errors.empty?
     puts "[governance] observability topology: PASS"
   else

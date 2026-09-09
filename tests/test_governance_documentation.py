@@ -64,6 +64,10 @@ class GovernanceDocumentationTest(unittest.TestCase):
 
         master = (ROOT / "docs/project/MASTER_EXECUTION_PLAN.md").read_text(encoding="utf-8")
         self.assertIn("M1 PROVEN; M2.5 PROVEN for real PREPROD CREATE", master)
+        self.assertIn("M1 -> M2", master)
+        self.assertIn("M1 -> M2.5 -> M3 -> M4", master)
+        self.assertIn("M2 + M4 -> M5 -> M6 -> M7 -> M8 -> M9", master)
+        self.assertNotIn("M0 -> M1 -> { M2, M2.5 } -> M3", master)
 
         security = (ROOT / "docs/architecture/SECURITY_TRUST_ZONES.md").read_text(encoding="utf-8")
         self.assertIn("Exactly 19 Go backend services", security)
@@ -81,6 +85,15 @@ class GovernanceDocumentationTest(unittest.TestCase):
         mlops = (ROOT / "docs/architecture/MLOPS_TOPOLOGY_V1.md").read_text(encoding="utf-8")
         self.assertIn("no automatic model promotion", mlops.lower())
         self.assertIn("a human approval is required", mlops.lower())
+
+    def test_deployment_dag_requires_machine_graph_and_runtime_binding(self):
+        text = (ROOT / "docs/architecture/DEPLOYMENT_DAG.md").read_text(encoding="utf-8")
+        self.assertIn("is the machine authority for graph topology", text)
+        self.assertIn("duplicate wave IDs", text)
+        self.assertIn("unknown `requires` targets", text)
+        self.assertIn("cycles", text)
+        self.assertIn("unreachable waves", text)
+        self.assertIn("must not be invented", text.lower())
 
     def test_m4_handoff_preserves_storage_first_dependency_order(self):
         text = (ROOT / "docs/project/CODEX_HANDOFFS.md").read_text(encoding="utf-8")

@@ -15,6 +15,8 @@ import subprocess
 import sys
 import json
 
+from contract_paths import machine_contract_path
+
 
 def load_yaml(path: Path) -> dict:
     output = subprocess.check_output(
@@ -36,7 +38,7 @@ def canonical_services(root: Path) -> list[str]:
 
 
 def current_milestone(root: Path) -> str:
-    return str(load_yaml(root / "config/contracts/public-api-contracts.yaml").get("current_milestone", ""))
+    return str(load_yaml(machine_contract_path(root, "public_api_contracts")).get("current_milestone", ""))
 
 
 def validate_service(root: Path, service: str) -> None:

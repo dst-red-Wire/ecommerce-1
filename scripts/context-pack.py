@@ -17,11 +17,13 @@ import shutil
 import subprocess
 import sys
 
+from contract_paths import machine_contract_path
+
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 ROUTER = ROOT / "config/context/router.yaml"
-OWNERSHIP = ROOT / "config/contracts/service-ownership.yaml"
-DEPS = ROOT / "config/contracts/dependency-map.yaml"
-PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
+OWNERSHIP = machine_contract_path(ROOT, "service_ownership")
+DEPS = machine_contract_path(ROOT, "dependency_map")
+PUBLIC_API = machine_contract_path(ROOT, "public_api_contracts")
 
 
 def run(*args: str, check: bool = True) -> str:
