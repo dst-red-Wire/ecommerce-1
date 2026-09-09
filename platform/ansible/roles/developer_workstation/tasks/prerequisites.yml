@@ -1,0 +1,325 @@
+---
+- name: Install baseline workstation packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - git
+      - jq
+      - build-essential
+      - docker.io
+      - make
+      - libyaml-dev
+      - pipx
+      - python3
+      - python3-venv
+      - ruby
+      - ruby-dev
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [workstation, bootstrap]
+
+- name: Create project-owned Ansible collection directory
+  ansible.builtin.file:
+    path: "{{ repo_root }}/.ansible/collections"
+    state: directory
+    mode: '0755'
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Load pinned project Ansible collections
+  ansible.builtin.include_vars:
+    file: "{{ repo_root }}/platform/ansible/requirements.yml"
+    name: developer_collection_requirements
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Inspect project-owned Ansible collection manifests
+  ansible.builtin.stat:
+    path: "{{ repo_root }}/.ansible/collections/ansible_collections/{{ item.name.split('.', 1)[0] }}/{{ item.name.split('.', 1)[1] }}/MANIFEST.json"
+  loop: "{{ developer_collection_requirements.collections }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: developer_collection_manifest_stats
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Read project-owned Ansible collection manifests
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ developer_collection_manifest_stats.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  when: item.stat.exists
+  register: developer_collection_manifests
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Initialize project-owned Ansible collection state
+  ansible.builtin.set_fact:
+    developer_project_collection_versions: {}
+    developer_collection_drift: []
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Record project-owned Ansible collection versions
+  ansible.builtin.set_fact:
+    developer_project_collection_versions: >-
+      {{ developer_project_collection_versions | combine({
+           item.item.item.name: ((item.content | b64decode | from_json).collection_info.version | string)
+         }) }}
+  loop: "{{ developer_collection_manifests.results }}"
+  loop_control:
+    label: "{{ item.item.item.name }}"
+  when: not (item.skipped | default(false))
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Identify project-owned Ansible collection drift
+  ansible.builtin.set_fact:
+    developer_collection_drift: "{{ developer_collection_drift + [item] }}"
+  loop: "{{ developer_collection_requirements.collections }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: developer_project_collection_versions[item.name] | default('') != item.version
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Reconcile drifted project-owned Ansible collections
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python | dirname }}/ansible-galaxy"
+      - collection
+      - install
+      - --requirements-file
+      - "{{ repo_root }}/platform/ansible/requirements.yml"
+      - --collections-path
+      - "{{ repo_root }}/.ansible/collections"
+      - --force
+  when: developer_collection_drift | length > 0
+  changed_when: true
+  tags: [workstation, bootstrap, ansible_collections]
+
+- name: Resolve repository Git common directory before worktree-dependent validation
+  ansible.builtin.command:
+    argv: [git, rev-parse, --path-format=absolute, --git-common-dir]
+    chdir: "{{ repo_root }}"
+  register: developer_git_common_dir
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Read repository core.bare directly from the common Git config
+  ansible.builtin.command:
+    argv: [git, config, --file, "{{ developer_git_common_dir.stdout | trim }}/config", --get, core.bare]
+  register: developer_git_core_bare
+  failed_when: developer_git_core_bare.rc not in [0, 1]
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Repair abnormal core.bare on a checkout
+  ansible.builtin.command:
+    argv: [git, config, --file, "{{ developer_git_common_dir.stdout | trim }}/config", core.bare, 'false']
+  when: developer_git_core_bare.rc == 0 and (developer_git_core_bare.stdout | trim | lower) == 'true'
+  changed_when: true
+  tags: [workstation, git]
+
+- name: Verify repository is usable as a worktree after Git repair
+  ansible.builtin.command:
+    argv: [git, rev-parse, --is-inside-work-tree]
+    chdir: "{{ repo_root }}"
+  register: developer_git_is_worktree
+  changed_when: false
+  failed_when: (developer_git_is_worktree.stdout | trim) != 'true'
+  tags: [workstation, git]
+
+- name: Read repository Git default lines
+  ansible.builtin.set_fact:
+    developer_git_default_lines: >-
+      {{ lookup('ansible.builtin.file', repo_root + '/config/workstation/git-local.conf').splitlines() }}
+    developer_git_defaults: []
+  tags: [workstation, git]
+
+- name: Select active repository Git defaults
+  ansible.builtin.set_fact:
+    developer_git_defaults: "{{ developer_git_defaults + [git_default_line] }}"
+  loop: "{{ developer_git_default_lines }}"
+  loop_control:
+    loop_var: git_default_line
+  when:
+    - git_default_line | trim | length > 0
+    - not (git_default_line | trim).startswith('#')
+  tags: [workstation, git]
+
+- name: Validate repository Git defaults
+  ansible.builtin.assert:
+    that:
+      - "'=' in git_default_entry"
+      - "git_default_entry.split('=', 1)[0] | trim | length > 0"
+      - "git_default_entry.split('=', 1) | length == 2"
+    fail_msg: >-
+      Invalid repository Git default entry {{ git_default_entry | to_json }}:
+      expected a non-empty key and an accessible value in key=value form.
+  loop: "{{ developer_git_defaults }}"
+  loop_control:
+    loop_var: git_default_entry
+    label: "{{ git_default_entry }}"
+  tags: [workstation, git]
+
+- name: Read current repository-local Git defaults
+  ansible.builtin.command:
+    argv: [git, config, --local, --get, "{{ git_default_entry.split('=', 1)[0] }}"]
+    chdir: "{{ repo_root }}"
+  loop: "{{ developer_git_defaults }}"
+  loop_control:
+    loop_var: git_default_entry
+    label: "{{ git_default_entry }}"
+  register: developer_git_current
+  failed_when: false
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Reconcile repository-local Git defaults
+  ansible.builtin.command:
+    argv:
+      - git
+      - config
+      - --local
+      - "{{ git_default_result.git_default_entry.split('=', 1)[0] }}"
+      - "{{ git_default_result.git_default_entry.split('=', 1)[1] }}"
+    chdir: "{{ repo_root }}"
+  loop: "{{ developer_git_current.results }}"
+  loop_control:
+    loop_var: git_default_result
+    label: "{{ git_default_result.git_default_entry }}"
+  when: >-
+    git_default_result.rc != 0 or
+    (git_default_result.stdout | trim) !=
+    git_default_result.git_default_entry.split('=', 1)[1]
+  changed_when: true
+  tags: [workstation, git]
+
+- name: Validate Git identity fields without inventing identity
+  ansible.builtin.command:
+    argv: [git, config, --get, "{{ git_identity_field }}"]
+    chdir: "{{ repo_root }}"
+  loop: [user.name, user.email]
+  loop_control:
+    loop_var: git_identity_field
+    label: "{{ git_identity_field }}"
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Validate origin remote
+  ansible.builtin.command:
+    argv: [git, remote, get-url, origin]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, git]
+
+- name: Select the non-root bootstrap user for Docker access
+  ansible.builtin.set_fact:
+    developer_bootstrap_user: "{{ ansible_facts.env.SUDO_USER | default(ansible_facts.user_id, true) }}"
+  tags: [workstation, bootstrap, docker]
+
+- name: Reconcile bootstrap user membership in the Docker group
+  ansible.builtin.user:
+    name: "{{ developer_bootstrap_user }}"
+    groups: docker
+    append: true
+  become: true
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
+
+- name: Probe Docker daemon as the bootstrap user
+  ansible.builtin.command:
+    argv: [docker, info]
+  register: docker_probe
+  become: "{{ developer_bootstrap_user != ansible_facts.user_id }}"
+  become_user: "{{ developer_bootstrap_user }}"
+  changed_when: false
+  failed_when: false
+  tags: [workstation, docker]
+
+- name: Start Docker Desktop through the supported Windows Docker CLI
+  ansible.builtin.command:
+    argv: [docker.exe, desktop, start]
+  register: docker_desktop_start
+  changed_when: true
+  failed_when: false
+  when: developer_is_wsl2 and docker_probe.rc != 0
+  tags: [workstation, docker]
+
+- name: Start the native Ubuntu Docker daemon
+  ansible.builtin.service:
+    name: docker
+    state: started
+  when: not developer_is_wsl2 and docker_probe.rc != 0
+  become: true
+  tags: [workstation, docker]
+
+- name: Fall back to the official Docker Desktop executable through PowerShell
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - "$p = Join-Path $Env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $p) { Start-Process -FilePath $p; exit 0 } else { exit 1 }"
+  when: developer_is_wsl2 and docker_probe.rc != 0 and docker_desktop_start.rc != 0
+  changed_when: true
+  tags: [workstation, docker]
+
+- name: Wait until Docker daemon is usable by the bootstrap user
+  ansible.builtin.command:
+    argv: [docker, info]
+  register: docker_ready
+  become: "{{ developer_bootstrap_user != ansible_facts.user_id }}"
+  become_user: "{{ developer_bootstrap_user }}"
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: docker_ready.rc == 0
+  tags: [workstation, docker]
+
+- name: Report when a new login session is required for direct Docker access
+  ansible.builtin.command:
+    argv: [id, -nG]
+  register: developer_current_groups
+  changed_when: false
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
+
+- name: Fail closed rather than claim Docker readiness in a stale login session
+  ansible.builtin.assert:
+    that: "'docker' in developer_current_groups.stdout.split()"
+    fail_msg: >-
+      Docker access was granted to {{ developer_bootstrap_user }}, but this login session has not
+      loaded the docker group. Start a new login session (or run `newgrp docker`) and rerun
+      `make bootstrap`; readiness is intentionally not reported yet.
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
+
+- name: Inspect pinned Ruby Psych YAML runtime
+  ansible.builtin.command:
+    argv: [ruby, -rpsych, -e, "print Psych::VERSION"]
+  register: developer_psych_version
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Reconcile pinned Ruby Psych YAML runtime
+  ansible.builtin.command:
+    argv: [gem, install, psych, --version, "{{ psych_version }}", --user-install, --no-document]
+  when: developer_psych_version.stdout | trim != psych_version
+  changed_when: true
+  tags: [workstation, bootstrap]
+
+- name: Validate explicitly provisioned Python runtime
+  ansible.builtin.command:
+    argv: [python3, --version]
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Validate explicitly provisioned Ruby and Psych runtime
+  ansible.builtin.command:
+    argv: [ruby, -rpsych, -e, "abort unless Psych::VERSION == ENV.fetch('EXPECTED_PSYCH_VERSION')"]
+  environment:
+    EXPECTED_PSYCH_VERSION: "{{ psych_version }}"
+  changed_when: false
+  tags: [workstation, bootstrap]
+

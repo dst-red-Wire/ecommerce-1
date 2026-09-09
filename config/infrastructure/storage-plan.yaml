@@ -1,4 +1,4 @@
-version: 5
+version: 6
 status: exact
 policies:
   no_default_ceph: true
@@ -126,8 +126,8 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: preprod-jit-external-archive
-      target_failure_domain: external-to-preprod-jit
+      targets: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+      target_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
       archive_before_preprod_destroy: required
       archive_proof: required-not-yet-proven
       destroy_without_verified_archive: forbidden
@@ -168,8 +168,8 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: preprod-jit-external-archive
-      target_failure_domain: external-to-preprod-jit
+      targets: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+      target_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
       archive_before_preprod_destroy: required
       archive_proof: required-not-yet-proven
       destroy_without_verified_archive: forbidden
@@ -209,8 +209,8 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: barman-pitr-compatible
-      target: preprod-jit-external-archive
-      target_failure_domain: external-to-preprod-jit
+      targets: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+      target_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
       archive_before_preprod_destroy: required
       archive_proof: required-not-yet-proven
       destroy_without_verified_archive: forbidden

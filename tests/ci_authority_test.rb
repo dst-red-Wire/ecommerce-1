@@ -143,7 +143,7 @@ class StoragePlanGovernanceTest < Minitest::Test
     storage = YAML.safe_load(File.read(File.join(ROOT, storage_path)), aliases: false)
     resilience = YAML.safe_load(File.read(File.join(ROOT, resilience_path)), aliases: false)
     profile = resilience.dig("profiles", "mlops-metadata-cnpg")
-    assert_equal 5, storage.fetch("version")
+    assert_equal 6, storage.fetch("version")
     assert_equal "exact", storage.fetch("status")
     assert_equal "exact", resilience.fetch("status")
     refute_nil profile
@@ -160,8 +160,8 @@ class StoragePlanGovernanceTest < Minitest::Test
       assert_equal "strict", spec.dig("topology", "anti_affinity"), component
       assert_equal "single-writer-home-site", spec.dig("topology", "prod_write_authority"), component
       assert_equal "barman-pitr-compatible", spec.dig("backup", "method"), component
-      assert_equal "preprod-jit-external-archive", spec.dig("backup", "target"), component
-      assert_equal "external-to-preprod-jit", spec.dig("backup", "target_failure_domain"), component
+      assert_equal profile.fetch("backup_object_authorities"), spec.dig("backup", "targets"), component
+      assert_equal profile.fetch("backup_failure_domains"), spec.dig("backup", "target_failure_domains"), component
       assert_equal profile.fetch("schedule"), spec.dig("backup", "schedule"), component
       assert_equal profile.fetch("retention"), spec.dig("backup", "retention"), component
       assert_equal({"machine_contract" => "resilience_governance", "profile" => "mlops-metadata-cnpg"},

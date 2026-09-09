@@ -1,4 +1,4 @@
-version: 2
+version: 3
 status: exact
 authority: resilience-governance
 purpose: measurable recovery objectives and persistent archive requirements for stateful platform data
@@ -42,7 +42,7 @@ profiles:
   keycloak-database:
     components: [keycloak-database]
     backup_method: barman-pitr-compatible
-    backup_object_authority: preprod-jit-external-archive
+    backup_object_authorities: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
     backup_execution_authority: rancher-fleet-kubernetes-cronjob
     archive_before_preprod_destroy: required
     archive_proof: required-not-yet-proven
@@ -53,13 +53,13 @@ profiles:
     rto: {preprod: 4h, prod: 2h}
     restore_validation: required
     restore_proof: required-not-yet-proven
-    backup_failure_domain: external-to-preprod-jit
+    backup_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
     local_objective_override: forbidden
 
   mlops-metadata-cnpg:
     components: [lakefs-metadata-cnpg, mlflow-metadata-cnpg]
     backup_method: barman-pitr-compatible
-    backup_object_authority: preprod-jit-external-archive
+    backup_object_authorities: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
     backup_execution_authority: rancher-fleet-kubernetes-cronjob
     archive_before_preprod_destroy: required
     archive_proof: required-not-yet-proven
@@ -70,7 +70,7 @@ profiles:
     rto: {preprod: 4h, prod: 2h}
     restore_validation: required
     restore_proof: required-not-yet-proven
-    backup_failure_domain: external-to-preprod-jit
+    backup_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
     local_objective_override: forbidden
 
 validation:

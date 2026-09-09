@@ -111,6 +111,30 @@ class OpenApiValidatorTest < Minitest::Test
     assert errors.any? { |error| error.include?("reserved service namespace payments owned by payment") }, errors.inspect
   end
 
+  def test_irregular_plural_namespaces_are_reserved_for_their_owners
+    {"inventories" => "inventory", "taxes" => "tax", "categories" => nil}.each do |namespace, owner|
+      spec = product_spec
+      spec.fetch("paths")["/v1/#{namespace}"] = {
+        "get" => {"operationId" => "probe#{namespace.capitalize}", "responses" => {"200" => {"description" => "probe"}}}
+      }
+      errors = validate_product(spec)
+      if owner
+        assert errors.any? { |error| error.include?("reserved service namespace #{namespace} owned by #{owner}") }, errors.inspect
+      else
+        refute errors.any? { |error| error.include?("reserved service namespace #{namespace}") }, errors.inspect
+      end
+    end
+  end
+
+  def test_each_canonical_owner_can_publish_its_declared_namespace
+    namespaces = REGISTRY.fetch("rules").fetch("canonical_service_namespaces")
+    %w[inventory tax checkout].each do |service|
+      assert_equal service, OpenApiContractValidator.reserved_namespace_owner(namespaces, namespaces.fetch(service))
+    end
+    assert_nil OpenApiContractValidator.reserved_namespace_owner(namespaces, "inventory")
+    assert_nil OpenApiContractValidator.reserved_namespace_owner(namespaces, "tax")
+  end
+
   def test_write_without_idempotency_key_is_rejected
     spec = product_spec
     spec.fetch("paths").fetch("/v1/products").fetch("post")["parameters"] = []

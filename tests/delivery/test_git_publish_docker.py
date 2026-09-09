@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAYBOOK = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+PLAYBOOK = (ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml").read_text(encoding="utf-8")
 CONTROLLER = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
 
 

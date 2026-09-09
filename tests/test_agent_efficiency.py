@@ -50,7 +50,7 @@ class AgentEfficiencyContractTest(unittest.TestCase):
     def test_bootstrap_is_single_cross_linux_idempotent_contract(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         playbook = (ROOT / "platform/ansible/developer.yml").read_text(encoding="utf-8")
-        workstation = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+        workstation = (ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml").read_text(encoding="utf-8")
         self.assertEqual(1, len([line for line in makefile.splitlines() if line.startswith("bootstrap:")]))
         self.assertNotIn("workstation-bootstrap:", makefile)
         self.assertNotIn("Require WSL2", playbook)
@@ -85,7 +85,7 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn('argv: ["{{ local_bin }}/oasdiff", version]', tasks)
 
     def test_native_docker_readiness_is_checked_as_bootstrap_user(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+        tasks = (ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml").read_text(encoding="utf-8")
         self.assertIn("Reconcile bootstrap user membership in the Docker group", tasks)
         self.assertIn("append: true", tasks)
         self.assertIn("Probe Docker daemon as the bootstrap user", tasks)
@@ -103,6 +103,22 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Validate exact isolated Nx local version", tasks)
         self.assertNotIn("pnpm approve-builds", tasks)
         self.assertNotIn("dangerouslyAllowAllBuilds", tasks)
+
+
+    def test_pre_commit_is_provisioned_and_verified_before_hooks(self):
+        playbook = (ROOT / "platform/ansible/developer.yml").read_text(encoding="utf-8")
+        toolchain = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        hooks = (ROOT / "platform/ansible/roles/developer_workstation/tasks/hooks.yml").read_text(encoding="utf-8")
+        self.assertLess(playbook.index("tasks_from: prerequisites"), playbook.index("role: developer_toolchain"))
+        self.assertLess(playbook.index("role: developer_toolchain"), playbook.index("tasks_from: hooks"))
+        self.assertIn('spec: "pre-commit=={{ pre_commit_version }}"', toolchain)
+        self.assertIn("item.rc != 0 or ('Version: ' + item.item.version) not in item.stdout", toolchain)
+        self.assertIn("Require explicitly provisioned pre-commit executable", hooks)
+        self.assertIn("Verify pinned pre-commit version before configuring hooks", hooks)
+        self.assertLess(hooks.index("Verify pinned pre-commit version"), hooks.index("Install repository pre-commit hooks"))
+        self.assertEqual(3, hooks.count('changed_when: false'))
+        self.assertNotIn("ignore_errors", hooks)
+        self.assertNotIn("|| true", hooks)
 
 
 if __name__ == "__main__":

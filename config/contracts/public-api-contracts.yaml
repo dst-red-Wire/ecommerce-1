@@ -1,4 +1,4 @@
-version: 1
+version: 2
 status: exact
 protocol: rest-json
 openapi_version: 3.1.0
@@ -9,6 +9,26 @@ common_components: contracts/openapi/common.v1.yaml
 rules:
   version_in_path: true
   canonical_service_namespaces_reserved: true
+  canonical_service_namespaces:
+    catalog: catalogs
+    product: products
+    inventory: inventories
+    cart: carts
+    checkout: checkout
+    pricing: pricing
+    tax: taxes
+    order: orders
+    payment: payments
+    fulfillment: fulfillment
+    shipping: shipping
+    tracking: tracking
+    returns: returns
+    billing: billing
+    fraud-risk: fraud-risks
+    search: search
+    review: reviews
+    user-profile: user-profiles
+    notification: notifications
   remote_refs_forbidden: true
   problem_details_media_type: application/problem+json
   security_scheme: bearerAuth

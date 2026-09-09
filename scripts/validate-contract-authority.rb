@@ -505,8 +505,10 @@ module ContractAuthorityValidator
     errors << "resilience profile mlops-metadata-cnpg restore validation must be required" unless profile["restore_validation"] == "required"
     errors << "resilience profile mlops-metadata-cnpg component set drift" unless Array(profile["components"]).sort == MLOPS_METADATA_COMPONENTS.sort
     errors << "resilience profile mlops-metadata-cnpg backup method drift" unless profile["backup_method"] == "barman-pitr-compatible"
-    errors << "resilience profile mlops-metadata-cnpg backup authority must be persistent and external to PREPROD JIT" unless profile["backup_object_authority"] == "preprod-jit-external-archive"
-    errors << "resilience profile mlops-metadata-cnpg backup failure domain drift" unless profile["backup_failure_domain"] == "external-to-preprod-jit"
+    expected_targets = {"preprod" => "preprod-jit-external-archive", "prod" => "opposite-prod-site"}
+    expected_failure_domains = {"preprod" => "external-to-preprod-jit", "prod" => "opposite-prod-site"}
+    errors << "resilience profile mlops-metadata-cnpg backup targets must distinguish PREPROD and PROD" unless profile["backup_object_authorities"] == expected_targets
+    errors << "resilience profile mlops-metadata-cnpg backup failure domains must match each environment" unless profile["backup_failure_domains"] == expected_failure_domains
     errors << "PREPROD archive must precede destroy" unless profile["archive_before_preprod_destroy"] == "required"
     errors << "PREPROD destroy without verified archive must be forbidden" unless profile["destroy_without_verified_archive"] == "forbidden"
     errors << "PREPROD archive proof must remain explicitly unproven until runtime evidence exists" unless profile["archive_proof"] == "required-not-yet-proven"
@@ -573,14 +575,14 @@ module ContractAuthorityValidator
     end
     {
       "backup_method" => "barman-pitr-compatible",
-      "backup_object_authority" => "preprod-jit-external-archive",
+      "backup_object_authorities" => expected_targets,
       "backup_execution_authority" => "rancher-fleet-kubernetes-cronjob",
       "archive_before_preprod_destroy" => "required",
       "archive_proof" => "required-not-yet-proven",
       "destroy_without_verified_archive" => "forbidden",
       "restore_validation" => "required",
       "restore_proof" => "required-not-yet-proven",
-      "backup_failure_domain" => "external-to-preprod-jit",
+      "backup_failure_domains" => expected_failure_domains,
       "local_objective_override" => "forbidden"
     }.each do |field, expected|
       errors << "resilience profile keycloak-database #{field} drift" unless keycloak_profile[field] == expected
@@ -596,8 +598,8 @@ module ContractAuthorityValidator
     end
     errors << "keycloak-database restore validation must match resilience governance" unless keycloak_backup["restore_validation"] == keycloak_profile["restore_validation"]
     errors << "keycloak-database backup method must match resilience governance" unless keycloak_backup["method"] == keycloak_profile["backup_method"]
-    errors << "keycloak-database backup target must be persistent and external to PREPROD JIT" unless keycloak_backup["target"] == keycloak_profile["backup_object_authority"]
-    errors << "keycloak-database backup failure domain must be external to PREPROD JIT" unless keycloak_backup["target_failure_domain"] == keycloak_profile["backup_failure_domain"]
+    errors << "keycloak-database backup targets must distinguish PREPROD and PROD" unless keycloak_backup["targets"] == keycloak_profile["backup_object_authorities"]
+    errors << "keycloak-database backup failure domains must match each environment" unless keycloak_backup["target_failure_domains"] == keycloak_profile["backup_failure_domains"]
     errors << "keycloak-database archive must precede PREPROD destroy" unless keycloak_backup["archive_before_preprod_destroy"] == keycloak_profile["archive_before_preprod_destroy"]
     errors << "keycloak-database destroy must fail closed without verified archive" unless keycloak_backup["destroy_without_verified_archive"] == keycloak_profile["destroy_without_verified_archive"]
     errors << "keycloak-database archive proof must remain unproven until runtime evidence exists" unless keycloak_backup["archive_proof"] == keycloak_profile["archive_proof"]
@@ -638,8 +640,8 @@ module ContractAuthorityValidator
       end
       errors << "#{component} restore validation must match resilience governance" unless backup["restore_validation"] == profile["restore_validation"]
       errors << "#{component} backup method must match resilience governance" unless backup["method"] == profile["backup_method"]
-      errors << "#{component} backup target must match resilience governance" unless backup["target"] == profile["backup_object_authority"]
-      errors << "#{component} backup failure domain must match resilience governance" unless backup["target_failure_domain"] == profile["backup_failure_domain"]
+      errors << "#{component} backup targets must distinguish PREPROD and PROD" unless backup["targets"] == profile["backup_object_authorities"]
+      errors << "#{component} backup failure domains must match each environment" unless backup["target_failure_domains"] == profile["backup_failure_domains"]
     end
   end
 

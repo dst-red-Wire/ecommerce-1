@@ -63,6 +63,12 @@ module OpenApiContractValidator
     errors << "#{registry_path} openapi_version must be 3.1.0" unless registry["openapi_version"] == "3.1.0"
     errors << "#{registry_path} remote_refs_forbidden must be true" unless rules["remote_refs_forbidden"] == true
     errors << "#{registry_path} canonical_service_namespaces_reserved must be true" unless rules["canonical_service_namespaces_reserved"] == true
+    canonical_namespaces = rules["canonical_service_namespaces"]
+    unless canonical_namespaces.is_a?(Hash) && canonical_namespaces.keys.sort == services.sort &&
+           canonical_namespaces.values.all? { |namespace| namespace.is_a?(String) && !namespace.empty? } &&
+           canonical_namespaces.values.uniq.length == canonical_namespaces.values.length
+      errors << "#{registry_path} canonical_service_namespaces must map every canonical service to a unique namespace"
+    end
 
     common_path = registry["common_components"]
     common_absolute = safe_contract_path(root, common_path, errors)
@@ -170,7 +176,7 @@ module OpenApiContractValidator
       errors << "#{spec_path} path #{path} must start with #{expected_prefix}" unless path.start_with?(expected_prefix)
       if path.start_with?(expected_prefix) && rules["canonical_service_namespaces_reserved"] == true
         namespace = path.delete_prefix(expected_prefix).split("/", 2).first
-        owner = reserved_namespace_owner(canonical_services, namespace)
+        owner = reserved_namespace_owner(rules["canonical_service_namespaces"], namespace)
         if owner && owner != service
           errors << "#{spec_path} path #{path} uses reserved service namespace #{namespace} owned by #{owner}"
         end
@@ -233,10 +239,10 @@ module OpenApiContractValidator
   end
 
 
-  def reserved_namespace_owner(canonical_services, namespace)
-    Array(canonical_services).find do |candidate|
-      namespace == candidate || namespace == "#{candidate}s"
-    end
+  def reserved_namespace_owner(canonical_namespaces, namespace)
+    return nil unless canonical_namespaces.is_a?(Hash)
+
+    canonical_namespaces.find { |_service, reserved| namespace == reserved }&.first
   end
 
   def security_requirement?(security, scheme)

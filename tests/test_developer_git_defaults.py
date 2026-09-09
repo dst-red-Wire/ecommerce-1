@@ -7,7 +7,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TASKS = ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml"
+TASKS = ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml"
 ANSIBLE_PLAYBOOK = shutil.which("ansible-playbook")
 
 

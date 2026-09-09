@@ -137,10 +137,28 @@ class ContractAuthorityClosureTest < Minitest::Test
   def test_keycloak_backup_must_survive_preprod_jit_destroy
     lock = load_yaml("architecture.lock.yaml")
     storage = load_yaml("config/infrastructure/storage-plan.yaml")
-    storage.dig("engines", "keycloak-database", "backup")["target"] = "seaweedfs-s3"
+    storage.dig("engines", "keycloak-database", "backup")["targets"]["prod"] = "preprod-jit-external-archive"
     errors = []
     ContractAuthorityValidator.validate_resilience_binding(errors, lock, ROOT, storage)
-    assert errors.any? { |error| error.include?("keycloak-database backup target must be persistent") }
+    assert errors.any? { |error| error.include?("keycloak-database backup targets must distinguish") }
+  end
+
+  def test_environment_aware_database_backup_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    %w[keycloak-database lakefs-metadata-cnpg mlflow-metadata-cnpg].each do |component|
+      {
+        "prod targets PREPROD" => ["targets", {"preprod" => "preprod-jit-external-archive", "prod" => "preprod-jit-external-archive"}],
+        "PREPROD stays in JIT" => ["target_failure_domains", {"preprod" => "preprod-jit", "prod" => "opposite-prod-site"}],
+        "failure domains swapped" => ["target_failure_domains", {"preprod" => "opposite-prod-site", "prod" => "external-to-preprod-jit"}],
+        "ambiguous target" => ["targets", "preprod-jit-external-archive"]
+      }.each do |label, (field, value)|
+        storage = load_yaml("config/infrastructure/storage-plan.yaml")
+        storage.dig("engines", component, "backup")[field] = value
+        errors = []
+        ContractAuthorityValidator.validate_resilience_binding(errors, lock, ROOT, storage)
+        assert errors.any? { |error| error.include?(component) && error.include?(field.start_with?("target_failure") ? "failure" : "target") }, "#{component}: #{label}"
+      end
+    end
   end
 
   def test_seaweedfs_preprod_backup_target_and_teardown_gate_mutations_fail_closed

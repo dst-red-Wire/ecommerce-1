@@ -34,6 +34,9 @@
 
   roles:
     - role: developer_workstation
+      tasks_from: prerequisites
     - role: developer_toolchain
+    - role: developer_workstation
+      tasks_from: hooks
     - role: api_codegen
     - role: product_persistence

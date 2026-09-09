@@ -1,0 +1,38 @@
+---
+- name: Locate explicitly provisioned pre-commit executable
+  ansible.builtin.stat:
+    path: "{{ local_bin }}/pre-commit"
+  register: developer_pre_commit_executable
+  tags: [workstation, bootstrap]
+
+- name: Require explicitly provisioned pre-commit executable
+  ansible.builtin.assert:
+    that:
+      - developer_pre_commit_executable.stat.exists
+      - developer_pre_commit_executable.stat.executable
+    fail_msg: "Pinned pre-commit must be provisioned in {{ local_bin }} before hook configuration."
+  tags: [workstation, bootstrap]
+
+- name: Verify pinned pre-commit version before configuring hooks
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/pre-commit", --version]
+  register: developer_pre_commit_version
+  changed_when: false
+  failed_when: "('pre-commit ' + pre_commit_version) not in developer_pre_commit_version.stdout"
+  environment:
+    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
+  tags: [workstation, bootstrap]
+
+- name: Install repository pre-commit hooks
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/pre-commit", install, --install-hooks]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, bootstrap]
+
+- name: Install repository pre-push hook
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/pre-commit", install, --hook-type, pre-push]
+    chdir: "{{ repo_root }}"
+  changed_when: false
+  tags: [workstation, bootstrap]
