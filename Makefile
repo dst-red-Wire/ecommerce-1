@@ -92,7 +92,8 @@ tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
-workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
+workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible; requires pipx
+	@command -v pipx >/dev/null 2>&1 || { echo "ERROR: pipx is required for workstation-bootstrap; install pipx first, then retry." >&2; exit 1; }
 	@$(ANSIBLE_BOOTSTRAP) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
