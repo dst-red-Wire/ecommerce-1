@@ -83,7 +83,7 @@
 - name: Reconcile drifted project-owned Ansible collections
   ansible.builtin.command:
     argv:
-      - ansible-galaxy
+      - "{{ ansible_playbook_python | dirname }}/ansible-galaxy"
       - collection
       - install
       - --requirements-file
@@ -211,10 +211,26 @@
   changed_when: false
   tags: [workstation, git]
 
-- name: Probe Docker daemon
+- name: Select the non-root bootstrap user for Docker access
+  ansible.builtin.set_fact:
+    developer_bootstrap_user: "{{ ansible_facts.env.SUDO_USER | default(ansible_facts.user_id, true) }}"
+  tags: [workstation, bootstrap, docker]
+
+- name: Reconcile bootstrap user membership in the Docker group
+  ansible.builtin.user:
+    name: "{{ developer_bootstrap_user }}"
+    groups: docker
+    append: true
+  become: true
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
+
+- name: Probe Docker daemon as the bootstrap user
   ansible.builtin.command:
     argv: [docker, info]
   register: docker_probe
+  become: "{{ developer_bootstrap_user != ansible_facts.user_id }}"
+  become_user: "{{ developer_bootstrap_user }}"
   changed_when: false
   failed_when: false
   tags: [workstation, docker]
@@ -249,16 +265,35 @@
   changed_when: true
   tags: [workstation, docker]
 
-- name: Wait until Docker daemon is reachable
+- name: Wait until Docker daemon is usable by the bootstrap user
   ansible.builtin.command:
     argv: [docker, info]
   register: docker_ready
+  become: "{{ developer_bootstrap_user != ansible_facts.user_id }}"
+  become_user: "{{ developer_bootstrap_user }}"
   changed_when: false
   retries: 30
   delay: 2
   until: docker_ready.rc == 0
-  when: docker_probe.rc != 0
   tags: [workstation, docker]
+
+- name: Report when a new login session is required for direct Docker access
+  ansible.builtin.command:
+    argv: [id, -nG]
+  register: developer_current_groups
+  changed_when: false
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
+
+- name: Fail closed rather than claim Docker readiness in a stale login session
+  ansible.builtin.assert:
+    that: "'docker' in developer_current_groups.stdout.split()"
+    fail_msg: >-
+      Docker access was granted to {{ developer_bootstrap_user }}, but this login session has not
+      loaded the docker group. Start a new login session (or run `newgrp docker`) and rerun
+      `make bootstrap`; readiness is intentionally not reported yet.
+  when: not developer_is_wsl2 and developer_bootstrap_user != 'root'
+  tags: [workstation, bootstrap, docker]
 
 - name: Inspect pinned Ruby Psych YAML runtime
   ansible.builtin.command:

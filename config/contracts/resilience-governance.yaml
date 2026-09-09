@@ -19,6 +19,26 @@ persistent_archive_authorities:
     external_failure_domain_independence: required
 
 profiles:
+  seaweedfs-preprod-object-data:
+    components: [seaweedfs, lakefs, mlflow, platform-backup-jobs]
+    backup_method: external-object-copy-plus-inventory-validation
+    backup_object_authority: preprod-jit-external-archive
+    backup_execution_authority: rancher-fleet-kubernetes-cronjob
+    archive_before_preprod_destroy: required
+    archive_proof: required-not-yet-proven
+    destroy_without_verified_archive: forbidden
+    schedule: {preprod: 12h}
+    retention: {preprod: 7d}
+    rpo: {preprod: 12h}
+    rto: {preprod: 6h}
+    restore_validation: required
+    restore_proof: required-not-yet-proven
+    backup_failure_domain: external-to-preprod-jit
+    encryption: {in_transit: required, at_rest: required, key_authority_separate_from-jit: required}
+    integrity: {checksums: required, immutable_manifest: required, inventory_validation: required}
+    management_responsibility: persistent-management-plane
+    local_objective_override: forbidden
+
   keycloak-database:
     components: [keycloak-database]
     backup_method: barman-pitr-compatible

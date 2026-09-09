@@ -395,7 +395,15 @@ engines:
     retention: persistent-until-explicit-deletion
     backup:
       method: cross-site-object-replication-plus-inventory-validation
-      target: opposite-prod-site
+      targets: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+      target_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
+      objectives_authority:
+        machine_contract: resilience_governance
+        profile: seaweedfs-preprod-object-data
+      local_objective_override: forbidden
+      archive_before_preprod_destroy: required
+      archive_proof: required-not-yet-proven
+      destroy_without_verified_archive: forbidden
       schedule: {preprod: 12h, prod: 6h}
       retention: {preprod: 7d, prod: 30d}
       rpo: {preprod: 12h, prod: 6h}

@@ -1,5 +1,6 @@
 PYTHON := python3
 include config/toolchain/versions.env
+export PATH := $(HOME)/.local/bin:$(PATH)
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG

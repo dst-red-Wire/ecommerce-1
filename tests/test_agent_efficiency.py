@@ -43,6 +43,9 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("pipx run --spec ansible-core==$(ANSIBLE_CORE_VERSION)", makefile)
         self.assertIn("ansible-core=={{ ansible_core_version }}", tasks)
         self.assertIn("ansible-lint=={{ ansible_lint_version }}", tasks)
+        self.assertIn("Validate canonical ansible-playbook version and path", tasks)
+        self.assertIn('argv: ["{{ local_bin }}/ansible-playbook", --version]', tasks)
+        self.assertIn("export PATH := $(HOME)/.local/bin:$(PATH)", makefile)
 
     def test_bootstrap_is_single_cross_linux_idempotent_contract(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -78,6 +81,18 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         )
         self.assertIn("oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz", tasks)
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
+        self.assertIn("Validate pinned oasdiff version", tasks)
+        self.assertIn('argv: ["{{ local_bin }}/oasdiff", version]', tasks)
+
+    def test_native_docker_readiness_is_checked_as_bootstrap_user(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn("Reconcile bootstrap user membership in the Docker group", tasks)
+        self.assertIn("append: true", tasks)
+        self.assertIn("Probe Docker daemon as the bootstrap user", tasks)
+        self.assertIn("Wait until Docker daemon is usable by the bootstrap user", tasks)
+        self.assertIn("Fail closed rather than claim Docker readiness in a stale login session", tasks)
+        self.assertIn("docker_probe.rc != 0", tasks)
+        self.assertIn("until: docker_ready.rc == 0", tasks)
 
     def test_isolated_nx_has_exact_fail_closed_build_approval(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")

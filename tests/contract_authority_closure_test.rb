@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "fileutils"
+require "tmpdir"
 require "yaml"
 require_relative "../scripts/validate-contract-authority"
 
@@ -46,6 +48,16 @@ class ContractAuthorityClosureTest < Minitest::Test
     assert errors.any? { |error| error.include?("unknown profile missing-profile") }
   end
 
+  def test_each_deployment_safety_rule_mutation_fails_closed
+    ContractAuthorityValidator::REQUIRED_DEPLOYMENT_RULES.each_key do |rule|
+      waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+      waves.fetch("rules")[rule] = false
+      errors = []
+      ContractAuthorityValidator.validate_dag(errors, waves)
+      assert errors.any? { |error| error.include?(rule) }, rule
+    end
+  end
+
   def test_unknown_storage_dependency_is_rejected
     storage = load_yaml("config/infrastructure/storage-plan.yaml")
     waves = load_yaml("config/infrastructure/deployment-waves.yaml")
@@ -78,6 +90,23 @@ class ContractAuthorityClosureTest < Minitest::Test
     errors = []
     ContractAuthorityValidator.validate_trust_zones(errors, lock, ROOT, waves)
     assert_empty errors
+  end
+
+  def test_each_trust_zone_safety_rule_mutation_fails_closed
+    lock = load_yaml("architecture.lock.yaml")
+    waves = load_yaml("config/infrastructure/deployment-waves.yaml")
+    ContractAuthorityValidator::REQUIRED_TRUST_ZONE_RULES.each_key do |rule|
+      Dir.mktmpdir do |root|
+        FileUtils.cp_r(Dir.glob(File.join(ROOT, "*")), root)
+        path = File.join(root, "config/contracts/security-trust-zones.yaml")
+        contract = YAML.safe_load(File.read(path), aliases: false)
+        contract.fetch("rules")[rule] = false
+        File.write(path, YAML.dump(contract))
+        errors = []
+        ContractAuthorityValidator.validate_trust_zones(errors, lock, root, waves)
+        assert errors.any? { |error| error.include?(rule) }, rule
+      end
+    end
   end
   def test_keycloak_database_and_strimzi_operator_mutations_fail_closed
     storage = load_yaml("config/infrastructure/storage-plan.yaml")
@@ -112,6 +141,20 @@ class ContractAuthorityClosureTest < Minitest::Test
     errors = []
     ContractAuthorityValidator.validate_resilience_binding(errors, lock, ROOT, storage)
     assert errors.any? { |error| error.include?("keycloak-database backup target must be persistent") }
+  end
+
+  def test_seaweedfs_preprod_backup_target_and_teardown_gate_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    {
+      "targets" => {"preprod" => "opposite-prod-site", "prod" => "opposite-prod-site"},
+      "destroy_without_verified_archive" => "allowed"
+    }.each do |field, value|
+      storage = load_yaml("config/infrastructure/storage-plan.yaml")
+      storage.dig("engines", "seaweedfs", "backup")[field] = value
+      errors = []
+      ContractAuthorityValidator.validate_resilience_binding(errors, lock, ROOT, storage)
+      assert errors.any? { |error| error.include?("SeaweedFS") && error.include?(field.split('_').first) }, field
+    end
   end
 
 end

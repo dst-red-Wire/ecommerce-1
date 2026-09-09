@@ -27,6 +27,21 @@ module ContractAuthorityValidator
     "cycles_forbidden" => true,
     "unreachable_waves_forbidden" => true
   }.freeze
+  REQUIRED_DEPLOYMENT_RULES = {
+    "wait_only_on_declared_dependencies" => true,
+    "fail_fast_on_blocking_gate" => true,
+    "no_perf_before_prior_gates" => true,
+    "no_chaos_dr_before_prior_gates" => true,
+    "no_prod_promotion_from_test_state" => true
+  }.freeze
+  REQUIRED_TRUST_ZONE_RULES = {
+    "active_wave_components_must_be_mapped" => true,
+    "unknown_subjects_forbidden" => true,
+    "business_services_must_be_z3" => true,
+    "frontends_must_be_z3" => true,
+    "customer_identity_runtime_must_not_be_mgmt_only" => true,
+    "keycloak_admin_paths_require_mgmt_identity" => true
+  }.freeze
   REQUIRED_EXECUTION_POLICY = {
     "activation_requires_resolved_binding" => true,
     "placeholders_forbidden" => true,
@@ -231,6 +246,11 @@ module ContractAuthorityValidator
     errors << "deployment graph policy must declare a root_wave" unless root_id.is_a?(String) && !root_id.empty?
     REQUIRED_GRAPH_POLICY.each do |field, expected|
       errors << "deployment graph policy #{field} must be #{expected}" unless graph_policy[field] == expected
+    end
+    rules = waves_contract["rules"] || {}
+    errors << "deployment rules must contain exactly the required safety invariants" unless rules.keys.sort == REQUIRED_DEPLOYMENT_RULES.keys.sort
+    REQUIRED_DEPLOYMENT_RULES.each do |field, expected|
+      errors << "deployment safety rule #{field} must be #{expected}" unless rules[field] == expected
     end
 
     waves = Array(waves_contract["waves"])
@@ -441,6 +461,11 @@ module ContractAuthorityValidator
     errors << "security trust zones status must be exact" unless contract["status"] == "exact"
     documentation = lock.dig("topology_contracts", "security_zones")
     errors << "security trust zones documentation authority drift" unless contract["documentation"] == documentation
+    rules = contract["rules"] || {}
+    errors << "security trust-zone rules must contain exactly the required safety invariants" unless rules.keys.sort == REQUIRED_TRUST_ZONE_RULES.keys.sort
+    REQUIRED_TRUST_ZONE_RULES.each do |field, expected|
+      errors << "security trust-zone rule #{field} must be #{expected}" unless rules[field] == expected
+    end
 
     zones = contract["zones"]
     errors << "security trust zones must define exactly Z0 through Z6" unless zones.is_a?(Hash) && zones.keys.sort == %w[Z0 Z1 Z2 Z3 Z4 Z5 Z6]
@@ -496,7 +521,50 @@ module ContractAuthorityValidator
     errors << "resilience governance must fail closed when external copy is unproven" unless validation["fail_closed_when_external_copy_unproven"] == true
     archive = authority.dig("persistent_archive_authorities", "preprod-jit-external-archive") || {}
     errors << "persistent PREPROD archive must be external to JIT" unless archive["external_failure_domain_independence"] == "required" && archive["lifecycle"] == "persistent-independent-from-preprod-jit"
-    errors << "persistent PREPROD archive provider must remain unresolved rather than fabricated" unless archive.dig("operational_prerequisites", "provider") == "required-unresolved"
+    %w[provider endpoint bucket credential_reference].each do |field|
+      errors << "persistent PREPROD archive #{field} must remain unresolved rather than fabricated" unless archive.dig("operational_prerequisites", field) == "required-unresolved"
+    end
+    errors << "persistent PREPROD archive management responsibility drift" unless archive["management_plane_responsibility"] == "provision-and-govern-destination"
+    errors << "persistent PREPROD archive encryption drift" unless archive["encryption"] == {
+      "in_transit" => "required", "at_rest" => "required", "key_authority_separate_from-jit" => "required"
+    }
+    errors << "persistent PREPROD archive integrity drift" unless archive["integrity"] == {
+      "checksums" => "required", "immutable_manifest" => "required"
+    }
+
+    seaweed_profile = authority.dig("profiles", "seaweedfs-preprod-object-data") || {}
+    %w[schedule retention rpo rto].each do |field|
+      errors << "resilience profile seaweedfs-preprod-object-data #{field} must define a positive PREPROD duration" unless duration_map?(seaweed_profile[field], ["preprod"])
+    end
+    {
+      "components" => %w[seaweedfs lakefs mlflow platform-backup-jobs],
+      "backup_method" => "external-object-copy-plus-inventory-validation",
+      "backup_object_authority" => "preprod-jit-external-archive",
+      "backup_execution_authority" => "rancher-fleet-kubernetes-cronjob",
+      "archive_before_preprod_destroy" => "required",
+      "archive_proof" => "required-not-yet-proven",
+      "destroy_without_verified_archive" => "forbidden",
+      "restore_validation" => "required",
+      "restore_proof" => "required-not-yet-proven",
+      "backup_failure_domain" => "external-to-preprod-jit",
+      "management_responsibility" => "persistent-management-plane",
+      "local_objective_override" => "forbidden"
+    }.each do |field, expected|
+      errors << "resilience profile seaweedfs-preprod-object-data #{field} drift" unless seaweed_profile[field] == expected
+    end
+    seaweed_backup = storage.dig("engines", "seaweedfs", "backup") || {}
+    errors << "SeaweedFS backup targets must distinguish PREPROD and PROD failure domains" unless seaweed_backup["targets"] == {
+      "preprod" => "preprod-jit-external-archive", "prod" => "opposite-prod-site"
+    }
+    errors << "SeaweedFS backup target failure domains drift" unless seaweed_backup["target_failure_domains"] == {
+      "preprod" => "external-to-preprod-jit", "prod" => "opposite-prod-site"
+    }
+    errors << "SeaweedFS PREPROD objectives must resolve through resilience governance" unless seaweed_backup["objectives_authority"] == {
+      "machine_contract" => "resilience_governance", "profile" => "seaweedfs-preprod-object-data"
+    }
+    %w[archive_before_preprod_destroy archive_proof destroy_without_verified_archive local_objective_override].each do |field|
+      errors << "SeaweedFS PREPROD backup #{field} must match resilience governance" unless seaweed_backup[field] == seaweed_profile[field]
+    end
 
     keycloak_profile = authority.dig("profiles", "keycloak-database") || {}
     errors << "resilience profile keycloak-database component set drift" unless Array(keycloak_profile["components"]) == ["keycloak-database"]

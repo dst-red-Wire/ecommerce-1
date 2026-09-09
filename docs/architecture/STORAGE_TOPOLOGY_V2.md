@@ -36,7 +36,7 @@ Minimum topology:
 - versioning/Object Lock/immutability only where the workload/evidence/backup policy requires it;
 - encryption and restore validation required before PROD admission.
 
-SeaweedFS objects used as immutable evidence/backup must have an independent copy outside the failure domain they protect. For JIT PREPROD lakeFS/MLflow metadata and the Keycloak IAM database, retention after teardown requires a persistent management-plane-governed external archive whose provider, endpoint, bucket and credential remain explicit unresolved prerequisites. Teardown fails closed until archive integrity and restore-validation evidence exist; static contracts never claim that evidence is already proven.
+SeaweedFS objects used as immutable evidence/backup must have an independent copy outside the failure domain they protect. PROD uses the opposite PROD site; PREPROD uses the persistent `preprod-jit-external-archive` authority, never the nonexistent opposite site of mono-site `preprod-jit`. This same authority binds SeaweedFS object data, lakeFS/MLflow metadata and the Keycloak IAM database. Its provider, endpoint, bucket and credential remain explicit unresolved prerequisites rather than fabricated values. Teardown fails closed until archive integrity and restore-validation evidence exist; static contracts never claim that evidence is already proven.
 
 ## PostgreSQL / CNPG
 

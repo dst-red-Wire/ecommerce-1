@@ -308,6 +308,14 @@
     force: true
   tags: [toolchain, agent_tools]
 
+- name: Validate pinned oasdiff version
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/oasdiff", version]
+  register: oasdiff_current
+  changed_when: false
+  failed_when: oasdiff_version not in (oasdiff_current.stdout + oasdiff_current.stderr)
+  tags: [toolchain, agent_tools]
+
 - name: Check installed oapi-codegen version
   ansible.builtin.command:
     argv: ["{{ local_bin }}/oapi-codegen", --version]
@@ -448,6 +456,14 @@
   loop: "{{ developer_pipx_checks.results }}"
   when: "item.rc != 0 or ('Version: ' + item.item.version) not in item.stdout"
   changed_when: true
+  tags: [toolchain]
+
+- name: Validate canonical ansible-playbook version and path
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/ansible-playbook", --version]
+  register: ansible_playbook_current
+  changed_when: false
+  failed_when: ansible_core_version not in ansible_playbook_current.stdout
   tags: [toolchain]
 
 - name: Check Molecule Docker plugin version
