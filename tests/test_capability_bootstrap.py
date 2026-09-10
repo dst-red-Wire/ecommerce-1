@@ -135,6 +135,16 @@ class CapabilityAuditTest(unittest.TestCase):
         )
         self.assertTrue(all(result.state == "PASS" for result in results.values()))
 
+    def test_omitted_platform_primitives_are_treated_as_empty(self):
+        test_contract = contract([{"name": "python", "requires": [], "command": "python3"}])
+        del test_contract["platform_primitives"]
+        results = MOD.Auditor(
+            test_contract,
+            runner=self.runner({"/bin/python3": (0, "Python 1.0.0")}),
+            which=lambda command: f"/bin/{command}",
+        ).run(bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["python"].state)
+
     def test_missing_platform_primitive_fails(self):
         results = self.primitive_auditor(("tar",), present=set()).run(
             bootstrap=False, os_name="linux", arch="amd64"
@@ -155,6 +165,17 @@ class CapabilityAuditTest(unittest.TestCase):
         )
         self.assertEqual("PASS", results["invented-primitive"].state)
 
+    def test_platform_primitives_are_unsupported_without_host_resolution(self):
+        resolver = mock.Mock(return_value="/bin/tar")
+        auditor = MOD.Auditor(self.primitive_auditor(("tar",), present={"tar"}).contract, which=resolver)
+
+        os_results = auditor.run(bootstrap=False, os_name="plan9", arch="amd64")
+        arch_results = auditor.run(bootstrap=False, os_name="linux", arch="sparc64")
+
+        self.assertEqual("UNSUPPORTED", os_results["tar"].state)
+        self.assertEqual("UNSUPPORTED", arch_results["tar"].state)
+        resolver.assert_not_called()
+
     def test_platform_primitive_does_not_overwrite_capability_result(self):
         item = {"name": "ruby", "requires": [], "command": "ruby", "version_key": "GO_VERSION"}
         test_contract = contract([item])
@@ -167,6 +188,14 @@ class CapabilityAuditTest(unittest.TestCase):
         results = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         self.assertEqual("FAIL", results["ruby"].state)
         self.assertIn("wrong version", results["ruby"].detail)
+
+    def test_platform_primitive_rejects_mismatched_capability_name_collision(self):
+        test_contract = contract([{"name": "tar", "requires": [], "command": "fake"}])
+        test_contract["platform_primitives"] = [{"command": "tar", "justification": "test collision"}]
+        with self.assertRaisesRegex(
+            ValueError, "primitive tar collides with capability tar using executable fake"
+        ):
+            MOD.validate_contract(test_contract)
 
     def test_platform_primitive_audit_never_calls_runner(self):
         runner = mock.Mock()
