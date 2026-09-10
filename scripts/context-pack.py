@@ -24,6 +24,18 @@ DEPS = ROOT / "config/contracts/dependency-map.yaml"
 PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
 
 
+class MissingManagedYq(RuntimeError):
+    pass
+
+
+def managed_yq() -> str:
+    """Resolve only the repository-provisioned yq, never an unpinned system copy."""
+    candidate = Path.home() / ".local" / "bin" / "yq"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise MissingManagedYq(f"managed yq missing: run `make context-tools` ({candidate})")
+    return str(candidate)
+
+
 def run(*args: str, check: bool = True) -> str:
     p = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and p.returncode:
@@ -32,7 +44,7 @@ def run(*args: str, check: bool = True) -> str:
 
 
 def yq_json(expr: str, path: Path):
-    return json.loads(run("yq", "-o=json", expr, str(path)))
+    return json.loads(run(managed_yq(), "-o=json", expr, str(path)))
 
 
 def changed_files(base: str) -> list[str]:
@@ -263,4 +275,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except MissingManagedYq as exc:
+        print(f"BLOCKED {exc}", file=sys.stderr)
+        raise SystemExit(1) from None

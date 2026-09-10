@@ -92,6 +92,11 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             item = graph.items.get(entrypoint, {})
             if item.get("provider") != provider or provider not in item.get("requires", []):
                 raise ValueError(f"{entrypoint}: must be bound to the ansible-core provider")
+    for item in graph.items.values():
+        if item.get("classification") == "seed-prerequisite" and (
+            item.get("provision") or item.get("provision_requires") or item.get("isolated")
+        ):
+            raise ValueError(f"{item['name']}: runner prerequisite must not have a repository provisioner")
     command_aliases = contract.get("command_capabilities", {})
     external = {}
     for classification, key in (
@@ -367,7 +372,8 @@ class Auditor:
                 detail = f"runner prerequisite missing: {capability_name or item.get('name', command)}"
             else:
                 detail = "tool absent"
-            return Result("FAIL", detail)
+            state = "BLOCKED" if item.get("classification") == "seed-prerequisite" else "FAIL"
+            return Result(state, detail)
         expected = self.versions.get(item.get("version_key", ""))
         version_file = item.get("version_file")
         if version_file:
