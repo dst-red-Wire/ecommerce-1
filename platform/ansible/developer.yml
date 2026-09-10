@@ -26,7 +26,7 @@
       register: developer_kernel
       changed_when: false
       tags: [always]
-      when: "'workstation' in ansible_run_tags or 'docker' in ansible_run_tags"
+      when: "'all' in ansible_run_tags or 'workstation' in ansible_run_tags or 'docker' in ansible_run_tags"
 
     - name: Require WSL2 Microsoft kernel
       ansible.builtin.assert:
@@ -34,7 +34,7 @@
           - "'microsoft' in developer_kernel.stdout | lower"
         fail_msg: "Developer reconciliation must run from the supported WSL2 environment."
       tags: [always]
-      when: "'workstation' in ansible_run_tags or 'docker' in ansible_run_tags"
+      when: "'all' in ansible_run_tags or 'workstation' in ansible_run_tags or 'docker' in ansible_run_tags"
 
   roles:
     - role: developer_workstation
