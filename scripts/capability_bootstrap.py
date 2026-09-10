@@ -121,6 +121,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             alternative_key = alternative.get("version_key")
             if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
                 raise ValueError(f"{name}: alternative requires command and version authority")
+        selection_policy = item.get("selection_policy")
+        if selection_policy and (selection_policy != "first_available" or not item.get("any_of")):
+            raise ValueError(f"{name}: invalid alternative selection policy")
         provision_authority = item.get("provision_authority")
         if provision_authority and not versions.get(provision_authority):
             raise ValueError(f"{name}: missing provision authority {provision_authority}")
@@ -295,6 +298,13 @@ class Auditor:
             return Result("PASS", "dependencies ready")
         alternatives = item.get("any_of", [])
         if alternatives:
+            if item.get("selection_policy") == "first_available":
+                for alternative in alternatives:
+                    if self.resolve(alternative["command"]):
+                        return self.check({**item, **alternative, "any_of": []}, capability_name)
+                return Result("FAIL", "alternatives absent: " + ", ".join(
+                    alternative["command"] for alternative in alternatives
+                ))
             failures = []
             for alternative in alternatives:
                 result = self.check({**item, **alternative, "any_of": []}, capability_name)
