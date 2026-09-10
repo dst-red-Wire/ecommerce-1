@@ -1,4 +1,7 @@
 PYTHON := python3
+MANAGED_BIN := $(HOME)/.local/bin
+PATH := $(MANAGED_BIN):$(PATH)
+export PATH
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
