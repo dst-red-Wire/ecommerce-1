@@ -386,6 +386,10 @@ class Auditor:
                 unavailable = [dep for dep in item.get("provision_requires", []) if results[dep].state != "PASS"]
                 result = Result("SKIP", "provision requires " + ", ".join(unavailable)) if unavailable else self.provision(item)
             results[name] = result
+        for primitive in self.contract["platform_primitives"]:
+            command = primitive["command"]
+            if command not in results:
+                results[command] = Result("PASS", "ready") if self.which(command) else Result("FAIL", "tool absent")
         return results
 
 
