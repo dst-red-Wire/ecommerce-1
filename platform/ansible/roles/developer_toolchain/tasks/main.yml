@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, gitleaks, kubectl, helm, terraform, kustomize, kind]
+  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -259,6 +259,22 @@
     state: link
     force: true
   tags: [toolchain, agent_tools]
+
+- name: Download pinned Cosign binary
+  ansible.builtin.get_url:
+    url: "https://github.com/sigstore/cosign/releases/download/v{{ cosign_version }}/cosign-linux-amd64"
+    dest: "{{ local_share }}/tools/cosign-{{ cosign_version }}"
+    checksum: "sha256:{{ cosign_sha256 }}"
+    mode: '0755'
+  tags: [cosign]
+
+- name: Link Cosign into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/cosign-{{ cosign_version }}"
+    dest: "{{ local_bin }}/cosign"
+    state: link
+    force: true
+  tags: [cosign]
 
 - name: Download pinned Bazelisk
   ansible.builtin.get_url:

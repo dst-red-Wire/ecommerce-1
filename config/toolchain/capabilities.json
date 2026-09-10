@@ -26,11 +26,20 @@
       "requires": [
         "python"
       ],
-      "command": "pip3",
-      "version_args": [
+      "classification": "managed",
+      "probe": [
+        "python3",
+        "-m",
+        "pip",
         "--version"
       ],
-      "classification": "conditional"
+      "provision": {
+        "type": "ensurepip"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "provision_authority": "PIP_PROVISION_AUTHORITY"
     },
     {
       "name": "ruby",
@@ -497,12 +506,29 @@
       "checksum_key": "HELM_SHA256_LINUX_AMD64"
     },
     {
-      "name": "terraform",
+      "name": "cosign",
       "requires": [],
-      "command": "terraform",
+      "command": "cosign",
       "version_args": [
         "version"
       ],
+      "version_key": "COSIGN_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "cosign"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "COSIGN_SHA256_LINUX_AMD64"
+    },
+    {
+      "name": "terraform",
+      "requires": [],
       "version_key": "TERRAFORM_VERSION",
       "provision_requires": [
         "ansible-playbook"
@@ -515,7 +541,23 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64"
+      "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
+      "any_of": [
+        {
+          "command": "terraform",
+          "version_args": [
+            "version"
+          ],
+          "version_key": "TERRAFORM_VERSION"
+        },
+        {
+          "command": "tofu",
+          "version_args": [
+            "version"
+          ],
+          "version_key": "OPENTOFU_VERSION"
+        }
+      ]
     },
     {
       "name": "kustomize",
@@ -729,7 +771,8 @@
       "python3",
       "git",
       "gh",
-      "oras"
+      "oras",
+      "cosign"
     ]
   },
   "command_capabilities": {
@@ -737,7 +780,9 @@
     "ansible": "ansible-core",
     "gofmt": "go",
     "pnpm": "pnpm",
-    "docker": "docker"
+    "docker": "docker",
+    "terraform": "terraform",
+    "tofu": "terraform"
   },
   "gate_sources": [
     "scripts/repoctl.py",

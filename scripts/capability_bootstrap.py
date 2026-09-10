@@ -20,6 +20,8 @@ CONTRACT = ROOT / "config/toolchain/capabilities.json"
 VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
+MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
+COMMAND_WRAPPERS = {"require", "require_command"}
 
 
 @dataclass(frozen=True)
@@ -78,8 +80,15 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
         version_key = item.get("version_key")
         if version_key and not versions.get(version_key):
             raise ValueError(f"{name}: missing version authority {version_key}")
+        for alternative in item.get("any_of", []):
+            alternative_key = alternative.get("version_key")
+            if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
+                raise ValueError(f"{name}: alternative requires command and version authority")
+        provision_authority = item.get("provision_authority")
+        if provision_authority and not versions.get(provision_authority):
+            raise ValueError(f"{name}: missing provision authority {provision_authority}")
         if classification == "managed" and item.get("provision") and not (
-            version_key or item.get("version_file")
+            version_key or item.get("version_file") or item.get("provision_authority")
         ):
             raise ValueError(f"{name}: provisioned capability has no version authority")
         if classification == "platform-provided" and not item.get("justification"):
@@ -112,7 +121,7 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             if not isinstance(node, ast.Call):
                 continue
             function = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-            if function == "require" and node.args and isinstance(node.args[0], ast.Constant):
+            if function in COMMAND_WRAPPERS and node.args and isinstance(node.args[0], ast.Constant):
                 discovered.add(str(node.args[0].value))
             if function in {"run", "output", "Popen"} and node.args and isinstance(node.args[0], ast.List):
                 elements = node.args[0].elts
@@ -186,6 +195,22 @@ class Auditor:
         self.which = which
         self.versions = load_versions()
 
+    def resolve_all(self, command: str) -> list[str]:
+        """Resolve commands without requiring a newly logged-in shell after provisioning."""
+        candidates = []
+        resolved = self.which(command)
+        if resolved:
+            candidates.append(resolved)
+        for directory in MANAGED_BIN_DIRS:
+            candidate = directory / command
+            if candidate.is_file() and os.access(candidate, os.X_OK) and str(candidate) not in candidates:
+                candidates.append(str(candidate))
+        return candidates
+
+    def resolve(self, command: str) -> str | None:
+        candidates = self.resolve_all(command)
+        return candidates[0] if candidates else None
+
     def platform_result(self, os_name: str, arch: str, item: dict | None = None) -> Result | None:
         if os_name not in self.contract["supported"]["os"]:
             return Result("UNSUPPORTED", f"os {os_name}")
@@ -199,37 +224,50 @@ class Auditor:
     def check(self, item: dict) -> Result:
         if item.get("virtual"):
             return Result("PASS", "dependencies ready")
+        alternatives = item.get("any_of", [])
+        if alternatives:
+            failures = []
+            for alternative in alternatives:
+                result = self.check({**item, **alternative, "any_of": []})
+                if result.state == "PASS":
+                    return result
+                failures.append(f"{alternative['command']}: {result.detail}")
+            return Result("FAIL", "; ".join(failures))
         command = item.get("command")
         argv = item.get("probe") or ([command, *item.get("version_args", [])] if command else [])
-        resolved = self.which(command) if command else None
-        managed = Path.home() / ".local" / "bin" / str(command)
-        if command and item.get("provision") and managed.is_file():
-            resolved = str(managed)
-        if command and not resolved:
+        resolved_candidates = self.resolve_all(command) if command else []
+        if command and not resolved_candidates:
             return Result("FAIL", "tool absent")
-        if command and argv and argv[0] == command:
-            argv = [str(resolved), *argv[1:]]
-        proc = self.runner(argv)
-        detail = " ".join((proc.stdout or proc.stderr).strip().split())
-        if proc.returncode:
-            return Result("BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}")
         expected = self.versions.get(item.get("version_key", ""))
         version_file = item.get("version_file")
         if version_file:
             expected = (ROOT / version_file).read_text(encoding="utf-8").strip()
-        if expected and expected not in detail:
-            return Result("FAIL", f"wrong version: expected {expected}; got {detail or 'unknown'}")
-        return Result("PASS", detail or "ready")
+        candidates = resolved_candidates if command and argv and argv[0] == command else [None]
+        last = Result("FAIL", "tool absent")
+        for resolved in candidates:
+            candidate_argv = [str(resolved), *argv[1:]] if resolved else argv
+            proc = self.runner(candidate_argv)
+            detail = " ".join((proc.stdout or proc.stderr).strip().split())
+            if proc.returncode:
+                last = Result("BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}")
+            elif expected and expected not in detail:
+                last = Result("FAIL", f"wrong version: expected {expected}; got {detail or 'unknown'}")
+            else:
+                return Result("PASS", detail or "ready")
+        return last
 
     def provision(self, item: dict) -> Result:
         spec = item.get("provision")
         if not spec:
             return self.check(item)
-        if spec["type"] == "pip":
+        if spec["type"] == "ensurepip":
+            command = [sys.executable, "-m", "ensurepip", "--user"]
+        elif spec["type"] == "pip":
             version = self.versions[item["version_key"]]
             command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]
         else:
-            command = ["ansible-playbook", "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "--tags", spec["tags"]]
+            ansible_playbook = self.resolve("ansible-playbook") or "ansible-playbook"
+            command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "--tags", spec["tags"]]
         proc = self.runner(command)
         if proc.returncode:
             detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]

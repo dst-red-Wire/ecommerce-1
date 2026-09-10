@@ -104,6 +104,67 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         runner.assert_not_called()
 
+    def test_pip_is_provisioned_from_python_ensurepip_and_rechecked(self):
+        items = [
+            {"name": "python", "requires": [], "command": "python3"},
+            {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
+             "provision": {"type": "ensurepip"}, "provision_authority": "PIP_PROVISION_AUTHORITY"},
+            {"name": "ansible", "requires": ["pip"], "command": "ansible"},
+            {"name": "independent", "requires": [], "command": "independent"},
+        ]
+        calls = []
+        pip_probes = iter([subprocess.CompletedProcess([], 1, "", "No module named pip"),
+                           subprocess.CompletedProcess([], 0, "pip 26.1", "")])
+        def runner(argv):
+            calls.append(argv)
+            if argv[1:4] == ["-m", "pip", "--version"]:
+                return next(pip_probes)
+            return subprocess.CompletedProcess(argv, 0, "ready", "")
+        auditor = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}")
+        results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["pip"].state)
+        self.assertIn([sys.executable, "-m", "ensurepip", "--user"], calls)
+        self.assertEqual("PASS", results["ansible"].state)
+
+    def test_failed_pip_provision_skips_only_dependants_without_false_pass(self):
+        items = [
+            {"name": "python", "requires": [], "command": "python3"},
+            {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
+             "provision": {"type": "ensurepip"}, "provision_authority": "PIP_PROVISION_AUTHORITY"},
+            {"name": "ansible", "requires": ["pip"], "command": "ansible"},
+            {"name": "cosign", "requires": [], "command": "cosign"},
+        ]
+        def runner(argv):
+            if "pip" in argv or "ensurepip" in argv:
+                return subprocess.CompletedProcess(argv, 1, "", "unavailable")
+            return subprocess.CompletedProcess(argv, 0, "ready", "")
+        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}").run(
+            bootstrap=True, os_name="linux", arch="amd64"
+        )
+        self.assertEqual("BLOCKED", results["pip"].state)
+        self.assertEqual("SKIP", results["ansible"].state)
+        self.assertEqual("PASS", results["cosign"].state)
+
+    def test_managed_user_bin_resolves_fresh_ansible_entry_points(self):
+        items = [
+            {"name": "ansible-core", "requires": [], "command": "ansible"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "command": "ansible-playbook"},
+            {"name": "next", "requires": [], "provision_requires": ["ansible-playbook"], "command": "next",
+             "provision": {"type": "ansible", "tags": "next"}},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MOD, "MANAGED_BIN_DIRS", (Path(tmp),)):
+            for command in ("ansible", "ansible-playbook"):
+                executable = Path(tmp, command); executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
+            calls = []
+            def runner(argv):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "ready", "")
+            auditor = MOD.Auditor(contract(items), runner=runner, which=lambda _: None)
+            results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["ansible-core"].state)
+        self.assertEqual("PASS", results["ansible-playbook"].state)
+        self.assertEqual(str(Path(tmp, "ansible-playbook")), calls[-2][0])
+
     def test_checksum_invalid_is_rejected_by_existing_ansible_mechanism(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
@@ -124,7 +185,7 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical = MOD.load_contract()
         MOD.validate_contract(canonical)
         names = {item["name"] for item in canonical["capabilities"]}
-        for name in ("gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize"):
+        for name in ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize"):
             self.assertIn(name, names)
 
     def test_unknown_gate_command_is_rejected(self):
@@ -138,6 +199,22 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical["capabilities"] = [item for item in canonical["capabilities"] if item["name"] != "gitleaks"]
         with self.assertRaisesRegex(ValueError, "undeclared commands: gitleaks"):
             MOD.validate_contract(canonical)
+
+    def test_delivery_without_cosign_is_rejected(self):
+        canonical = MOD.load_contract()
+        canonical["gate_requirements"]["delivery"].remove("cosign")
+        with self.assertRaisesRegex(ValueError, "cosign"):
+            MOD.validate_contract(canonical)
+
+    def test_require_command_wrapper_is_audited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp, "wrapper.py")
+            source.write_text('require_command("unknown-tool")\n')
+            canonical = MOD.load_contract()
+            canonical["gate_sources"] = ["wrapper.py"]
+            with mock.patch.object(MOD, "ROOT", Path(tmp)):
+                with self.assertRaisesRegex(ValueError, "unknown-tool"):
+                    MOD.validate_contract(canonical)
 
     def test_seed_prerequisite_requires_justification(self):
         canonical = MOD.load_contract()
@@ -162,12 +239,12 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical = MOD.load_contract()
         names = {item["name"]: item for item in canonical["capabilities"]}
         versions = MOD.load_versions()
-        for name in ("gitleaks", "kubectl", "helm", "terraform", "kustomize"):
+        for name in ("cosign", "gitleaks", "kubectl", "helm", "terraform", "kustomize"):
             self.assertEqual(["linux/amd64"], names[name]["platforms"])
             self.assertIn(f"{name.upper()}_SHA256_LINUX_AMD64", versions)
 
     def test_docker_blockage_does_not_skip_independent_gate_tools(self):
-        names = ("gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize")
+        names = ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize")
         items = [{"name": "docker", "requires": [], "probe": ["docker", "info"], "external_failure": True}]
         items += [{"name": name, "requires": [], "command": name} for name in names]
         items += [{"name": "kind", "requires": ["docker"], "command": "kind"}]
@@ -177,6 +254,28 @@ class CapabilityClosureTest(unittest.TestCase):
         self.assertEqual("SKIP", results["kind"].state)
         for name in names:
             self.assertEqual("PASS", results[name].state)
+
+    def test_terraform_runtime_accepts_each_pinned_alternative(self):
+        item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+        item.pop("provision_requires")
+        item.pop("provision")
+        versions = MOD.load_versions()
+        for present, output in (({"terraform"}, versions["TERRAFORM_VERSION"]), ({"tofu"}, versions["OPENTOFU_VERSION"])):
+            result = CapabilityAuditTest().auditor([item], {"/bin/" + next(iter(present)): (0, output)}, present=present).run(
+                bootstrap=False, os_name="linux", arch="amd64"
+            )["terraform"]
+            self.assertEqual("PASS", result.state)
+
+    def test_valid_tofu_wins_when_terraform_is_invalid(self):
+        item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+        item.pop("provision_requires")
+        item.pop("provision")
+        versions = MOD.load_versions()
+        results = CapabilityAuditTest().auditor(
+            [item], {"/bin/terraform": (0, "Terraform v0.1"), "/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"])},
+            present={"terraform", "tofu"},
+        ).run(bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["terraform"].state)
 
 
 if __name__ == "__main__":
