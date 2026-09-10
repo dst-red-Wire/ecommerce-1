@@ -560,6 +560,113 @@ class CapabilityAuditTest(unittest.TestCase):
 
 
 class CapabilityClosureTest(unittest.TestCase):
+    @staticmethod
+    def terraform_archive_run(source, selected_tag, unzip_present, sudo_available=True):
+        probe = re.search(
+            r"- name: Detect Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        prerequisite = re.search(
+            r"- name: Ensure Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        extraction = re.search(
+            r"- name: Extract pinned standalone gate tools\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        if probe is None or prerequisite is None or extraction is None:
+            return False, [], 0
+
+        events = []
+        privileged_installs = 0
+        probe_selected = selected_tag in re.findall(
+            r"^  tags: \[([^]]+)\]$", probe.group("body"), re.MULTILINE
+        )[0].split(", ")
+        if probe_selected:
+            events.append("probe-unzip")
+        prerequisite_selected = selected_tag in re.findall(
+            r"^  tags: \[([^]]+)\]$", prerequisite.group("body"), re.MULTILINE
+        )[0].split(", ")
+        guarded_by_probe = "when: terraform_unzip_probe.rc != 0" in prerequisite.group("body")
+        if prerequisite_selected and (not guarded_by_probe or not unzip_present):
+            events.append("privileged-unzip-install")
+            privileged_installs += 1
+            if not sudo_available:
+                return False, events, privileged_installs
+            if not unzip_present:
+                unzip_present = True
+
+        extraction_selected = (
+            selected_tag in {"gitleaks", "helm", "terraform", "kustomize"}
+            and f"tag: {selected_tag}" in extraction.group("body")
+        )
+        if extraction_selected:
+            events.append(f"extract-{selected_tag}")
+            if selected_tag == "terraform" and not unzip_present:
+                return False, events, privileged_installs
+        return True, events, privileged_installs
+
+    def test_terraform_target_installs_missing_unzip_before_archive_extraction(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        passed, events, installs = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
+        self.assertTrue(passed)
+        self.assertEqual(["probe-unzip", "privileged-unzip-install", "extract-terraform"], events)
+        self.assertEqual(1, installs)
+
+    def test_terraform_target_with_unzip_present_never_attempts_sudo_and_is_idempotent(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        for _ in range(2):
+            passed, events, privileged_installs = self.terraform_archive_run(
+                tasks, "terraform", unzip_present=True, sudo_available=False
+            )
+            self.assertTrue(passed)
+            self.assertEqual(["probe-unzip", "extract-terraform"], events)
+            self.assertEqual(0, privileged_installs)
+
+    def test_unconditional_privileged_install_mutation_fails_then_restored_passes(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        guard = "  when: terraform_unzip_probe.rc != 0\n"
+        self.assertEqual(1, tasks.count(guard))
+        mutated = tasks.replace(guard, "", 1)
+        mutated_passed, mutated_events, mutated_installs = self.terraform_archive_run(
+            mutated, "terraform", unzip_present=True, sudo_available=False
+        )
+        self.assertFalse(mutated_passed)
+        self.assertEqual(["probe-unzip", "privileged-unzip-install"], mutated_events)
+        self.assertEqual(1, mutated_installs)
+        restored_passed, restored_events, restored_installs = self.terraform_archive_run(
+            tasks, "terraform", unzip_present=True, sudo_available=False
+        )
+        self.assertTrue(restored_passed)
+        self.assertEqual(["probe-unzip", "extract-terraform"], restored_events)
+        self.assertEqual(0, restored_installs)
+
+    def test_missing_terraform_prerequisite_tag_mutation_fails_then_restored_passes(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        prerequisite = re.search(
+            r"(- name: Ensure Terraform archive extraction prerequisite\n.*?  tags: )\[terraform\]",
+            tasks,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(prerequisite)
+        mutated = tasks[:prerequisite.start()] + prerequisite.group(1) + "[toolchain]" + tasks[prerequisite.end():]
+        mutated_passed, mutated_events, _ = self.terraform_archive_run(mutated, "terraform", unzip_present=False)
+        self.assertFalse(mutated_passed)
+        self.assertEqual(["probe-unzip", "extract-terraform"], mutated_events)
+        restored_passed, _, _ = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
+        self.assertTrue(restored_passed)
+
+    def test_independent_archive_capabilities_do_not_select_terraform_unzip_setup(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        for capability in ("helm", "kustomize"):
+            passed, events, installs = self.terraform_archive_run(tasks, capability, unzip_present=False)
+            self.assertTrue(passed)
+            self.assertEqual([f"extract-{capability}"], events)
+            self.assertEqual(0, installs)
+
     def test_ansible_owner_rejects_direct_pip_mutation(self):
         canonical = MOD.load_contract()
         ansible_lint = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")
