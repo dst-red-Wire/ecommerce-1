@@ -5,9 +5,11 @@ Plateforme e-commerce B2C mono-vendeur, cloud-native, self-hosted, multi-site A/
 ## Environnement reproductible
 
 `make bootstrap` réconcilie l'environnement selon le graphe de capacités. `make env-check`
-effectue le même audit sans installation. Les états normalisés sont `PASS`, `FAIL`,
-`BLOCKED`, `SKIP` et `UNSUPPORTED`; un daemon Docker indisponible ne bloque que ses vrais
-dépendants, tels Kind et les tests conteneurisés. Voir
+effectue le même audit sans installation. Python, Git, Make et la version épinglée
+d’Ansible Core sont des prérequis fournis par le runner : le dépôt ne les installe pas et
+utilise Ansible pour réconcilier uniquement les outils du projet. Les états normalisés sont
+`PASS`, `FAIL`, `BLOCKED`, `SKIP` et `UNSUPPORTED`; un daemon Docker indisponible ne bloque
+que ses vrais dépendants, tels Kind et les tests conteneurisés. Voir
 [ADR-0002](docs/adr/ADR-0002-capability-aware-bootstrap.md).
 
 ## Statut

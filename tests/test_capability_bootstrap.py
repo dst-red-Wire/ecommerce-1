@@ -104,90 +104,109 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         runner.assert_not_called()
 
-    def test_ubuntu_pip_is_provisioned_from_apt_and_rechecked(self):
+    def test_compatible_runner_ansible_continues_project_provisioning_without_self_install(self):
+        version = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
         items = [
-            {"name": "python", "requires": [], "command": "python3"},
-            {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
-             "provision": {"type": "debian-package", "package": "python3-pip", "distributions": ["ubuntu", "debian"]},
-             "provision_authority": "PIP_PROVISION_AUTHORITY"},
-            {"name": "ansible", "requires": ["pip"], "command": "ansible"},
-            {"name": "independent", "requires": [], "command": "independent"},
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
+             "classification": "seed-prerequisite"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-galaxy", "version_key": "ANSIBLE_CORE_VERSION"},
+            {"name": "project-tool", "requires": [], "provision_requires": ["ansible-playbook"],
+             "command": "project-tool", "provision": {"type": "ansible", "tags": "project_tool"}},
         ]
         calls = []
-        pip_probes = iter([subprocess.CompletedProcess([], 1, "", "No module named pip"),
-                           subprocess.CompletedProcess([], 0, "pip 26.1", ""),
-                           subprocess.CompletedProcess([], 0, "pip 26.1", "")])
+        installed = set()
         def runner(argv):
             calls.append(argv)
-            if argv[1:4] == ["-m", "pip", "--version"]:
-                return next(pip_probes)
-            return subprocess.CompletedProcess(argv, 0, "ready", "")
-        auditor = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}",
-                              distribution=lambda: "ubuntu")
-        results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-        self.assertEqual("PASS", results["pip"].state)
-        self.assertIn(["/bin/apt-get", "install", "-y", "python3-pip"], calls)
-        self.assertFalse(any("ensurepip" in call for call in calls))
-        self.assertEqual("PASS", results["ansible"].state)
-        second_results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-        self.assertEqual("PASS", second_results["pip"].state)
-        self.assertEqual(1, calls.count(["/bin/apt-get", "install", "-y", "python3-pip"]))
+            if "platform/ansible/developer.yml" in argv:
+                installed.add("project-tool")
+                return subprocess.CompletedProcess(argv, 0, "reconciled", "")
+            output = f"ansible [core {version}]" if Path(argv[0]).name.startswith("ansible") else "ready"
+            return subprocess.CompletedProcess(argv, 0, output, "")
+        with tempfile.TemporaryDirectory() as tmp:
+            runner_bin = Path(tmp, "runner", "bin")
+            runner_bin.mkdir(parents=True)
+            for command in ("ansible", "ansible-playbook", "ansible-galaxy"):
+                executable = runner_bin / command
+                executable.write_text("#!/bin/true\n")
+                executable.chmod(0o755)
+            def which(command):
+                return str(runner_bin / command) if command.startswith("ansible") else (f"/opt/bin/{command}" if command in installed else None)
+            results = MOD.Auditor(contract(items), runner=runner, which=which).run(
+                bootstrap=True, os_name="linux", arch="amd64"
+            )
+        self.assertTrue(all(result.state == "PASS" for result in results.values()))
+        self.assertTrue(any("platform/ansible/developer.yml" in call for call in calls))
+        self.assertFalse(any("pip" in call or "apt" in call or "venv" in call for call in calls))
 
-    def test_ubuntu_ensurepip_only_mutation_is_rejected(self):
-        canonical = MOD.load_contract()
-        pip = next(item for item in canonical["capabilities"] if item["name"] == "pip")
-        pip["provision"] = {"type": "ensurepip"}
-        canonical["provision_owners"]["pip"] = "ensurepip"
-        with self.assertRaisesRegex(ValueError, "requires Ubuntu/Debian package provisioning"):
-            MOD.validate_contract(canonical)
-
-    def test_failed_pip_provision_skips_only_dependants_without_false_pass(self):
+    def test_missing_runner_ansible_fails_without_install_and_keeps_independent_audit(self):
         items = [
-            {"name": "python", "requires": [], "command": "python3"},
-            {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
-             "provision": {"type": "debian-package", "package": "python3-pip", "distributions": ["ubuntu", "debian"]},
-             "provision_authority": "PIP_PROVISION_AUTHORITY"},
-            {"name": "ansible", "requires": ["pip"], "command": "ansible"},
-            {"name": "cosign", "requires": [], "command": "cosign"},
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
+             "classification": "seed-prerequisite"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-galaxy"},
+            {"name": "ansible-owned", "requires": [], "provision_requires": ["ansible-playbook"], "command": "owned",
+             "provision": {"type": "ansible", "tags": "owned"}},
+            {"name": "independent", "requires": [], "command": "independent"},
         ]
-        def runner(argv):
-            if "pip" in argv or argv[0].endswith("apt-get"):
-                return subprocess.CompletedProcess(argv, 1, "", "unavailable")
-            return subprocess.CompletedProcess(argv, 0, "ready", "")
-        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}",
-                              distribution=lambda: "ubuntu").run(
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ready", ""))
+        results = MOD.Auditor(contract(items), runner=runner,
+                              which=lambda command: "/bin/independent" if command == "independent" else None).run(
             bootstrap=True, os_name="linux", arch="amd64"
         )
-        self.assertEqual("BLOCKED", results["pip"].state)
-        self.assertEqual("SKIP", results["ansible"].state)
-        self.assertEqual("PASS", results["cosign"].state)
+        self.assertEqual("FAIL", results["ansible-core"].state)
+        self.assertIn("runner prerequisite missing: ansible-core", results["ansible-core"].detail)
+        self.assertEqual("SKIP", results["ansible-playbook"].state)
+        self.assertEqual("SKIP", results["ansible-owned"].state)
+        self.assertEqual("PASS", results["independent"].state)
+        self.assertEqual(1, runner.call_count)
 
-    def test_managed_user_bin_resolves_fresh_ansible_entry_points(self):
+    def test_stale_runner_ansible_fails_with_pinned_authority_and_is_not_provisioned(self):
         items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "command": "ansible-playbook"},
-            {"name": "next", "requires": [], "provision_requires": ["ansible-playbook"], "command": "next",
-             "provision": {"type": "ansible", "tags": "next"}},
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
+             "classification": "seed-prerequisite"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-galaxy"},
         ]
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MOD, "MANAGED_BIN_DIRS", (Path(tmp),)):
-            for command in ("ansible", "ansible-playbook"):
-                executable = Path(tmp, command); executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
-            calls = []
-            def runner(argv):
-                calls.append(argv)
-                return subprocess.CompletedProcess(argv, 0, "ready", "")
-            auditor = MOD.Auditor(contract(items), runner=runner, which=lambda _: None)
-            results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-        self.assertEqual("PASS", results["ansible-core"].state)
-        self.assertEqual("PASS", results["ansible-playbook"].state)
-        self.assertEqual(str(Path(tmp, "ansible-playbook")), calls[-2][0])
+        calls = []
+        def runner(argv):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
+        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/usr/bin/{command}").run(
+            bootstrap=True, os_name="linux", arch="amd64"
+        )
+        self.assertEqual("FAIL", results["ansible-core"].state)
+        self.assertIn("expected " + MOD.load_versions()["ANSIBLE_CORE_VERSION"], results["ansible-core"].detail)
+        self.assertEqual([["/usr/bin/ansible", "--version"]], calls)
+
+    def test_ansible_runner_prerequisite_rejects_repository_provisioner_mutation(self):
+        for provision in ({"type": "pip", "package": "ansible-core"},
+                          {"type": "python-venv", "package": "ansible-core"},
+                          {"type": "debian-package", "package": "ansible-core"}):
+            canonical = MOD.load_contract()
+            next(item for item in canonical["capabilities"] if item["name"] == "ansible-core")["provision"] = provision
+            with self.subTest(provision=provision), self.assertRaisesRegex(
+                    ValueError, "runner prerequisite must not have a repository provisioner"):
+                MOD.validate_contract(canonical)
+
+    def test_capability_bootstrap_contains_no_ansible_self_bootstrap_path(self):
+        source = (ROOT / "scripts/capability_bootstrap.py").read_text()
+        forbidden = ("pip install ansible-core", "python-venv", "ANSIBLE_CORE_VENV",
+                     "apt install ansible", "apt install ansible-core")
+        for fragment in forbidden:
+            self.assertNotIn(fragment, source)
 
     def test_ansible_entrypoints_are_bound_to_validated_core_provider(self):
         versions = MOD.load_versions()
         items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION"},
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
+             "classification": "seed-prerequisite"},
             {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
              "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-galaxy"},
             {"name": "next", "requires": [], "provision_requires": ["ansible-playbook"], "command": "next",
              "provision": {"type": "ansible", "tags": "next"}},
         ]
@@ -197,7 +216,7 @@ class CapabilityAuditTest(unittest.TestCase):
             system_bin.mkdir(parents=True)
             managed_bin.mkdir(parents=True)
             for directory in (system_bin, managed_bin):
-                for command in ("ansible", "ansible-playbook"):
+                for command in ("ansible", "ansible-playbook", "ansible-galaxy"):
                     executable = directory / command
                     executable.write_text("#!/bin/true\n")
                     executable.chmod(0o755)
@@ -216,7 +235,7 @@ class CapabilityAuditTest(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "ready", "")
 
             def which(command):
-                if command in ("ansible", "ansible-playbook"):
+                if command in ("ansible", "ansible-playbook", "ansible-galaxy"):
                     return str(system_bin / command)
                 return str(Path(tmp, command)) if command in installed else None
 
@@ -231,20 +250,20 @@ class CapabilityAuditTest(unittest.TestCase):
                 provision_call = next(call for call in calls if "platform/ansible/developer.yml" in call)
                 self.assertEqual(str(managed_bin / "ansible-playbook"), provision_call[0])
 
-                mutated = MOD.Auditor(contract([{**item, **({"provider": None} if item["name"] == "ansible-playbook" else {})}
-                                                for item in items]), runner=runner, which=which)
-                mutated.run(bootstrap=False, os_name="linux", arch="amd64")
-                self.assertNotEqual(
-                    Path(mutated.resolved_executables["ansible-core"]).parent,
-                    Path(mutated.resolved_executables["ansible-playbook"]).parent,
-                    "independent PATH resolution must expose the stale-provider mutation",
-                )
+                mutated_contract = contract([
+                    {**item, **({"provider": None} if item["name"] == "ansible-playbook" else {})}
+                    for item in items
+                ])
+                with self.assertRaisesRegex(ValueError, "must be bound to the ansible-core provider"):
+                    MOD.validate_contract(mutated_contract)
 
     def test_ansible_entrypoint_missing_from_provider_does_not_fall_back_to_path(self):
         items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible"},
+            {"name": "ansible-core", "requires": [], "command": "ansible", "classification": "seed-prerequisite"},
             {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
              "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-galaxy"},
         ]
         with tempfile.TemporaryDirectory() as tmp:
             managed_bin = Path(tmp, "managed")
@@ -258,94 +277,6 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("PASS", results["ansible-core"].state)
         self.assertEqual("FAIL", results["ansible-playbook"].state)
         self.assertIn("entry point absent from provider ansible-core", results["ansible-playbook"].detail)
-
-    def test_pep668_ansible_uses_isolated_provider_and_is_idempotent(self):
-        version = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
-        items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
-             "isolated": True,
-             "provision": {"type": "python-venv", "package": "ansible-core",
-                           "entry_points": ["ansible", "ansible-playbook", "ansible-galaxy"]}},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-galaxy"},
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            system_bin = root / "usr" / "bin"
-            managed_bin = root / "home" / ".local" / "bin"
-            venv = root / "home" / ".local" / "share" / "ecommerce-1" / "venvs" / "ansible-core"
-            system_bin.mkdir(parents=True)
-            for entry_point in ("ansible", "ansible-playbook", "ansible-galaxy"):
-                executable = system_bin / entry_point
-                executable.write_text("#!/bin/true\n")
-                executable.chmod(0o755)
-            calls = []
-
-            def runner(argv):
-                calls.append(argv)
-                if argv[1:3] == ["-m", "venv"]:
-                    (venv / "bin").mkdir(parents=True)
-                    (venv / "bin" / "python").write_text("#!/bin/true\n")
-                    return subprocess.CompletedProcess(argv, 0, "", "")
-                if argv[:4] == [str(venv / "bin" / "python"), "-m", "pip", "install"]:
-                    for entry_point in ("ansible", "ansible-playbook", "ansible-galaxy"):
-                        executable = venv / "bin" / entry_point
-                        executable.write_text("#!/bin/true\n")
-                        executable.chmod(0o755)
-                    return subprocess.CompletedProcess(argv, 0, "installed", "")
-                if str(managed_bin) in argv[0]:
-                    return subprocess.CompletedProcess(argv, 0, f"ansible [core {version}]", "")
-                return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
-
-            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)), \
-                    mock.patch.object(MOD, "ANSIBLE_CORE_VENV", venv):
-                auditor = MOD.Auditor(contract(items), runner=runner,
-                                      which=lambda command: str(system_bin / command))
-                first = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-                second = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-
-            self.assertTrue(all(result.state == "PASS" for result in first.values()))
-            self.assertTrue(all(result.state == "PASS" for result in second.values()))
-            self.assertEqual(1, sum(call[1:3] == ["-m", "venv"] for call in calls))
-            self.assertEqual(1, sum(call[:4] == [str(venv / "bin" / "python"), "-m", "pip", "install"]
-                                    for call in calls))
-            self.assertFalse(any("--user" in call for call in calls),
-                             "PEP 668 bootstrap must never install into distro-managed Python")
-            provider_dir = Path(auditor.resolved_executables["ansible-core"]).parent
-            self.assertEqual(provider_dir, Path(auditor.resolved_executables["ansible-playbook"]).parent)
-            self.assertEqual(provider_dir, Path(auditor.resolved_executables["ansible-galaxy"]).parent)
-
-    def test_pep668_pip_user_mutation_is_rejected(self):
-        canonical = MOD.load_contract()
-        ansible = next(item for item in canonical["capabilities"] if item["name"] == "ansible-core")
-        ansible["provision"] = {"type": "pip", "package": "ansible-core", "arguments": ["--user"]}
-        canonical["provision_owners"]["ansible-core"] = "pip"
-        with self.assertRaisesRegex(ValueError, "isolated Python virtual environment"):
-            MOD.validate_contract(canonical)
-
-    def test_failed_ansible_venv_creation_blocks_only_real_dependants(self):
-        items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
-             "isolated": True,
-             "provision": {"type": "python-venv", "package": "ansible-core",
-                           "entry_points": ["ansible", "ansible-playbook", "ansible-galaxy"]}},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-playbook"},
-            {"name": "independent", "requires": [], "command": "independent"},
-        ]
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MOD, "ANSIBLE_CORE_VENV", Path(tmp) / "venv"):
-            def runner(argv):
-                if argv[1:3] == ["-m", "venv"]:
-                    return subprocess.CompletedProcess(argv, 1, "", "ensurepip unavailable")
-                return subprocess.CompletedProcess(argv, 0, "ready", "")
-            auditor = MOD.Auditor(contract(items), runner=runner,
-                                  which=lambda command: "/bin/independent" if command == "independent" else None)
-            results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
-        self.assertEqual("BLOCKED", results["ansible-core"].state)
-        self.assertEqual("SKIP", results["ansible-playbook"].state)
-        self.assertEqual("PASS", results["independent"].state)
 
     def test_ansible_lint_is_provisioned_only_through_ansible_and_rechecked(self):
         canonical = MOD.load_contract()

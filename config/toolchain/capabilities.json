@@ -22,31 +22,6 @@
       "classification": "seed-prerequisite"
     },
     {
-      "name": "pip",
-      "requires": [
-        "python"
-      ],
-      "classification": "managed",
-      "probe": [
-        "python3",
-        "-m",
-        "pip",
-        "--version"
-      ],
-      "provision": {
-        "type": "debian-package",
-        "package": "python3-pip",
-        "distributions": [
-          "ubuntu",
-          "debian"
-        ]
-      },
-      "platforms": [
-        "linux/amd64"
-      ],
-      "provision_authority": "PIP_PROVISION_AUTHORITY"
-    },
-    {
       "name": "ruby",
       "requires": [],
       "command": "ruby",
@@ -71,25 +46,13 @@
     },
     {
       "name": "ansible-core",
-      "requires": [
-        "pip"
-      ],
+      "requires": [],
       "command": "ansible",
       "version_args": [
         "--version"
       ],
       "version_key": "ANSIBLE_CORE_VERSION",
-      "isolated": true,
-      "provision": {
-        "type": "python-venv",
-        "package": "ansible-core",
-        "entry_points": [
-          "ansible",
-          "ansible-playbook",
-          "ansible-galaxy"
-        ]
-      },
-      "classification": "managed"
+      "classification": "seed-prerequisite"
     },
     {
       "name": "ansible-playbook",
@@ -647,8 +610,6 @@
     }
   ],
   "provision_owners": {
-    "pip": "debian-package",
-    "ansible-core": "python-venv",
     "ansible-lint": "ansible",
     "node": "ansible",
     "go": "ansible",
@@ -685,6 +646,18 @@
     {
       "command": "make",
       "justification": "Public gate dispatcher supplied by the build environment."
+    },
+    {
+      "command": "ansible",
+      "justification": "Pinned Ansible Core is supplied by the runner and drives repository-owned tool reconciliation."
+    },
+    {
+      "command": "ansible-playbook",
+      "justification": "The runner supplies this entry point from the same pinned Ansible Core provider."
+    },
+    {
+      "command": "ansible-galaxy",
+      "justification": "The runner supplies this entry point from the same pinned Ansible Core provider."
     }
   ],
   "platform_primitives": [
@@ -816,7 +789,6 @@
     ]
   },
   "command_capabilities": {
-    "pip3": "pip",
     "ansible": "ansible-core",
     "gofmt": "go",
     "pnpm": "pnpm",

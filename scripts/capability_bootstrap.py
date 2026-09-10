@@ -22,7 +22,6 @@ VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
-ANSIBLE_CORE_VENV = Path.home() / ".local" / "share" / "ecommerce-1" / "venvs" / "ansible-core"
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
@@ -73,23 +72,20 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
         provision_type = graph.items[capability].get("provision", {}).get("type")
         if provision_type != owner:
             raise ValueError(f"{capability}: canonical provision owner is {owner}, not {provision_type or 'none'}")
-    pip = graph.items.get("pip", {})
-    pip_provision = pip.get("provision", {})
-    if "linux/amd64" in pip.get("platforms", []) and (
-        pip_provision.get("type") != "debian-package"
-        or not {"ubuntu", "debian"}.issubset(pip_provision.get("distributions", []))
-    ):
-        raise ValueError("pip: Linux amd64 requires Ubuntu/Debian package provisioning")
-    ansible_core = graph.items.get("ansible-core", {})
-    ansible_provision = ansible_core.get("provision", {})
-    if ansible_provision and ansible_provision.get("type") != "python-venv":
-        raise ValueError("ansible-core: provisioning must use an isolated Python virtual environment")
-    if ansible_provision and not ansible_core.get("isolated"):
-        raise ValueError("ansible-core: the isolated provider must be authoritative")
-    if ansible_provision and set(ansible_provision.get("entry_points", [])) != {
-        "ansible", "ansible-playbook", "ansible-galaxy"
-    }:
-        raise ValueError("ansible-core: isolated provider must expose all Ansible entry points")
+    ansible_core = graph.items.get("ansible-core")
+    if ansible_core:
+        if ansible_core.get("classification") != "seed-prerequisite":
+            raise ValueError("ansible-core: must be a runner prerequisite")
+        if ansible_core.get("provision") or ansible_core.get("provision_requires") or ansible_core.get("isolated"):
+            raise ValueError("ansible-core: runner prerequisite must not have a repository provisioner")
+        required_entrypoints = {
+            "ansible-playbook": "ansible-core",
+            "ansible-galaxy": "ansible-core",
+        }
+        for entrypoint, provider in required_entrypoints.items():
+            item = graph.items.get(entrypoint, {})
+            if item.get("provider") != provider or provider not in item.get("requires", []):
+                raise ValueError(f"{entrypoint}: must be bound to the ansible-core provider")
     command_aliases = contract.get("command_capabilities", {})
     external = {}
     for classification, key in (
@@ -220,21 +216,6 @@ class Graph:
 
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
-Distribution = Callable[[], str]
-
-
-def linux_distribution(path: Path = Path("/etc/os-release")) -> str:
-    """Return the Linux distribution identifier used for package provisioning."""
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            key, separator, value = raw.partition("=")
-            if separator and key == "ID":
-                return value.strip().strip('"').lower()
-    except OSError:
-        pass
-    return ""
-
-
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -244,14 +225,12 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 class Auditor:
     def __init__(self, contract: dict, *, runner: Runner = default_runner,
-                 which: Callable[[str], str | None] = shutil.which,
-                 distribution: Distribution = linux_distribution):
+                 which: Callable[[str], str | None] = shutil.which):
         self.contract = contract
         validate_contract(contract)
         self.graph = Graph(contract["capabilities"])
         self.runner = runner
         self.which = which
-        self.distribution = distribution
         self.versions = load_versions()
         self.resolved_executables: dict[str, str] = {}
 
@@ -331,7 +310,12 @@ class Auditor:
         else:
             resolved_candidates = self.resolve_all(command) if command else []
         if command and not resolved_candidates:
-            detail = f"entry point absent from provider {provider}" if provider else "tool absent"
+            if provider:
+                detail = f"entry point absent from provider {provider}"
+            elif item.get("classification") == "seed-prerequisite":
+                detail = f"runner prerequisite missing: {capability_name or item.get('name', command)}"
+            else:
+                detail = "tool absent"
             return Result("FAIL", detail)
         expected = self.versions.get(item.get("version_key", ""))
         version_file = item.get("version_file")
@@ -358,56 +342,19 @@ class Auditor:
         spec = item.get("provision")
         if not spec:
             return self.check(item)
-        if spec["type"] == "debian-package":
-            distribution = self.distribution()
-            if distribution not in spec.get("distributions", []):
-                return Result("UNSUPPORTED", f"pip provisioning is unavailable for Linux distribution {distribution or 'unknown'}")
-            apt_get = self.resolve("apt-get")
-            if not apt_get:
-                return Result("BLOCKED", "apt-get is unavailable for pip provisioning")
-            prefix = [] if not hasattr(os, "geteuid") or os.geteuid() == 0 else ["sudo"]
-            for args in (["update"], ["install", "-y", spec["package"]]):
-                command = [*prefix, apt_get, *args]
-                proc = self.runner(command)
-                if proc.returncode:
-                    detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
-                    return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
-            return self.check(item, item["name"])
-        elif spec["type"] == "python-venv":
-            version = self.versions[item["version_key"]]
-            venv_python = ANSIBLE_CORE_VENV / "bin" / "python"
-            if not venv_python.is_file():
-                proc = self.runner([sys.executable, "-m", "venv", str(ANSIBLE_CORE_VENV)])
-                if proc.returncode:
-                    detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
-                    return Result("BLOCKED", detail or f"virtual environment creation exit {proc.returncode}")
-            command = [str(venv_python), "-m", "pip", "install", f"{spec['package']}=={version}"]
-        else:
-            ansible_playbook = self.resolved_executables.get("ansible-playbook")
-            playbook_capability = self.graph.items.get("ansible-playbook", {})
-            if not playbook_capability.get("provider"):
-                ansible_playbook = ansible_playbook or self.resolve("ansible-playbook")
-            if not ansible_playbook:
-                return Result("BLOCKED", "validated ansible-playbook provider is unavailable")
-            command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "-e", "resolved_executables=" + json.dumps(self.resolved_executables), "--tags", spec["tags"]]
+        if spec["type"] != "ansible":
+            return Result("BLOCKED", f"unsupported repository provisioner: {spec['type']}")
+        ansible_playbook = self.resolved_executables.get("ansible-playbook")
+        playbook_capability = self.graph.items.get("ansible-playbook", {})
+        if not playbook_capability.get("provider"):
+            ansible_playbook = ansible_playbook or self.resolve("ansible-playbook")
+        if not ansible_playbook:
+            return Result("BLOCKED", "validated ansible-playbook provider is unavailable")
+        command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "-e", "resolved_executables=" + json.dumps(self.resolved_executables), "--tags", spec["tags"]]
         proc = self.runner(command)
         if proc.returncode:
             detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
             return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
-        if spec["type"] == "python-venv":
-            managed_bin = MANAGED_BIN_DIRS[0]
-            try:
-                managed_bin.mkdir(parents=True, exist_ok=True)
-                for entry_point in spec["entry_points"]:
-                    source = ANSIBLE_CORE_VENV / "bin" / entry_point
-                    if not source.is_file():
-                        return Result("BLOCKED", f"isolated provider did not install {entry_point}")
-                    destination = managed_bin / entry_point
-                    if destination.is_symlink() or destination.exists():
-                        destination.unlink()
-                    destination.symlink_to(source)
-            except OSError as exc:
-                return Result("BLOCKED", f"cannot publish isolated Ansible entry points: {exc}")
         return self.check(item, item["name"])
 
     def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
