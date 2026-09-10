@@ -102,6 +102,19 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             command = entry.get("command", "")
             if not command or not entry.get("justification"):
                 raise ValueError(f"{key}: command and contractual justification are required")
+            capability = graph.items.get(command)
+            if key == "platform_primitives" and capability:
+                capability_command = capability.get("command")
+                probe = capability.get("probe") or []
+                if (
+                    capability_command != command
+                    or capability.get("any_of")
+                    or (probe and probe[0] != command)
+                ):
+                    raise ValueError(
+                        f"primitive {command} collides with capability {command} "
+                        "that is not a direct executable check"
+                    )
             if command in external:
                 raise ValueError(f"command has multiple external classifications: {command}")
             external[command] = classification
@@ -412,6 +425,13 @@ class Auditor:
                 unavailable = [dep for dep in item.get("provision_requires", []) if results[dep].state != "PASS"]
                 result = Result("SKIP", "provision requires " + ", ".join(unavailable)) if unavailable else self.provision(item)
             results[name] = result
+        for primitive in self.contract.get("platform_primitives", []):
+            command = primitive["command"]
+            if command not in results:
+                platform_failure = self.platform_result(os_name, arch, primitive)
+                results[command] = platform_failure or (
+                    Result("PASS", "ready") if self.which(command) else Result("FAIL", "tool absent")
+                )
         return results
 
 
