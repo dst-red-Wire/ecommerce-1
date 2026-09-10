@@ -72,6 +72,13 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
         provision_type = graph.items[capability].get("provision", {}).get("type")
         if provision_type != owner:
             raise ValueError(f"{capability}: canonical provision owner is {owner}, not {provision_type or 'none'}")
+    pip = graph.items.get("pip", {})
+    pip_provision = pip.get("provision", {})
+    if "linux/amd64" in pip.get("platforms", []) and (
+        pip_provision.get("type") != "debian-package"
+        or not {"ubuntu", "debian"}.issubset(pip_provision.get("distributions", []))
+    ):
+        raise ValueError("pip: Linux amd64 requires Ubuntu/Debian package provisioning")
     command_aliases = contract.get("command_capabilities", {})
     external = {}
     for classification, key in (
@@ -194,6 +201,19 @@ class Graph:
 
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+Distribution = Callable[[], str]
+
+
+def linux_distribution(path: Path = Path("/etc/os-release")) -> str:
+    """Return the Linux distribution identifier used for package provisioning."""
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            key, separator, value = raw.partition("=")
+            if separator and key == "ID":
+                return value.strip().strip('"').lower()
+    except OSError:
+        pass
+    return ""
 
 
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -204,12 +224,15 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 class Auditor:
-    def __init__(self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which):
+    def __init__(self, contract: dict, *, runner: Runner = default_runner,
+                 which: Callable[[str], str | None] = shutil.which,
+                 distribution: Distribution = linux_distribution):
         self.contract = contract
         validate_contract(contract)
         self.graph = Graph(contract["capabilities"])
         self.runner = runner
         self.which = which
+        self.distribution = distribution
         self.versions = load_versions()
         self.resolved_executables: dict[str, str] = {}
 
@@ -292,8 +315,21 @@ class Auditor:
         spec = item.get("provision")
         if not spec:
             return self.check(item)
-        if spec["type"] == "ensurepip":
-            command = [sys.executable, "-m", "ensurepip", "--user"]
+        if spec["type"] == "debian-package":
+            distribution = self.distribution()
+            if distribution not in spec.get("distributions", []):
+                return Result("UNSUPPORTED", f"pip provisioning is unavailable for Linux distribution {distribution or 'unknown'}")
+            apt_get = self.resolve("apt-get")
+            if not apt_get:
+                return Result("BLOCKED", "apt-get is unavailable for pip provisioning")
+            prefix = [] if not hasattr(os, "geteuid") or os.geteuid() == 0 else ["sudo"]
+            for args in (["update"], ["install", "-y", spec["package"]]):
+                command = [*prefix, apt_get, *args]
+                proc = self.runner(command)
+                if proc.returncode:
+                    detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
+                    return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
+            return self.check(item, item["name"])
         elif spec["type"] == "pip":
             version = self.versions[item["version_key"]]
             command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]

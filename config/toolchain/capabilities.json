@@ -34,7 +34,12 @@
         "--version"
       ],
       "provision": {
-        "type": "ensurepip"
+        "type": "debian-package",
+        "package": "python3-pip",
+        "distributions": [
+          "ubuntu",
+          "debian"
+        ]
       },
       "platforms": [
         "linux/amd64"
@@ -634,7 +639,7 @@
     }
   ],
   "provision_owners": {
-    "pip": "ensurepip",
+    "pip": "debian-package",
     "ansible-core": "pip",
     "ansible-lint": "ansible",
     "node": "ansible",

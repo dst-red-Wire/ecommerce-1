@@ -104,41 +104,58 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         runner.assert_not_called()
 
-    def test_pip_is_provisioned_from_python_ensurepip_and_rechecked(self):
+    def test_ubuntu_pip_is_provisioned_from_apt_and_rechecked(self):
         items = [
             {"name": "python", "requires": [], "command": "python3"},
             {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
-             "provision": {"type": "ensurepip"}, "provision_authority": "PIP_PROVISION_AUTHORITY"},
+             "provision": {"type": "debian-package", "package": "python3-pip", "distributions": ["ubuntu", "debian"]},
+             "provision_authority": "PIP_PROVISION_AUTHORITY"},
             {"name": "ansible", "requires": ["pip"], "command": "ansible"},
             {"name": "independent", "requires": [], "command": "independent"},
         ]
         calls = []
         pip_probes = iter([subprocess.CompletedProcess([], 1, "", "No module named pip"),
+                           subprocess.CompletedProcess([], 0, "pip 26.1", ""),
                            subprocess.CompletedProcess([], 0, "pip 26.1", "")])
         def runner(argv):
             calls.append(argv)
             if argv[1:4] == ["-m", "pip", "--version"]:
                 return next(pip_probes)
             return subprocess.CompletedProcess(argv, 0, "ready", "")
-        auditor = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}")
+        auditor = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}",
+                              distribution=lambda: "ubuntu")
         results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
         self.assertEqual("PASS", results["pip"].state)
-        self.assertIn([sys.executable, "-m", "ensurepip", "--user"], calls)
+        self.assertIn(["/bin/apt-get", "install", "-y", "python3-pip"], calls)
+        self.assertFalse(any("ensurepip" in call for call in calls))
         self.assertEqual("PASS", results["ansible"].state)
+        second_results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", second_results["pip"].state)
+        self.assertEqual(1, calls.count(["/bin/apt-get", "install", "-y", "python3-pip"]))
+
+    def test_ubuntu_ensurepip_only_mutation_is_rejected(self):
+        canonical = MOD.load_contract()
+        pip = next(item for item in canonical["capabilities"] if item["name"] == "pip")
+        pip["provision"] = {"type": "ensurepip"}
+        canonical["provision_owners"]["pip"] = "ensurepip"
+        with self.assertRaisesRegex(ValueError, "requires Ubuntu/Debian package provisioning"):
+            MOD.validate_contract(canonical)
 
     def test_failed_pip_provision_skips_only_dependants_without_false_pass(self):
         items = [
             {"name": "python", "requires": [], "command": "python3"},
             {"name": "pip", "requires": ["python"], "probe": ["python3", "-m", "pip", "--version"],
-             "provision": {"type": "ensurepip"}, "provision_authority": "PIP_PROVISION_AUTHORITY"},
+             "provision": {"type": "debian-package", "package": "python3-pip", "distributions": ["ubuntu", "debian"]},
+             "provision_authority": "PIP_PROVISION_AUTHORITY"},
             {"name": "ansible", "requires": ["pip"], "command": "ansible"},
             {"name": "cosign", "requires": [], "command": "cosign"},
         ]
         def runner(argv):
-            if "pip" in argv or "ensurepip" in argv:
+            if "pip" in argv or argv[0].endswith("apt-get"):
                 return subprocess.CompletedProcess(argv, 1, "", "unavailable")
             return subprocess.CompletedProcess(argv, 0, "ready", "")
-        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}").run(
+        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/bin/{command}",
+                              distribution=lambda: "ubuntu").run(
             bootstrap=True, os_name="linux", arch="amd64"
         )
         self.assertEqual("BLOCKED", results["pip"].state)
