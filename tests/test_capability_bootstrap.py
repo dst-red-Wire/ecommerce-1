@@ -471,12 +471,36 @@ class CapabilityClosureTest(unittest.TestCase):
     def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
         expected = {"ruff", "oxfmt", "oxlint"}
-        select = lambda run_tags: {tag for tag in expected if "all" in run_tags or tag in run_tags}
+        select = lambda run_tags: {
+            tag for tag in expected if "all" in run_tags or "quality_tools" in run_tags or tag in run_tags
+        }
         self.assertEqual(expected, select(["all"]))
+        self.assertEqual(expected, select(["quality_tools"]))
         for tag in expected:
             self.assertEqual({tag}, select([tag]))
-            self.assertIn(f"tags: [toolchain, {tag}]", tasks)
-        self.assertNotIn("quality_tools", tasks)
+            self.assertIn(f"tags: [toolchain, quality_tools, {tag}]", tasks)
+
+        self.assertEqual(
+            2,
+            tasks.count(
+                "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags "
+                "or item.tag in ansible_run_tags"
+            ),
+        )
+        makefile = (ROOT / "Makefile").read_text()
+        self.assertIn("quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries", makefile)
+        self.assertIn("@$(ANSIBLE_LOCAL) --tags quality_tools", makefile)
+
+        # Exact regression mutation: removing the aggregate task tag leaves the
+        # public selector with no quality tool installation tasks to execute.
+        mutated_tasks = tasks.replace("quality_tools, ", "")
+        aggregate_selected = {
+            tag
+            for tag in expected
+            if f"tags: [toolchain, quality_tools, {tag}]" in mutated_tasks
+        }
+        self.assertNotEqual(expected, aggregate_selected)
+        self.assertEqual(set(), aggregate_selected)
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()

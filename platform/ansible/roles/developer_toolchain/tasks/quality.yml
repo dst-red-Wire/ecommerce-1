@@ -10,8 +10,8 @@
     - {path: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}", tag: oxlint}
     - {path: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}", tag: oxfmt}
     - {path: "{{ local_share }}/tools/ruff/{{ ruff_version }}", tag: ruff}
-  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [toolchain, oxlint, oxfmt, ruff]
+  when: "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
+  tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
 
 - name: Download pinned Oxlint archive
   ansible.builtin.get_url:
@@ -19,7 +19,7 @@
     dest: "{{ local_cache }}/oxlint-{{ oxlint_version }}.tar.gz"
     checksum: "sha256:{{ oxlint_sha256 }}"
     mode: '0644'
-  tags: [toolchain, oxlint]
+  tags: [toolchain, quality_tools, oxlint]
 
 - name: Extract pinned Oxlint
   ansible.builtin.unarchive:
@@ -27,7 +27,7 @@
     dest: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}"
     remote_src: true
     creates: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}/oxlint-x86_64-unknown-linux-gnu"
-  tags: [toolchain, oxlint]
+  tags: [toolchain, quality_tools, oxlint]
 
 - name: Link Oxlint into the user path
   ansible.builtin.file:
@@ -36,7 +36,7 @@
     follow: false
     state: link
     force: true
-  tags: [toolchain, oxlint]
+  tags: [toolchain, quality_tools, oxlint]
 
 - name: Download pinned Oxfmt archive
   ansible.builtin.get_url:
@@ -44,7 +44,7 @@
     dest: "{{ local_cache }}/oxfmt-{{ oxfmt_version }}.tar.gz"
     checksum: "sha256:{{ oxfmt_sha256 }}"
     mode: '0644'
-  tags: [toolchain, oxfmt]
+  tags: [toolchain, quality_tools, oxfmt]
 
 - name: Extract pinned Oxfmt
   ansible.builtin.unarchive:
@@ -52,7 +52,7 @@
     dest: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}"
     remote_src: true
     creates: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}/oxfmt-x86_64-unknown-linux-gnu"
-  tags: [toolchain, oxfmt]
+  tags: [toolchain, quality_tools, oxfmt]
 
 - name: Link Oxfmt into the user path
   ansible.builtin.file:
@@ -61,7 +61,7 @@
     follow: false
     state: link
     force: true
-  tags: [toolchain, oxfmt]
+  tags: [toolchain, quality_tools, oxfmt]
 
 - name: Download pinned Ruff archive
   ansible.builtin.get_url:
@@ -69,7 +69,7 @@
     dest: "{{ local_cache }}/ruff-{{ ruff_version }}.tar.gz"
     checksum: "sha256:{{ ruff_sha256 }}"
     mode: '0644'
-  tags: [toolchain, ruff]
+  tags: [toolchain, quality_tools, ruff]
 
 - name: Extract pinned Ruff
   ansible.builtin.unarchive:
@@ -78,7 +78,7 @@
     remote_src: true
     extra_opts: [--strip-components=1]
     creates: "{{ local_share }}/tools/ruff/{{ ruff_version }}/ruff"
-  tags: [toolchain, ruff]
+  tags: [toolchain, quality_tools, ruff]
 
 - name: Link Ruff into the user path
   ansible.builtin.file:
@@ -86,7 +86,7 @@
     dest: "{{ local_bin }}/ruff"
     state: link
     force: true
-  tags: [toolchain, ruff]
+  tags: [toolchain, quality_tools, ruff]
 
 - name: Validate pinned quality tool versions
   ansible.builtin.command:
@@ -98,5 +98,5 @@
   register: quality_tool_versions
   changed_when: false
   failed_when: item.version not in quality_tool_versions.stdout
-  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [toolchain, oxlint, oxfmt, ruff]
+  when: "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
+  tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
