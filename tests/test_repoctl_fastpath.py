@@ -12,6 +12,15 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_ruby_runner_prerequisite_present_is_returned(self):
+        with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
+            self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
+
+    def test_missing_ruby_raises_blocked_runner_prerequisite(self):
+        with mock.patch.object(MOD.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(MOD.MissingRunnerPrerequisite, "runner prerequisite missing: ruby"):
+                MOD.require("ruby")
+
     def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
         calls = []
 

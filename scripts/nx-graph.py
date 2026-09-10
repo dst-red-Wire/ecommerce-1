@@ -4,15 +4,29 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 OUT = ROOT / ".context/nx-workspace"
 
 
+class MissingManagedYq(RuntimeError):
+    pass
+
+
+def managed_yq() -> str:
+    """Resolve only the repository-provisioned yq, never an unpinned system copy."""
+    candidate = Path.home() / ".local" / "bin" / "yq"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise MissingManagedYq(f"managed yq missing: run `make context-tools` ({candidate})")
+    return str(candidate)
+
+
 def yaml_json(path: str) -> dict:
-    raw = subprocess.check_output(["yq", "-o=json", ".", path], cwd=ROOT, text=True)
+    raw = subprocess.check_output([managed_yq(), "-o=json", ".", path], cwd=ROOT, text=True)
     return json.loads(raw)
 
 
@@ -69,4 +83,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except MissingManagedYq as exc:
+        print(f"BLOCKED {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
