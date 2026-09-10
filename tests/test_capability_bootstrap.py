@@ -561,6 +561,110 @@ class CapabilityAuditTest(unittest.TestCase):
 
 class CapabilityClosureTest(unittest.TestCase):
     @staticmethod
+    def ansible_lint_run(source, selected_tag, pipx_present, unrelated_present=True, sudo_available=True):
+        broad = re.search(
+            r"- name: Install native build prerequisites for CGO and archive handling\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        probe = re.search(
+            r"- name: Detect ansible-lint pipx prerequisite\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        prerequisite = re.search(
+            r"- name: Ensure ansible-lint pipx prerequisite\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        install = re.search(
+            r"- name: Install only missing or mismatched pipx packages\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        if None in (broad, probe, prerequisite, install):
+            return False, [], []
+
+        events = []
+        apt_packages = []
+
+        def selected(task):
+            tags = re.findall(r"^  tags: \[([^]]+)\]$", task.group("body"), re.MULTILINE)[0].split(", ")
+            return selected_tag == "all" or selected_tag in tags
+
+        if selected(broad):
+            broad_packages = re.findall(r"^      - (\S+)$", broad.group("body"), re.MULTILINE)
+            if not unrelated_present:
+                if not sudo_available:
+                    return False, ["broad-apt-blocked"], broad_packages
+                apt_packages.extend(broad_packages)
+            pipx_present = True
+            events.append("broad-apt")
+
+        if selected(probe):
+            events.append("probe-pipx")
+        if selected(prerequisite) and not pipx_present:
+            events.append("install-pipx")
+            apt_packages.append("pipx")
+            if not sudo_available:
+                return False, events, apt_packages
+            pipx_present = True
+        if selected(install):
+            events.append("install-ansible-lint")
+            if not pipx_present:
+                return False, events, apt_packages
+        return True, events, apt_packages
+
+    def test_ansible_lint_present_prerequisite_is_unprivileged_and_idempotent(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        for _ in range(2):
+            passed, events, apt_packages = self.ansible_lint_run(
+                tasks, "ansible_lint", pipx_present=True, unrelated_present=False, sudo_available=False
+            )
+            self.assertTrue(passed)
+            self.assertEqual(["probe-pipx", "install-ansible-lint"], events)
+            self.assertEqual([], apt_packages)
+
+    def test_ansible_lint_missing_prerequisite_installs_only_pipx(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        passed, events, apt_packages = self.ansible_lint_run(
+            tasks, "ansible_lint", pipx_present=False, unrelated_present=False
+        )
+        self.assertTrue(passed)
+        self.assertEqual(["probe-pipx", "install-pipx", "install-ansible-lint"], events)
+        self.assertEqual(["pipx"], apt_packages)
+        self.assertNotIn("build-essential", apt_packages)
+
+    def test_broad_ansible_lint_tag_mutation_fails_then_restored_passes(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        broad_tags = "  tags: [toolchain, go, cgo, node]\n"
+        self.assertEqual(1, tasks.count(broad_tags))
+        mutated = tasks.replace(broad_tags, "  tags: [toolchain, go, cgo, node, ansible_lint]\n", 1)
+        mutated_passed, mutated_events, mutated_packages = self.ansible_lint_run(
+            mutated, "ansible_lint", pipx_present=True, unrelated_present=False, sudo_available=False
+        )
+        self.assertFalse(mutated_passed)
+        self.assertEqual(["broad-apt-blocked"], mutated_events)
+        self.assertIn("build-essential", mutated_packages)
+        restored_passed, restored_events, restored_packages = self.ansible_lint_run(
+            tasks, "ansible_lint", pipx_present=True, unrelated_present=False, sudo_available=False
+        )
+        self.assertTrue(restored_passed)
+        self.assertEqual(["probe-pipx", "install-ansible-lint"], restored_events)
+        self.assertEqual([], restored_packages)
+
+    def test_full_and_toolchain_runs_preserve_broad_package_reconciliation(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        for tag in ("all", "toolchain"):
+            passed, events, apt_packages = self.ansible_lint_run(
+                tasks, tag, pipx_present=False, unrelated_present=False
+            )
+            self.assertTrue(passed)
+            self.assertIn("broad-apt", events)
+            self.assertIn("build-essential", apt_packages)
+            self.assertIn("pipx", apt_packages)
+
+    @staticmethod
     def terraform_archive_run(source, selected_tag, unzip_present, sudo_available=True):
         probe = re.search(
             r"- name: Detect Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",

@@ -27,7 +27,25 @@
     update_cache: true
     cache_valid_time: 86400
   become: true
-  tags: [toolchain, go, cgo, node, ansible_lint]
+  tags: [toolchain, go, cgo, node]
+
+- name: Detect ansible-lint pipx prerequisite
+  ansible.builtin.command:
+    argv: [pipx, --version]
+  register: ansible_lint_pipx_probe
+  failed_when: false
+  changed_when: false
+  tags: [toolchain, ansible_lint]
+
+- name: Ensure ansible-lint pipx prerequisite
+  ansible.builtin.apt:
+    name: pipx
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  when: ansible_lint_pipx_probe.rc != 0
+  tags: [toolchain, ansible_lint]
 
 - name: Download pinned Node archive
   ansible.builtin.get_url:
