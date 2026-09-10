@@ -167,6 +167,126 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         runner.assert_not_called()
 
+    def test_pnpm_probe_uses_validated_corepack_outside_path_and_checks_version(self):
+        items = [
+            {"name": "corepack", "requires": [], "command": "corepack"},
+            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
+             "probe": ["corepack", "pnpm", "--version"]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp, "managed", "bin")
+            managed_bin.mkdir(parents=True)
+            corepack = managed_bin / "corepack"
+            corepack.write_text("#!/bin/true\n")
+            corepack.chmod(0o755)
+            expected_version = Path(tmp, "pnpm-version")
+            expected_version.write_text("11.24.0\n")
+            items[1]["version_file"] = str(expected_version)
+            calls = []
+
+            def runner(argv):
+                calls.append(argv)
+                output = "0.34.6" if len(argv) == 1 else "11.24.0"
+                return subprocess.CompletedProcess(argv, 0, output, "")
+
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
+                    bootstrap=False, os_name="linux", arch="amd64"
+                )
+
+        self.assertEqual("PASS", results["corepack"].state)
+        self.assertEqual("PASS", results["pnpm"].state)
+        self.assertEqual([str(corepack), "pnpm", "--version"], calls[-1])
+
+    def test_pnpm_probe_keeps_validated_corepack_when_stale_provider_is_on_path(self):
+        items = [
+            {"name": "corepack", "requires": [], "command": "corepack", "version_key": "ANSIBLE_CORE_VERSION"},
+            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
+             "probe": ["corepack", "pnpm", "--version"]},
+        ]
+        expected = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
+        with tempfile.TemporaryDirectory() as tmp:
+            system_bin = Path(tmp, "system", "bin")
+            managed_bin = Path(tmp, "managed", "bin")
+            system_bin.mkdir(parents=True); managed_bin.mkdir(parents=True)
+            for executable in (system_bin / "corepack", managed_bin / "corepack"):
+                executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
+            calls = []
+
+            def runner(argv):
+                calls.append(argv)
+                version = "1.0.0" if argv[0] == str(system_bin / "corepack") else expected
+                return subprocess.CompletedProcess(argv, 0, version, "")
+
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                auditor = MOD.Auditor(contract(items), runner=runner,
+                                      which=lambda command: str(system_bin / command))
+                results = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
+
+        self.assertEqual("PASS", results["corepack"].state)
+        self.assertEqual(str(managed_bin / "corepack"), auditor.resolved_executables["corepack"])
+        self.assertEqual([str(managed_bin / "corepack"), "pnpm", "--version"], calls[-1])
+
+    def test_literal_corepack_mutation_fails_when_validated_provider_is_outside_path(self):
+        corrected = [
+            {"name": "corepack", "requires": [], "command": "corepack"},
+            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
+             "probe": ["corepack", "pnpm", "--version"]},
+        ]
+        mutated = [corrected[0], {key: value for key, value in corrected[1].items() if key != "provider"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp)
+            corepack = managed_bin / "corepack"
+            corepack.write_text("#!/bin/true\n"); corepack.chmod(0o755)
+
+            def runner(argv):
+                rc = 127 if argv[0] == "corepack" else 0
+                return subprocess.CompletedProcess(argv, rc, "11.24.0" if not rc else "", "ENOENT" if rc else "")
+
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                fixed = MOD.Auditor(contract(corrected), runner=runner, which=lambda _: None).run(
+                    bootstrap=False, os_name="linux", arch="amd64")
+                legacy = MOD.Auditor(contract(mutated), runner=runner, which=lambda _: None).run(
+                    bootstrap=False, os_name="linux", arch="amd64")
+
+        self.assertEqual("PASS", fixed["pnpm"].state)
+        self.assertEqual("FAIL", legacy["pnpm"].state)
+        self.assertIn("ENOENT", legacy["pnpm"].detail)
+
+    def test_pnpm_skips_without_a_valid_corepack_provider(self):
+        items = [
+            {"name": "corepack", "requires": [], "command": "corepack"},
+            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
+             "probe": ["corepack", "pnpm", "--version"]},
+        ]
+        runner = mock.Mock()
+        results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
+            bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("FAIL", results["corepack"].state)
+        self.assertEqual("SKIP", results["pnpm"].state)
+        runner.assert_not_called()
+
+    def test_pnpm_probe_rejects_wrong_version_through_validated_corepack(self):
+        items = [
+            {"name": "corepack", "requires": [], "command": "corepack"},
+            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
+             "probe": ["corepack", "pnpm", "--version"]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp)
+            corepack = managed_bin / "corepack"
+            corepack.write_text("#!/bin/true\n"); corepack.chmod(0o755)
+            expected_version = managed_bin / "pnpm-version"
+            expected_version.write_text("11.24.0\n")
+            items[1]["version_file"] = str(expected_version)
+            runner = mock.Mock(side_effect=lambda argv: subprocess.CompletedProcess(
+                argv, 0, "0.34.6" if len(argv) == 1 else "10.0.0", ""))
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
+                    bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("FAIL", results["pnpm"].state)
+        self.assertIn("wrong version: expected 11.24.0", results["pnpm"].detail)
+
     def test_compatible_runner_ansible_continues_project_provisioning_without_self_install(self):
         version = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
         items = [

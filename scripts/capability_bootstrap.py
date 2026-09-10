@@ -306,7 +306,13 @@ class Auditor:
         argv = item.get("probe") or ([command, *item.get("version_args", [])] if command else [])
         provider = item.get("provider")
         if provider:
-            provider_command = self.provider_entrypoint(item)
+            provider_executable = self.resolved_executables.get(provider)
+            provider_item = self.graph.items[provider]
+            provider_command = (
+                provider_executable
+                if argv and argv[0] == provider_item["command"]
+                else self.provider_entrypoint(item)
+            )
             resolved_candidates = [provider_command] if provider_command else []
         elif item.get("isolated"):
             resolved_candidates = [
@@ -315,7 +321,7 @@ class Auditor:
             ]
         else:
             resolved_candidates = self.resolve_all(command) if command else []
-        if command and not resolved_candidates:
+        if (command or provider) and not resolved_candidates:
             if provider:
                 detail = f"entry point absent from provider {provider}"
             elif item.get("classification") == "seed-prerequisite":
@@ -327,7 +333,7 @@ class Auditor:
         version_file = item.get("version_file")
         if version_file:
             expected = (ROOT / version_file).read_text(encoding="utf-8").strip()
-        candidates = resolved_candidates if command and argv and argv[0] == command else [None]
+        candidates = resolved_candidates if argv and (provider or (command and argv[0] == command)) else [None]
         last = Result("FAIL", "tool absent")
         for resolved in candidates:
             candidate_argv = [str(resolved), *argv[1:]] if resolved else argv

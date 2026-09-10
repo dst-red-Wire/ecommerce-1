@@ -132,6 +132,7 @@
       "requires": [
         "corepack"
       ],
+      "provider": "corepack",
       "probe": [
         "corepack",
         "pnpm",
