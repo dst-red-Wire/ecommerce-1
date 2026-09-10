@@ -13,9 +13,17 @@ class ContractConsistencyTest < Minitest::Test
     File.write(absolute, value.to_yaml)
   end
 
-  def fixture(root)
+  # Unit-only sub-contract fixture. It intentionally exercises ContractConsistency only and
+  # MUST NOT be treated as a complete architecture.lock.yaml by global authority validators.
+  def subcontract_fixture(root)
     write_yaml(root, "architecture.lock.yaml", {
-      "business" => {"services" => %w[product catalog], "frontends" => ["admin"]}
+      "business" => {"services" => %w[product catalog], "frontends" => ["admin"]},
+      "machine_contracts" => {
+        "service_ownership" => "config/contracts/service-ownership.yaml",
+        "dependency_map" => "config/contracts/dependency-map.yaml",
+        "event_contracts" => "config/contracts/event-contracts.yaml",
+        "public_api_contracts" => "config/contracts/public-api-contracts.yaml"
+      }
     })
     write_yaml(root, "config/contracts/service-ownership.yaml", {
       "services" => {
@@ -39,14 +47,14 @@ class ContractConsistencyTest < Minitest::Test
 
   def test_valid_cross_registry_contracts_pass
     Dir.mktmpdir do |root|
-      fixture(root)
+      subcontract_fixture(root)
       assert_empty ContractConsistency.validate(root)
     end
   end
 
   def test_sync_drift_fails
     Dir.mktmpdir do |root|
-      fixture(root)
+      subcontract_fixture(root)
       write_yaml(root, "config/contracts/service-ownership.yaml", {
         "services" => {
           "product" => {"sync_dependencies" => []},
@@ -59,7 +67,7 @@ class ContractConsistencyTest < Minitest::Test
 
   def test_event_consumer_drift_fails
     Dir.mktmpdir do |root|
-      fixture(root)
+      subcontract_fixture(root)
       write_yaml(root, "config/contracts/dependency-map.yaml", {
         "services" => {
           "product" => {"sync" => [], "events_in" => []},

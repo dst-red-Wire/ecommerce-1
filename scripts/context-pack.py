@@ -17,11 +17,15 @@ import shutil
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from contract_paths import machine_contract_path  # noqa: E402
+from yaml_loader import load_yaml  # noqa: E402
+
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 ROUTER = ROOT / "config/context/router.yaml"
-OWNERSHIP = ROOT / "config/contracts/service-ownership.yaml"
-DEPS = ROOT / "config/contracts/dependency-map.yaml"
-PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
+OWNERSHIP = machine_contract_path(ROOT, "service_ownership")
+DEPS = machine_contract_path(ROOT, "dependency_map")
+PUBLIC_API = machine_contract_path(ROOT, "public_api_contracts")
 
 
 def run(*args: str, check: bool = True) -> str:
@@ -29,10 +33,6 @@ def run(*args: str, check: bool = True) -> str:
     if check and p.returncode:
         raise RuntimeError(p.stderr.strip() or f"command failed: {' '.join(args)}")
     return p.stdout
-
-
-def yq_json(expr: str, path: Path):
-    return json.loads(run("yq", "-o=json", expr, str(path)))
 
 
 def changed_files(base: str) -> list[str]:
@@ -74,14 +74,14 @@ def task_route(task: str, cfg: dict) -> str:
 
 
 def route(task: str, files: list[str]) -> str:
-    cfg = yq_json(".", ROUTER)
+    cfg = load_yaml(ROUTER)
     ranks = {"L0": 0, "L1": 1, "L2": 2}
     candidates = [file_route(files, cfg), task_route(task, cfg)]
     return max(candidates, key=lambda item: ranks[item])
 
 
 def service_names() -> list[str]:
-    return [str(x) for x in yq_json(".services | keys", OWNERSHIP)]
+    return [str(x) for x in load_yaml(OWNERSHIP)["services"]]
 
 
 def detect_services(task: str, files: list[str]) -> list[str]:
@@ -97,13 +97,13 @@ def detect_services(task: str, files: list[str]) -> list[str]:
 
 
 def service_contract(name: str) -> str:
-    owner = yq_json(f'.services."{name}"', OWNERSHIP)
-    dep = yq_json(f'.services."{name}"', DEPS)
-    services = yq_json(".services", DEPS) or {}
+    owner = load_yaml(OWNERSHIP)["services"].get(name)
+    services = load_yaml(DEPS).get("services", {})
+    dep = services.get(name)
     consumers = sorted(
         service for service, contract in services.items() if name in ((contract or {}).get("sync") or [])
     )
-    public = yq_json(f'.contracts."{name}"', PUBLIC_API)
+    public = load_yaml(PUBLIC_API).get("contracts", {}).get(name)
     return json.dumps(
         {
             "ownership": owner,
@@ -192,7 +192,7 @@ def main() -> int:
     parser.add_argument("--output", default=".context/codex-context.md")
     args = parser.parse_args()
 
-    cfg = yq_json(".", ROUTER)
+    cfg = load_yaml(ROUTER)
     files = changed_files(args.base)
     level = route(args.task, files)
     level_cfg = cfg["levels"][level]

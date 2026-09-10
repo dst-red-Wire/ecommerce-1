@@ -23,7 +23,7 @@ make contracts
 La validation échoue si un contrat enregistré :
 
 - n'est pas OpenAPI 3.1.0 ou diverge de son registre machine ;
-- déclare un service non canonique ou `checkout` ;
+- déclare un service non canonique ;
 - diverge de l'ownership exact de `config/contracts/service-ownership.yaml` ;
 - utilise un `$ref` distant ou non résolu ;
 - omet `operationId` ou une réponse 2xx ;
@@ -40,4 +40,4 @@ Le chemin HTTP est versionné en `/v1/...`; la version sémantique du document e
 
 ## Suite
 
-Une fois la convention du golden service `product` validée par implémentation et revue, les contrats externes suivants sont ajoutés par tranches métier, sans créer de service `checkout`. Le Storefront public doit ensuite s'appuyer sur les contrats des propriétaires appropriés (notamment `catalog`) plutôt que contourner les frontières de domaine.
+Une fois la convention du golden service `product` validée par implémentation et revue, les contrats externes suivants sont ajoutés par tranches métier. `checkout` reste un domaine autonome canonique et peut publier son propre contrat REST lorsqu'un besoin edge/public le justifie. Le Storefront public doit s'appuyer sur les contrats des propriétaires appropriés plutôt que contourner leurs frontières de domaine.

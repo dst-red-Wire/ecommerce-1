@@ -161,6 +161,8 @@ module ArchitectureValidator
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
     events, events_path = required_machine_contract(contracts, "event_contracts")
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
+    deployment_waves, = required_machine_contract(contracts, "deployment_waves")
+    observability_topology, observability_topology_path = required_machine_contract(contracts, "observability_topology")
     network, = required_machine_contract(contracts, "network_plan")
     mgmt, = required_machine_contract(contracts, "mgmt_inventory")
     prod, = required_machine_contract(contracts, "prod_inventory")
@@ -370,8 +372,17 @@ module ArchitectureValidator
         "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
         "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
         "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
+        "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
         "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
         "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
+      },
+      "mlops" => {
+        "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
+        "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
+        "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
+        "orchestration" => "tekton", "desired_state" => "rancher-fleet",
+        "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
+        "drift" => "evidently-tekton-batch"
       },
       "supply_chain" => {
         "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",
@@ -383,6 +394,36 @@ module ArchitectureValidator
       check_equal(errors, "#{section} active contract keys", expected_contract.keys.sort, actual_contract.keys.sort)
       expected_contract.each do |field, expected|
         check_equal(errors, "#{section}.#{field}", expected, actual_contract[field])
+      end
+    end
+
+    waves = expect_array(deployment_waves.fetch("waves"), "deployment-waves.yaml waves")
+    component_waves = {}
+    wave_components = waves.flat_map do |wave|
+      components = Array(wave["components"]) + Array(wave["parallel_groups"]).flatten + Array(wave["serial_after_parallel"])
+      components.each { |component| component_waves[component] = wave }
+      components
+    end
+    %w[rotel opentelemetry-collector vmagent victoriametrics victorialogs vmalert alertmanager grafana clickhouse mongodb-oss-self-hosted hyperdx data-prepper-security opensearch-security wazuh cloudnativepg seaweedfs lakefs lakefs-metadata-cnpg mlflow mlflow-metadata-cnpg].each do |component|
+      check_equal(errors, "deployment waves include #{component}", true, wave_components.include?(component))
+    end
+
+    forbidden_wave_components = expect_array(
+      observability_topology.dig("anti_duplication", "forbidden_active_components"),
+      "#{observability_topology_path} anti_duplication.forbidden_active_components"
+    )
+    forbidden_wave_components.each do |component|
+      errors << "deployment waves include forbidden observability component #{component}" if wave_components.include?(component)
+    end
+
+    cnpg_operator_wave = component_waves["cloudnativepg"]
+    if cnpg_operator_wave
+      %w[lakefs-metadata-cnpg mlflow-metadata-cnpg].each do |component|
+        metadata_wave = component_waves[component]
+        next unless metadata_wave
+        next if Array(metadata_wave["requires"]).include?(cnpg_operator_wave["id"])
+
+        errors << "deployment wave for #{component} must require CloudNativePG operator wave #{cnpg_operator_wave['id']}"
       end
     end
 

@@ -1,11 +1,14 @@
 PYTHON := python3
+include config/toolchain/versions.env
+export PATH := $(HOME)/.local/bin:$(PATH)
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
+ANSIBLE_BOOTSTRAP := pipx run --spec ansible-core==$(ANSIBLE_CORE_VERSION) ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help bootstrap ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
@@ -85,13 +88,14 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
+.PHONY: workstation-doctor quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
-workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+bootstrap: ## Canonically reconcile pinned dependencies on Ubuntu Linux, WSL2, Codex Cloud and CI
+	@command -v python3 >/dev/null 2>&1 && command -v pipx >/dev/null 2>&1 || { echo "ERROR: bootstrap seed requires Ubuntu python3 and pipx packages." >&2; exit 1; }
+	@$(ANSIBLE_BOOTSTRAP) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
 	@$(ANSIBLE_LOCAL) --tags quality_tools

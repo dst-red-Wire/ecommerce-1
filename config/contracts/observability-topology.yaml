@@ -62,14 +62,47 @@ security_telemetry:
   pipeline: data-prepper
   storage: opensearch
   analytics: wazuh
+  deployment_component: data-prepper-security
   allowed_purposes: [security-enrichment, siem]
   forbidden_purposes: [general-application-logs, general-infrastructure-logs]
 
 hyperdx:
   telemetry_storage: clickhouse
   metadata_store: mongodb
+  metadata_deployment: mongodb-oss-self-hosted
   metadata_scope: hyperdx-internal-only
   business_data_forbidden: true
+
+stateful_storage:
+  profile: observability-stateful-v1
+  contract_authority:
+    machine_contract: storage_plan
+  backup_object_authority: seaweedfs-s3
+  prod_placement: per-site-independent
+  stretched_quorum_between_prod_sites: forbidden
+  environments:
+    mgmt: deferred
+    preprod: required
+    prod: required
+  stores:
+    metrics:
+      component: victoriametrics
+      purpose: sre-metrics
+    infrastructure_logs:
+      component: victorialogs
+      purpose: infrastructure-logs
+    application_observability:
+      component: clickhouse
+      purpose: application-traces-and-logs
+    hyperdx_metadata:
+      component: mongodb-oss-self-hosted
+      purpose: hyperdx-metadata-only
+      business_data_forbidden: true
+    security_siem:
+      component: opensearch-security
+      purpose: security-siem-only
+      general_application_logs_forbidden: true
+      general_infrastructure_logs_forbidden: true
 
 anti_duplication:
   forbidden_active_components:

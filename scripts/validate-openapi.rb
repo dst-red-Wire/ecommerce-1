@@ -22,17 +22,19 @@ module OpenApiContractValidator
       "architecture.lock.yaml machine_contracts"
     )
 
-    registry_path = machine_contracts["public_api_contracts"]
-    unless registry_path.is_a?(String) && !registry_path.empty?
-      return ["architecture.lock.yaml machine_contracts.public_api_contracts must be declared"]
-    end
-
+    registry_path = ArchitectureValidator.machine_contract_path(
+      root, "public_api_contracts", machine_contracts["public_api_contracts"]
+    )
     registry = ArchitectureValidator.expect_mapping(
       ArchitectureValidator.load_yaml(root, registry_path),
       registry_path
     )
-    ownership_path = machine_contracts.fetch("service_ownership")
-    dependency_path = machine_contracts.fetch("dependency_map")
+    ownership_path = ArchitectureValidator.machine_contract_path(
+      root, "service_ownership", machine_contracts.fetch("service_ownership")
+    )
+    dependency_path = ArchitectureValidator.machine_contract_path(
+      root, "dependency_map", machine_contracts.fetch("dependency_map")
+    )
     ownership = ArchitectureValidator.expect_mapping(
       ArchitectureValidator.load_yaml(root, ownership_path),
       ownership_path
@@ -60,6 +62,13 @@ module OpenApiContractValidator
     errors << "#{registry_path} protocol must match dependency-map public_protocol" unless registry["protocol"] == dependencies.dig("rules", "public_protocol")
     errors << "#{registry_path} openapi_version must be 3.1.0" unless registry["openapi_version"] == "3.1.0"
     errors << "#{registry_path} remote_refs_forbidden must be true" unless rules["remote_refs_forbidden"] == true
+    errors << "#{registry_path} canonical_service_namespaces_reserved must be true" unless rules["canonical_service_namespaces_reserved"] == true
+    canonical_namespaces = rules["canonical_service_namespaces"]
+    unless canonical_namespaces.is_a?(Hash) && canonical_namespaces.keys.sort == services.sort &&
+           canonical_namespaces.values.all? { |namespace| namespace.is_a?(String) && !namespace.empty? } &&
+           canonical_namespaces.values.uniq.length == canonical_namespaces.values.length
+      errors << "#{registry_path} canonical_service_namespaces must map every canonical service to a unique namespace"
+    end
 
     common_path = registry["common_components"]
     common_absolute = safe_contract_path(root, common_path, errors)
@@ -88,11 +97,6 @@ module OpenApiContractValidator
         errors << "#{registry_path} contract #{service.inspect} is not a canonical service"
         next
       end
-      if service == "checkout"
-        errors << "checkout service is forbidden in #{registry_path}"
-        next
-      end
-
       entry = ArchitectureValidator.expect_mapping(entry, "#{registry_path} contracts.#{service}")
       service_ownership = ownership_services[service]
       unless service_ownership.is_a?(Hash)
@@ -118,6 +122,7 @@ module OpenApiContractValidator
           entry: entry,
           ownership: service_ownership,
           registry: registry,
+          canonical_services: services,
           cache: cache,
           operation_ids: operation_ids
         )
@@ -146,7 +151,7 @@ module OpenApiContractValidator
     absolute
   end
 
-  def validate_document(root:, spec_path:, spec:, service:, entry:, ownership:, registry:, cache:, operation_ids:)
+  def validate_document(root:, spec_path:, spec:, service:, entry:, ownership:, registry:, canonical_services:, cache:, operation_ids:)
     errors = []
     rules = registry.fetch("rules")
     openapi_version = registry.fetch("openapi_version")
@@ -169,7 +174,13 @@ module OpenApiContractValidator
 
     paths.each do |path, path_item|
       errors << "#{spec_path} path #{path} must start with #{expected_prefix}" unless path.start_with?(expected_prefix)
-      errors << "#{spec_path} path #{path} contains forbidden checkout service" if path.split("/").include?("checkout")
+      if path.start_with?(expected_prefix) && rules["canonical_service_namespaces_reserved"] == true
+        namespace = path.delete_prefix(expected_prefix).split("/", 2).first
+        owner = reserved_namespace_owner(rules["canonical_service_namespaces"], namespace)
+        if owner && owner != service
+          errors << "#{spec_path} path #{path} uses reserved service namespace #{namespace} owned by #{owner}"
+        end
+      end
       unless path_item.is_a?(Hash)
         errors << "#{spec_path} path #{path} must map to an object"
         next
@@ -225,6 +236,13 @@ module OpenApiContractValidator
 
     validate_refs(root, spec_path, spec, spec, cache, errors, {})
     errors
+  end
+
+
+  def reserved_namespace_owner(canonical_namespaces, namespace)
+    return nil unless canonical_namespaces.is_a?(Hash)
+
+    canonical_namespaces.find { |_service, reserved| namespace == reserved }&.first
   end
 
   def security_requirement?(security, scheme)

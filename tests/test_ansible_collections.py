@@ -8,7 +8,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 ANSIBLE_CFG = (ROOT / "platform/ansible/ansible.cfg").read_text(encoding="utf-8")
-WORKSTATION_TASKS = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+WORKSTATION_TASKS = (ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml").read_text(encoding="utf-8")
 SPEC = importlib.util.spec_from_file_location("repoctl", ROOT / "scripts/repoctl.py")
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)

@@ -1,13 +1,19 @@
 # frozen_string_literal: true
 
+require "fileutils"
 require "minitest/autorun"
+require "tmpdir"
+require "yaml"
 require_relative "../scripts/validate-openapi"
 
 class OpenApiValidatorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
-  SPEC_PATH = "contracts/openapi/product.v1.yaml"
-  REGISTRY_PATH = "config/contracts/public-api-contracts.yaml"
-  OWNERSHIP_PATH = "config/contracts/service-ownership.yaml"
+  LOCK = ArchitectureValidator.load_yaml(ROOT, "architecture.lock.yaml")
+  REGISTRY_PATH = LOCK.fetch("machine_contracts").fetch("public_api_contracts")
+  OWNERSHIP_PATH = LOCK.fetch("machine_contracts").fetch("service_ownership")
+  DEPENDENCY_PATH = LOCK.fetch("machine_contracts").fetch("dependency_map")
+  REGISTRY = ArchitectureValidator.load_yaml(ROOT, REGISTRY_PATH)
+  SPEC_PATH = REGISTRY.fetch("contracts").fetch("product").fetch("path")
 
   def test_repository_contracts_pass
     assert_empty OpenApiContractValidator.validate(ROOT)
@@ -31,18 +37,102 @@ class OpenApiValidatorTest < Minitest::Test
     assert errors.any? { |error| error.include?("must match exact service ownership") }, errors.inspect
   end
 
-  def test_checkout_path_is_rejected
+  def test_registered_checkout_contract_is_allowed
+    Dir.mktmpdir("openapi-checkout") do |root|
+      [
+        "architecture.lock.yaml",
+        DEPENDENCY_PATH,
+        REGISTRY_PATH,
+        OWNERSHIP_PATH,
+        REGISTRY.fetch("common_components"),
+        SPEC_PATH
+      ].each do |relative|
+        target = File.join(root, relative)
+        FileUtils.mkdir_p(File.dirname(target))
+        FileUtils.cp(File.join(ROOT, relative), target)
+      end
+
+      ownership = ArchitectureValidator.load_yaml(root, OWNERSHIP_PATH).fetch("services").fetch("checkout")
+      checkout = product_spec
+      checkout["x-ecommerce-service"] = "checkout"
+      checkout["x-ecommerce-authoritative-store"] = ownership.fetch("db")
+      checkout["x-ecommerce-ownership"] = ownership.fetch("owns")
+      checkout["x-ecommerce-audiences"] = ["storefront"]
+      checkout["paths"] = {
+        "/v1/checkout" => {
+          "get" => {
+            "operationId" => "getCheckoutSession",
+            "responses" => {"200" => {"description" => "ok"}}
+          }
+        }
+      }
+      checkout_path = "contracts/openapi/checkout.v1.yaml"
+      File.write(File.join(root, checkout_path), YAML.dump(checkout))
+
+      registry_path = File.join(root, REGISTRY_PATH)
+      registry = YAML.safe_load_file(registry_path, aliases: false)
+      registry.fetch("contracts")["checkout"] = {
+        "path" => checkout_path,
+        "api_version" => "1.0.0",
+        "path_major" => "v1",
+        "audiences" => ["storefront"]
+      }
+      File.write(registry_path, YAML.dump(registry))
+
+      assert_empty OpenApiContractValidator.validate(root)
+    end
+  end
+
+  def test_non_owner_cannot_publish_checkout_namespace
     spec = product_spec
     spec.fetch("paths")["/v1/checkout"] = {
       "get" => {
-        "operationId" => "forbiddenCheckout",
-        "responses" => { "200" => { "description" => "forbidden" } }
+        "operationId" => "productCannotOwnCheckout",
+        "responses" => {"200" => {"description" => "invalid ownership probe"}}
       }
     }
 
     errors = validate_product(spec)
 
-    assert errors.any? { |error| error.include?("contains forbidden checkout service") }, errors.inspect
+    assert errors.any? { |error| error.include?("reserved service namespace checkout owned by checkout") }, errors.inspect
+  end
+
+  def test_non_owner_cannot_publish_plural_service_namespace
+    spec = product_spec
+    spec.fetch("paths")["/v1/payments"] = {
+      "get" => {
+        "operationId" => "productCannotOwnPayments",
+        "responses" => {"200" => {"description" => "invalid ownership probe"}}
+      }
+    }
+
+    errors = validate_product(spec)
+
+    assert errors.any? { |error| error.include?("reserved service namespace payments owned by payment") }, errors.inspect
+  end
+
+  def test_irregular_plural_namespaces_are_reserved_for_their_owners
+    {"inventories" => "inventory", "taxes" => "tax", "categories" => nil}.each do |namespace, owner|
+      spec = product_spec
+      spec.fetch("paths")["/v1/#{namespace}"] = {
+        "get" => {"operationId" => "probe#{namespace.capitalize}", "responses" => {"200" => {"description" => "probe"}}}
+      }
+      errors = validate_product(spec)
+      if owner
+        assert errors.any? { |error| error.include?("reserved service namespace #{namespace} owned by #{owner}") }, errors.inspect
+      else
+        refute errors.any? { |error| error.include?("reserved service namespace #{namespace}") }, errors.inspect
+      end
+    end
+  end
+
+  def test_each_canonical_owner_can_publish_its_declared_namespace
+    namespaces = REGISTRY.fetch("rules").fetch("canonical_service_namespaces")
+    %w[inventory tax checkout].each do |service|
+      assert_equal service, OpenApiContractValidator.reserved_namespace_owner(namespaces, namespaces.fetch(service))
+    end
+    assert_nil OpenApiContractValidator.reserved_namespace_owner(namespaces, "inventory")
+    assert_nil OpenApiContractValidator.reserved_namespace_owner(namespaces, "tax")
   end
 
   def test_write_without_idempotency_key_is_rejected
@@ -96,6 +186,7 @@ class OpenApiValidatorTest < Minitest::Test
       entry: entry,
       ownership: ownership,
       registry: registry,
+      canonical_services: LOCK.fetch("business").fetch("services"),
       cache: { SPEC_PATH => spec },
       operation_ids: {}
     )

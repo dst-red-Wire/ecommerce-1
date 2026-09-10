@@ -1,0 +1,82 @@
+version: 3
+status: exact
+authority: resilience-governance
+purpose: measurable recovery objectives and persistent archive requirements for stateful platform data
+
+persistent_archive_authorities:
+  preprod-jit-external-archive:
+    lifecycle: persistent-independent-from-preprod-jit
+    management_plane_responsibility: provision-and-govern-destination
+    operational_prerequisites:
+      provider: required-unresolved
+      endpoint: required-unresolved
+      bucket: required-unresolved
+      credential_reference: required-unresolved
+    fabricated_runtime_values_forbidden: true
+    least_privilege_identity: archive-writer-no-delete
+    encryption: {in_transit: required, at_rest: required, key_authority_separate_from-jit: required}
+    integrity: {checksums: required, immutable_manifest: required}
+    external_failure_domain_independence: required
+
+profiles:
+  seaweedfs-preprod-object-data:
+    components: [seaweedfs, lakefs, mlflow, platform-backup-jobs]
+    backup_method: external-object-copy-plus-inventory-validation
+    backup_object_authority: preprod-jit-external-archive
+    backup_execution_authority: rancher-fleet-kubernetes-cronjob
+    archive_before_preprod_destroy: required
+    archive_proof: required-not-yet-proven
+    destroy_without_verified_archive: forbidden
+    schedule: {preprod: 12h}
+    retention: {preprod: 7d}
+    rpo: {preprod: 12h}
+    rto: {preprod: 6h}
+    restore_validation: required
+    restore_proof: required-not-yet-proven
+    backup_failure_domain: external-to-preprod-jit
+    encryption: {in_transit: required, at_rest: required, key_authority_separate_from-jit: required}
+    integrity: {checksums: required, immutable_manifest: required, inventory_validation: required}
+    management_responsibility: persistent-management-plane
+    local_objective_override: forbidden
+
+  keycloak-database:
+    components: [keycloak-database]
+    backup_method: barman-pitr-compatible
+    backup_object_authorities: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+    backup_execution_authority: rancher-fleet-kubernetes-cronjob
+    archive_before_preprod_destroy: required
+    archive_proof: required-not-yet-proven
+    destroy_without_verified_archive: forbidden
+    schedule: {preprod: 12h, prod: 6h}
+    retention: {preprod: 7d, prod: 30d}
+    rpo: {preprod: 12h, prod: 6h}
+    rto: {preprod: 4h, prod: 2h}
+    restore_validation: required
+    restore_proof: required-not-yet-proven
+    backup_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
+    local_objective_override: forbidden
+
+  mlops-metadata-cnpg:
+    components: [lakefs-metadata-cnpg, mlflow-metadata-cnpg]
+    backup_method: barman-pitr-compatible
+    backup_object_authorities: {preprod: preprod-jit-external-archive, prod: opposite-prod-site}
+    backup_execution_authority: rancher-fleet-kubernetes-cronjob
+    archive_before_preprod_destroy: required
+    archive_proof: required-not-yet-proven
+    destroy_without_verified_archive: forbidden
+    schedule: {preprod: 12h, prod: 6h}
+    retention: {preprod: 7d, prod: 30d}
+    rpo: {preprod: 12h, prod: 6h}
+    rto: {preprod: 4h, prod: 2h}
+    restore_validation: required
+    restore_proof: required-not-yet-proven
+    backup_failure_domains: {preprod: external-to-preprod-jit, prod: opposite-prod-site}
+    local_objective_override: forbidden
+
+validation:
+  duration_format: positive-integer-hours-or-days
+  null_objectives_forbidden: true
+  restore_validation_required: true
+  undeclared_profile_forbidden: true
+  preprod_destroy_gate: verified-external-archive-and-integrity-proof-required
+  fail_closed_when_external_copy_unproven: true

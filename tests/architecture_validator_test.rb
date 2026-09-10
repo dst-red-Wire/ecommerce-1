@@ -5,6 +5,7 @@ require "minitest/autorun"
 require "tmpdir"
 require "yaml"
 require_relative "../scripts/validate-architecture"
+require_relative "../scripts/validate-observability"
 
 class ArchitectureValidatorTest < Minitest::Test
   ROOT = File.expand_path("..", __dir__)
@@ -25,6 +26,61 @@ class ArchitectureValidatorTest < Minitest::Test
 
   def test_repository_contracts_are_consistent
     assert_empty ArchitectureValidator.validate(ROOT)
+  end
+
+  def test_rejects_missing_active_stateful_or_observability_component_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "60-stateful" }["serial_after_parallel"].delete("lakefs")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors, "deployment waves include lakefs: expected true, got false"
+    end
+  end
+
+  def test_rejects_missing_mlops_storage_prerequisite_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "45-object-storage" }["components"].delete("seaweedfs")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors, "deployment waves include seaweedfs: expected true, got false"
+    end
+  end
+
+  def test_rejects_forbidden_observability_component_from_deployment_waves
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "55-observability-services" }["components"] <<
+          "opensearch-general-log-store"
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors,
+                      "deployment waves include forbidden observability component opensearch-general-log-store"
+    end
+  end
+
+  def test_rejects_cnpg_metadata_without_operator_readiness_dependency
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "60-stateful" }["requires"].delete("58-stateful-operators")
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert_includes errors,
+                      "deployment wave for lakefs-metadata-cnpg must require CloudNativePG operator wave 58-stateful-operators"
+      assert_includes errors,
+                      "deployment wave for mlflow-metadata-cnpg must require CloudNativePG operator wave 58-stateful-operators"
+    end
+  end
+
+  def test_rejects_hyperdx_metadata_deployment_drift
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/contracts/observability-topology.yaml") do |data|
+        data["hyperdx"]["metadata_deployment"] = "mongodb-atlas"
+      end
+      errors = ObservabilityTopologyValidator.validate(root)
+      assert_includes errors, "HyperDX metadata MongoDB must be internal-only"
+    end
   end
 
   SERVICE_MUTATIONS = {
@@ -453,7 +509,10 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[observability metrics] => "prometheus",
       %w[observability infrastructure_logs] => "loki",
       %w[observability security_pipeline] => "logstash",
-      %w[observability security] => "splunk"
+      %w[observability security] => "splunk",
+      %w[observability hyperdx_metadata_store] => "mongodb-atlas",
+      %w[mlops dataset_versioner] => "dvc",
+      %w[mlops progressive_delivery] => "flagger"
     }
     mutations.each do |path, value|
       with_contract_copy do |root|

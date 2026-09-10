@@ -12,12 +12,12 @@ module AffectedComponents
 
   FRONTENDS = %w[storefront admin].freeze
   PLATFORM_COMPONENTS = %w[platform:terraform platform:ansible].freeze
-  SEMANTIC_CONTRACTS = %w[
-    config/contracts/service-ownership.yaml
-    config/contracts/dependency-map.yaml
-    config/contracts/event-contracts.yaml
-    config/contracts/public-api-contracts.yaml
-  ].freeze
+  SEMANTIC_CONTRACT_KEYS = {
+    "service_ownership" => :service_ownership,
+    "dependency_map" => :dependency_map,
+    "event_contracts" => :event_contracts,
+    "public_api_contracts" => :public_api_contracts
+  }.freeze
 
   def public_contract_index(public_api)
     public_api.fetch("contracts", {}).each_with_object({}) do |(service, spec), index|
@@ -35,16 +35,27 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, strict_unknown: false)
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, runtime_efficiency_contract: nil, ci_topology_contract: nil, strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
       path = raw_path.to_s.sub(%r{\A\./}, "")
       next if path.empty?
 
+      if contract_impact.key?(path)
+        impact = contract_impact[path]
+        Array(impact).each { |component| components << component }
+        components << "system" unless impact.empty?
+        next
+      end
+      next if runtime_efficiency_contract && path == runtime_efficiency_contract
+      if ci_topology_contract && path == ci_topology_contract
+        force_all!(components, services)
+        next
+      end
+
       case path
-      when "architecture.lock.yaml", "Makefile", "go.work",
-           "config/contracts/ci-topology.yaml", "config/toolchain/versions.env"
+      when "architecture.lock.yaml", "Makefile", "go.work", "config/toolchain/versions.env"
         force_all!(components, services)
       when %r{\Ascripts/ci-[^/]+\.(?:rb|py)\z}, "scripts/repoctl.py",
            %r{\Aplatform/tekton/}
@@ -83,19 +94,7 @@ module AffectedComponents
         # mapping. Fail closed until they do rather than guessing from filenames.
         services.each { |service| components << "service:#{service}" }
         components << "system"
-      when *SEMANTIC_CONTRACTS
-        impact = contract_impact[path]
-        if impact.nil?
-          # Callers that do not provide a base/head semantic delta are deliberately
-          # conservative. The CLI always provides one.
-          services.each { |service| components << "service:#{service}" }
-          components << "system"
-        else
-          Array(impact).each { |component| components << component }
-          components << "system" unless impact.empty?
-        end
-      when "config/contracts/runtime-efficiency.yaml",
-           "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
+      when "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
            "tests/resource_sizing_test.rb", "tests/runtime_efficiency_test.rb"
         # The runtime-efficiency gate is globally authoritative and always runs on
         # the new SHA, so these inputs do not require the broad system suite.
@@ -143,6 +142,31 @@ module AffectedComponents
     YAML.safe_load(text, aliases: false) || {}
   rescue Psych::SyntaxError => e
     raise ArgumentError, "invalid YAML at #{ref}:#{path}: #{e.message}"
+  end
+
+  def machine_contract_path_at(root, ref, key)
+    lock = yaml_at(root, ref, "architecture.lock.yaml")
+    contracts = lock["machine_contracts"]
+    raise ArgumentError, "architecture.lock.yaml machine_contracts must be a mapping at #{ref}" unless contracts.is_a?(Hash)
+    path = contracts[key]
+    unless path.is_a?(String) && !path.empty?
+      raise ArgumentError, "architecture.lock.yaml machine_contracts.#{key} must declare a path at #{ref}"
+    end
+    path
+  end
+
+  def machine_contract_paths_at(root, ref)
+    lock = yaml_at(root, ref, "architecture.lock.yaml")
+    contracts = lock["machine_contracts"]
+    raise ArgumentError, "architecture.lock.yaml machine_contracts must be a mapping at #{ref}" unless contracts.is_a?(Hash)
+
+    SEMANTIC_CONTRACT_KEYS.each_with_object({}) do |(key, kind), result|
+      path = contracts[key]
+      unless path.is_a?(String) && !path.empty?
+        raise ArgumentError, "architecture.lock.yaml machine_contracts.#{key} must declare a path at #{ref}"
+      end
+      result[kind] = path
+    end
   end
 
   def changed_keys(before, after)
@@ -198,10 +222,14 @@ module AffectedComponents
     impact
   end
 
-  def semantic_contract_impact(path, before:, after:, services:, frontends:, context: {})
+  def semantic_contract_impact(kind, before:, after:, services:, frontends:, context: {})
+    if kind.is_a?(String)
+      normalized = File.basename(kind, ".yaml").tr("-", "_").to_sym
+      kind = normalized if SEMANTIC_CONTRACT_KEYS.value?(normalized)
+    end
     impact = Set.new
-    case path
-    when "config/contracts/service-ownership.yaml"
+    case kind
+    when :service_ownership
       old_services = before.fetch("services", {})
       new_services = after.fetch("services", {})
       changed_keys(old_services, new_services).each do |service|
@@ -212,7 +240,7 @@ module AffectedComponents
                Array(new_services.dig(service, "sync_dependencies"))
         canonical_service_components(refs, services).each { |component| impact << component }
       end
-    when "config/contracts/dependency-map.yaml"
+    when :dependency_map
       old_services = before.fetch("services", {})
       new_services = after.fetch("services", {})
       before_events = context.fetch(:before_events, {})
@@ -223,7 +251,7 @@ module AffectedComponents
         dependency_entry_impact(service, old_services[service], new_services[service], services,
                                 before_events, after_events).each { |component| impact << component }
       end
-    when "config/contracts/event-contracts.yaml"
+    when :event_contracts
       old_events = before.fetch("events", {})
       new_events = after.fetch("events", {})
       changed_keys(old_events, new_events).each do |event_name|
@@ -232,7 +260,7 @@ module AffectedComponents
         refs = [event_producer(event_name), *Array(old_spec["consumers"]), *Array(new_spec["consumers"])]
         canonical_service_components(refs, services).each { |component| impact << component }
       end
-    when "config/contracts/public-api-contracts.yaml"
+    when :public_api_contracts
       global_keys = (before.keys | after.keys) - ["contracts"]
       global_changed = global_keys.any? { |key| before[key] != after[key] }
       if global_changed
@@ -255,28 +283,35 @@ module AffectedComponents
   end
 
   def contract_impact_map(root, base, head, paths, services:, frontends: FRONTENDS)
-    before_events = yaml_at(root, base, "config/contracts/event-contracts.yaml")
-    after_events = yaml_at(root, head, "config/contracts/event-contracts.yaml")
+    before_paths = machine_contract_paths_at(root, base)
+    after_paths = machine_contract_paths_at(root, head)
+    before_events = yaml_at(root, base, before_paths.fetch(:event_contracts))
+    after_events = yaml_at(root, head, after_paths.fetch(:event_contracts))
     context = {before_events: before_events, after_events: after_events}
 
-    SEMANTIC_CONTRACTS.each_with_object({}) do |path, impacts|
-      next unless paths.include?(path)
+    SEMANTIC_CONTRACT_KEYS.values.each_with_object({}) do |kind, impacts|
+      before_path = before_paths.fetch(kind)
+      after_path = after_paths.fetch(kind)
+      changed_contract_paths = [before_path, after_path].uniq.select { |path| paths.include?(path) }
+      next if changed_contract_paths.empty?
 
-      impacts[path] = semantic_contract_impact(
-        path,
-        before: yaml_at(root, base, path),
-        after: yaml_at(root, head, path),
+      impact = semantic_contract_impact(
+        kind,
+        before: yaml_at(root, base, before_path),
+        after: yaml_at(root, head, after_path),
         services: services,
         frontends: frontends,
         context: context
       )
+      changed_contract_paths.each { |path| impacts[path] = impact }
     end
   end
 
   def load_project(root, ref)
     lock = yaml_at(root, ref, "architecture.lock.yaml")
-    ownership = yaml_at(root, ref, "config/contracts/service-ownership.yaml")
-    public_api = yaml_at(root, ref, "config/contracts/public-api-contracts.yaml")
+    contract_paths = machine_contract_paths_at(root, ref)
+    ownership = yaml_at(root, ref, contract_paths.fetch(:service_ownership))
+    public_api = yaml_at(root, ref, contract_paths.fetch(:public_api_contracts))
     services = ownership.fetch("services").keys
     canonical = lock.dig("business", "services") || []
     raise "service ownership differs from architecture.lock.yaml" unless services.sort == canonical.sort
@@ -301,6 +336,8 @@ if $PROGRAM_NAME == __FILE__
 
   root = File.expand_path("..", __dir__)
   services, public_contracts, common_openapi = AffectedComponents.load_project(root, options[:head])
+  runtime_efficiency_contract = AffectedComponents.machine_contract_path_at(root, options[:head], "runtime_efficiency")
+  ci_topology_contract = AffectedComponents.machine_contract_path_at(root, options[:head], "ci_topology")
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
   contract_impact = AffectedComponents.contract_impact_map(
     root, options[:base], options[:head], paths, services: services
@@ -311,6 +348,8 @@ if $PROGRAM_NAME == __FILE__
     public_contracts: public_contracts,
     common_openapi: common_openapi,
     contract_impact: contract_impact,
+    runtime_efficiency_contract: runtime_efficiency_contract,
+    ci_topology_contract: ci_topology_contract,
     strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"

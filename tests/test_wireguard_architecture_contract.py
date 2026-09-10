@@ -2,25 +2,28 @@ from __future__ import annotations
 
 import ipaddress
 from pathlib import Path
+import sys
 import unittest
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
-NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
-POLICY = ROOT / "config/contracts/mgmt-wireguard-access.yaml"
-ACCESS_GATEWAYS = ROOT / "config/infrastructure/mgmt-access-gateways.yaml"
-DOC = ROOT / "docs/architecture/MGMT_WIREGUARD_ACCESS.md"
+sys.path.insert(0, str(ROOT / "scripts"))
+from contract_paths import machine_contract_path, topology_contract_path  # noqa: E402
+from yaml_loader import load_yaml  # noqa: E402
+
 LOCK = ROOT / "architecture.lock.yaml"
-EXACT_INDEX = ROOT / "docs/architecture/EXACT_TOPOLOGY_V2.md"
+NETWORK_PLAN = machine_contract_path(ROOT, "network_plan")
+POLICY = machine_contract_path(ROOT, "mgmt_wireguard_access")
+ACCESS_GATEWAYS = machine_contract_path(ROOT, "mgmt_access_gateways")
+DOC = topology_contract_path(ROOT, "mgmt_wireguard_access")
+EXACT_INDEX = topology_contract_path(ROOT, "exact_index")
 
 
 class WireGuardArchitectureContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.network = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))
-        cls.policy = yaml.safe_load(POLICY.read_text(encoding="utf-8"))
-        cls.gateway_inventory = yaml.safe_load(ACCESS_GATEWAYS.read_text(encoding="utf-8"))
+        cls.network = load_yaml(NETWORK_PLAN)
+        cls.policy = load_yaml(POLICY)
+        cls.gateway_inventory = load_yaml(ACCESS_GATEWAYS)
         cls.wg = cls.network["wireguard"]["mgmt"]
 
     def test_tunnel_is_disjoint_from_every_versioned_network(self):
@@ -58,9 +61,9 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertNotIn(gateway, break_glass)
 
     def test_gateway_reservation_is_in_infrastructure_vm_range(self):
-        allocation = self.network["static_allocations"]["mgmt"][401]["wg-01"]
+        allocation = self.network["static_allocations"]["mgmt"]["401"]["wg-01"]
         self.assertEqual(self.wg["gateway_mgmt_ip"], allocation)
-        subnet = ipaddress.ip_network(self.network["vlans"]["mgmt"][401]["cidr"])
+        subnet = ipaddress.ip_network(self.network["vlans"]["mgmt"]["401"]["cidr"])
         address = ipaddress.ip_address(allocation)
         self.assertIn(address, subnet)
         host_offset = int(address) - int(subnet.network_address)
@@ -109,7 +112,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("wireguard-peer-audit-on-wg01", policy["operator_attribution"])
         self.assertEqual("required", policy["stateful_return"])
         translated = ipaddress.ip_address(policy["translated_source_ip"])
-        self.assertIn(translated, ipaddress.ip_network(self.network["vlans"]["mgmt"][401]["cidr"]))
+        self.assertIn(translated, ipaddress.ip_network(self.network["vlans"]["mgmt"]["401"]["cidr"]))
 
     def test_public_endpoint_is_runtime_only_udp_wireguard(self):
         endpoint = self.wg["endpoint"]
@@ -124,10 +127,8 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("exact", self.policy["status"])
         self.assertEqual("Z5", self.policy["gateway"]["trust_zone"])
         self.assertFalse(self.policy["gateway"]["kubernetes_member"])
-        self.assertEqual(
-            "config/infrastructure/mgmt-access-gateways.yaml#access_gateways.wg-01",
-            self.policy["gateway"]["inventory_source"],
-        )
+        expected_inventory_source = f"{ACCESS_GATEWAYS.relative_to(ROOT).as_posix()}#access_gateways.wg-01"
+        self.assertEqual(expected_inventory_source, self.policy["gateway"]["inventory_source"])
         self.assertEqual("workforce", self.policy["access"]["identity_realm"])
         self.assertEqual("forbidden", self.policy["access"]["customer_identity"])
         self.assertEqual("deny", self.policy["access"]["default_forwarding"])
@@ -177,23 +178,23 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
             self.assertEqual(len(threat["controls"]), len(set(threat["controls"])), name)
 
     def test_contract_is_indexed_by_architecture_lock(self):
-        lock = yaml.safe_load(LOCK.read_text(encoding="utf-8"))
+        lock = load_yaml(LOCK)
         self.assertEqual(
-            "docs/architecture/MGMT_WIREGUARD_ACCESS.md",
-            lock["topology_contracts"]["mgmt_wireguard_access"],
+            DOC.resolve(),
+            (ROOT / lock["topology_contracts"]["mgmt_wireguard_access"]).resolve(),
         )
         self.assertEqual(
-            "config/contracts/mgmt-wireguard-access.yaml",
-            lock["machine_contracts"]["mgmt_wireguard_access"],
+            POLICY.resolve(),
+            (ROOT / lock["machine_contracts"]["mgmt_wireguard_access"]).resolve(),
         )
         self.assertEqual(
-            "config/infrastructure/mgmt-access-gateways.yaml",
-            lock["machine_contracts"]["mgmt_access_gateways"],
+            ACCESS_GATEWAYS.resolve(),
+            (ROOT / lock["machine_contracts"]["mgmt_access_gateways"]).resolve(),
         )
         index = EXACT_INDEX.read_text(encoding="utf-8")
-        self.assertIn("MGMT_WIREGUARD_ACCESS.md", index)
-        self.assertIn("config/contracts/mgmt-wireguard-access.yaml", index)
-        self.assertIn("config/infrastructure/mgmt-access-gateways.yaml", index)
+        self.assertIn(DOC.name, index)
+        self.assertIn(POLICY.relative_to(ROOT).as_posix(), index)
+        self.assertIn(ACCESS_GATEWAYS.relative_to(ROOT).as_posix(), index)
 
     def test_exact_document_records_no_active_implementation(self):
         text = DOC.read_text(encoding="utf-8")

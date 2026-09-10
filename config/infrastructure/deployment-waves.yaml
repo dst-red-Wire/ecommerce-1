@@ -1,5 +1,207 @@
-version: 2
+version: 5
 status: exact
+graph_policy:
+  root_wave: 00-underlay
+  unique_wave_ids_required: true
+  requires_must_resolve: true
+  cycles_forbidden: true
+  unreachable_waves_forbidden: true
+execution_policy:
+  activation_requires_resolved_binding: true
+  placeholders_forbidden: true
+  unbound_components_forbidden: true
+  unknown_bindings_forbidden: true
+  automatic_destroy: forbidden
+
+execution_profiles:
+  infrastructure:
+    timeout: 30m
+    retry:
+      max_attempts: 3
+      backoff: 60s
+    health_checks: [controller-ready, declared-gates-pass]
+    evidence:
+      exact_sha: required
+      environment: required
+      component: required
+      wave: required
+      observed_revision: required
+      gate_results: required
+    failure:
+      behavior: fail-closed-block-dependent-waves
+      hook: reconcile-last-approved-state
+      automatic_destroy: forbidden
+  operator:
+    timeout: 15m
+    retry:
+      max_attempts: 3
+      backoff: 30s
+    health_checks: [deployment-ready, crds-established, declared-gates-pass]
+    evidence:
+      exact_sha: required
+      environment: required
+      component: required
+      wave: required
+      observed_revision: required
+      gate_results: required
+    failure:
+      behavior: fail-closed-block-dependent-waves
+      hook: reconcile-last-approved-state
+      automatic_destroy: forbidden
+  stateful:
+    timeout: 30m
+    retry:
+      max_attempts: 2
+      backoff: 60s
+    health_checks: [workload-ready, storage-bound, quorum-healthy, declared-gates-pass]
+    evidence:
+      exact_sha: required
+      environment: required
+      component: required
+      wave: required
+      observed_revision: required
+      gate_results: required
+    failure:
+      behavior: fail-closed-preserve-data
+      hook: preserve-data-and-reconcile
+      automatic_destroy: forbidden
+  stateless:
+    timeout: 10m
+    retry:
+      max_attempts: 3
+      backoff: 30s
+    health_checks: [workload-ready, declared-gates-pass]
+    evidence:
+      exact_sha: required
+      environment: required
+      component: required
+      wave: required
+      observed_revision: required
+      gate_results: required
+    failure:
+      behavior: fail-closed-block-dependent-waves
+      hook: reconcile-last-approved-state
+      automatic_destroy: forbidden
+  qualification:
+    timeout: 60m
+    retry:
+      max_attempts: 1
+      backoff: 30s
+    health_checks: [declared-gate-pass]
+    evidence:
+      exact_sha: required
+      environment: required
+      component: required
+      wave: required
+      observed_revision: required
+      gate_results: required
+    failure:
+      behavior: fail-closed
+      hook: none
+      automatic_destroy: forbidden
+  backup:
+    timeout: 60m
+    retry: {max_attempts: 1, backoff: 60s}
+    health_checks: [job-ready, archive-created, integrity-verified, restore-evidence-gate-pass]
+    evidence: {exact_sha: required, environment: required, component: required, wave: required, observed_revision: required, gate_results: required}
+    failure: {behavior: fail-closed-block-destroy, hook: preserve-data-and-evidence, automatic_destroy: forbidden}
+  inference:
+    timeout: 30m
+    retry: {max_attempts: 1, backoff: 30s}
+    health_checks: [crds-established, controller-ready, immutable-model-digest, shadow-canary-gates-pass, manual-promotion-approval]
+    evidence: {exact_sha: required, environment: required, component: required, wave: required, observed_revision: required, gate_results: required}
+    failure: {behavior: fail-closed-no-automatic-model-promotion, hook: reconcile-last-approved-state, automatic_destroy: forbidden}
+
+component_execution_bindings:
+  network: infrastructure
+  dns-prerequisites: infrastructure
+  time-sync: infrastructure
+  image-mirrors: infrastructure
+  rke2-control-plane: infrastructure
+  rke2-workers: infrastructure
+  cilium: infrastructure
+  hubble: infrastructure
+  pod-security: infrastructure
+  kyverno: infrastructure
+  tetragon: infrastructure
+  rancher-fleet: infrastructure
+  spire: infrastructure
+  istio: infrastructure
+  openbao: infrastructure
+  external-secrets: infrastructure
+  harbor: infrastructure
+  tekton: infrastructure
+  seaweedfs: stateful
+  mongodb-community-operator: operator
+  opensearch-operator: operator
+  victoriametrics: stateful
+  victorialogs: stateful
+  clickhouse: stateful
+  mongodb-oss-self-hosted: stateful
+  opensearch-security: stateful
+  rotel: stateless
+  opentelemetry-collector: stateless
+  vmagent: stateless
+  vmalert: stateless
+  alertmanager: stateless
+  grafana: stateless
+  hyperdx: stateless
+  data-prepper-security: stateless
+  wazuh: stateless
+  cloudnativepg: operator
+  strimzi-operator: operator
+  kserve-operator: operator
+  lakefs-metadata-cnpg: stateful
+  keycloak-database: stateful
+  mlflow-metadata-cnpg: stateful
+  strimzi-kafka: stateful
+  rabbitmq: stateful
+  redis: stateful
+  opensearch-business: stateful
+  apicurio: stateless
+  platform-backup-jobs: backup
+  kserve-vllm-inference: inference
+  evidently-tekton-batch: qualification
+  lakefs: stateless
+  mlflow: stateless
+  keycloak: stateless
+  haproxy: stateless
+  caddy: stateless
+  coraza: stateless
+  kong: stateless
+  ats: stateless
+  istio-gateway: stateless
+  squid-egress: stateless
+  product: stateless
+  inventory: stateless
+  pricing: stateless
+  tax: stateless
+  order: stateless
+  payment: stateless
+  shipping: stateless
+  fraud-risk: stateless
+  search: stateless
+  user-profile: stateless
+  notification: stateless
+  catalog: stateless
+  cart: stateless
+  tracking: stateless
+  review: stateless
+  fulfillment: stateless
+  returns: stateless
+  billing: stateless
+  checkout: stateless
+  storefront: stateless
+  admin: stateless
+  smoke: qualification
+  security: qualification
+  contracts: qualification
+  integration: qualification
+  bdd: qualification
+  e2e: qualification
+  performance: qualification
+  chaos-dr: qualification
+
 waves:
   - id: 00-underlay
     requires: []
@@ -16,33 +218,55 @@ waves:
   - id: 40-secrets-registry-ci
     requires: [30-gitops-identity]
     components: [openbao, external-secrets, harbor, tekton]
-  - id: 50-observability
-    requires: [40-secrets-registry-ci]
-    components: [opentelemetry, prometheus, alertmanager, grafana, fluent-bit, data-prepper, opensearch-logs, wazuh]
-  - id: 60-stateful
+  - id: 45-object-storage
     requires: [40-secrets-registry-ci, 20-network-security]
+    components: [seaweedfs]
+  - id: 48-observability-operators
+    requires: [45-object-storage]
+    components: [mongodb-community-operator, opensearch-operator]
+  - id: 50-observability-stateful
+    requires: [48-observability-operators]
+    components: [victoriametrics, victorialogs, clickhouse, mongodb-oss-self-hosted, opensearch-security]
+  - id: 55-observability-services
+    requires: [50-observability-stateful]
+    components: [rotel, opentelemetry-collector, vmagent, vmalert, alertmanager, grafana, hyperdx, data-prepper-security, wazuh]
+  - id: 58-stateful-operators
+    requires: [45-object-storage, 40-secrets-registry-ci, 20-network-security]
+    components: [cloudnativepg, kserve-operator]
+  - id: 59-messaging-operators
+    requires: [58-stateful-operators]
+    components: [strimzi-operator]
+  - id: 60-stateful
+    requires: [58-stateful-operators, 59-messaging-operators, 45-object-storage, 40-secrets-registry-ci, 20-network-security]
     parallel_groups:
-      - [cloudnativepg, strimzi-kafka, rabbitmq, redis, seaweedfs]
-      - [opensearch-business, apicurio]
+      - [lakefs-metadata-cnpg, mlflow-metadata-cnpg, keycloak-database, strimzi-kafka, rabbitmq, redis]
+      - [opensearch-business]
+    serial_after_parallel: [apicurio, lakefs, mlflow]
   - id: 70-iam-edge
     requires: [60-stateful, 30-gitops-identity]
     components: [keycloak, haproxy, caddy, coraza, kong, ats, istio-gateway, squid-egress]
+  - id: 72-backup-archive-jobs
+    requires: [60-stateful, 50-observability-stateful, 40-secrets-registry-ci, 45-object-storage]
+    components: [platform-backup-jobs]
+  - id: 75-mlops-inference
+    requires: [58-stateful-operators, 60-stateful, 70-iam-edge, 55-observability-services]
+    components: [kserve-vllm-inference]
+  - id: 76-mlops-qualification
+    requires: [60-stateful, 72-backup-archive-jobs, 75-mlops-inference, 40-secrets-registry-ci]
+    components: [evidently-tekton-batch]
   - id: 80-golden-service
-    requires: [50-observability, 60-stateful, 70-iam-edge]
+    requires: [55-observability-services, 60-stateful, 70-iam-edge]
     components: [product]
   - id: 90-commerce
     requires: [80-golden-service]
     parallel_groups:
-      - [catalog, inventory, pricing, tax, search]
-      - [cart, fraud-risk]
-      - [shipping, tracking]
-      - [review, user-profile, notification]
-    serial_after_parallel: [order, payment, returns, billing]
+      - [inventory, pricing, tax, order, payment, shipping, fraud-risk, search, user-profile, notification]
+    serial_after_parallel: [catalog, cart, tracking, review, fulfillment, returns, billing, checkout]
   - id: 100-frontends
     requires: [90-commerce]
     components: [storefront, admin]
   - id: 110-qualification
-    requires: [100-frontends]
+    requires: [100-frontends, 72-backup-archive-jobs, 75-mlops-inference, 76-mlops-qualification]
     components: [smoke, security, contracts, integration, bdd, e2e, performance, chaos-dr]
 rules:
   wait_only_on_declared_dependencies: true
@@ -50,3 +274,17 @@ rules:
   no_perf_before_prior_gates: true
   no_chaos_dr_before_prior_gates: true
   no_prod_promotion_from_test_state: true
+
+mlops_qualification:
+  engine: evidently-tekton-batch
+  task: platform/tekton/tasks/evidently-qualification.yaml
+  execution: bounded-tekton-task
+  purposes: [qualification, drift-baseline, governed-retraining-evidence]
+  inputs: [lakefs-dataset-commit, mlflow-candidate, evaluation-policy]
+  evidence: [probabilistic-evaluation, drift-baseline, immutable-evidence-digest]
+  training_trigger: forbidden
+  automatic_retraining: forbidden
+  automatic_promotion: forbidden
+  promotion_authority: none
+  human_approval_bypass: forbidden
+  permanent_service: forbidden

@@ -1,32 +1,34 @@
 import ipaddress
 from pathlib import Path
+import sys
 import unittest
 
-import yaml
-
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from contract_paths import machine_contract_path  # noqa: E402
+from yaml_loader import load_yaml  # noqa: E402
+
 LOCALS = ROOT / "platform/terraform/environments/mgmt/locals.tf"
 CHECKS = ROOT / "platform/terraform/environments/mgmt/checks.tf"
 ENV_MAIN = ROOT / "platform/terraform/environments/mgmt/main.tf"
 ENV_VARIABLES = ROOT / "platform/terraform/environments/mgmt/variables.tf"
 ENV_OUTPUTS = ROOT / "platform/terraform/environments/mgmt/outputs.tf"
 MODULE_MAIN = ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf"
-INVENTORY = ROOT / "config/infrastructure/mgmt-inventory.yaml"
-NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
+INVENTORY = machine_contract_path(ROOT, "mgmt_inventory")
+NETWORK_PLAN = machine_contract_path(ROOT, "network_plan")
 
 
 class TerraformNetworkChecksTest(unittest.TestCase):
     def test_management_inventory_addresses_belong_to_canonical_segments(self):
-        inventory = yaml.safe_load(INVENTORY.read_text(encoding="utf-8"))
-        segments = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))["vlans"]["mgmt"]
+        inventory = load_yaml(INVENTORY)
+        segments = load_yaml(NETWORK_PLAN)["vlans"]["mgmt"]
 
         for node in [*inventory["control_planes"].values(), *inventory["workers"].values()]:
-            self.assertIn(ipaddress.ip_address(node["mgmt_ip"]), ipaddress.ip_network(segments[401]["cidr"]))
-            self.assertIn(ipaddress.ip_address(node["k8s_ip"]), ipaddress.ip_network(segments[402]["cidr"]))
+            self.assertIn(ipaddress.ip_address(node["mgmt_ip"]), ipaddress.ip_network(segments["401"]["cidr"]))
+            self.assertIn(ipaddress.ip_address(node["k8s_ip"]), ipaddress.ip_network(segments["402"]["cidr"]))
         for worker in inventory["workers"].values():
-            self.assertIn(ipaddress.ip_address(worker["storage_ip"]), ipaddress.ip_network(segments[403]["cidr"]))
-            self.assertIn(ipaddress.ip_address(worker["backup_ip"]), ipaddress.ip_network(segments[405]["cidr"]))
+            self.assertIn(ipaddress.ip_address(worker["storage_ip"]), ipaddress.ip_network(segments["403"]["cidr"]))
+            self.assertIn(ipaddress.ip_address(worker["backup_ip"]), ipaddress.ip_network(segments["405"]["cidr"]))
 
     def test_terraform_uses_standard_ipv4_interval_bounds(self):
         locals_text = LOCALS.read_text(encoding="utf-8")
@@ -72,7 +74,7 @@ class TerraformNetworkChecksTest(unittest.TestCase):
         self.assertIn("module.hcloud_mgmt.private_networks", outputs_text)
 
     def test_provider_aliases_match_inventory_roles(self):
-        inventory = yaml.safe_load(INVENTORY.read_text(encoding="utf-8"))
+        inventory = load_yaml(INVENTORY)
 
         for node in inventory["control_planes"].values():
             self.assertEqual([node["k8s_ip"]], [node["k8s_ip"]])

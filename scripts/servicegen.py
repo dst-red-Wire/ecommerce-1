@@ -13,22 +13,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import json
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-def load_yaml(path: Path) -> dict:
-    output = subprocess.check_output(
-        [
-            "ruby",
-            "-ryaml",
-            "-rjson",
-            "-e",
-            "d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)",
-            str(path),
-        ],
-        text=True,
-    )
-    return json.loads(output)
+from contract_paths import machine_contract_path  # noqa: E402 - script-local path is established above
+from yaml_loader import load_yaml  # noqa: E402
 
 
 def canonical_services(root: Path) -> list[str]:
@@ -36,7 +27,7 @@ def canonical_services(root: Path) -> list[str]:
 
 
 def current_milestone(root: Path) -> str:
-    return str(load_yaml(root / "config/contracts/public-api-contracts.yaml").get("current_milestone", ""))
+    return str(load_yaml(machine_contract_path(root, "public_api_contracts")).get("current_milestone", ""))
 
 
 def validate_service(root: Path, service: str) -> None:

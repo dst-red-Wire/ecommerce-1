@@ -6,11 +6,13 @@ These rules apply to the whole repository.
 
 ## Authoritative architecture
 
-Before changing code or structure, read:
+Before changing code or structure, read the applicable authority in this order:
 
-1. `docs/architecture/BASELINE_V2.md`
-2. `architecture.lock.yaml`
-3. relevant ADRs and domain documentation
+1. specialized machine contract;
+2. specialized validated topology/document;
+3. `architecture.lock.yaml`;
+4. `docs/architecture/BASELINE_V2.md`;
+5. execution plan/handoff/issue.
 
 Validated architecture is not to be redesigned during implementation unless an explicit contradiction is found and routed back to architecture governance.
 
@@ -31,7 +33,8 @@ Validated architecture is not to be redesigned during implementation unless an e
 - Progressive delivery: Argo Rollouts.
 - Registry: Harbor.
 - Object storage target: SeaweedFS S3.
-- Logging/security: Fluent Bit + Data Prepper + OpenSearch Logs + Wazuh.
+- Observability: Rotel -> ClickHouse/HyperDX for application traces and logs; vmagent -> VictoriaMetrics for metrics; OpenTelemetry Collector -> VictoriaLogs for infrastructure logs; vmalert -> Alertmanager for alerting.
+- Security/SIEM only: Data Prepper -> OpenSearch -> Wazuh.
 
 Do not introduce these superseded defaults into new implementation:
 
@@ -40,6 +43,7 @@ Do not introduce these superseded defaults into new implementation:
 - MinIO Community Edition / MinIO Operator
 - Loki as the logging baseline
 - Splunk as the SIEM baseline
+- DVC as the active dataset versioner
 
 Historical references may remain only when explicitly labelled superseded.
 
@@ -71,9 +75,13 @@ Prefer small reviewable PRs over monolithic changes.
 
 ## Build sequence
 
-Do not implement the 19 services in parallel from empty scaffolding. Follow:
+Do not implement the 19 services in parallel from empty scaffolding. After M1, M2 and M2.5 may proceed in parallel. Real PREPROD `CREATE` in M3 is gated by M2.5 PROVEN:
 
-`M1 bootstrap -> M2 golden product service -> M3 PREPROD infra -> M4 platform -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
+`M1 bootstrap -> { M2 golden product service, M2.5 persistent MGMT bootstrap }`
+
+`M2.5 PROVEN -> M3 PREPROD infra -> M4 platform`
+
+`M2 + M4 -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
 
 The `product` service is the first golden backend implementation and must validate the shared engineering conventions before they are replicated.
 ## Token-efficient agent context

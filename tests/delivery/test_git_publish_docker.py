@@ -2,7 +2,7 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-PLAYBOOK = (ROOT / "platform/ansible/roles/developer_workstation/tasks/main.yml").read_text(encoding="utf-8")
+PLAYBOOK = (ROOT / "platform/ansible/roles/developer_workstation/tasks/prerequisites.yml").read_text(encoding="utf-8")
 CONTROLLER = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
 
 
@@ -11,6 +11,8 @@ class DockerPublishBoundaryTest(unittest.TestCase):
         self.assertIn("Probe Docker daemon", PLAYBOOK)
         self.assertIn("docker.exe", PLAYBOOK)
         self.assertIn("powershell.exe", PLAYBOOK)
+        self.assertIn("Start the native Ubuntu Docker daemon", PLAYBOOK)
+        self.assertIn("- docker.io", PLAYBOOK)
         self.assertIn("retries: 30", PLAYBOOK)
 
     def test_service_gate_requests_ansible_docker_capability(self):

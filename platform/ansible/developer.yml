@@ -12,30 +12,31 @@
         fail_msg: "Pass -e repo_root=/absolute/path/to/ecommerce-1."
       tags: [always]
 
-    - name: Require Ubuntu on the supported WSL workstation
+    - name: Require supported Linux execution environment
       ansible.builtin.assert:
         that:
           - ansible_facts.system == 'Linux'
           - ansible_facts.distribution == 'Ubuntu'
-        fail_msg: "Developer reconciliation currently supports the Ubuntu WSL2 workstation only."
+        fail_msg: "Bootstrap supports Ubuntu Linux, including WSL2, Codex Cloud and Linux CI runners."
       tags: [always]
 
-    - name: Read kernel release for WSL verification
+    - name: Read kernel release for conditional WSL adaptations
       ansible.builtin.command:
         argv: [uname, -r]
       register: developer_kernel
       changed_when: false
       tags: [always]
 
-    - name: Require WSL2 Microsoft kernel
-      ansible.builtin.assert:
-        that:
-          - "'microsoft' in developer_kernel.stdout | lower"
-        fail_msg: "Developer reconciliation must run from the supported WSL2 environment."
+    - name: Detect WSL2 without making it a global prerequisite
+      ansible.builtin.set_fact:
+        developer_is_wsl2: "{{ 'microsoft' in developer_kernel.stdout | lower }}"
       tags: [always]
 
   roles:
     - role: developer_workstation
+      tasks_from: prerequisites
     - role: developer_toolchain
+    - role: developer_workstation
+      tasks_from: hooks
     - role: api_codegen
     - role: product_persistence

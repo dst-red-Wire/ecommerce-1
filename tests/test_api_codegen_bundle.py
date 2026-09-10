@@ -86,6 +86,13 @@ class ApiCodegenBundleTest(unittest.TestCase):
         service.write_text(product, encoding="utf-8")
         return temp, service, common
 
+    def write_public_api_lock(self, root):
+        (root / "architecture.lock.yaml").write_text(
+            "machine_contracts:\n"
+            "  public_api_contracts: config/contracts/public-api-contracts.yaml\n",
+            encoding="utf-8",
+        )
+
     def test_canonical_common_refs_become_internal_without_losing_named_service_refs(self):
         temp, service, common = self.write_specs()
         self.addCleanup(temp.cleanup)
@@ -161,6 +168,9 @@ class ApiCodegenBundleTest(unittest.TestCase):
             root = pathlib.Path(temp_name)
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
+            shutil.copy2(ROOT / "scripts/contract_paths.py", root / "scripts/contract_paths.py")
+            shutil.copy2(ROOT / "scripts/yaml_loader.py", root / "scripts/yaml_loader.py")
+            self.write_public_api_lock(root)
             (root / "config/contracts").mkdir(parents=True)
             (root / "contracts/openapi").mkdir(parents=True)
             (root / "services/product").mkdir(parents=True)
@@ -227,6 +237,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
     def test_typescript_codegen_check_is_read_only_and_fails_on_drift(self):
         with tempfile.TemporaryDirectory() as temp_name:
             root = pathlib.Path(temp_name)
+            self.write_public_api_lock(root)
             (root / "config/contracts").mkdir(parents=True)
             (root / "contracts/openapi").mkdir(parents=True)
             (root / "frontend/packages/api-client/src/generated").mkdir(parents=True)
@@ -242,6 +253,13 @@ class ApiCodegenBundleTest(unittest.TestCase):
                 "common_components": "contracts/openapi/common.v1.yaml",
                 "contracts": {"product": {"path": "contracts/openapi/product.v1.yaml"}},
             }
+            (root / "config/contracts/public-api-contracts.yaml").write_text(
+                "common_components: contracts/openapi/common.v1.yaml\n"
+                "contracts:\n"
+                "  product:\n"
+                "    path: contracts/openapi/product.v1.yaml\n",
+                encoding="utf-8",
+            )
 
             def fake_run(command, *_args, **_kwargs):
                 if command and command[0] == "oxfmt":

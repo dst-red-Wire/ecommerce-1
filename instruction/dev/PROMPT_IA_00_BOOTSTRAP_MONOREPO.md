@@ -9,9 +9,10 @@ Tu es l'agent d'implémentation chargé de créer le bootstrap minimal du monore
 Lire avant toute modification :
 
 1. `/AGENTS.md`
-2. `/docs/architecture/BASELINE_V2.md`
+2. les contrats machine et topologies exactes applicables au bootstrap
 3. `/architecture.lock.yaml`
-4. les ADR présents sous `/docs/adr/` lorsqu'ils existent
+4. `/docs/architecture/BASELINE_V2.md`
+5. les ADR présents sous `/docs/adr/` lorsqu'ils existent
 
 En cas de contradiction, arrêter la partie concernée et signaler précisément le conflit. Ne jamais choisir silencieusement une troisième architecture.
 
@@ -188,6 +189,7 @@ Flagger
 MinIO Community Edition / MinIO Operator
 Loki as logging baseline
 Splunk as SIEM baseline
+DVC as dataset-version authority
 ```
 
 Historical documents may mention them only as superseded choices.
@@ -198,15 +200,21 @@ Créer la structure :
 
 ```text
 observability/
-  otel/
-  prometheus/
+  rotel/
+  otel-collector/
+  vmagent/
+  victoriametrics/
+  victorialogs/
+  vmalert/
   alertmanager/
   grafana/
-  fluent-bit/
-  data-prepper/
-  opensearch/
+  clickhouse/
+  hyperdx/
+  security-siem/
   wazuh/
 ```
+
+Applications use `OTLP -> Rotel -> ClickHouse -> HyperDX` for traces/logs and `Rotel -> vmagent -> VictoriaMetrics` for metrics. Infrastructure logs use `OpenTelemetry Collector -> VictoriaLogs`; alerting is `VictoriaMetrics/VictoriaLogs -> vmalert -> Alertmanager`. Data Prepper -> OpenSearch is security/SIEM only. Do not create Fluent Bit or a general OpenSearch log pipeline.
 
 Ne pas créer des dashboards massifs au bootstrap.
 

@@ -1,4 +1,4 @@
-version: 2
+version: 4
 status: locked-for-build
 project: ecommerce
 
@@ -88,12 +88,26 @@ observability:
   infrastructure_logs: victorialogs
   application_observability_storage: clickhouse
   application_observability_ui: hyperdx
+  hyperdx_metadata_store: mongodb-oss-self-hosted
   alerts: vmalert
   notifications: alertmanager
   dashboards: grafana
   security_pipeline: data-prepper
   security_logs: opensearch
   security: wazuh
+
+mlops:
+  dataset_versioner: lakefs
+  object_storage: seaweedfs-s3
+  metadata_database: cloudnativepg-postgresql
+  experiments_lineage: mlflow
+  artifact_registry: harbor
+  promotion_authority: gitea-gitops
+  orchestration: tekton
+  desired_state: rancher-fleet
+  progressive_delivery: argo-rollouts
+  runtime: kserve-vllm
+  drift: evidently-tekton-batch
 
 supply_chain:
   scanner: trivy
@@ -135,6 +149,8 @@ machine_contracts:
   ci_topology: config/contracts/ci-topology.yaml
   runtime_efficiency: config/contracts/runtime-efficiency.yaml
   observability_topology: config/contracts/observability-topology.yaml
+  resilience_governance: config/contracts/resilience-governance.yaml
+  security_trust_zones: config/contracts/security-trust-zones.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
@@ -171,11 +187,13 @@ superseded:
   prod-physical-hosts-per-site-5: prod-physical-hosts-per-site-3
   rook-ceph-launch-baseline: no-default-ceph
   woodpecker-ci: tekton
+  dvc-dataset-versioner: lakefs
 
 build_milestones:
   - M0-architecture-sync
   - M1-monorepo-bootstrap
   - M2-golden-service-product
+  - M2-5-persistent-mgmt-bootstrap
   - M3-preprod-infrastructure
   - M4-platform-baseline
   - M5-commerce-vertical-slice
@@ -183,3 +201,16 @@ build_milestones:
   - M7-qualification
   - M8-preprod-certification
   - M9-prod-ab
+
+milestone_dependencies:
+  M0-architecture-sync: []
+  M1-monorepo-bootstrap: [M0-architecture-sync]
+  M2-golden-service-product: [M1-monorepo-bootstrap]
+  M2-5-persistent-mgmt-bootstrap: [M1-monorepo-bootstrap]
+  M3-preprod-infrastructure: [M2-5-persistent-mgmt-bootstrap]
+  M4-platform-baseline: [M3-preprod-infrastructure]
+  M5-commerce-vertical-slice: [M2-golden-service-product, M4-platform-baseline]
+  M6-full-application: [M5-commerce-vertical-slice]
+  M7-qualification: [M6-full-application]
+  M8-preprod-certification: [M7-qualification]
+  M9-prod-ab: [M8-preprod-certification]

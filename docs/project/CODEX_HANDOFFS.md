@@ -2,15 +2,14 @@
 
 Status: `CHATGPT PREPARED — EXACT CONTRACTS BOUND`
 
-Codex must always read, in order:
+Codex must always read authorities in this order:
 
 1. `AGENTS.md`
-2. `docs/architecture/BASELINE_V2.md`
+2. the specialized machine contract(s) and exact topology/document(s) for the assigned work
 3. `architecture.lock.yaml`
-4. `docs/project/MASTER_EXECUTION_PLAN.md`
-5. the milestone issue assigned to the work
-6. the exact architecture contracts listed below
-7. relevant ADRs/domain docs
+4. `docs/architecture/BASELINE_V2.md`
+5. `docs/project/MASTER_EXECUTION_PLAN.md`, the assigned milestone issue and relevant handoff
+6. relevant ADRs/domain docs
 
 ## Mandatory exact architecture contracts
 
@@ -50,12 +49,13 @@ Tracker: `#13`.
 Goal: create the minimal repository skeleton and automation entrypoints needed for later milestones without implementing deep business logic.
 
 Required result:
-- exactly 17 backend service directories and two frontends;
-- no checkout service;
+- exactly 19 backend service directories and two frontends;
+- autonomous `checkout` and `fulfillment` services;
+- frontend target paths `frontend/apps/storefront` and `frontend/apps/admin`, using the shared `frontend/go.mod` Go + templ + HTMX runtime;
 - contracts, platform, observability, tests and tools areas;
 - `go.work`, ownership/contribution/security root files;
 - Fleet/Tekton paths, never Flux/Flagger;
-- no MinIO CE/Loki/Splunk active defaults;
+- no MinIO CE/Loki/Splunk/DVC active defaults;
 - no image using `latest`;
 - no tracked repository Shell automation;
 - preserve `config/infrastructure/*` and `config/contracts/*` as single config sources;
@@ -72,6 +72,14 @@ Goal: make Product the single proven service template for transport, persistence
 Use `SERVICE_OWNERSHIP_MATRIX.md`, `DATA_OWNERSHIP_MATRIX.md`, `EVENT_CONTRACT_MATRIX.md`, `dependency-map.yaml` and `SECURITY_TRUST_ZONES.md` as hard boundaries. Implement only Product deeply. REST and gRPC call the same application use-cases. Use pgx/sqlc, versioned migrations, transactional outbox, franz-go Kafka, Protobuf contracts, idempotence, OTel and structured logs. Provide unit, integration and contract tests. Provide non-root container, immutable dependencies, Fleet deployable configuration and Tekton CI stages for lint/test/build/scan/SBOM/sign/push. No other service may receive duplicated Product business logic.
 
 Deliver one or a small sequence of tightly-scoped PRs tied to #14.
+
+## M2.5 prompt — Persistent MGMT Bootstrap IaC
+
+Tracker: `#32`.
+
+Goal: establish the persistent management plane required before a real PREPROD `CREATE`. Use the exact MGMT inventory, access and network contracts. Implement only reproducible Terraform/Ansible/RKE2, Gitea, Harbor, Tekton, Fleet and OpenBao prerequisites; do not provision PREPROD or bypass the mandatory human apply gate.
+
+Deliver the static/offline proof separately from any real provider apply. M3 remains blocked for real PREPROD `CREATE` until this M2.5 evidence is PROVEN.
 
 ## M3 prompt — PREPROD Infrastructure
 
@@ -102,15 +110,19 @@ Tracker: `#17`.
 Goal: install the minimum complete platform needed to run and prove application slices, following `DEPLOYMENT_DAG.md`, `deployment-waves.yaml`, `STORAGE_TOPOLOGY_V2.md`, `storage-plan.yaml` and `SECURITY_TRUST_ZONES.md`.
 
 Order:
-`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> stateful platform`.
+The executable order is the `requires` graph in `config/infrastructure/deployment-waves.yaml`; this prose must not weaken or add dependencies to that graph. After the common storage prerequisite, independent branches may proceed in parallel:
+`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> SeaweedFS S3 -> { observability operators -> observability stateful stores -> observability/security services | CloudNativePG -> remaining stateful platform -> IAM/edge }`.
 
 Stateful baseline:
-- CNPG/PostgreSQL;
+- SeaweedFS S3 becomes healthy before stateful observability stores that depend on its backup authority;
+- MongoDB Community/OpenSearch operators precede their observability stateful custom resources;
+- VictoriaMetrics, VictoriaLogs, ClickHouse, HyperDX metadata MongoDB and OpenSearch Security precede their observability/security consumers;
+- CNPG/PostgreSQL, including separate `lakefs-metadata-cnpg` and `mlflow-metadata-cnpg` clusters;
+- lakeFS/MLflow metadata RPO/RTO remain owned by resilience governance; local numeric overrides are forbidden until that authority binds them;
 - Strimzi Kafka KRaft + MirrorMaker2 hooks;
 - RabbitMQ Quorum Queues;
 - Redis Cluster;
-- OpenSearch;
-- SeaweedFS S3;
+- OpenSearch Business;
 - Apicurio Registry where contract workflow requires it.
 
 Requirements:
@@ -133,8 +145,8 @@ Goal: prove a real user-facing commerce path through the actual platform without
 Implement in four bounded slices:
 
 A. `Storefront -> Catalog/Product/Search/Pricing/Inventory`
-B. `Cart -> Order -> Tax -> Fraud/Risk -> Payment`
-C. `Shipping -> Tracking -> Returns -> Billing -> Notification`
+B. `Cart -> Checkout -> Order -> Payment`, with Checkout using Pricing, Tax, Inventory, Fraud/Risk and Shipping delivery options through contracts.
+C. `Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
 For each slice:
@@ -187,6 +199,7 @@ Execute/generate automation for:
 - k6 performance;
 - Chaos Mesh and DR tests behind fail-closed environment gates;
 - restore/rebuild checks;
+- when a model is in the release candidate: lineage, reproducibility, deterministic gates, challenger/champion, SBOM, signature, drift, rollback and restore;
 - evidence index referencing external artifacts rather than committing runtime evidence.
 
 A FAIL cannot be converted to PASS by documentation. Open corrective issues.
@@ -195,7 +208,7 @@ A FAIL cannot be converted to PASS by documentation. Open corrective issues.
 
 Tracker: `#21`.
 
-Goal: automate and execute, where credentials/hardware permit, the three validated campaigns using the same signed digest/release manifest/configuration and the exact physical topology from `PROD_TOPOLOGY_V2.md`/`prod-inventory.yaml`.
+Goal: automate and execute, where credentials/hardware permit, the three validated campaigns using the same signed release identity (including any model digest), configuration and exact physical topology from `PROD_TOPOLOGY_V2.md`/`prod-inventory.yaml`.
 
 1. Standard <=24h: general qualification.
 2. Endurance: 72 useful hours of stable load.
