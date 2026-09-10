@@ -514,6 +514,17 @@
 - name: Reconcile pinned source quality tools
   ansible.builtin.import_tasks: quality.yml
 
+# Terraform is distributed as a ZIP archive, so its targeted provisioning path
+# must establish the extractor without selecting the broader toolchain package set.
+- name: Ensure Terraform archive extraction prerequisite
+  ansible.builtin.apt:
+    name: unzip
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [terraform]
+
 # These gate tools deliberately have distinct tags: one failed download must not
 # prevent the capability controller from reconciling unrelated source branches.
 - name: Download pinned standalone gate archives

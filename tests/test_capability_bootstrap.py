@@ -440,6 +440,78 @@ class CapabilityAuditTest(unittest.TestCase):
 
 
 class CapabilityClosureTest(unittest.TestCase):
+    @staticmethod
+    def terraform_archive_run(source, selected_tag, unzip_present):
+        prerequisite = re.search(
+            r"- name: Ensure Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        extraction = re.search(
+            r"- name: Extract pinned standalone gate tools\n(?P<body>.*?)(?=\n- name:)",
+            source,
+            re.DOTALL,
+        )
+        if prerequisite is None or extraction is None:
+            return False, [], 0
+
+        events = []
+        unzip_installs = 0
+        prerequisite_selected = selected_tag in re.findall(
+            r"^  tags: \[([^]]+)\]$", prerequisite.group("body"), re.MULTILINE
+        )[0].split(", ")
+        if prerequisite_selected:
+            events.append("terraform-unzip-prerequisite")
+            if not unzip_present:
+                unzip_present = True
+                unzip_installs += 1
+
+        extraction_selected = (
+            selected_tag in {"gitleaks", "helm", "terraform", "kustomize"}
+            and f"tag: {selected_tag}" in extraction.group("body")
+        )
+        if extraction_selected:
+            events.append(f"extract-{selected_tag}")
+            if selected_tag == "terraform" and not unzip_present:
+                return False, events, unzip_installs
+        return True, events, unzip_installs
+
+    def test_terraform_target_installs_missing_unzip_before_archive_extraction(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        passed, events, installs = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
+        self.assertTrue(passed)
+        self.assertEqual(["terraform-unzip-prerequisite", "extract-terraform"], events)
+        self.assertEqual(1, installs)
+
+    def test_terraform_target_preserves_present_unzip_without_reinstallation(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        passed, events, installs = self.terraform_archive_run(tasks, "terraform", unzip_present=True)
+        self.assertTrue(passed)
+        self.assertEqual(["terraform-unzip-prerequisite", "extract-terraform"], events)
+        self.assertEqual(0, installs)
+
+    def test_missing_terraform_prerequisite_tag_mutation_fails_then_restored_passes(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        prerequisite = re.search(
+            r"(- name: Ensure Terraform archive extraction prerequisite\n.*?  tags: )\[terraform\]",
+            tasks,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(prerequisite)
+        mutated = tasks[:prerequisite.start()] + prerequisite.group(1) + "[toolchain]" + tasks[prerequisite.end():]
+        mutated_passed, mutated_events, _ = self.terraform_archive_run(mutated, "terraform", unzip_present=False)
+        self.assertFalse(mutated_passed)
+        self.assertEqual(["extract-terraform"], mutated_events)
+        restored_passed, _, _ = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
+        self.assertTrue(restored_passed)
+
+    def test_independent_archive_capability_does_not_select_terraform_unzip_setup(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        passed, events, installs = self.terraform_archive_run(tasks, "helm", unzip_present=False)
+        self.assertTrue(passed)
+        self.assertEqual(["extract-helm"], events)
+        self.assertEqual(0, installs)
+
     def test_ansible_owner_rejects_direct_pip_mutation(self):
         canonical = MOD.load_contract()
         ansible_lint = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")
