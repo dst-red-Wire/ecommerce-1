@@ -31,6 +31,19 @@ storage_classes:
     xfs_project_quota: required
     failure_domain: host-and-site
 
+  localpv-seaweedfs:
+    provisioner: kubernetes.io/no-provisioner
+    backing_pools: [seaweedfs-volume-1, seaweedfs-volume-2]
+    filesystem: xfs
+    access_mode: ReadWriteOnce
+    volume_binding_mode: WaitForFirstConsumer
+    reclaim_policy: Retain
+    encryption_at_rest: luks2
+    allocation: dedicated-static-pv-per-member
+    xfs_project_quota: required
+    failure_domain: host-and-site
+    generic_pool_reuse: forbidden
+
 observability_defaults:
   storage_class: localpv-observability
   strict_replica_anti_affinity: true
@@ -380,9 +393,11 @@ engines:
     engine: seaweedfs
     deployment_mode: fleet-managed-cluster
     storage:
-      class: localpv
+      class: localpv-seaweedfs
       persistent_components: [master, volume-server, filer]
       access_mode: ReadWriteOnce
+      volume_mode: Filesystem
+      volume_server_backing_pools: [seaweedfs-volume-1, seaweedfs-volume-2]
     topology:
       masters_per_site: 3
       volume_servers_per_site: 3
@@ -412,8 +427,21 @@ engines:
     encryption: {at_rest: luks2, in_transit: tls-mtls}
     network:
       writers: [platform-backup-jobs, lakefs, mlflow]
-      readers: [platform-backup-jobs, lakefs, mlflow]
+      readers: [platform-backup-jobs, lakefs, mlflow, ats]
       public_access: forbidden
+      bucket_access:
+        cdn-assets:
+          readers: [ats]
+          writers: []
+        backups:
+          readers: [platform-backup-jobs]
+          writers: [platform-backup-jobs]
+        mlops-datasets-artifacts:
+          readers: [lakefs, mlflow]
+          writers: [lakefs, mlflow]
+        external-archives:
+          readers: [platform-backup-jobs]
+          writers: [platform-backup-jobs]
     data_scope: {allowed: [object-storage, backups, ml-artifacts], object_lock: required-by-class, versioning: required-by-class}
     operational_authority: {desired_state: rancher-fleet, owner: platform-storage}
     dependencies: [openbao, external-secrets]

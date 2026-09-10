@@ -80,6 +80,7 @@ subjects:
   apicurio: Z4
   platform-backup-jobs: Z6
   kserve-vllm-inference: Z3
+  evidently-tekton-batch: Z6
   lakefs: Z5
   mlflow: Z5
   keycloak: Z3

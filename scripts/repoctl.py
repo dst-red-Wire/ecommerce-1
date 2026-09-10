@@ -552,7 +552,11 @@ def api_compat(base: str, head: str) -> int:
 
         base_common = base_registry_doc.get("common_components")
         head_common = head_registry_doc.get("common_components")
-        common_changed = any(path and path in changed for path in {base_common, head_common})
+        # A registry-only pointer replacement changes the effective shared contract
+        # even when neither referenced common file appears in git diff.
+        common_changed = base_common != head_common or any(
+            path and path in changed for path in {base_common, head_common}
+        )
         authority_changed = base_registry != head_registry
         for name in sorted(set(base_contracts) & set(head_contracts)):
             base_entry = base_contracts[name]

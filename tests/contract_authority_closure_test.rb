@@ -75,6 +75,54 @@ class ContractAuthorityClosureTest < Minitest::Test
     assert_empty errors
   end
 
+  def test_seaweedfs_dedicated_pool_mutations_fail_closed
+    baseline = load_yaml("config/infrastructure/storage-plan.yaml")
+    mutations = [
+      ->(s) { s.dig("engines", "seaweedfs", "storage")["class"] = "localpv" },
+      ->(s) { s["storage_classes"].delete("localpv-seaweedfs") },
+      ->(s) { s.dig("preprod", "worker-01")["nvme-4"] = "localpv-a" },
+      ->(s) { s.dig("storage_classes", "localpv-seaweedfs")["backing_pools"] = ["localpv-a", "seaweedfs-volume-2"] }
+    ]
+    mutations.each do |mutation|
+      storage = Marshal.load(Marshal.dump(baseline)); mutation.call(storage)
+      errors = []; ContractAuthorityValidator.validate_storage_classes(errors, storage)
+      refute_empty errors
+    end
+  end
+
+  def test_ats_seaweedfs_least_privilege_mutations_fail_closed
+    baseline = load_yaml("config/infrastructure/storage-plan.yaml")
+    mutations = [
+      ->(s) { s.dig("engines", "seaweedfs", "network", "readers").delete("ats") },
+      ->(s) { s.dig("engines", "seaweedfs", "network", "writers") << "ats" },
+      ->(s) { s.dig("engines", "seaweedfs", "network", "bucket_access", "backups", "readers") << "ats" },
+      ->(s) { s.dig("engines", "seaweedfs", "network")["public_access"] = "allowed" }
+    ]
+    mutations.each do |mutation|
+      storage = Marshal.load(Marshal.dump(baseline)); mutation.call(storage)
+      errors = []; ContractAuthorityValidator.validate_seaweedfs_cdn_access(errors, storage)
+      refute_empty errors
+    end
+  end
+
+  def test_evidently_execution_and_safety_mutations_fail_closed
+    lock = load_yaml("architecture.lock.yaml")
+    storage = load_yaml("config/infrastructure/storage-plan.yaml")
+    baseline = load_yaml("config/infrastructure/deployment-waves.yaml")
+    mutations = [
+      ->(w) { w["waves"].find { |x| x["id"] == "76-mlops-qualification" }["components"].clear },
+      ->(w) { w["mlops_qualification"]["task"] = "platform/tekton/tasks/missing.yaml" },
+      ->(w) { w["mlops_qualification"]["permanent_service"] = "allowed" },
+      ->(w) { w["mlops_qualification"]["automatic_retraining"] = "allowed" },
+      ->(w) { w["mlops_qualification"]["automatic_promotion"] = "allowed" }
+    ]
+    mutations.each do |mutation|
+      waves = Marshal.load(Marshal.dump(baseline)); mutation.call(waves)
+      errors = []; ContractAuthorityValidator.validate_executable_platform_authorities(errors, lock, storage, waves, ROOT)
+      refute_empty errors
+    end
+  end
+
   def test_superseded_component_is_rejected_generically
     lock = load_yaml("architecture.lock.yaml")
     waves = load_yaml("config/infrastructure/deployment-waves.yaml")
@@ -141,7 +189,10 @@ class ContractAuthorityClosureTest < Minitest::Test
     [
       lambda { |waves| waves["waves"].find { |wave| wave["id"] == "72-backup-archive-jobs" }["components"].delete("platform-backup-jobs") },
       lambda { |waves| waves["component_execution_bindings"].delete("platform-backup-jobs") },
-      lambda { |waves| waves["waves"].find { |wave| wave["id"] == "110-qualification" }["requires"].delete("72-backup-archive-jobs") }
+      lambda do |waves|
+        waves["waves"].find { |wave| wave["id"] == "110-qualification" }["requires"].delete("72-backup-archive-jobs")
+        waves["waves"].find { |wave| wave["id"] == "76-mlops-qualification" }["requires"].delete("72-backup-archive-jobs")
+      end
     ].each do |mutation|
       waves = Marshal.load(Marshal.dump(baseline))
       mutation.call(waves)
@@ -190,7 +241,7 @@ class ContractAuthorityClosureTest < Minitest::Test
   def test_backup_and_kserve_trust_zone_mutations_fail_closed
     lock = load_yaml("architecture.lock.yaml")
     waves = load_yaml("config/infrastructure/deployment-waves.yaml")
-    %w[platform-backup-jobs kserve-operator kserve-vllm-inference].each do |subject|
+    %w[platform-backup-jobs kserve-operator kserve-vllm-inference evidently-tekton-batch].each do |subject|
       Dir.mktmpdir do |root|
         FileUtils.cp_r(Dir.glob(File.join(ROOT, "*")), root)
         path = File.join(root, "config/contracts/security-trust-zones.yaml")

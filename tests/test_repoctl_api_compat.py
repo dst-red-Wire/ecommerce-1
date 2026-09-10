@@ -88,6 +88,27 @@ class RepoctlApiCompatibilityTest(unittest.TestCase):
         head = self.commit("redirect authority")
         self.assertEqual(1, len(self.run_compat(base, head)[1]))
 
+    def test_common_pointer_only_replacement_checks_unchanged_specs(self):
+        base = self.seed()
+        replacement = "contracts/openapi/common.v2.yaml"
+        (self.root / replacement).write_text("openapi: 3.1.0\ninfo: {title: common-v2, version: v2}\n", encoding="utf-8")
+        # Commit the new shared file first so the comparison changes only the registry pointer.
+        base = self.commit("stage replacement common")
+        self.write_registry("config/contracts/public-api-contracts.yaml", {"product": "contracts/openapi/product.v1.yaml"}, common=replacement)
+        head = self.commit("redirect common pointer")
+        _, calls = self.run_compat(base, head)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("oasdiff", calls[0][0])
+
+    def test_deleted_old_common_and_selected_new_common_checks_unchanged_specs(self):
+        base = self.seed()
+        replacement = "contracts/openapi/common.v2.yaml"
+        (self.root / replacement).write_text("openapi: 3.1.0\n", encoding="utf-8")
+        (self.root / "contracts/openapi/common.v1.yaml").unlink()
+        self.write_registry("config/contracts/public-api-contracts.yaml", {"product": "contracts/openapi/product.v1.yaml"}, common=replacement)
+        head = self.commit("replace common")
+        self.assertEqual(1, len(self.run_compat(base, head)[1]))
+
     def test_spec_path_replacement_checks_base_against_head(self):
         base = self.seed()
         replacement = "contracts/openapi/product.v2.yaml"

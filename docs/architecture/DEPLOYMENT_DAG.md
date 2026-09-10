@@ -86,6 +86,7 @@ Within `60-stateful`, independent engines may run in parallel after their declar
 
 - dedicated CNPG metadata databases for lakeFS and MLflow;
 - after healthy SeaweedFS and dedicated CNPG metadata databases: lakeFS dataset version authority, then MLflow experiments, lineage and champion/challenger service;
+- `76-mlops-qualification`: the bounded Evidently Tekton task consumes pinned dataset/candidate inputs after MLOps state and inference readiness, and produces governed evaluation and drift-baseline evidence before `110-qualification`;
 - Strimzi Kafka KRaft, strictly after the Strimzi operator readiness boundary;
 - RabbitMQ;
 - Redis Cluster;

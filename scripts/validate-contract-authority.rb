@@ -375,6 +375,38 @@ module ContractAuthorityValidator
       next if storage_class.nil? || storage_class == "none"
       errors << "storage component #{component} references unknown storage class #{storage_class}" unless classes.key?(storage_class)
     end
+
+    seaweed_class = classes["localpv-seaweedfs"] || {}
+    errors << "SeaweedFS dedicated storage class must use only dedicated backing pools" unless
+      seaweed_class["backing_pools"] == %w[seaweedfs-volume-1 seaweedfs-volume-2] &&
+      seaweed_class["generic_pool_reuse"] == "forbidden"
+    seaweed_storage = storage.dig("engines", "seaweedfs", "storage") || {}
+    errors << "SeaweedFS volume servers must use localpv-seaweedfs, never generic localpv" unless
+      seaweed_storage["class"] == "localpv-seaweedfs"
+    errors << "SeaweedFS volume-server backing pools drift" unless
+      seaweed_storage["volume_server_backing_pools"] == %w[seaweedfs-volume-1 seaweedfs-volume-2]
+    expected_preprod = {"nvme-4" => "seaweedfs-volume-1", "nvme-5" => "seaweedfs-volume-2"}
+    storage.fetch("preprod", {}).each do |host, devices|
+      errors << "SeaweedFS PREPROD device mapping drift on #{host}" unless devices.slice(*expected_preprod.keys) == expected_preprod
+    end
+    expected_prod = {"nvme-3" => "seaweedfs-volume-1", "nvme-5" => "seaweedfs-volume-2"}
+    errors << "SeaweedFS PROD device mapping drift" unless storage.dig("prod", "per_data_host")&.slice(*expected_prod.keys) == expected_prod
+    generic_pools = Array(classes.dig("localpv", "backing_pools"))
+    errors << "SeaweedFS dedicated and generic backing pools must not overlap" unless
+      (generic_pools & Array(seaweed_class["backing_pools"])).empty?
+  end
+
+  def validate_seaweedfs_cdn_access(errors, storage)
+    network = storage.dig("engines", "seaweedfs", "network") || {}
+    errors << "SeaweedFS public access must remain forbidden" unless network["public_access"] == "forbidden"
+    errors << "ATS must be a read-only SeaweedFS identity" unless Array(network["readers"]).include?("ats") && !Array(network["writers"]).include?("ats")
+    scopes = network["bucket_access"] || {}
+    errors << "ATS must read only the cdn-assets SeaweedFS scope" unless
+      Array(scopes.dig("cdn-assets", "readers")) == ["ats"] && Array(scopes.dig("cdn-assets", "writers")).empty?
+    (scopes.keys - ["cdn-assets"]).each do |scope|
+      identities = Array(scopes.dig(scope, "readers")) + Array(scopes.dig(scope, "writers"))
+      errors << "ATS access to non-CDN SeaweedFS scope #{scope} is forbidden" if identities.include?("ats")
+    end
   end
 
   def validate_stateful_contracts(errors, storage)
@@ -447,7 +479,7 @@ module ContractAuthorityValidator
     end
   end
 
-  def validate_executable_platform_authorities(errors, lock, storage, waves_contract)
+  def validate_executable_platform_authorities(errors, lock, storage, waves_contract, root = File.expand_path("..", __dir__))
     waves = Array(waves_contract["waves"])
     by_id = waves.to_h { |wave| [wave["id"], wave] }
     component_wave = {}
@@ -461,6 +493,21 @@ module ContractAuthorityValidator
     errors << "platform-backup-jobs must be present in deployment DAG" unless backup_wave
     if backup_wave && qualification_wave && !wave_dependency_reachable?(by_id, backup_wave, qualification_wave)
       errors << "platform-backup-jobs must be reachable before archive/destruction qualification gate"
+    end
+
+    if lock.dig("mlops", "drift") == "evidently-tekton-batch"
+      binding = waves_contract["mlops_qualification"] || {}
+      evidently_wave = component_wave["evidently-tekton-batch"]
+      errors << "Evidently lock selection requires a qualification DAG binding" unless evidently_wave
+      errors << "Evidently execution binding must be qualification" unless waves_contract.dig("component_execution_bindings", "evidently-tekton-batch") == "qualification"
+      task = binding["task"]
+      errors << "Evidently Tekton task binding is missing" unless task.is_a?(String) && File.file?(File.join(root, task))
+      errors << "Evidently must execute as a bounded Tekton task" unless binding["execution"] == "bounded-tekton-task" && binding["permanent_service"] == "forbidden"
+      errors << "Evidently purposes drift" unless Array(binding["purposes"]).sort == %w[drift-baseline governed-retraining-evidence qualification].sort
+      %w[training_trigger automatic_retraining automatic_promotion].each do |field|
+        errors << "Evidently #{field} must be forbidden" unless binding[field] == "forbidden"
+      end
+      errors << "Evidently must have no promotion authority and cannot bypass humans" unless binding["promotion_authority"] == "none" && binding["human_approval_bypass"] == "forbidden"
     end
 
     return unless lock.dig("mlops", "runtime") == "kserve-vllm"
@@ -522,6 +569,7 @@ module ContractAuthorityValidator
     errors << "KServe operator must be in permanent management trust zone Z5" unless subjects["kserve-operator"] == "Z5"
     errors << "KServe inference workload must be in application trust zone Z3" unless subjects["kserve-vllm-inference"] == "Z3"
     errors << "platform-backup-jobs must be in evidence trust zone Z6" unless subjects["platform-backup-jobs"] == "Z6"
+    errors << "Evidently batch must be in qualification trust zone Z6" unless subjects["evidently-tekton-batch"] == "Z6"
   end
 
   def validate_resilience_binding(errors, lock, root, storage)
@@ -691,6 +739,7 @@ module ContractAuthorityValidator
     validate_dag(errors, waves)
     validate_superseded_components(errors, lock, waves)
     validate_storage_classes(errors, storage)
+    validate_seaweedfs_cdn_access(errors, storage)
     validate_stateful_contracts(errors, storage)
     validate_storage_dependency_edges(errors, storage, waves)
     validate_executable_platform_authorities(errors, lock, storage, waves)

@@ -22,6 +22,9 @@ Status: `EXACT`
 | NVMe-6 | spare/replacement reserve |
 
 LocalPV volumes use XFS, static PVs, `nodeAffinity`, `kubernetes.io/no-provisioner`, `WaitForFirstConsumer` and `Retain` where applicable.
+SeaweedFS volume servers bind only to `localpv-seaweedfs`, whose dedicated pools are `seaweedfs-volume-1` and
+`seaweedfs-volume-2`; reuse of generic `localpv-a`/`localpv-b` is forbidden. PREPROD maps those pools to NVMe-4/NVMe-5,
+while PROD retains the exact NVMe-3/NVMe-5 per-data-host mapping.
 
 ## SeaweedFS
 
@@ -33,6 +36,7 @@ Minimum topology:
 - >=2 filers with anti-affinity;
 - >=2 S3 gateways with anti-affinity;
 - bucket-level identity/isolation;
+- ATS has read-only access to the `cdn-assets` scope and no access to backup, archive, or MLOps scopes;
 - versioning/Object Lock/immutability only where the workload/evidence/backup policy requires it;
 - encryption and restore validation required before PROD admission.
 

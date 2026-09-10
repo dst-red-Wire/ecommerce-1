@@ -1,0 +1,19 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: evidently-qualification
+spec:
+  params:
+    - name: evidently-image
+      type: string
+      description: Immutable Evidently batch image selected by the supply-chain authority
+    - {name: dataset-commit, type: string}
+    - {name: candidate-digest, type: string}
+    - {name: evaluation-policy, type: string}
+  results:
+    - {name: evidence-digest, description: Immutable governed evaluation evidence digest}
+  steps:
+    - name: evaluate
+      image: $(params.evidently-image)
+      command: [evidently]
+      args: ["--dataset-commit=$(params.dataset-commit)", "--candidate=$(params.candidate-digest)", "--policy=$(params.evaluation-policy)"]

@@ -58,6 +58,9 @@ Critical invariants use tolerance zero. Drift is multi-signal and persistent; th
 ## Drift and retraining
 
 Evidently OSS runs as a Tekton batch, never as a permanent launch service. Its Prometheus-compatible metrics are scraped by vmagent into VictoriaMetrics; detailed governed evidence never includes raw datasets in metrics or logs.
+The executable authority is `platform/tekton/tasks/evidently-qualification.yaml`, bound as `evidently-tekton-batch`
+in qualification trust zone Z6 and deployment wave `76-mlops-qualification`. It emits governed probabilistic-evaluation,
+drift-baseline, and retraining-decision evidence only; it has no training, promotion, or approval-bypass authority.
 
 `drift -> qualification (dedupe, quotas, evidence) -> analysis -> approval if retraining is justified -> training -> full qualification -> challenger/champion -> GitOps PR -> shadow -> canary -> promotion`
 

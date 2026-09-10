@@ -161,6 +161,7 @@ component_execution_bindings:
   apicurio: stateless
   platform-backup-jobs: backup
   kserve-vllm-inference: inference
+  evidently-tekton-batch: qualification
   lakefs: stateless
   mlflow: stateless
   keycloak: stateless
@@ -250,6 +251,9 @@ waves:
   - id: 75-mlops-inference
     requires: [58-stateful-operators, 60-stateful, 70-iam-edge, 55-observability-services]
     components: [kserve-vllm-inference]
+  - id: 76-mlops-qualification
+    requires: [60-stateful, 72-backup-archive-jobs, 75-mlops-inference, 40-secrets-registry-ci]
+    components: [evidently-tekton-batch]
   - id: 80-golden-service
     requires: [55-observability-services, 60-stateful, 70-iam-edge]
     components: [product]
@@ -262,7 +266,7 @@ waves:
     requires: [90-commerce]
     components: [storefront, admin]
   - id: 110-qualification
-    requires: [100-frontends, 72-backup-archive-jobs, 75-mlops-inference]
+    requires: [100-frontends, 72-backup-archive-jobs, 75-mlops-inference, 76-mlops-qualification]
     components: [smoke, security, contracts, integration, bdd, e2e, performance, chaos-dr]
 rules:
   wait_only_on_declared_dependencies: true
@@ -270,3 +274,17 @@ rules:
   no_perf_before_prior_gates: true
   no_chaos_dr_before_prior_gates: true
   no_prod_promotion_from_test_state: true
+
+mlops_qualification:
+  engine: evidently-tekton-batch
+  task: platform/tekton/tasks/evidently-qualification.yaml
+  execution: bounded-tekton-task
+  purposes: [qualification, drift-baseline, governed-retraining-evidence]
+  inputs: [lakefs-dataset-commit, mlflow-candidate, evaluation-policy]
+  evidence: [probabilistic-evaluation, drift-baseline, immutable-evidence-digest]
+  training_trigger: forbidden
+  automatic_retraining: forbidden
+  automatic_promotion: forbidden
+  promotion_authority: none
+  human_approval_bypass: forbidden
+  permanent_service: forbidden
