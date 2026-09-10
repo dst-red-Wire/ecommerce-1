@@ -108,6 +108,8 @@ def documentation_errors(text):
         if (re.search(r"application (?:telemetry|logs?|observability)(?:\s+and\s+logs?)?\s*(?:use|uses|->|:)\s*VictoriaLogs|VictoriaLogs\s+for\s+(?:both\s+)?(?:infrastructure\s+(?:and|/)\s+)?application", sentence, re.I)
                 and not (historical or negated)):
             errors.append("application telemetry/logs must use Rotel, ClickHouse, and HyperDX: " + sentence.strip())
+        if re.search(r"(?:observability/)?fluent-bit/", sentence, re.I) and not historical:
+            errors.append("Fluent Bit bootstrap component is superseded: " + sentence.strip())
     return errors
 
 

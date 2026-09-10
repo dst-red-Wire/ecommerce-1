@@ -68,6 +68,42 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
+    def test_retirement_is_scoped_to_the_superseded_component(self):
+        for statement in ("FluxCD, not Fleet, is the GitOps CD default.",
+                          "MinIO, not SeaweedFS, is the object store.",
+                          "Fluent Bit, not VictoriaLogs, is the general logging baseline."):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in ("FluxCD is superseded by Fleet.", "FluxCD is not the active GitOps controller.",
+                          "Do not use FluxCD; use Fleet.", "Fluent Bit is not used for general logging.",
+                          "MinIO CE has been superseded by SeaweedFS."):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
+    def test_nextjs_active_directives_and_migration_context(self):
+        for statement in ("Use Next.js for the Storefront.", "Deploy Next.js for the admin frontend.",
+                          "Frontend framework: Next.js.", "Admin frontend uses Next.js.",
+                          "Storefront is built with Next.js.", "Next.js is the production frontend framework."):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in ("Next.js is the migration source only.", "Migrate from Next.js to Go/templ/HTMX.",
+                          "Legacy Next.js frontend remains only for migration reference.",
+                          "Next.js is superseded as the PROD frontend target."):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
+    def test_topology_assertions_and_operational_subsets(self):
+        for statement in ("The topology consists of 17 backend services.", "The architecture includes 17 services.",
+                          "The platform has 17 Go services.", "There are 17 Go services in the architecture.",
+                          "Our backend consists of 17 services."):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in ("17 services were affected by the incident.",
+                          "17 services have completed migration so far.", "tests passed for 17 services.",
+                          "17 services currently have generated clients.", "17 of 19 services are healthy."):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
     def test_operational_service_counts_are_not_topology_claims(self):
         self.assertEqual([], authority.documentation_errors("Incident impact: 17 services were unavailable."))
         self.assertEqual([], authority.documentation_errors("17 backend services are complete; two remain."))
@@ -78,6 +114,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             shutil.copy2(ROOT / relative, root / relative)
         shutil.copytree(ROOT / "config", root / "config")
         shutil.copytree(ROOT / "docs", root / "docs")
+        shutil.copytree(ROOT / "instruction", root / "instruction")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         return root
 
