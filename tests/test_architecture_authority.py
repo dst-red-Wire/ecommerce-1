@@ -213,6 +213,43 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             agents.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_exact_observability_source_mutations_are_rejected(self):
+        mutations = (
+            ("docs/architecture/PREPROD_TOPOLOGY_V2.md", "OpenTelemetry Collector where the role requires host or infrastructure telemetry",
+             "Fluent Bit where the role requires host or general logging"),
+            ("docs/architecture/AIOPS_TOPOLOGY_V1.md", "VictoriaLogs infrastructure logs and Rotel/ClickHouse/HyperDX application observability",
+             "OpenSearch Logs as the general observability source"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            for relative, before, after in mutations:
+                with self.subTest(relative=relative):
+                    path = root / relative
+                    original = path.read_text()
+                    self.assertIn(before, original)
+                    path.write_text(original.replace(before, after, 1))
+                    self.assertTrue(authority.validate(root))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_derived_index_mutations_are_rejected(self):
+        mutations = (
+            ("3 physical failure domains", "5 physical failure domains"),
+            ("3 CP + 5 workers", "2 CP + 4 workers"),
+            ("Exactly 19 backend services", "Exactly 18 backend services"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = index.read_text()
+            for before, after in mutations:
+                with self.subTest(mutation=f"{before} -> {after}"):
+                    self.assertIn(before, original)
+                    index.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any("derived index drift" in error for error in authority.validate(root)))
+                    index.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_l2_context_contract_mutation_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)

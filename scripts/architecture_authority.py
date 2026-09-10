@@ -65,6 +65,88 @@ def load_yaml(path):
     return json.loads(completed.stdout)
 
 
+def component_is_retired(sentence, component):
+    """Return true only when retirement/negation applies to the named component."""
+    return bool(re.search(
+        rf"(?:\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|active)\s+)?(?:{component})\b|"
+        rf"\b(?:{component})\b.{{0,35}}\b(?:is\s+not|not\s+used|forbid(?:den)?|superseded|historical|removed|rejected)\b)",
+        sentence, re.I,
+    ))
+
+
+def derived_index_errors(index, lock):
+    """Cross-check facts rendered by the derived index against their lock values."""
+    errors = []
+
+    def require(fragment, field):
+        if fragment not in index:
+            errors.append(f"derived index drift from architecture.lock.yaml: {field}")
+
+    require(f"derived from version {lock['version']} of that lock", "version")
+    require(f"TTL is locked at {lock['dns']['critical_ttl_seconds']} seconds", "dns.critical_ttl_seconds")
+
+    prod = lock["prod_certified_topology"]
+    site_count = len(prod["sites"])
+    require(f"{prod['physical_hosts_per_site']} physical failure domains", "prod physical failure domains")
+    if index.count(f"{prod['physical_hosts_per_site']} physical failure domains") != site_count:
+        errors.append("derived index drift from architecture.lock.yaml: PROD site failure-domain counts")
+    require(f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers", "PROD control-plane/worker counts")
+    if index.count(f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers") != site_count:
+        errors.append("derived index drift from architecture.lock.yaml: PROD per-site control-plane/worker counts")
+    require(f"{prod['data_workers_per_site']} data workers + {prod['general_workers_per_site']} general", "PROD worker roles")
+    for site, values in prod["sites"].items():
+        require(values["private_block"], f"prod_certified_topology.sites.{site}.private_block")
+    require(lock["management_plane"]["private_block"], "management_plane.private_block")
+
+    services = lock["business"]["services"]
+    require(f"Exactly {len(services)} backend services", "business.services count")
+    require("`, `".join(services), "business.services membership/order")
+    frontend = lock["business"]["frontend_runtime"]
+    frontend_target = f"{frontend['language'].title()} + {frontend['rendering']} + {frontend['interactions'].upper()}"
+    require(f"The storefront and admin target {frontend_target}", "business.frontend_runtime target")
+    require("Next.js/React/Node is only the migration source", "business.frontend_runtime migration source")
+    require(f"M2.5 is `{lock['build_milestones'][3]}`", "M2.5 milestone identity")
+
+    observability = lock["observability"]
+    display = {
+        "opentelemetry": "OpenTelemetry", "rotel": "Rotel", "opentelemetry-collector": "OpenTelemetry Collector",
+        "prometheus": "Prometheus", "vmagent": "vmagent", "victoriametrics": "VictoriaMetrics",
+        "victorialogs": "VictoriaLogs", "clickhouse": "ClickHouse", "hyperdx": "HyperDX",
+        "mongodb-oss-self-hosted": "self-hosted MongoDB OSS", "vmalert": "vmalert",
+        "alertmanager": "Alertmanager", "grafana": "Grafana", "data-prepper": "Data Prepper",
+        "opensearch": "OpenSearch", "wazuh": "Wazuh",
+    }
+    observability_section = index.split("## Observability", 1)[-1].split("\n## ", 1)[0]
+    for field, value in observability.items():
+        require_value = display.get(value, value)
+        if require_value not in observability_section:
+            errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
+
+    mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
+    mlops_display = {
+        "lakefs": "lakeFS", "seaweedfs-s3": "SeaweedFS S3", "cloudnativepg-postgresql": "CloudNativePG PostgreSQL",
+        "mlflow": "MLflow", "harbor": "Harbor", "gitea-gitops": "Gitea GitOps", "tekton": "Tekton",
+        "rancher-fleet": "Rancher Fleet", "argo-rollouts": "Argo Rollouts", "kserve-vllm": "KServe/vLLM",
+        "evidently-tekton-batch": "Evidently in Tekton batch",
+    }
+    for field, value in lock["mlops"].items():
+        if mlops_display.get(value, value) not in mlops_section:
+            errors.append(f"derived index drift from architecture.lock.yaml: mlops.{field}")
+
+    flow_and_delivery = index.split("## AIOps", 1)[0]
+    platform_display = {
+        "rke2": "RKE2", "tekton": "Tekton", "harbor": "Harbor", "rancher-fleet": "Fleet",
+        "argo-rollouts": "Argo Rollouts", "seaweedfs-s3": "SeaweedFS S3",
+    }
+    for field in ("kubernetes", "ci", "registry", "gitops", "progressive_delivery"):
+        value = lock["platform"][field]
+        if platform_display.get(value, value) not in flow_and_delivery:
+            errors.append(f"derived index drift from architecture.lock.yaml: platform.{field}")
+    if platform_display[lock["stateful"]["object_storage"]] not in flow_and_delivery:
+        errors.append("derived index drift from architecture.lock.yaml: stateful.object_storage")
+    return errors
+
+
 def documentation_errors(text):
     """Inspect every sentence, including code blocks; no document-wide exemptions."""
     errors = []
@@ -72,35 +154,58 @@ def documentation_errors(text):
     for sentence in re.split(r"\n|;|(?<=[.!?])\s+", normalized):
         # Only an explicit label on this clause qualifies it as historical.
         # An unrelated mention of migration or rejection cannot exempt a claim.
-        historical = re.match(r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I)
-        if re.search(r"\b(?:exactly|total(?:s|ing)?|architecture(?: has| defines)?|topology(?: has| defines)?|baseline:)\s+17\s+(?:(?:go|backend)\s+)*services?\b|\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I) and not historical:
+        historical = (re.match(r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I)
+                      or re.search(r"\bdiagram\b.*\b(?:historical|superseded)\b", sentence, re.I))
+        operational_subset = re.search(
+            r"\b17\s+of\s+19\b|\b(?:healthy|deployed|available|ready|complete|remain(?:s|ing)?|unavailable|progress)\b",
+            sentence, re.I,
+        )
+        topology_claim = (
+            re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\b", sentence, re.I)
+            and re.search(r"\b(?:exactly|total(?:s|ing)?|architecture|topology|platform|backend|consists?\s+of|there\s+are|has|includes?|defines?|baseline)\b", sentence, re.I)
+        )
+        if ((topology_claim and not operational_subset)
+                or re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I)) and not historical:
             errors.append("superseded service topology: " + sentence.strip())
         dvc_retired = re.search(r"\bDVC\s+(?:(?:is|was|has been)\s+)?(?:superseded|historical|rejected|forbidden)\b", sentence, re.I)
         if re.search(r"\bdvc\b", sentence, re.I) and not (historical or dvc_retired):
             errors.append("DVC must be explicitly historical/superseded: " + sentence.strip())
-        if re.search(r"next\.?js", sentence, re.I) and re.search(r"target|cible|prod|runtime|ATS\s*->", sentence, re.I):
+        if re.search(r"next\.?js", sentence, re.I) and re.search(
+                r"target|cible|prod|runtime|ATS\s*->|\buse\b|\buses\b|deploy|frontend|framework|built\s+with",
+                sentence, re.I):
             migration = re.search(
                 r"next\.?js(?:/React/Node(?:\.js)?)?\s+(?:is (?:only )?the migration source|est la source de migration)"
                 r"|actuellement Next\.js, cible Go|Migration du runtime frontend Next\.js vers Go"
                 r"|existing Next\.js implementation remains until migration", sentence, re.I
             )
-            if not (historical or migration):
+            migration = migration or (re.search(r"\bmigration\b", sentence, re.I)
+                                      and re.search(r"\b(?:only|source|reference|legacy|currently)\b", sentence, re.I))
+            migration = migration or re.search(r"\bcurrently\s+use(?:s)?\b", sentence, re.I)
+            nextjs_retired = re.search(
+                r"next\.?js.{0,30}\b(?:superseded|historical|rejected|forbidden|removed|not\s+(?:the\s+)?(?:target|runtime))\b",
+                sentence, re.I,
+            )
+            if not (historical or migration or nextjs_retired):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
         if re.search(r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?", sentence) and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
         superseded = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator)?|Loki|Splunk"
         active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object storage|logging|SIEM)"
-        retired = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not)\b", sentence, re.I)
-        if re.search(rf"\b(?:{superseded})\b", sentence, re.I) and re.search(active, sentence, re.I) and not (historical or retired):
+        component = re.search(rf"\b(?:{superseded})\b", sentence, re.I)
+        retired = component and component_is_retired(sentence, superseded)
+        if component and re.search(active, sentence, re.I) and not (historical or retired):
             errors.append("superseded platform default must not be active: " + sentence.strip())
         if (re.search(r"Fluent Bit", sentence, re.I) and
                 re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|shipper)", sentence, re.I)
-                and not historical and not retired):
+                and not historical and not component_is_retired(sentence, r"Fluent Bit")):
             errors.append("Fluent Bit general logging is superseded: " + sentence.strip())
         negated = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not|only)\b", sentence, re.I)
         if (re.search(r"(?:general|application|infrastructure)\s+(?:logging|logs|log pipeline)", sentence, re.I) and
                 re.search(r"Data Prepper|OpenSearch", sentence, re.I) and not (historical or negated)):
             errors.append("Data Prepper/OpenSearch general logging role is forbidden: " + sentence.strip())
+        if (re.search(r"OpenSearch\s+Logs|OpenSearch.{0,20}(?:general\s+)?observability\s+source", sentence, re.I)
+                and not re.search(r"security", sentence, re.I) and not historical and not negated):
+            errors.append("OpenSearch general observability storage is superseded: " + sentence.strip())
         if (re.search(r"Prometheus", sentence, re.I) and
                 re.search(r"(?:primary|main|authoritative)\s+(?:TSDB|metrics (?:store|storage|server))|(?:TSDB|metrics (?:store|storage|server))\s+(?:is|:)\s+Prometheus", sentence, re.I)
                 and not (historical or negated)):
@@ -168,6 +273,7 @@ def validate(root):
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
+        errors.extend(derived_index_errors(index, lock))
         for relative in ("AGENTS.md", "README.md"):
             text = (root / relative).read_text()
             if not re.search(r"architecture.lock.yaml.{0,12}(?:— the single canonical architecture authority|, seule autorité canonique)", text):
