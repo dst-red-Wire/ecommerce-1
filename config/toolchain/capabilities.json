@@ -519,20 +519,21 @@
       ],
       "classification": "managed",
       "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
+      "selection_policy": "first_available",
       "any_of": [
-        {
-          "command": "terraform",
-          "version_args": [
-            "version"
-          ],
-          "version_key": "TERRAFORM_VERSION"
-        },
         {
           "command": "tofu",
           "version_args": [
             "version"
           ],
           "version_key": "OPENTOFU_VERSION"
+        },
+        {
+          "command": "terraform",
+          "version_args": [
+            "version"
+          ],
+          "version_key": "TERRAFORM_VERSION"
         }
       ]
     },

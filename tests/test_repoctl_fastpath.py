@@ -12,6 +12,22 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
+        calls = []
+
+        def fake_which(command):
+            return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
+
+        with (
+            mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
+            mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
+            mock.patch.object(MOD, "run", side_effect=lambda argv, **kwargs: calls.append(argv)),
+        ):
+            self.assertEqual(0, MOD.terraform_check())
+
+        self.assertTrue(calls)
+        self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+
     def test_exact_state_skips_ansible_startup(self):
         with (
             mock.patch.object(MOD, "developer_state_ready", return_value=True),
