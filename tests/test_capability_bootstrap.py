@@ -546,7 +546,7 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertTrue(any("platform/ansible/developer.yml" in call for call in calls))
         self.assertFalse(any("pip" in call or "apt" in call or "venv" in call for call in calls))
 
-    def test_missing_runner_ansible_fails_without_install_and_keeps_independent_audit(self):
+    def test_missing_runner_ansible_blocks_without_install_and_keeps_independent_audit(self):
         items = [
             {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
              "classification": "seed-prerequisite"},
@@ -561,7 +561,7 @@ class CapabilityAuditTest(unittest.TestCase):
                               which=lambda command: "/bin/independent" if command == "independent" else None).run(
             bootstrap=True, os_name="linux", arch="amd64"
         )
-        self.assertEqual("FAIL", results["ansible-core"].state)
+        self.assertEqual("BLOCKED", results["ansible-core"].state)
         self.assertIn("runner prerequisite missing: ansible-core", results["ansible-core"].detail)
         self.assertEqual("SKIP", results["ansible-playbook"].state)
         self.assertEqual("SKIP", results["ansible-owned"].state)
@@ -602,6 +602,55 @@ class CapabilityAuditTest(unittest.TestCase):
                      "apt install ansible", "apt install ansible-core")
         for fragment in forbidden:
             self.assertNotIn(fragment, source)
+
+    def test_ruby_runner_prerequisite_present_is_accepted_without_version_pin(self):
+        canonical = MOD.load_contract()
+        ruby = next(item for item in canonical["capabilities"] if item["name"] == "ruby")
+        self.assertEqual("seed-prerequisite", ruby["classification"])
+        self.assertNotIn("version_key", ruby)
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ruby 3.4.4", ""))
+        auditor = MOD.Auditor(canonical, runner=runner, which=lambda command: "/usr/bin/ruby" if command == "ruby" else None)
+
+        result = auditor.check(ruby, "ruby")
+
+        self.assertEqual("PASS", result.state)
+        runner.assert_called_once_with(["/usr/bin/ruby", "--version"])
+
+    def test_missing_ruby_is_blocked_and_never_provisioned(self):
+        ruby = {
+            "name": "ruby", "requires": [], "command": "ruby",
+            "version_args": ["--version"], "classification": "seed-prerequisite",
+        }
+        runner = mock.Mock()
+        audit = MOD.Auditor(contract([ruby]), runner=runner, which=lambda _command: None).run(
+            bootstrap=False, os_name="linux", arch="amd64"
+        )["ruby"]
+        bootstrap = MOD.Auditor(contract([ruby]), runner=runner, which=lambda _command: None).run(
+            bootstrap=True, os_name="linux", arch="amd64"
+        )["ruby"]
+
+        self.assertEqual("BLOCKED", audit.state)
+        self.assertEqual("BLOCKED", bootstrap.state)
+        self.assertIn("runner prerequisite missing: ruby", audit.detail)
+        self.assertNotIn("provision", ruby)
+        runner.assert_not_called()
+
+    def test_runner_prerequisite_rejects_ruby_provisioner_mutation(self):
+        canonical = MOD.load_contract()
+        ruby = next(item for item in canonical["capabilities"] if item["name"] == "ruby")
+        ruby["provision"] = {"type": "ansible", "tags": "ruby"}
+        with self.assertRaisesRegex(ValueError, "ruby: runner prerequisite must not have"):
+            MOD.validate_contract(canonical)
+
+    def test_yq_keeps_pinned_ansible_managed_provisioning_contract(self):
+        canonical = MOD.load_contract()
+        yq = next(item for item in canonical["capabilities"] if item["name"] == "yq")
+        self.assertEqual("managed", yq["classification"])
+        self.assertEqual("YQ_VERSION", yq["version_key"])
+        self.assertEqual({"type": "ansible", "tags": "context_tools"}, yq["provision"])
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn("checksum: \"sha256:{{ yq_sha256 }}\"", tasks)
+        self.assertIn("dest: \"{{ local_bin }}/yq\"", tasks)
 
     def test_ansible_entrypoints_are_bound_to_validated_core_provider(self):
         versions = MOD.load_versions()

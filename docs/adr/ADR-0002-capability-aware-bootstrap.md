@@ -47,8 +47,8 @@ prerequisite. The runner image, CI environment, Codex environment or developer w
 provisioning layer owns its installation. The repository bootstrap uses that validated,
 coherent Ansible provider to reconcile project-owned tools.
 
-The authority boundary is therefore explicit: the runner supplies Python, Git, Make and
-Ansible; the repository bootstrap supplies the project toolchain. The existing Ansible role
+The authority boundary is therefore explicit: the runner supplies Python, Ruby, Git, Make
+and Ansible; the repository bootstrap supplies the project toolchain. The existing Ansible role
 remains the owner of repeatable project-tool installation. Its invocation is represented as
 a provisioning dependency, not falsely as a runtime dependency. Downloads continue to
 consume pinned versions and checksums from the existing authority.
@@ -63,10 +63,10 @@ with a partial shell parser. Contract validation rejects an executable that has 
 capability, seed prerequisite or justified platform primitive, as well as missing graph
 dependencies, cycles, absent version pins and malformed checksum authorities.
 
-The runner prerequisites are Python (to start the controller), Git (to locate and inspect the
-checkout), Make (the public dispatcher), and the pinned Ansible Core provider with its
+The runner prerequisites are Python (to start the controller), Ruby (to execute deterministic
+governance validators), Git (to locate and inspect the checkout), Make (the public dispatcher), and the pinned Ansible Core provider with its
 `ansible`, `ansible-playbook`, and `ansible-galaxy` entry points. They are audited but never
-provisioned by repository bootstrap. Ruby, `tar`, `diff`, a C compiler, `gh`, `curl`
+provisioned by repository bootstrap. `tar`, `diff`, a C compiler, `gh`, `curl`
 and `unzip` are explicitly justified platform primitives. This classification does not
 silently turn them into managed downloads; it records who supplies them and prevents an
 undeclared assumption.

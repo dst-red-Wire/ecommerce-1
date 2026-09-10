@@ -63,6 +63,10 @@ os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg"
 CONTEXT = ROOT / ".context"
 
 
+class MissingRunnerPrerequisite(RuntimeError):
+    """A runner-owned primitive is absent; repository code must not install it."""
+
+
 def fail(message: str, code: int = 2) -> int:
     print(f"FAIL {message}", file=sys.stderr)
     return code
@@ -71,6 +75,8 @@ def fail(message: str, code: int = 2) -> int:
 def require(name: str) -> str:
     path = shutil.which(name)
     if not path:
+        if name == "ruby":
+            raise MissingRunnerPrerequisite(f"runner prerequisite missing: {name}")
         raise RuntimeError(f"required command missing: {name}")
     return path
 
@@ -107,6 +113,7 @@ def git(*args: str, check: bool = True) -> str:
 
 
 def ruby_yaml(path: str) -> dict:
+    require("ruby")
     script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
     return json.loads(output(["ruby", "-e", script, path]))
 
@@ -971,6 +978,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
+    require("ruby")
     command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
@@ -1939,7 +1947,9 @@ def main() -> int:
         if args.cmd == "failure-context":
             return failure_context(args.gate, args.component)
         if args.cmd == "context":
-            return run([sys.executable, "scripts/context-pack.py", "--task", args.task]).returncode
+            return run(
+                [sys.executable, "scripts/context-pack.py", "--task", args.task], check=False
+            ).returncode
         if args.cmd == "api-generate":
             return api_generate(args.target, args.service, args.check)
         if args.cmd == "api-mock":
@@ -1971,7 +1981,9 @@ def main() -> int:
                 env=env,
             ).returncode
         if args.cmd == "nx-graph":
-            run([sys.executable, "scripts/nx-graph.py"])
+            materialize = run([sys.executable, "scripts/nx-graph.py"], check=False)
+            if materialize.returncode:
+                return materialize.returncode
             out = ROOT / ".context/nx-workspace"
             return run(
                 ["nx", "graph", "--file", str(ROOT / ".context/nx-graph.html"), "--focus", "frontend-admin"], cwd=out
@@ -2013,6 +2025,9 @@ def main() -> int:
             return precommit()
         if args.cmd == "prepush":
             return prepush()
+    except MissingRunnerPrerequisite as exc:
+        print(f"BLOCKED {exc}", file=sys.stderr)
+        return 1
     except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc), 1)
     return 2

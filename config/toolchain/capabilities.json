@@ -28,7 +28,7 @@
       "version_args": [
         "--version"
       ],
-      "classification": "platform-provided",
+      "classification": "seed-prerequisite",
       "justification": "Ruby is the contracted runtime for deterministic governance validators."
     },
     {
@@ -660,13 +660,13 @@
     {
       "command": "ansible-galaxy",
       "justification": "The runner supplies this entry point from the same pinned Ansible Core provider."
+    },
+    {
+      "command": "ruby",
+      "justification": "The runner supplies Ruby for deterministic governance validators; repository bootstrap never installs it."
     }
   ],
   "platform_primitives": [
-    {
-      "command": "ruby",
-      "justification": "Governance validators are native Ruby programs; Ruby is a contracted CI runner runtime."
-    },
     {
       "command": "tar",
       "justification": "POSIX archive primitive used only for an in-memory Git archive compatibility snapshot."
