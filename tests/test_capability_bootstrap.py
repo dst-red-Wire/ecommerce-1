@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1098,27 +1100,112 @@ class CapabilityClosureTest(unittest.TestCase):
         for name in names:
             self.assertEqual("PASS", results[name].state)
 
-    def test_terraform_runtime_accepts_each_pinned_alternative(self):
+    def terraform_audit(self, present, outcomes):
         item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
         item.pop("provision_requires")
         item.pop("provision")
-        versions = MOD.load_versions()
-        for present, output in (({"terraform"}, versions["TERRAFORM_VERSION"]), ({"tofu"}, versions["OPENTOFU_VERSION"])):
-            result = CapabilityAuditTest().auditor([item], {"/bin/" + next(iter(present)): (0, output)}, present=present).run(
-                bootstrap=False, os_name="linux", arch="amd64"
-            )["terraform"]
-            self.assertEqual("PASS", result.state)
+        auditor = CapabilityAuditTest().auditor([item], outcomes, present=present)
+        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+        return item, auditor, result
 
-    def test_valid_tofu_wins_when_terraform_is_invalid(self):
-        item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
-        item.pop("provision_requires")
-        item.pop("provision")
+    def test_terraform_provider_selection_and_resolved_executable(self):
         versions = MOD.load_versions()
-        results = CapabilityAuditTest().auditor(
-            [item], {"/bin/terraform": (0, "Terraform v0.1"), "/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"])},
-            present={"terraform", "tofu"},
-        ).run(bootstrap=False, os_name="linux", arch="amd64")
-        self.assertEqual("PASS", results["terraform"].state)
+        cases = (
+            ("tofu only", {"tofu"}, {"/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"])}, "PASS", "/bin/tofu"),
+            ("terraform only", {"terraform"}, {"/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"])}, "PASS", "/bin/terraform"),
+            ("both valid", {"tofu", "terraform"}, {
+                "/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"]),
+                "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
+            }, "PASS", "/bin/tofu"),
+            ("stale tofu", {"tofu", "terraform"}, {
+                "/bin/tofu": (0, "OpenTofu 0.1.0"),
+                "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
+            }, "FAIL", None),
+            ("stale terraform", {"terraform"}, {"/bin/terraform": (0, "Terraform v0.1.0")}, "FAIL", None),
+        )
+        for label, present, outcomes, state, executable in cases:
+            with self.subTest(label=label):
+                _, auditor, result = self.terraform_audit(present, outcomes)
+                self.assertEqual(state, result.state)
+                self.assertEqual(executable, auditor.resolved_executables.get("terraform"))
+
+    def test_terraform_provider_selection_matches_repoctl_path_lookup(self):
+        versions = MOD.load_versions()
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp) / "managed"
+            path_bin = Path(tmp) / "path"
+            managed_bin.mkdir()
+            path_bin.mkdir()
+            item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+            item.pop("provision_requires")
+            item.pop("provision")
+
+            cases = (
+                ("managed tofu valid", {"managed/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "managed/tofu"),
+                ("managed tofu stale", {"managed/tofu": "0.1.0", "path/terraform": versions["TERRAFORM_VERSION"]}, "FAIL", None),
+                ("PATH tofu", {"path/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/tofu"),
+                ("managed terraform", {"managed/terraform": versions["TERRAFORM_VERSION"], "path/terraform": "0.1.0"}, "PASS", "managed/terraform"),
+                ("PATH terraform", {"path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/terraform"),
+            )
+            for label, tools, expected_state, selected in cases:
+                with self.subTest(label=label):
+                    for directory in (managed_bin, path_bin):
+                        for executable in directory.iterdir():
+                            executable.unlink()
+                    outcomes = {}
+                    for location, version in tools.items():
+                        executable = Path(tmp) / location
+                        executable.write_text("stub", encoding="utf-8")
+                        executable.chmod(0o755)
+                        product = "OpenTofu " if executable.name == "tofu" else "Terraform v"
+                        outcomes[str(executable)] = (0, product + version)
+                    caller_path = str(path_bin)
+                    which = lambda command: shutil.which(command, path=caller_path)
+                    effective_path = os.pathsep.join((str(managed_bin), caller_path))
+                    repoctl_selected = (
+                        shutil.which("tofu", path=effective_path)
+                        or shutil.which("terraform", path=effective_path)
+                    )
+                    with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                        auditor = MOD.Auditor(contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which)
+                        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+                    self.assertEqual(expected_state, result.state)
+                    expected_executable = str(Path(tmp) / selected) if selected else None
+                    self.assertEqual(expected_executable, auditor.resolved_executables.get("terraform"))
+                    if result.state == "PASS":
+                        self.assertEqual(repoctl_selected, auditor.resolved_executables["terraform"])
+
+                    if label == "managed tofu stale":
+                        mutation_auditor = MOD.Auditor(contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which)
+                        mutation_auditor.resolve_repoctl_runtime = which
+                        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+                        self.assertEqual("PASS", mutation.state, "PATH-only mutation must reproduce the false PASS")
+                        self.assertEqual(str(path_bin / "terraform"), mutation_auditor.resolved_executables["terraform"])
+
+    def test_alternative_selection_policy_is_validated_when_present(self):
+        base = {
+            "name": "terraform",
+            "requires": [],
+            "any_of": [{"command": "tofu", "version_key": "OPENTOFU_VERSION"}],
+        }
+        MOD.validate_contract(contract([{**base, "selection_policy": "first_available"}]))
+        for policy in ("", None, False, "invalid"):
+            with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "invalid alternative selection policy"):
+                MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
+
+    def test_terraform_legacy_fallback_mutation_is_caught(self):
+        versions = MOD.load_versions()
+        outcomes = {
+            "/bin/tofu": (0, "OpenTofu 0.1.0"),
+            "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
+        }
+        item, _, restored = self.terraform_audit({"tofu", "terraform"}, outcomes)
+        mutated = dict(item)
+        mutated.pop("selection_policy")
+        mutation_auditor = CapabilityAuditTest().auditor([mutated], outcomes, present={"tofu", "terraform"})
+        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+        self.assertEqual("PASS", mutation.state, "legacy fallback mutation must reproduce the false PASS")
+        self.assertEqual("FAIL", restored.state, "preferred stale tofu must fail closed")
 
 
 if __name__ == "__main__":

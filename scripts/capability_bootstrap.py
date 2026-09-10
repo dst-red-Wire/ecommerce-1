@@ -127,6 +127,10 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             alternative_key = alternative.get("version_key")
             if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
                 raise ValueError(f"{name}: alternative requires command and version authority")
+        if "selection_policy" in item and (
+            item["selection_policy"] != "first_available" or not item.get("any_of")
+        ):
+            raise ValueError(f"{name}: invalid alternative selection policy")
         provision_authority = item.get("provision_authority")
         if provision_authority and not versions.get(provision_authority):
             raise ValueError(f"{name}: missing provision authority {provision_authority}")
@@ -273,6 +277,14 @@ class Auditor:
         candidates = self.resolve_all(command)
         return candidates[0] if candidates else None
 
+    def resolve_repoctl_runtime(self, command: str) -> str | None:
+        """Resolve using repoctl's managed-bin-prefixed effective PATH."""
+        for directory in MANAGED_BIN_DIRS:
+            candidate = directory / command
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        return self.which(command)
+
     def provider_entrypoint(self, item: dict) -> str | None:
         """Resolve an entry point beside the executable that validated its provider."""
         provider = item.get("provider")
@@ -301,6 +313,19 @@ class Auditor:
             return Result("PASS", "dependencies ready")
         alternatives = item.get("any_of", [])
         if alternatives:
+            if item.get("selection_policy") == "first_available":
+                for alternative in alternatives:
+                    resolved = self.resolve_repoctl_runtime(alternative["command"])
+                    if resolved:
+                        return self.check({
+                            **item,
+                            **alternative,
+                            "any_of": [],
+                            "resolved_executable": resolved,
+                        }, capability_name)
+                return Result("FAIL", "alternatives absent: " + ", ".join(
+                    alternative["command"] for alternative in alternatives
+                ))
             failures = []
             for alternative in alternatives:
                 result = self.check({**item, **alternative, "any_of": []}, capability_name)
@@ -326,7 +351,8 @@ class Auditor:
                 if (candidate := directory / command).is_file() and os.access(candidate, os.X_OK)
             ]
         else:
-            resolved_candidates = self.resolve_all(command) if command else []
+            selected = item.get("resolved_executable")
+            resolved_candidates = [selected] if selected else (self.resolve_all(command) if command else [])
         if (command or provider) and not resolved_candidates:
             if provider:
                 detail = f"entry point absent from provider {provider}"
