@@ -95,6 +95,28 @@ Implement:
 
 Do not hardcode credentials. Do not claim real provider provisioning when credentials/environment are absent. Return `READY FOR REAL PROVISIONING` only after all offline/static validation passes.
 
+## M2.5 prompt — Persistent MGMT Bootstrap
+
+Canonical milestone: `M2-5-persistent-mgmt-bootstrap`. Assignment requires a tracker scoped to this milestone.
+
+Goal: implement only the persistent management-plane bootstrap described by `architecture.lock.yaml` and its declared MGMT topology and machine contracts. This handoff is governance metadata; it does not grant deployment/apply permission.
+
+Entry gate: M1 PROVEN.
+
+Bounded implementation scope:
+- consume the declared MGMT inventory, network/IPAM, WireGuard access, security-zone, and resilience contracts without duplicating their values;
+- prepare the Terraform/OpenTofu and Ansible bootstrap workflow for the locked persistent MGMT services and human apply gate;
+- keep PREPROD JIT provisioning and all M3 work out of scope;
+- do not invent provider, RTO, RPO, credential, or deployment values.
+
+Evidence required for M2.5 PROVEN:
+- deterministic static validation of every consumed contract and rendered plan/configuration;
+- test evidence for inventory/IPAM consistency, private operator access, secret-safe output, idempotent configuration, and the mandatory human gate before any state-changing apply;
+- an evidence index identifying the reviewed commit and external runtime evidence without committing credentials, state, kubeconfigs, or generated reports;
+- rollback/rebuild instructions demonstrating how the bootstrap can be safely reversed and reproduced.
+
+Exit gate: M2.5 becomes PROVEN only when the bounded outputs and evidence above pass review. That PROVEN state enables M3; neither M1 nor M2 alone enables M3.
+
 ## M4 prompt — Platform Baseline
 
 Tracker: `#17`.

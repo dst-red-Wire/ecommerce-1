@@ -20,7 +20,8 @@ class ArchitectureValidatorTest < Minitest::Test
   def contract_files(root = ROOT)
     lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
     machine_contracts = lock.fetch("machine_contracts").values
-    (BASE_CONTRACT_FILES + machine_contracts).uniq
+    topology_contracts = lock.fetch("topology_contracts").values
+    (BASE_CONTRACT_FILES + machine_contracts + topology_contracts).uniq
   end
 
   def test_repository_contracts_are_consistent
@@ -299,6 +300,17 @@ class ArchitectureValidatorTest < Minitest::Test
         errors = ArchitectureValidator.validate(root)
         assert errors.any? { |error| error.include?("machine_contracts.#{contract} declared file does not exist") },
                contract
+      end
+    end
+  end
+
+  def test_all_declared_topology_contract_paths_must_exist
+    %w[prod deployment_dag security_zones observability].each do |contract|
+      with_contract_copy do |root|
+        path = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml"))).fetch("topology_contracts").fetch(contract)
+        FileUtils.rm(File.join(root, path))
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("topology_contracts.#{contract} declared file does not exist") }, contract
       end
     end
   end

@@ -153,7 +153,8 @@ Les cibles Make restent des façades courtes : elles appellent `scripts/repoctl.
 
 - OpenTelemetry Collector pour la collecte.
 - vmagent + VictoriaMetrics pour les métriques; Prometheus reste un protocole/format compatible.
-- VictoriaLogs pour les journaux d'infrastructure et d'application.
+- OpenTelemetry Collector -> VictoriaLogs pour les journaux d'infrastructure.
+- Rotel -> ClickHouse -> HyperDX pour la télémétrie et les journaux applicatifs; les métadonnées HyperDX utilisent `mongodb-oss-self-hosted`.
 - Data Prepper + OpenSearch + Wazuh uniquement pour la sécurité et l'audit.
 - Archives DFIR immuables selon la politique de résilience.
 

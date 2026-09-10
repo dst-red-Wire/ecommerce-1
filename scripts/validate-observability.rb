@@ -54,6 +54,12 @@ module ObservabilityTopologyValidator
     data-prepper-general-log-pipeline
   ].freeze
 
+  DEPLOYMENT_COMPONENT_FIELDS = %w[
+    infrastructure_collector application_gateway metrics_scraper metrics infrastructure_logs
+    application_observability_storage application_observability_ui hyperdx_metadata_store alerts
+    notifications dashboards security_pipeline security
+  ].freeze
+
   def load_yaml(path)
     YAML.safe_load(File.read(path), aliases: false) || {}
   rescue Psych::Exception, SystemCallError => e
@@ -103,8 +109,20 @@ module ObservabilityTopologyValidator
 
     hyperdx = contract["hyperdx"] || {}
     errors << "HyperDX telemetry must use ClickHouse" unless hyperdx["telemetry_storage"] == "clickhouse"
-    errors << "HyperDX metadata MongoDB must be internal-only" unless hyperdx["metadata_store"] == "mongodb" &&
+    errors << "HyperDX metadata MongoDB must be internal-only" unless hyperdx["metadata_store"] == "mongodb-oss-self-hosted" &&
       hyperdx["metadata_scope"] == "hyperdx-internal-only" && hyperdx["business_data_forbidden"] == true
+
+    waves_path = lock.dig("machine_contracts", "deployment_waves")
+    waves = load_yaml(File.join(root, waves_path.to_s))
+    wave = Array(waves["waves"]).find { |entry| entry["id"] == "50-observability" }
+    components = Array(wave && wave["components"])
+    required = DEPLOYMENT_COMPONENT_FIELDS.map { |field| summary[field] }
+    required << "#{summary['security_logs']}-security"
+    missing = required.compact.uniq - components
+    errors << "deployment wave 50 missing canonical observability components: #{missing.join(', ')}" unless missing.empty?
+    forbidden_wave = %w[prometheus prometheus-server fluent-bit opensearch-logs]
+    active_forbidden = components & forbidden_wave
+    errors << "deployment wave 50 activates superseded general observability roles: #{active_forbidden.join(', ')}" unless active_forbidden.empty?
 
     forbidden = Array(contract.dig("anti_duplication", "forbidden_active_components"))
     errors << "observability anti-duplication guard drift" unless forbidden.sort == FORBIDDEN_GENERAL_LOG_COMPONENTS.sort

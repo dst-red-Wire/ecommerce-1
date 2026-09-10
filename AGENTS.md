@@ -33,7 +33,8 @@ Validated architecture is not to be redesigned during implementation unless an e
 - Object storage target: SeaweedFS S3.
 - Telemetry collection: OpenTelemetry Collector.
 - Metrics: vmagent + VictoriaMetrics; Prometheus is protocol/format compatibility only, not the primary TSDB/server authority.
-- Infrastructure/application logs: VictoriaLogs.
+- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs.
+- Application telemetry/logs: Rotel -> ClickHouse -> HyperDX.
 - Security-only pipeline: Data Prepper + OpenSearch + Wazuh.
 - HyperDX metadata store: `mongodb-oss-self-hosted`.
 

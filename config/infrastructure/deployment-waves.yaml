@@ -18,7 +18,7 @@ waves:
     components: [openbao, external-secrets, harbor, tekton]
   - id: 50-observability
     requires: [40-secrets-registry-ci]
-    components: [opentelemetry, prometheus, alertmanager, grafana, fluent-bit, data-prepper, opensearch-logs, wazuh]
+    components: [opentelemetry-collector, rotel, vmagent, victoriametrics, victorialogs, clickhouse, hyperdx, mongodb-oss-self-hosted, vmalert, alertmanager, grafana, data-prepper, opensearch-security, wazuh]
   - id: 60-stateful
     requires: [40-secrets-registry-ci, 20-network-security]
     parallel_groups:

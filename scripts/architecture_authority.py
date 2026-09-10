@@ -97,6 +97,17 @@ def documentation_errors(text):
                 re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|shipper)", sentence, re.I)
                 and not historical and not retired):
             errors.append("Fluent Bit general logging is superseded: " + sentence.strip())
+        negated = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not|only)\b", sentence, re.I)
+        if (re.search(r"(?:general|application|infrastructure)\s+(?:logging|logs|log pipeline)", sentence, re.I) and
+                re.search(r"Data Prepper|OpenSearch", sentence, re.I) and not (historical or negated)):
+            errors.append("Data Prepper/OpenSearch general logging role is forbidden: " + sentence.strip())
+        if (re.search(r"Prometheus", sentence, re.I) and
+                re.search(r"(?:primary|main|authoritative)\s+(?:TSDB|metrics (?:store|storage|server))|(?:TSDB|metrics (?:store|storage|server))\s+(?:is|:)\s+Prometheus", sentence, re.I)
+                and not (historical or negated)):
+            errors.append("Prometheus is compatibility-only, not primary metrics storage: " + sentence.strip())
+        if (re.search(r"application (?:telemetry|logs?|observability)(?:\s+and\s+logs?)?\s*(?:use|uses|->|:)\s*VictoriaLogs|VictoriaLogs\s+for\s+(?:both\s+)?(?:infrastructure\s+(?:and|/)\s+)?application", sentence, re.I)
+                and not (historical or negated)):
+            errors.append("application telemetry/logs must use Rotel, ClickHouse, and HyperDX: " + sentence.strip())
     return errors
 
 
@@ -141,6 +152,17 @@ def validate(root):
         for relative in lock["machine_contracts"].values():
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
+        for role, relative in lock["topology_contracts"].items():
+            if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
+                errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
+                continue
+            path = root / relative
+            if not path.is_file():
+                errors.append(f"missing topology contract: {relative}")
+                continue
+            contents = path.read_text()
+            if not contents.strip() or not re.search(r"^Status:\s*`[^`]*EXACT[^`]*`", contents, re.M | re.I):
+                errors.append(f"topology contract must be readable and EXACT: {relative}")
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
@@ -154,6 +176,16 @@ def validate(root):
         plan = (root / "docs/project/MASTER_EXECUTION_PLAN.md").read_text()
         if not re.search(r"\| M3 PREPROD Infrastructure .*?\| M2\.5 PROVEN;", plan):
             errors.append("MASTER_EXECUTION_PLAN.md must gate M3 on M2.5")
+        readiness = (root / "docs/project/TECHNICAL_READINESS.md").read_text()
+        if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
+            errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
+        handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
+        handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
+        handoff = handoff_match.group(0) if handoff_match else ""
+        handoff_requirements = ("## M2.5 prompt", "M2-5-persistent-mgmt-bootstrap", "Entry gate: M1 PROVEN",
+                                "Evidence required for M2.5 PROVEN", "Exit gate:", "That PROVEN state enables M3")
+        if any(requirement not in handoff for requirement in handoff_requirements):
+            errors.append("CODEX_HANDOFFS.md must define the executable M2.5 entry, evidence, and M3 exit contract")
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]

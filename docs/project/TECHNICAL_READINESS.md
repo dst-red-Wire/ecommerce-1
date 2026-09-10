@@ -60,7 +60,8 @@ Work verifies current external reality against the exact contracts. It does not 
 
 - M1: `READY FOR CODEX`.
 - M2: dependency-gated by M1, no specification blocker.
-- M3: dependency-gated by M1 and real provider access for deployment, no specification blocker.
+- M2.5: dependency-gated by M1; its persistent MGMT bootstrap evidence must be PROVEN before exit.
+- M3: dependency-gated by M2.5 PROVEN and real provider access for deployment; M1 or M2 PROVEN alone never authorizes M3.
 - M4-M9: dependency-gated by preceding milestones/evidence, no known specification blocker.
 - W1/W2: `READY FOR WORK`.
 - W3-W5: evidence/dependency-gated, no specification blocker.

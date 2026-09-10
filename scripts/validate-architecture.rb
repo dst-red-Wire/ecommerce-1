@@ -126,6 +126,33 @@ module ArchitectureValidator
     end
   end
 
+  def validate_topology_contracts(root, lock)
+    declared = expect_mapping(lock["topology_contracts"], "architecture.lock.yaml topology_contracts")
+    declared.each do |key, path|
+      label = "architecture.lock.yaml topology_contracts.#{key}"
+      unless key.is_a?(String) && !key.strip.empty?
+        raise ContractLoadError, "architecture.lock.yaml topology_contracts keys must be non-empty strings"
+      end
+      unless path.is_a?(String) && !path.strip.empty? && !Pathname.new(path).absolute?
+        raise ContractLoadError, "#{label} must declare a non-empty relative path"
+      end
+      repository_root = File.expand_path(root)
+      resolved = File.expand_path(path, repository_root)
+      unless resolved.start_with?("#{repository_root}#{File::SEPARATOR}") && File.file?(resolved)
+        raise ContractLoadError, "#{label} declared file does not exist: #{path}"
+      end
+      real_root = File.realpath(repository_root)
+      real_path = File.realpath(resolved)
+      unless real_path.start_with?("#{real_root}#{File::SEPARATOR}")
+        raise ContractLoadError, "#{label} resolves outside the repository: #{path.inspect}"
+      end
+      contents = File.read(real_path)
+      unless contents.match?(/^Status:\s*`[^`]*EXACT[^`]*`/i)
+        raise ContractLoadError, "#{label} must reference a readable EXACT topology contract: #{path}"
+      end
+    end
+  end
+
   def required_machine_contract(contracts, key)
     contracts.fetch(key) do
       raise ContractLoadError, "architecture.lock.yaml machine_contracts.#{key} must be declared"
@@ -157,6 +184,7 @@ module ArchitectureValidator
   def validate(root)
     errors = []
     lock = expect_mapping(load_yaml(root, "architecture.lock.yaml"), "architecture.lock.yaml")
+    validate_topology_contracts(root, lock)
     contracts = load_machine_contracts(root, lock)
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
     events, events_path = required_machine_contract(contracts, "event_contracts")

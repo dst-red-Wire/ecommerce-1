@@ -51,6 +51,23 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
 
+    def test_restricted_observability_roles_are_semantic(self):
+        for statement in (
+            "General logging pipeline: Data Prepper + OpenSearch.",
+            "Prometheus is the primary TSDB.",
+            "Use Fluent Bit for general logging.",
+            "Application logs -> VictoriaLogs.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in (
+            "Historical: General logging used Data Prepper + OpenSearch.",
+            "Prometheus is not the primary TSDB.",
+            "Fluent Bit is superseded for general logging.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
     def test_operational_service_counts_are_not_topology_claims(self):
         self.assertEqual([], authority.documentation_errors("Incident impact: 17 services were unavailable."))
         self.assertEqual([], authority.documentation_errors("17 backend services are complete; two remain."))
@@ -98,6 +115,35 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             plan.write_text(original_plan.replace("M2.5 PROVEN; exact infrastructure", "M1 PROVEN; exact infrastructure"))
             self.assertTrue(any("gate M3" in error for error in authority.validate(root)))
 
+    def test_readiness_and_m25_handoff_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            readiness = root / "docs/project/TECHNICAL_READINESS.md"
+            original = readiness.read_text()
+            for replacement in ("M1 PROVEN", "M2 PROVEN", "a completed prerequisite"):
+                readiness.write_text(original.replace("M2.5 PROVEN", replacement))
+                self.assertTrue(any("TECHNICAL_READINESS" in error for error in authority.validate(root)))
+                readiness.write_text(original)
+            handoff = root / "docs/project/CODEX_HANDOFFS.md"
+            original_handoff = handoff.read_text()
+            for required in ("## M2.5 prompt", "Entry gate: M1 PROVEN", "Evidence required for M2.5 PROVEN", "That PROVEN state enables M3"):
+                handoff.write_text(original_handoff.replace(required, "removed", 1))
+                self.assertTrue(any("executable M2.5" in error for error in authority.validate(root)))
+                handoff.write_text(original_handoff)
+            self.assertEqual([], authority.validate(root))
+
+    def test_declared_topology_contract_deletions_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            for relative in ("docs/architecture/PROD_TOPOLOGY_V2.md", "docs/architecture/DEPLOYMENT_DAG.md",
+                             "docs/architecture/SECURITY_TRUST_ZONES.md", "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md"):
+                path = root / relative
+                original = path.read_text()
+                path.unlink()
+                self.assertTrue(any(relative in error for error in authority.validate(root)))
+                path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_exact_contract_mutations_are_rejected(self):
         mutations = (
             ("config/contracts/security-trust-zones.yaml", "  Z6: backup-evidence-dfir\n", ""),
@@ -124,7 +170,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             root = self.copy_repository(directory)
             agents = root / "AGENTS.md"
             original = agents.read_text()
-            agents.write_text(original.replace("- Infrastructure/application logs: VictoriaLogs.",
+            agents.write_text(original.replace("- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs.",
                                                "- General logging pipeline: Fluent Bit + Data Prepper + OpenSearch."))
             self.assertTrue(any("general logging" in error for error in authority.validate(root)))
             agents.write_text(original)
