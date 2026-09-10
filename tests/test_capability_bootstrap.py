@@ -55,6 +55,67 @@ class CapabilityAuditTest(unittest.TestCase):
         present = present if present is not None else {item.get("command") for item in items}
         return MOD.Auditor(contract(items), runner=self.runner(outcomes), which=lambda cmd: f"/bin/{cmd}" if cmd in present else None)
 
+    def quality_provision(self, requested, tags=None, failures=()):
+        tags = tags or {name: name for name in ("ruff", "oxfmt", "oxlint")}
+        items = [
+            {"name": "ansible-playbook", "requires": [], "command": "ansible-playbook"},
+            *[
+                {"name": name, "requires": [], "command": name,
+                 "provision": {"type": "ansible", "tags": tags[name]}}
+                for name in ("ruff", "oxfmt", "oxlint")
+            ],
+        ]
+        installed = {"ruff", "oxfmt", "oxlint"} - {requested}
+        calls = []
+
+        def runner(argv):
+            calls.append(argv)
+            if "platform/ansible/developer.yml" in argv:
+                selected_tag = argv[argv.index("--tags") + 1]
+                for name in ("oxlint", "oxfmt", "ruff"):
+                    if tags[name] != selected_tag:
+                        continue
+                    installed.add(name)
+                    if name in failures:
+                        return subprocess.CompletedProcess(argv, 1, "", f"{name} download failed")
+                return subprocess.CompletedProcess(argv, 0, "reconciled", "")
+            return subprocess.CompletedProcess(argv, 0, "1.0", "")
+
+        with mock.patch.object(MOD, "validate_contract") if len(set(tags.values())) != 3 else mock.patch.object(
+                MOD, "validate_contract", wraps=MOD.validate_contract):
+            auditor = MOD.Auditor(contract(items), runner=runner,
+                                  which=lambda command: f"/bin/{command}" if command == "ansible-playbook" or command in installed else None)
+        result = auditor.provision(next(item for item in items if item["name"] == requested))
+        return result, calls
+
+    def test_ruff_provisioning_is_positive_and_targeted(self):
+        result, calls = self.quality_provision("ruff")
+        self.assertEqual("PASS", result.state)
+        self.assertEqual("ruff", calls[0][calls[0].index("--tags") + 1])
+
+    def test_oxfmt_provisioning_is_positive_and_targeted(self):
+        result, calls = self.quality_provision("oxfmt")
+        self.assertEqual("PASS", result.state)
+        self.assertEqual("oxfmt", calls[0][calls[0].index("--tags") + 1])
+
+    def test_oxlint_provisioning_is_positive_and_targeted(self):
+        result, calls = self.quality_provision("oxlint")
+        self.assertEqual("PASS", result.state)
+        self.assertEqual("oxlint", calls[0][calls[0].index("--tags") + 1])
+
+    def test_quality_provisioning_failures_are_isolated(self):
+        oxlint, _ = self.quality_provision("oxlint", failures={"ruff", "oxfmt"})
+        ruff, _ = self.quality_provision("ruff", failures={"oxfmt"})
+        self.assertEqual("PASS", oxlint.state)
+        self.assertEqual("PASS", ruff.state)
+
+    def test_shared_quality_tag_mutation_contaminates_requested_tool(self):
+        shared = {name: "quality_tools" for name in ("ruff", "oxfmt", "oxlint")}
+        result, _ = self.quality_provision("oxlint", tags=shared, failures={"oxfmt"})
+        self.assertEqual("BLOCKED", result.state)
+        isolated, _ = self.quality_provision("oxlint", failures={"ruff", "oxfmt"})
+        self.assertEqual("PASS", isolated.state)
+
     def test_failure_and_skip_propagate_only_to_real_dependants(self):
         items = [
             {"name": "docker", "requires": [], "probe": ["docker", "info"], "external_failure": True},
@@ -395,6 +456,27 @@ class CapabilityClosureTest(unittest.TestCase):
         old_select = lambda run_tags: {tag for tag in expected if tag in run_tags}
         self.assertNotEqual(expected, old_select(["all"]))
         self.assertEqual(set(), old_select(["all"]))
+
+    def test_quality_capabilities_have_distinct_provisioning_tags(self):
+        canonical = MOD.load_contract()
+        names = {item["name"]: item for item in canonical["capabilities"]}
+        tags = {name: names[name]["provision"]["tags"] for name in ("ruff", "oxfmt", "oxlint")}
+        self.assertEqual({"ruff": "ruff", "oxfmt": "oxfmt", "oxlint": "oxlint"}, tags)
+
+        for name in tags:
+            names[name]["provision"]["tags"] = "quality_tools"
+        with self.assertRaisesRegex(ValueError, "independent quality capabilities must use distinct"):
+            MOD.validate_contract(canonical)
+
+    def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
+        expected = {"ruff", "oxfmt", "oxlint"}
+        select = lambda run_tags: {tag for tag in expected if "all" in run_tags or tag in run_tags}
+        self.assertEqual(expected, select(["all"]))
+        for tag in expected:
+            self.assertEqual({tag}, select([tag]))
+            self.assertIn(f"tags: [toolchain, {tag}]", tasks)
+        self.assertNotIn("quality_tools", tasks)
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()

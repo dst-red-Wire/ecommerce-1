@@ -345,7 +345,7 @@
       "version_key": "OXLINT_VERSION",
       "provision": {
         "type": "ansible",
-        "tags": "quality_tools"
+        "tags": "oxlint"
       },
       "classification": "managed"
     },
@@ -362,7 +362,7 @@
       "version_key": "OXFMT_VERSION",
       "provision": {
         "type": "ansible",
-        "tags": "quality_tools"
+        "tags": "oxfmt"
       },
       "classification": "managed"
     },
@@ -379,7 +379,7 @@
       "version_key": "RUFF_VERSION",
       "provision": {
         "type": "ansible",
-        "tags": "quality_tools"
+        "tags": "ruff"
       },
       "classification": "managed"
     },
