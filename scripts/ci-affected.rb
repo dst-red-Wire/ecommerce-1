@@ -44,7 +44,8 @@ module AffectedComponents
 
       case path
       when "architecture.lock.yaml", "Makefile", "go.work",
-           "config/contracts/ci-topology.yaml", "config/toolchain/versions.env"
+           "config/contracts/ci-topology.yaml", "config/toolchain/versions.env",
+           "config/toolchain/capabilities.json"
         force_all!(components, services)
       when %r{\Ascripts/ci-[^/]+\.(?:rb|py)\z}, "scripts/repoctl.py",
            %r{\Aplatform/tekton/}
