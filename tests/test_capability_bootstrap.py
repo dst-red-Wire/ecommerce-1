@@ -472,6 +472,7 @@ class CapabilityClosureTest(unittest.TestCase):
 
     def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
+        main_tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         expected = {"ruff", "oxfmt", "oxlint"}
 
         def prepared_tools(source, run_tags):
@@ -503,6 +504,19 @@ class CapabilityClosureTest(unittest.TestCase):
             self.assertEqual(expected, prepared_tools(tasks, [aggregate]))
         for individual in expected:
             self.assertEqual({individual}, prepared_tools(tasks, [individual]))
+
+        shared_setup = main_tasks.split("- name: Install native build prerequisites", 1)[0]
+        for selector in ("all", "quality_tools", "toolchain", *expected):
+            with self.subTest(shared_directory_selector=selector):
+                self.assertTrue(selector == "all" or selector in shared_setup)
+
+        # Exact finding mutation: without the individual tags, targeted Oxlint
+        # provisioning cannot select the shared cache and binary directories.
+        mutated_setup = shared_setup
+        for tag in expected:
+            mutated_setup = mutated_setup.replace(f", {tag}", "")
+        self.assertNotIn("oxlint", mutated_setup)
+        self.assertIn("oxlint", shared_setup)
 
         self.assertEqual(
             2,
