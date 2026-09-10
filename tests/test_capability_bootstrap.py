@@ -17,6 +17,65 @@ sys.modules[SPEC.name] = MOD
 SPEC.loader.exec_module(MOD)
 
 
+class DeveloperWSLPreflightTest(unittest.TestCase):
+    PLAYBOOK = ROOT / "platform/ansible/developer.yml"
+    WSL_TASKS = (
+        "Read kernel release for WSL verification",
+        "Require WSL2 Microsoft kernel",
+    )
+
+    def predicates(self, source):
+        predicates = []
+        for name in self.WSL_TASKS:
+            task = source.split(f"- name: {name}", 1)[1].split("\n    - name:", 1)[0]
+            predicates.append(re.search(r'^      when: "(.+)"$', task, re.MULTILINE).group(1))
+        return predicates
+
+    def selected(self, predicate, run_tags):
+        return eval(predicate, {"__builtins__": {}}, {"ansible_run_tags": run_tags})
+
+    def test_wsl_preflight_selection_and_condition_parity(self):
+        predicates = self.predicates(self.PLAYBOOK.read_text(encoding="utf-8"))
+        self.assertEqual(predicates[0], predicates[1])
+        for run_tags in (["all"], ["workstation"], ["docker"]):
+            with self.subTest(run_tags=run_tags):
+                self.assertTrue(self.selected(predicates[0], run_tags))
+        for run_tags in (["terraform"], ["helm"]):
+            with self.subTest(run_tags=run_tags):
+                self.assertFalse(self.selected(predicates[0], run_tags))
+
+    def test_full_run_wsl2_passes_and_native_ubuntu_stops_before_roles(self):
+        source = self.PLAYBOOK.read_text(encoding="utf-8")
+        predicate = self.predicates(source)[0]
+
+        def full_run(kernel):
+            events = ["ubuntu-preflight"]
+            if self.selected(predicate, ["all"]):
+                events.extend(("wsl-kernel-probe", "wsl-assertion"))
+                if "microsoft" not in kernel.lower():
+                    return False, events
+            events.append("developer_workstation")
+            return True, events
+
+        passed, events = full_run("5.15.153.1-microsoft-standard-WSL2")
+        self.assertTrue(passed)
+        self.assertEqual("developer_workstation", events[-1])
+
+        passed, events = full_run("6.8.0-79-generic")
+        self.assertFalse(passed)
+        self.assertEqual(["ubuntu-preflight", "wsl-kernel-probe", "wsl-assertion"], events)
+        self.assertNotIn("developer_workstation", events)
+
+    def test_missing_all_mutation_reproduces_full_run_bypass(self):
+        source = self.PLAYBOOK.read_text(encoding="utf-8")
+        predicates = self.predicates(source)
+        mutation = "'all' in ansible_run_tags or "
+        self.assertTrue(all(mutation in predicate for predicate in predicates))
+        mutated = [predicate.replace(mutation, "", 1) for predicate in predicates]
+        self.assertTrue(all(not self.selected(predicate, ["all"]) for predicate in mutated))
+        self.assertTrue(all(self.selected(predicate, ["all"]) for predicate in predicates))
+
+
 def contract(items):
     normalized = []
     for item in items:
