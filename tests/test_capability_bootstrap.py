@@ -259,6 +259,94 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("FAIL", results["ansible-playbook"].state)
         self.assertIn("entry point absent from provider ansible-core", results["ansible-playbook"].detail)
 
+    def test_pep668_ansible_uses_isolated_provider_and_is_idempotent(self):
+        version = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
+        items = [
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
+             "isolated": True,
+             "provision": {"type": "python-venv", "package": "ansible-core",
+                           "entry_points": ["ansible", "ansible-playbook", "ansible-galaxy"]}},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-playbook"},
+            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-galaxy"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            system_bin = root / "usr" / "bin"
+            managed_bin = root / "home" / ".local" / "bin"
+            venv = root / "home" / ".local" / "share" / "ecommerce-1" / "venvs" / "ansible-core"
+            system_bin.mkdir(parents=True)
+            for entry_point in ("ansible", "ansible-playbook", "ansible-galaxy"):
+                executable = system_bin / entry_point
+                executable.write_text("#!/bin/true\n")
+                executable.chmod(0o755)
+            calls = []
+
+            def runner(argv):
+                calls.append(argv)
+                if argv[1:3] == ["-m", "venv"]:
+                    (venv / "bin").mkdir(parents=True)
+                    (venv / "bin" / "python").write_text("#!/bin/true\n")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[:4] == [str(venv / "bin" / "python"), "-m", "pip", "install"]:
+                    for entry_point in ("ansible", "ansible-playbook", "ansible-galaxy"):
+                        executable = venv / "bin" / entry_point
+                        executable.write_text("#!/bin/true\n")
+                        executable.chmod(0o755)
+                    return subprocess.CompletedProcess(argv, 0, "installed", "")
+                if str(managed_bin) in argv[0]:
+                    return subprocess.CompletedProcess(argv, 0, f"ansible [core {version}]", "")
+                return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
+
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)), \
+                    mock.patch.object(MOD, "ANSIBLE_CORE_VENV", venv):
+                auditor = MOD.Auditor(contract(items), runner=runner,
+                                      which=lambda command: str(system_bin / command))
+                first = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+                second = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+
+            self.assertTrue(all(result.state == "PASS" for result in first.values()))
+            self.assertTrue(all(result.state == "PASS" for result in second.values()))
+            self.assertEqual(1, sum(call[1:3] == ["-m", "venv"] for call in calls))
+            self.assertEqual(1, sum(call[:4] == [str(venv / "bin" / "python"), "-m", "pip", "install"]
+                                    for call in calls))
+            self.assertFalse(any("--user" in call for call in calls),
+                             "PEP 668 bootstrap must never install into distro-managed Python")
+            provider_dir = Path(auditor.resolved_executables["ansible-core"]).parent
+            self.assertEqual(provider_dir, Path(auditor.resolved_executables["ansible-playbook"]).parent)
+            self.assertEqual(provider_dir, Path(auditor.resolved_executables["ansible-galaxy"]).parent)
+
+    def test_pep668_pip_user_mutation_is_rejected(self):
+        canonical = MOD.load_contract()
+        ansible = next(item for item in canonical["capabilities"] if item["name"] == "ansible-core")
+        ansible["provision"] = {"type": "pip", "package": "ansible-core", "arguments": ["--user"]}
+        canonical["provision_owners"]["ansible-core"] = "pip"
+        with self.assertRaisesRegex(ValueError, "isolated Python virtual environment"):
+            MOD.validate_contract(canonical)
+
+    def test_failed_ansible_venv_creation_blocks_only_real_dependants(self):
+        items = [
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
+             "isolated": True,
+             "provision": {"type": "python-venv", "package": "ansible-core",
+                           "entry_points": ["ansible", "ansible-playbook", "ansible-galaxy"]}},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-playbook"},
+            {"name": "independent", "requires": [], "command": "independent"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(MOD, "ANSIBLE_CORE_VENV", Path(tmp) / "venv"):
+            def runner(argv):
+                if argv[1:3] == ["-m", "venv"]:
+                    return subprocess.CompletedProcess(argv, 1, "", "ensurepip unavailable")
+                return subprocess.CompletedProcess(argv, 0, "ready", "")
+            auditor = MOD.Auditor(contract(items), runner=runner,
+                                  which=lambda command: "/bin/independent" if command == "independent" else None)
+            results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+        self.assertEqual("BLOCKED", results["ansible-core"].state)
+        self.assertEqual("SKIP", results["ansible-playbook"].state)
+        self.assertEqual("PASS", results["independent"].state)
+
     def test_ansible_lint_is_provisioned_only_through_ansible_and_rechecked(self):
         canonical = MOD.load_contract()
         item = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")

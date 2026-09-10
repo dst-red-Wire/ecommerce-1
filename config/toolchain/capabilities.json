@@ -79,9 +79,15 @@
         "--version"
       ],
       "version_key": "ANSIBLE_CORE_VERSION",
+      "isolated": true,
       "provision": {
-        "type": "pip",
-        "package": "ansible-core"
+        "type": "python-venv",
+        "package": "ansible-core",
+        "entry_points": [
+          "ansible",
+          "ansible-playbook",
+          "ansible-galaxy"
+        ]
       },
       "classification": "managed"
     },
@@ -642,7 +648,7 @@
   ],
   "provision_owners": {
     "pip": "debian-package",
-    "ansible-core": "pip",
+    "ansible-core": "python-venv",
     "ansible-lint": "ansible",
     "node": "ansible",
     "go": "ansible",

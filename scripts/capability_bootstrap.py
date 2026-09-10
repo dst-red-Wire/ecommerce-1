@@ -22,6 +22,7 @@ VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
+ANSIBLE_CORE_VENV = Path.home() / ".local" / "share" / "ecommerce-1" / "venvs" / "ansible-core"
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
@@ -79,6 +80,16 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
         or not {"ubuntu", "debian"}.issubset(pip_provision.get("distributions", []))
     ):
         raise ValueError("pip: Linux amd64 requires Ubuntu/Debian package provisioning")
+    ansible_core = graph.items.get("ansible-core", {})
+    ansible_provision = ansible_core.get("provision", {})
+    if ansible_provision and ansible_provision.get("type") != "python-venv":
+        raise ValueError("ansible-core: provisioning must use an isolated Python virtual environment")
+    if ansible_provision and not ansible_core.get("isolated"):
+        raise ValueError("ansible-core: the isolated provider must be authoritative")
+    if ansible_provision and set(ansible_provision.get("entry_points", [])) != {
+        "ansible", "ansible-playbook", "ansible-galaxy"
+    }:
+        raise ValueError("ansible-core: isolated provider must expose all Ansible entry points")
     command_aliases = contract.get("command_capabilities", {})
     external = {}
     for classification, key in (
@@ -312,6 +323,11 @@ class Auditor:
         if provider:
             provider_command = self.provider_entrypoint(item)
             resolved_candidates = [provider_command] if provider_command else []
+        elif item.get("isolated"):
+            resolved_candidates = [
+                str(candidate) for directory in MANAGED_BIN_DIRS
+                if (candidate := directory / command).is_file() and os.access(candidate, os.X_OK)
+            ]
         else:
             resolved_candidates = self.resolve_all(command) if command else []
         if command and not resolved_candidates:
@@ -357,9 +373,15 @@ class Auditor:
                     detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
                     return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
             return self.check(item, item["name"])
-        elif spec["type"] == "pip":
+        elif spec["type"] == "python-venv":
             version = self.versions[item["version_key"]]
-            command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]
+            venv_python = ANSIBLE_CORE_VENV / "bin" / "python"
+            if not venv_python.is_file():
+                proc = self.runner([sys.executable, "-m", "venv", str(ANSIBLE_CORE_VENV)])
+                if proc.returncode:
+                    detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
+                    return Result("BLOCKED", detail or f"virtual environment creation exit {proc.returncode}")
+            command = [str(venv_python), "-m", "pip", "install", f"{spec['package']}=={version}"]
         else:
             ansible_playbook = self.resolved_executables.get("ansible-playbook")
             playbook_capability = self.graph.items.get("ansible-playbook", {})
@@ -372,6 +394,20 @@ class Auditor:
         if proc.returncode:
             detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
             return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
+        if spec["type"] == "python-venv":
+            managed_bin = MANAGED_BIN_DIRS[0]
+            try:
+                managed_bin.mkdir(parents=True, exist_ok=True)
+                for entry_point in spec["entry_points"]:
+                    source = ANSIBLE_CORE_VENV / "bin" / entry_point
+                    if not source.is_file():
+                        return Result("BLOCKED", f"isolated provider did not install {entry_point}")
+                    destination = managed_bin / entry_point
+                    if destination.is_symlink() or destination.exists():
+                        destination.unlink()
+                    destination.symlink_to(source)
+            except OSError as exc:
+                return Result("BLOCKED", f"cannot publish isolated Ansible entry points: {exc}")
         return self.check(item, item["name"])
 
     def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
