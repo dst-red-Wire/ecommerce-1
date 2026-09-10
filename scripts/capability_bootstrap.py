@@ -271,6 +271,14 @@ class Auditor:
         candidates = self.resolve_all(command)
         return candidates[0] if candidates else None
 
+    def resolve_repoctl_runtime(self, command: str) -> str | None:
+        """Resolve using repoctl's managed-bin-prefixed effective PATH."""
+        for directory in MANAGED_BIN_DIRS:
+            candidate = directory / command
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        return self.which(command)
+
     def provider_entrypoint(self, item: dict) -> str | None:
         """Resolve an entry point beside the executable that validated its provider."""
         provider = item.get("provider")
@@ -301,7 +309,7 @@ class Auditor:
         if alternatives:
             if item.get("selection_policy") == "first_available":
                 for alternative in alternatives:
-                    resolved = self.which(alternative["command"])
+                    resolved = self.resolve_repoctl_runtime(alternative["command"])
                     if resolved:
                         return self.check({
                             **item,
