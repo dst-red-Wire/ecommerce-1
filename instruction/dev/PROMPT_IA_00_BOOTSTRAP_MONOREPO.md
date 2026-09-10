@@ -199,10 +199,14 @@ Créer la structure :
 ```text
 observability/
   otel/
-  prometheus/
+  rotel/
+  vmagent/
+  victoriametrics/
+  victorialogs/
   alertmanager/
   grafana/
-  fluent-bit/
+  clickhouse/
+  hyperdx/
   data-prepper/
   opensearch/
   wazuh/

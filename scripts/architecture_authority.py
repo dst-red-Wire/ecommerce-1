@@ -73,30 +73,64 @@ def documentation_errors(text):
         # Only an explicit label on this clause qualifies it as historical.
         # An unrelated mention of migration or rejection cannot exempt a claim.
         historical = re.match(r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I)
-        if re.search(r"\b(?:exactly|total(?:s|ing)?|architecture(?: has| defines)?|topology(?: has| defines)?|baseline:)\s+17\s+(?:(?:go|backend)\s+)*services?\b|\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I) and not historical:
+        topology_17 = re.search(
+            r"\b(?:exactly|total(?:s|ing)?|baseline:)\s+17\s+(?:(?:go|backend)\s+)*services?\b"
+            r"|\b(?:the|our)\s+(?:architecture|topology|platform|backend)\s+"
+            r"(?:consists?\s+of|includes?|has|defines?)\s+17\s+(?:(?:go|backend)\s+)*services?\b"
+            r"|\bthere\s+are\s+17\s+(?:(?:go|backend)\s+)*services?\s+in\s+(?:the|our)\s+(?:architecture|topology|platform|backend)\b"
+            r"|\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b",
+            sentence, re.I,
+        )
+        if topology_17 and not historical:
             errors.append("superseded service topology: " + sentence.strip())
         dvc_retired = re.search(r"\bDVC\s+(?:(?:is|was|has been)\s+)?(?:superseded|historical|rejected|forbidden)\b", sentence, re.I)
         if re.search(r"\bdvc\b", sentence, re.I) and not (historical or dvc_retired):
             errors.append("DVC must be explicitly historical/superseded: " + sentence.strip())
-        if re.search(r"next\.?js", sentence, re.I) and re.search(r"target|cible|prod|runtime|ATS\s*->", sentence, re.I):
+        nextjs_active = re.search(
+            r"^\s*(?:use|deploy)\s+next\.?js\b"
+            r"|\bfrontend\s+framework\s*:\s*next\.?js\b"
+            r"|\b(?:prod(?:uction)?\s+)?frontend\s+(?:target|runtime)\s*:\s*next\.?js\b"
+            r"|\b(?:admin|storefront)(?:\s+frontend)?\s+(?:uses|is\s+built\s+with)\s+next\.?js\b"
+            r"|\bnext\.?js\s+is\s+the\s+(?:production|prod)\s+frontend\s+(?:framework|runtime|target)\b"
+            r"|\bnext\.?js\b.*\b(?:target|cible|prod|runtime)\b|\bATS\s*->.*\bnext\.?js\b",
+            sentence, re.I,
+        )
+        if nextjs_active:
             migration = re.search(
                 r"next\.?js(?:/React/Node(?:\.js)?)?\s+(?:is (?:only )?the migration source|est la source de migration)"
                 r"|actuellement Next\.js, cible Go|Migration du runtime frontend Next\.js vers Go"
-                r"|existing Next\.js implementation remains until migration", sentence, re.I
+                r"|existing Next\.js implementation remains until migration"
+                r"|migrate from Next\.?js to Go/templ/HTMX"
+                r"|legacy Next\.?js frontend remains only for migration reference"
+                r"|Next\.?js is superseded as the PROD frontend target", sentence, re.I
             )
             if not (historical or migration):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
         if re.search(r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?", sentence) and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
-        superseded = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator)?|Loki|Splunk"
-        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object storage|logging|SIEM)"
-        retired = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not)\b", sentence, re.I)
-        if re.search(rf"\b(?:{superseded})\b", sentence, re.I) and re.search(active, sentence, re.I) and not (historical or retired):
+        superseded = r"FluxCD|Flagger|MinIO(?: CE| Community Edition| Operator)?|Loki|Splunk"
+        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object stor(?:age|e)|logging|SIEM)"
+        superseded_match = re.search(rf"\b(?:{superseded})\b", sentence, re.I)
+        retired = superseded_match and re.search(
+            rf"(?:\b(?:do not|must not|never)\s+(?:use|deploy|select)\s+{superseded_match.group(0)}\b"
+            rf"|\bno\s+(?:active\s+)?{superseded_match.group(0)}\b"
+            rf"|\b{superseded_match.group(0)}\b\s+(?:(?:is|was)\s+not\b|(?:is|was|has been)\s+(?:superseded|historical|removed|rejected|forbidden)\b))",
+            sentence, re.I,
+        )
+        if superseded_match and re.search(r"\bis historical\b", sentence[superseded_match.start():], re.I):
+            retired = True
+        if superseded_match and re.search(active, sentence, re.I) and not (historical or retired):
             errors.append("superseded platform default must not be active: " + sentence.strip())
         if (re.search(r"Fluent Bit", sentence, re.I) and
                 re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|shipper)", sentence, re.I)
-                and not historical and not retired):
+                and not historical and not re.search(
+                    r"\bFluent Bit\b\s+(?:(?:is|was)\s+not\b|(?:is|was|has been)\s+"
+                    r"(?:superseded|historical|removed|rejected|forbidden)\b)"
+                    r"|\b(?:do not|must not|never)\s+(?:use|deploy|select)\s+Fluent Bit\b",
+                    sentence, re.I)):
             errors.append("Fluent Bit general logging is superseded: " + sentence.strip())
+        if re.search(r"(?:observability/)?fluent-bit/", sentence, re.I) and not historical:
+            errors.append("Fluent Bit bootstrap component is superseded: " + sentence.strip())
     return errors
 
 
