@@ -164,6 +164,33 @@ module ArchitectureValidator
     network, = required_machine_contract(contracts, "network_plan")
     mgmt, = required_machine_contract(contracts, "mgmt_inventory")
     prod, = required_machine_contract(contracts, "prod_inventory")
+    resilience, resilience_path = required_machine_contract(contracts, "resilience_governance")
+    trust_zones, trust_zones_path = required_machine_contract(contracts, "security_trust_zones")
+
+    [resilience, trust_zones].zip([resilience_path, trust_zones_path]).each do |contract, path|
+      check_equal(errors, "#{path} status", "exact", contract["status"])
+      check_equal(errors, "#{path} architecture authority", "architecture.lock.yaml", contract["architecture_authority"])
+    end
+    check_equal(errors, "security trust zones", {
+      "Z0" => "internet-untrusted", "Z1" => "public-edge-dmz", "Z2" => "kubernetes-ingress-service-mesh",
+      "Z3" => "application-workloads", "Z4" => "stateful-data", "Z5" => "permanent-mgmt",
+      "Z6" => "backup-evidence-dfir"
+    }, trust_zones["zones"])
+    check_equal(errors, "security secret handling", {
+      "flow" => "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
+      "forbidden" => %w[git image-layers ci-logs bootstrap-credentials-after-preprod-destroy application-access-to-openbao-admin-credentials]
+    }, trust_zones["secrets"])
+    check_equal(errors, "security egress", {
+      "default" => "deny", "application_path" => "approved-istio-egress-squid",
+      "logging" => "required", "exceptions" => "documented"
+    }, trust_zones["egress"])
+    check_equal(errors, "compromise containment", %w[isolate acquire-evidence destroy rebuild-via-gitops-iac],
+                resilience.dig("compromise", "sequence"))
+    check_equal(errors, "forensic evidence preservation", "forbidden",
+                resilience.dig("evidence", "destroy_required_forensic_evidence"))
+    check_equal(errors, "site recovery sequence",
+                %w[health-evidence quorum-fencing write-authority-decision stateful-promotion-recovery application-routing dns-gslb-change],
+                resilience.dig("site_recovery", "sequence"))
 
     service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
     service_sets = {

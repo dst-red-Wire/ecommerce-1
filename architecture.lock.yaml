@@ -78,6 +78,9 @@ stateful:
   search: opensearch
   object_storage: seaweedfs-s3
 
+dns:
+  critical_ttl_seconds: 60
+
 observability:
   telemetry: opentelemetry
   application_gateway: rotel

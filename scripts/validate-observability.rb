@@ -16,6 +16,7 @@ module ObservabilityTopologyValidator
     "infrastructure_logs" => "victorialogs",
     "application_observability_storage" => "clickhouse",
     "application_observability_ui" => "hyperdx",
+    "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
     "alerts" => "vmalert",
     "notifications" => "alertmanager",
     "dashboards" => "grafana",

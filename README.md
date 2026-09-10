@@ -151,10 +151,10 @@ Les cibles Make restent des façades courtes : elles appellent `scripts/repoctl.
 
 ## Observabilité
 
-- OpenTelemetry Collector.
-- Prometheus + Alertmanager + Grafana.
-- Fluent Bit + Data Prepper + OpenSearch Logs.
-- Wazuh pour la sécurité et l'audit.
+- OpenTelemetry Collector pour la collecte.
+- vmagent + VictoriaMetrics pour les métriques; Prometheus reste un protocole/format compatible.
+- VictoriaLogs pour les journaux d'infrastructure et d'application.
+- Data Prepper + OpenSearch + Wazuh uniquement pour la sécurité et l'audit.
 - Archives DFIR immuables selon la politique de résilience.
 
 ## QA

@@ -25,6 +25,8 @@ cdn:
   ATS -> SeaweedFS S3 assets
 ```
 
+The critical DNS/GSLB TTL is locked at 60 seconds by `architecture.lock.yaml`; DNS changes remain after fencing and write-authority decisions in the recovery sequence.
+
 ## PROD sites
 
 ```text

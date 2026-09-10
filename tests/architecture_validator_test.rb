@@ -620,6 +620,22 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_exact_security_and_resilience_invariants_are_enforced
+    mutations = {
+      ["config/contracts/security-trust-zones.yaml", "security trust zones"] => lambda { |data| data["zones"].delete("Z6") },
+      ["config/contracts/security-trust-zones.yaml", "security secret handling"] => lambda { |data| data["secrets"]["forbidden"].delete("ci-logs") },
+      ["config/contracts/security-trust-zones.yaml", "security egress"] => lambda { |data| data["egress"]["default"] = "allow" },
+      ["config/contracts/resilience-governance.yaml", "forensic evidence preservation"] => lambda { |data| data["evidence"]["destroy_required_forensic_evidence"] = "allowed" },
+      ["config/contracts/resilience-governance.yaml", "site recovery sequence"] => lambda { |data| data["site_recovery"]["sequence"].delete("dns-gslb-change") }
+    }
+    mutations.each do |(relative, message), mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, relative, &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
+    end
+  end
+
   private
 
   def self.mutate_yaml(root, relative)

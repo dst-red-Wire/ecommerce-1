@@ -183,11 +183,11 @@ Active choices:
 Do not introduce as active defaults:
 
 ```text
-FluxCD
-Flagger
-MinIO Community Edition / MinIO Operator
-Loki as logging baseline
-Splunk as SIEM baseline
+Superseded: FluxCD
+Superseded: Flagger
+Superseded: MinIO Community Edition / MinIO Operator
+Superseded: Loki as logging baseline
+Superseded: Splunk as SIEM baseline
 ```
 
 Historical documents may mention them only as superseded choices.

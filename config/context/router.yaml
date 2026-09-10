@@ -13,6 +13,8 @@ levels:
       - config/infrastructure/**
       - config/contracts/review-policy.yaml
       - config/contracts/ci-topology.yaml
+      - config/contracts/resilience-governance.yaml
+      - config/contracts/security-trust-zones.yaml
       - platform/**
       - gitops/**
       - security/**
@@ -32,6 +34,8 @@ levels:
       - security
       - tls
       - infrastructure
+      - resilience
+      - recovery
   L1:
     description: domain, API, service or frontend contract change
     max_bytes: 24576
@@ -71,6 +75,8 @@ canonical:
     - architecture.lock.yaml
     - config/contracts/review-policy.yaml
     - config/contracts/ci-topology.yaml
+    - config/contracts/resilience-governance.yaml
+    - config/contracts/security-trust-zones.yaml
   L1:
     - config/contracts/service-ownership.yaml
     - config/contracts/dependency-map.yaml
