@@ -450,6 +450,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform runtime_security] => "falco",
       %w[stateful object_storage] => "minio-community",
       %w[observability application_gateway] => "opentelemetry-collector",
+      %w[observability hyperdx_metadata_store] => "postgresql",
       %w[observability metrics] => "prometheus",
       %w[observability infrastructure_logs] => "loki",
       %w[observability security_pipeline] => "logstash",
