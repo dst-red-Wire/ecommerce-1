@@ -191,11 +191,76 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("FAIL", results["ruby"].state)
         self.assertIn("wrong version", results["ruby"].detail)
 
+    def test_platform_primitive_allows_direct_same_executable_capability(self):
+        item = {
+            "name": "ruby", "requires": [], "command": "ruby",
+            "version_args": ["--version"], "version_key": "GO_VERSION",
+        }
+        test_contract = contract([item])
+        test_contract["platform_primitives"] = [{"command": "ruby", "justification": "test collision"}]
+
+        MOD.validate_contract(test_contract)
+        auditor = MOD.Auditor(
+            test_contract,
+            runner=self.runner({"/bin/ruby": (0, f"ruby {MOD.load_versions()['GO_VERSION']}")}),
+            which=lambda command: f"/bin/{command}",
+        )
+
+        self.assertEqual("PASS", auditor.run(bootstrap=False, os_name="linux", arch="amd64")["ruby"].state)
+
+    def test_platform_primitive_rejects_any_of_capability_collision(self):
+        item = {
+            "name": "tar", "requires": [], "command": "tar",
+            "any_of": [{"command": "fake", "version_key": "GO_VERSION"}],
+        }
+        test_contract = contract([item])
+        test_contract["platform_primitives"] = [{"command": "tar", "justification": "test collision"}]
+
+        with self.assertRaisesRegex(ValueError, "not a direct executable check"):
+            MOD.validate_contract(test_contract)
+
+    def test_platform_primitive_rejects_alternate_probe_capability_collision(self):
+        item = {"name": "tar", "requires": [], "command": "tar", "probe": ["fake", "--version"]}
+        test_contract = contract([item])
+        test_contract["platform_primitives"] = [{"command": "tar", "justification": "test collision"}]
+
+        with self.assertRaisesRegex(ValueError, "not a direct executable check"):
+            MOD.validate_contract(test_contract)
+
+    def test_invalid_any_of_collision_is_rejected_before_it_can_mask_missing_primitive(self):
+        item = {
+            "name": "tar", "requires": [], "command": "tar",
+            "any_of": [{"command": "fake", "version_key": "GO_VERSION"}],
+        }
+        test_contract = contract([item])
+        test_contract["platform_primitives"] = [{"command": "tar", "justification": "test collision"}]
+        with self.assertRaisesRegex(ValueError, "not a direct executable check"):
+            MOD.Auditor(
+                test_contract,
+                runner=self.runner({"/bin/fake": (0, "fake 1.0.0")}),
+                which=lambda command: "/bin/fake" if command == "fake" else None,
+            )
+
+        def legacy_name_and_command_only_guard(candidate, versions=None):
+            capability = candidate["capabilities"][0]
+            primitive = candidate["platform_primitives"][0]
+            if capability["name"] == primitive["command"] and capability.get("command") != primitive["command"]:
+                raise ValueError("mismatched executable")
+
+        with mock.patch.object(MOD, "validate_contract", side_effect=legacy_name_and_command_only_guard):
+            auditor = MOD.Auditor(
+                test_contract,
+                runner=self.runner({"/bin/fake": (0, f"fake {MOD.load_versions()['GO_VERSION']}")}),
+                which=lambda command: "/bin/fake" if command == "fake" else None,
+            )
+            mutation = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", mutation["tar"].state, "legacy guard must reproduce primitive masking")
+
     def test_platform_primitive_rejects_mismatched_capability_name_collision(self):
         test_contract = contract([{"name": "tar", "requires": [], "command": "fake"}])
         test_contract["platform_primitives"] = [{"command": "tar", "justification": "test collision"}]
         with self.assertRaisesRegex(
-            ValueError, "primitive tar collides with capability tar using executable fake"
+            ValueError, "primitive tar collides with capability tar that is not a direct executable check"
         ):
             MOD.validate_contract(test_contract)
 
