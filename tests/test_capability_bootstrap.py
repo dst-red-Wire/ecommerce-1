@@ -868,6 +868,56 @@ class CapabilityClosureTest(unittest.TestCase):
                 self.assertEqual(state, result.state)
                 self.assertEqual(executable, auditor.resolved_executables.get("terraform"))
 
+    def test_terraform_provider_selection_matches_repoctl_path_lookup(self):
+        versions = MOD.load_versions()
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp)
+            managed_tofu = managed_bin / "tofu"
+            managed_tofu.write_text("managed", encoding="utf-8")
+            managed_tofu.chmod(0o755)
+            outcomes = {
+                str(managed_tofu): (0, "OpenTofu " + versions["OPENTOFU_VERSION"]),
+                "/path/tofu": (0, "OpenTofu 0.1.0"),
+                "/path/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
+            }
+            item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+            item.pop("provision_requires")
+            item.pop("provision")
+
+            cases = (
+                ("managed tofu outside PATH", {"terraform": "/path/terraform"}, "PASS", "/path/terraform"),
+                ("stale PATH tofu", {"tofu": "/path/tofu", "terraform": "/path/terraform"}, "FAIL", None),
+                ("valid PATH tofu", {"tofu": "/path/tofu", "terraform": "/path/terraform"}, "PASS", "/path/tofu"),
+                ("PATH terraform fallback", {"terraform": "/path/terraform"}, "PASS", "/path/terraform"),
+            )
+            for label, path_tools, expected_state, expected_executable in cases:
+                with self.subTest(label=label):
+                    case_outcomes = dict(outcomes)
+                    if label == "valid PATH tofu":
+                        case_outcomes["/path/tofu"] = (0, "OpenTofu " + versions["OPENTOFU_VERSION"])
+                    which = path_tools.get
+                    with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                        auditor = MOD.Auditor(
+                            contract([item]), runner=CapabilityAuditTest().runner(case_outcomes), which=which
+                        )
+                        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+                    repoctl_selected = which("tofu") or which("terraform")
+                    self.assertEqual(expected_state, result.state)
+                    self.assertEqual(expected_executable, auditor.resolved_executables.get("terraform"))
+                    if result.state == "PASS":
+                        self.assertEqual(repoctl_selected, auditor.resolved_executables["terraform"])
+
+    def test_alternative_selection_policy_is_validated_when_present(self):
+        base = {
+            "name": "terraform",
+            "requires": [],
+            "any_of": [{"command": "tofu", "version_key": "OPENTOFU_VERSION"}],
+        }
+        MOD.validate_contract(contract([{**base, "selection_policy": "first_available"}]))
+        for policy in ("", None, False, "invalid"):
+            with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "invalid alternative selection policy"):
+                MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
+
     def test_terraform_legacy_fallback_mutation_is_caught(self):
         versions = MOD.load_versions()
         outcomes = {

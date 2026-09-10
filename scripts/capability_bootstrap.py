@@ -121,8 +121,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             alternative_key = alternative.get("version_key")
             if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
                 raise ValueError(f"{name}: alternative requires command and version authority")
-        selection_policy = item.get("selection_policy")
-        if selection_policy and (selection_policy != "first_available" or not item.get("any_of")):
+        if "selection_policy" in item and (
+            item["selection_policy"] != "first_available" or not item.get("any_of")
+        ):
             raise ValueError(f"{name}: invalid alternative selection policy")
         provision_authority = item.get("provision_authority")
         if provision_authority and not versions.get(provision_authority):
@@ -300,8 +301,14 @@ class Auditor:
         if alternatives:
             if item.get("selection_policy") == "first_available":
                 for alternative in alternatives:
-                    if self.resolve(alternative["command"]):
-                        return self.check({**item, **alternative, "any_of": []}, capability_name)
+                    resolved = self.which(alternative["command"])
+                    if resolved:
+                        return self.check({
+                            **item,
+                            **alternative,
+                            "any_of": [],
+                            "resolved_executable": resolved,
+                        }, capability_name)
                 return Result("FAIL", "alternatives absent: " + ", ".join(
                     alternative["command"] for alternative in alternatives
                 ))
@@ -330,7 +337,8 @@ class Auditor:
                 if (candidate := directory / command).is_file() and os.access(candidate, os.X_OK)
             ]
         else:
-            resolved_candidates = self.resolve_all(command) if command else []
+            selected = item.get("resolved_executable")
+            resolved_candidates = [selected] if selected else (self.resolve_all(command) if command else [])
         if (command or provider) and not resolved_candidates:
             if provider:
                 detail = f"entry point absent from provider {provider}"
