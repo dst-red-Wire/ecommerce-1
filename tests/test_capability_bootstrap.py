@@ -1,10 +1,12 @@
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -471,36 +473,55 @@ class CapabilityClosureTest(unittest.TestCase):
     def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
         expected = {"ruff", "oxfmt", "oxlint"}
+
+        def prepared_tools(source, run_tags):
+            preparation = source.split("- name: Download pinned Oxlint archive", 1)[0]
+            predicate = re.search(r'^  when: "(.+)"$', preparation, re.MULTILINE).group(1)
+            return {
+                tag
+                for tag in re.findall(r"tag: (ruff|oxfmt|oxlint)}", preparation)
+                if eval(
+                    predicate,
+                    {"__builtins__": {}},
+                    {"ansible_run_tags": run_tags, "item": SimpleNamespace(tag=tag)},
+                )
+            }
+
         select = lambda run_tags: {
-            tag for tag in expected if "all" in run_tags or "quality_tools" in run_tags or tag in run_tags
+            tag
+            for tag in expected
+            if "all" in run_tags or "toolchain" in run_tags or "quality_tools" in run_tags or tag in run_tags
         }
         self.assertEqual(expected, select(["all"]))
         self.assertEqual(expected, select(["quality_tools"]))
+        self.assertEqual(expected, select(["toolchain"]))
         for tag in expected:
             self.assertEqual({tag}, select([tag]))
             self.assertIn(f"tags: [toolchain, quality_tools, {tag}]", tasks)
 
+        for aggregate in ("all", "quality_tools", "toolchain"):
+            self.assertEqual(expected, prepared_tools(tasks, [aggregate]))
+        for individual in expected:
+            self.assertEqual({individual}, prepared_tools(tasks, [individual]))
+
         self.assertEqual(
             2,
             tasks.count(
-                "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags "
+                "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags "
+                "or 'quality_tools' in ansible_run_tags "
                 "or item.tag in ansible_run_tags"
             ),
         )
         makefile = (ROOT / "Makefile").read_text()
         self.assertIn("quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries", makefile)
         self.assertIn("@$(ANSIBLE_LOCAL) --tags quality_tools", makefile)
+        self.assertIn("--tags toolchain,node,agent_tools,context_tools", makefile)
 
-        # Exact regression mutation: removing the aggregate task tag leaves the
-        # public selector with no quality tool installation tasks to execute.
-        mutated_tasks = tasks.replace("quality_tools, ", "")
-        aggregate_selected = {
-            tag
-            for tag in expected
-            if f"tags: [toolchain, quality_tools, {tag}]" in mutated_tasks
-        }
-        self.assertNotEqual(expected, aggregate_selected)
-        self.assertEqual(set(), aggregate_selected)
+        # Exact regression mutation: tasks still carry `toolchain`, but the old
+        # predicate omits every per-tool directory needed before extraction.
+        mutated_tasks = tasks.replace("or 'toolchain' in ansible_run_tags ", "")
+        self.assertEqual(set(), prepared_tools(mutated_tasks, ["toolchain"]))
+        self.assertEqual(expected, prepared_tools(tasks, ["toolchain"]))
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()

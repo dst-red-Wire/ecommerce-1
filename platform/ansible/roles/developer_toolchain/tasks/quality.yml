@@ -10,7 +10,7 @@
     - {path: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}", tag: oxlint}
     - {path: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}", tag: oxfmt}
     - {path: "{{ local_share }}/tools/ruff/{{ ruff_version }}", tag: ruff}
-  when: "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
 
 - name: Download pinned Oxlint archive
@@ -98,5 +98,5 @@
   register: quality_tool_versions
   changed_when: false
   failed_when: item.version not in quality_tool_versions.stdout
-  when: "'all' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
