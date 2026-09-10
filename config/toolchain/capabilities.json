@@ -90,6 +90,7 @@
       "requires": [
         "ansible-core"
       ],
+      "provider": "ansible-core",
       "command": "ansible-playbook",
       "version_args": [
         "--version"
@@ -101,6 +102,7 @@
       "requires": [
         "ansible-core"
       ],
+      "provider": "ansible-core",
       "command": "ansible-galaxy",
       "version_args": [
         "--version"

@@ -122,6 +122,14 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             checksum = versions.get(checksum_key, "")
             if len(checksum) != 64 or any(character not in "0123456789abcdef" for character in checksum.lower()):
                 raise ValueError(f"{name}: invalid checksum authority {checksum_key}")
+        provider = item.get("provider")
+        if provider:
+            if provider not in graph.items:
+                raise ValueError(f"{name}: missing provider capability {provider}")
+            if provider not in item.get("requires", []):
+                raise ValueError(f"{name}: provider {provider} must be a runtime dependency")
+            if not graph.items[provider].get("command"):
+                raise ValueError(f"{name}: provider {provider} has no executable")
 
     for command, capability in command_aliases.items():
         if capability not in graph.items:
@@ -263,6 +271,19 @@ class Auditor:
         candidates = self.resolve_all(command)
         return candidates[0] if candidates else None
 
+    def provider_entrypoint(self, item: dict) -> str | None:
+        """Resolve an entry point beside the executable that validated its provider."""
+        provider = item.get("provider")
+        if not provider:
+            return None
+        provider_executable = self.resolved_executables.get(provider)
+        if not provider_executable:
+            return None
+        candidate = Path(provider_executable).parent / item["command"]
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        return None
+
     def platform_result(self, os_name: str, arch: str, item: dict | None = None) -> Result | None:
         if os_name not in self.contract["supported"]["os"]:
             return Result("UNSUPPORTED", f"os {os_name}")
@@ -287,9 +308,15 @@ class Auditor:
             return Result("FAIL", "; ".join(failures))
         command = item.get("command")
         argv = item.get("probe") or ([command, *item.get("version_args", [])] if command else [])
-        resolved_candidates = self.resolve_all(command) if command else []
+        provider = item.get("provider")
+        if provider:
+            provider_command = self.provider_entrypoint(item)
+            resolved_candidates = [provider_command] if provider_command else []
+        else:
+            resolved_candidates = self.resolve_all(command) if command else []
         if command and not resolved_candidates:
-            return Result("FAIL", "tool absent")
+            detail = f"entry point absent from provider {provider}" if provider else "tool absent"
+            return Result("FAIL", detail)
         expected = self.versions.get(item.get("version_key", ""))
         version_file = item.get("version_file")
         if version_file:
@@ -334,7 +361,12 @@ class Auditor:
             version = self.versions[item["version_key"]]
             command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]
         else:
-            ansible_playbook = self.resolve("ansible-playbook") or "ansible-playbook"
+            ansible_playbook = self.resolved_executables.get("ansible-playbook")
+            playbook_capability = self.graph.items.get("ansible-playbook", {})
+            if not playbook_capability.get("provider"):
+                ansible_playbook = ansible_playbook or self.resolve("ansible-playbook")
+            if not ansible_playbook:
+                return Result("BLOCKED", "validated ansible-playbook provider is unavailable")
             command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "-e", "resolved_executables=" + json.dumps(self.resolved_executables), "--tags", spec["tags"]]
         proc = self.runner(command)
         if proc.returncode:

@@ -182,6 +182,83 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("PASS", results["ansible-playbook"].state)
         self.assertEqual(str(Path(tmp, "ansible-playbook")), calls[-2][0])
 
+    def test_ansible_entrypoints_are_bound_to_validated_core_provider(self):
+        versions = MOD.load_versions()
+        items = [
+            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-playbook"},
+            {"name": "next", "requires": [], "provision_requires": ["ansible-playbook"], "command": "next",
+             "provision": {"type": "ansible", "tags": "next"}},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            system_bin = Path(tmp, "usr", "bin")
+            managed_bin = Path(tmp, "home", "test", ".local", "bin")
+            system_bin.mkdir(parents=True)
+            managed_bin.mkdir(parents=True)
+            for directory in (system_bin, managed_bin):
+                for command in ("ansible", "ansible-playbook"):
+                    executable = directory / command
+                    executable.write_text("#!/bin/true\n")
+                    executable.chmod(0o755)
+
+            calls = []
+            installed = set()
+
+            def runner(argv):
+                calls.append(argv)
+                if argv[0] == str(system_bin / "ansible"):
+                    return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
+                if argv[0] == str(managed_bin / "ansible"):
+                    return subprocess.CompletedProcess(argv, 0, f"ansible [core {versions['ANSIBLE_CORE_VERSION']}]", "")
+                if "platform/ansible/developer.yml" in argv:
+                    installed.add("next")
+                return subprocess.CompletedProcess(argv, 0, "ready", "")
+
+            def which(command):
+                if command in ("ansible", "ansible-playbook"):
+                    return str(system_bin / command)
+                return str(Path(tmp, command)) if command in installed else None
+
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                auditor = MOD.Auditor(contract(items), runner=runner, which=which)
+                results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+
+                self.assertEqual("PASS", results["ansible-core"].state)
+                self.assertEqual("PASS", results["ansible-playbook"].state)
+                self.assertEqual(str(managed_bin / "ansible"), auditor.resolved_executables["ansible-core"])
+                self.assertEqual(str(managed_bin / "ansible-playbook"), auditor.resolved_executables["ansible-playbook"])
+                provision_call = next(call for call in calls if "platform/ansible/developer.yml" in call)
+                self.assertEqual(str(managed_bin / "ansible-playbook"), provision_call[0])
+
+                mutated = MOD.Auditor(contract([{**item, **({"provider": None} if item["name"] == "ansible-playbook" else {})}
+                                                for item in items]), runner=runner, which=which)
+                mutated.run(bootstrap=False, os_name="linux", arch="amd64")
+                self.assertNotEqual(
+                    Path(mutated.resolved_executables["ansible-core"]).parent,
+                    Path(mutated.resolved_executables["ansible-playbook"]).parent,
+                    "independent PATH resolution must expose the stale-provider mutation",
+                )
+
+    def test_ansible_entrypoint_missing_from_provider_does_not_fall_back_to_path(self):
+        items = [
+            {"name": "ansible-core", "requires": [], "command": "ansible"},
+            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
+             "command": "ansible-playbook"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_bin = Path(tmp, "managed")
+            system_bin = Path(tmp, "system")
+            managed_bin.mkdir(); system_bin.mkdir()
+            for executable in (managed_bin / "ansible", system_bin / "ansible-playbook"):
+                executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
+            which = lambda command: str(managed_bin / "ansible") if command == "ansible" else str(system_bin / command)
+            auditor = MOD.Auditor(contract(items), runner=self.runner({}), which=which)
+            results = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["ansible-core"].state)
+        self.assertEqual("FAIL", results["ansible-playbook"].state)
+        self.assertIn("entry point absent from provider ansible-core", results["ansible-playbook"].detail)
+
     def test_ansible_lint_is_provisioned_only_through_ansible_and_rechecked(self):
         canonical = MOD.load_contract()
         item = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")
@@ -198,6 +275,7 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor = MOD.Auditor(canonical, runner=runner, which=lambda command: (
             f"/opt/bin/{command}" if command == "ansible-playbook" or command in installed else None
         ))
+        auditor.resolved_executables["ansible-playbook"] = "/opt/bin/ansible-playbook"
         self.assertEqual("PASS", auditor.provision(item).state)
         provision_call = calls[0]
         self.assertIn("platform/ansible/developer.yml", provision_call)
