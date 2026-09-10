@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind]
+  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -27,7 +27,7 @@
     update_cache: true
     cache_valid_time: 86400
   become: true
-  tags: [toolchain, go, cgo, node]
+  tags: [toolchain, go, cgo, node, ansible_lint]
 
 - name: Download pinned Node archive
   ansible.builtin.get_url:
@@ -335,13 +335,14 @@
 - name: Install pinned oapi-codegen with the pinned Go toolchain
   ansible.builtin.command:
     argv:
-      - "{{ local_bin }}/go"
+      - "{{ resolved_executables.go | default(local_bin + '/go') }}"
       - install
       - "github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v{{ oapi_codegen_version }}"
   environment:
     GOBIN: "{{ local_bin }}"
-    GOROOT: "{{ local_share }}/toolchains/go/{{ go_version }}/go"
-    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
+    # Empty means infer GOROOT from the selected executable, not the controller's inherited Go.
+    GOROOT: ""
+    PATH: "{{ (resolved_executables.go | default(local_bin + '/go')) | dirname }}:{{ local_bin }}:{{ ansible_env.PATH }}"
   when: oapi_codegen_current.rc != 0 or ('v' + oapi_codegen_version) not in oapi_codegen_current.stdout
   changed_when: true
   tags: [toolchain, agent_tools, oapi_codegen]
@@ -447,16 +448,19 @@
       - { name: checkov, package: checkov, version: "{{ checkov_version }}", spec: "checkov=={{ checkov_version }}" }
       - { name: semgrep, package: semgrep, version: "{{ semgrep_version }}", spec: "semgrep=={{ semgrep_version }}" }
       - { name: cve-bin-tool, package: cve-bin-tool, version: "{{ cve_bin_tool_version }}", spec: "cve-bin-tool=={{ cve_bin_tool_version }}" }
-  tags: [toolchain]
+  tags: [toolchain, ansible_lint]
 
 - name: Read installed pipx package versions
   ansible.builtin.command:
-    argv: [pipx, runpip, "{{ item.name }}", pip, show, "{{ item.package }}"]
-  loop: "{{ developer_pipx_packages }}"
+    argv: [pipx, runpip, "{{ item.name }}", show, "{{ item.package }}"]
+  loop: >-
+    {{ developer_pipx_packages | selectattr('name', 'equalto', 'ansible-lint') | list
+       if 'ansible_lint' in ansible_run_tags and 'all' not in ansible_run_tags and 'toolchain' not in ansible_run_tags
+       else developer_pipx_packages }}
   register: developer_pipx_checks
   failed_when: false
   changed_when: false
-  tags: [toolchain]
+  tags: [toolchain, ansible_lint]
 
 - name: Install only missing or mismatched pipx packages
   ansible.builtin.command:
@@ -464,11 +468,11 @@
   loop: "{{ developer_pipx_checks.results }}"
   when: "item.rc != 0 or ('Version: ' + item.item.version) not in item.stdout"
   changed_when: true
-  tags: [toolchain]
+  tags: [toolchain, ansible_lint]
 
 - name: Check Molecule Docker plugin version
   ansible.builtin.command:
-    argv: [pipx, runpip, molecule, pip, show, molecule-plugins]
+    argv: [pipx, runpip, molecule, show, molecule-plugins]
   register: molecule_plugins_check
   failed_when: false
   changed_when: false
@@ -476,7 +480,7 @@
 
 - name: Check Molecule Testinfra version
   ansible.builtin.command:
-    argv: [pipx, runpip, molecule, pip, show, pytest-testinfra]
+    argv: [pipx, runpip, molecule, show, pytest-testinfra]
   register: testinfra_check
   failed_when: false
   changed_when: false
@@ -541,7 +545,7 @@
       archive: "kustomize-{{ kustomize_version }}.tar.gz"
       checksum: "{{ kustomize_sha256 }}"
       tag: kustomize
-  when: item.tag in ansible_run_tags
+  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [gitleaks, helm, terraform, kustomize]
 
 - name: Create standalone gate tool directories
@@ -554,7 +558,7 @@
     - {name: helm, version: "{{ helm_version }}", tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", tag: kustomize}
-  when: item.tag in ansible_run_tags
+  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [gitleaks, helm, terraform, kustomize]
 
 - name: Extract pinned standalone gate tools
@@ -568,7 +572,7 @@
     - {name: helm, version: "{{ helm_version }}", archive: "helm-{{ helm_version }}.tar.gz", creates: linux-amd64/helm, tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", archive: "terraform-{{ terraform_version }}.zip", creates: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", archive: "kustomize-{{ kustomize_version }}.tar.gz", creates: kustomize, tag: kustomize}
-  when: item.tag in ansible_run_tags
+  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [gitleaks, helm, terraform, kustomize]
 
 - name: Link standalone gate tools into the user path
@@ -582,7 +586,7 @@
     - {name: helm, version: "{{ helm_version }}", relative: linux-amd64/helm, tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", relative: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", relative: kustomize, tag: kustomize}
-  when: item.tag in ansible_run_tags
+  when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [gitleaks, helm, terraform, kustomize]
 
 - name: Download pinned kubectl

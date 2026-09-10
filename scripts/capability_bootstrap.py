@@ -8,6 +8,7 @@ import ast
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,7 @@ STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
+SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
 
 @dataclass(frozen=True)
@@ -55,6 +57,21 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     """
     versions = versions or load_versions()
     graph = Graph(contract["capabilities"])
+    owners = contract.get("provision_owners", {})
+    managed = {
+        name for name, item in graph.items.items()
+        if item.get("classification") == "managed" and item.get("provision")
+    }
+    if set(owners) != managed:
+        missing = sorted(managed - set(owners))
+        extra = sorted(set(owners) - managed)
+        raise ValueError(f"provision owners must cover managed capabilities exactly; missing={missing}; extra={extra}")
+    for capability, owner in owners.items():
+        if capability not in graph.items:
+            raise ValueError(f"provision owner references missing capability: {capability}")
+        provision_type = graph.items[capability].get("provision", {}).get("type")
+        if provision_type != owner:
+            raise ValueError(f"{capability}: canonical provision owner is {owner}, not {provision_type or 'none'}")
     command_aliases = contract.get("command_capabilities", {})
     external = {}
     for classification, key in (
@@ -194,6 +211,18 @@ class Auditor:
         self.runner = runner
         self.which = which
         self.versions = load_versions()
+        self.resolved_executables: dict[str, str] = {}
+
+    @staticmethod
+    def installed_version(output: str, parser: str = "first_semver") -> str | None:
+        """Parse the reported installed version, never an arbitrary substring."""
+        if parser not in {"first_semver", "first_semver_release"}:
+            raise ValueError(f"unsupported version parser: {parser}")
+        match = SEMVER.search(output)
+        if not match:
+            return None
+        version = match.group(1)
+        return version.split("+", 1)[0] if parser == "first_semver_release" else version
 
     def resolve_all(self, command: str) -> list[str]:
         """Resolve commands without requiring a newly logged-in shell after provisioning."""
@@ -221,14 +250,14 @@ class Auditor:
             return Result("UNSUPPORTED", f"{os_name}/{arch} has no contracted provisioner")
         return None
 
-    def check(self, item: dict) -> Result:
+    def check(self, item: dict, capability_name: str | None = None) -> Result:
         if item.get("virtual"):
             return Result("PASS", "dependencies ready")
         alternatives = item.get("any_of", [])
         if alternatives:
             failures = []
             for alternative in alternatives:
-                result = self.check({**item, **alternative, "any_of": []})
+                result = self.check({**item, **alternative, "any_of": []}, capability_name)
                 if result.state == "PASS":
                     return result
                 failures.append(f"{alternative['command']}: {result.detail}")
@@ -250,9 +279,12 @@ class Auditor:
             detail = " ".join((proc.stdout or proc.stderr).strip().split())
             if proc.returncode:
                 last = Result("BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}")
-            elif expected and expected not in detail:
-                last = Result("FAIL", f"wrong version: expected {expected}; got {detail or 'unknown'}")
+            elif expected and self.installed_version(detail, item.get("version_parser", "first_semver")) != expected.removeprefix("v"):
+                installed = self.installed_version(detail, item.get("version_parser", "first_semver"))
+                last = Result("FAIL", f"wrong version: expected {expected}; got {installed or detail or 'unknown'}")
             else:
+                if capability_name and resolved:
+                    self.resolved_executables[capability_name] = str(resolved)
                 return Result("PASS", detail or "ready")
         return last
 
@@ -267,12 +299,12 @@ class Auditor:
             command = [sys.executable, "-m", "pip", "install", "--user", f"{spec['package']}=={version}"]
         else:
             ansible_playbook = self.resolve("ansible-playbook") or "ansible-playbook"
-            command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "--tags", spec["tags"]]
+            command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "-e", "resolved_executables=" + json.dumps(self.resolved_executables), "--tags", spec["tags"]]
         proc = self.runner(command)
         if proc.returncode:
             detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
             return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
-        return self.check(item)
+        return self.check(item, item["name"])
 
     def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
         results: dict[str, Result] = {}
@@ -286,7 +318,7 @@ class Auditor:
             if unmet:
                 results[name] = Result("SKIP", "requires " + ", ".join(unmet))
                 continue
-            result = self.check(item)
+            result = self.check(item, name)
             if bootstrap and result.state == "FAIL" and item.get("provision"):
                 unavailable = [dep for dep in item.get("provision_requires", []) if results[dep].state != "PASS"]
                 result = Result("SKIP", "provision requires " + ", ".join(unavailable)) if unavailable else self.provision(item)

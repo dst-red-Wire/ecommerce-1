@@ -105,9 +105,8 @@
     },
     {
       "name": "ansible-lint",
-      "requires": [],
-      "provision_requires": [
-        "pip"
+      "requires": [
+        "ansible-playbook"
       ],
       "command": "ansible-lint",
       "version_args": [
@@ -115,8 +114,8 @@
       ],
       "version_key": "ANSIBLE_LINT_VERSION",
       "provision": {
-        "type": "pip",
-        "package": "ansible-lint"
+        "type": "ansible",
+        "tags": "ansible_lint"
       },
       "classification": "managed"
     },
@@ -492,6 +491,7 @@
         "--short"
       ],
       "version_key": "HELM_VERSION",
+      "version_parser": "first_semver_release",
       "provision_requires": [
         "ansible-playbook"
       ],
@@ -633,6 +633,33 @@
       "checksum_key": "GITLEAKS_SHA256_LINUX_AMD64"
     }
   ],
+  "provision_owners": {
+    "pip": "ensurepip",
+    "ansible-core": "pip",
+    "ansible-lint": "ansible",
+    "node": "ansible",
+    "go": "ansible",
+    "sqlc": "ansible",
+    "yq": "ansible",
+    "oasdiff": "ansible",
+    "rg": "ansible",
+    "fd": "ansible",
+    "ast-grep": "ansible",
+    "oras": "ansible",
+    "bazel": "ansible",
+    "nx": "ansible",
+    "oapi-codegen": "ansible",
+    "oxlint": "ansible",
+    "oxfmt": "ansible",
+    "ruff": "ansible",
+    "kubectl": "ansible",
+    "helm": "ansible",
+    "cosign": "ansible",
+    "terraform": "ansible",
+    "kustomize": "ansible",
+    "kind": "ansible",
+    "gitleaks": "ansible"
+  },
   "seed_prerequisites": [
     {
       "command": "python3",

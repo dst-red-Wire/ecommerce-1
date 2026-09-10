@@ -165,6 +165,88 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("PASS", results["ansible-playbook"].state)
         self.assertEqual(str(Path(tmp, "ansible-playbook")), calls[-2][0])
 
+    def test_ansible_lint_is_provisioned_only_through_ansible_and_rechecked(self):
+        canonical = MOD.load_contract()
+        item = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")
+        installed = set()
+        calls = []
+
+        def runner(argv):
+            calls.append(argv)
+            if "platform/ansible/developer.yml" in argv:
+                installed.add("ansible-lint")
+                return subprocess.CompletedProcess(argv, 0, "reconciled", "")
+            return subprocess.CompletedProcess(argv, 0, "ansible-lint " + MOD.load_versions()["ANSIBLE_LINT_VERSION"], "")
+
+        auditor = MOD.Auditor(canonical, runner=runner, which=lambda command: (
+            f"/opt/bin/{command}" if command == "ansible-playbook" or command in installed else None
+        ))
+        self.assertEqual("PASS", auditor.provision(item).state)
+        provision_call = calls[0]
+        self.assertIn("platform/ansible/developer.yml", provision_call)
+        self.assertIn("ansible_lint", provision_call)
+        self.assertNotIn("pip", provision_call)
+
+    def test_go_provider_selected_by_capability_is_forwarded_to_ansible(self):
+        items = [
+            {"name": "go", "requires": [], "command": "go", "version_key": "GO_VERSION"},
+            {"name": "ansible-playbook", "requires": [], "command": "ansible-playbook"},
+            {"name": "oapi-codegen", "requires": [], "provision_requires": ["go", "ansible-playbook"],
+             "command": "oapi-codegen", "version_key": "OAPI_CODEGEN_VERSION",
+             "provision": {"type": "ansible", "tags": "oapi_codegen"}},
+        ]
+        installed = set()
+        calls = []
+        versions = MOD.load_versions()
+
+        def which(command):
+            if command == "go":
+                return "/opt/custom-go/bin/go"
+            if command == "ansible-playbook":
+                return "/usr/bin/ansible-playbook"
+            return f"/opt/bin/{command}" if command in installed else None
+
+        def runner(argv):
+            calls.append(argv)
+            if argv[0] == "/opt/custom-go/bin/go":
+                return subprocess.CompletedProcess(argv, 0, "go version go" + versions["GO_VERSION"] + " linux/amd64", "")
+            if "platform/ansible/developer.yml" in argv:
+                installed.add("oapi-codegen")
+                return subprocess.CompletedProcess(argv, 0, "reconciled", "")
+            if argv[0].endswith("oapi-codegen"):
+                return subprocess.CompletedProcess(argv, 0, "oapi-codegen version v" + versions["OAPI_CODEGEN_VERSION"], "")
+            return subprocess.CompletedProcess(argv, 0, "ready", "")
+
+        auditor = MOD.Auditor(contract(items), runner=runner, which=which)
+        with mock.patch.object(MOD, "MANAGED_BIN_DIRS", ()):
+            results = auditor.run(bootstrap=True, os_name="linux", arch="amd64")
+        self.assertEqual("PASS", results["go"].state)
+        self.assertEqual("PASS", results["oapi-codegen"].state)
+        ansible_call = next(call for call in calls if "platform/ansible/developer.yml" in call)
+        self.assertIn('resolved_executables={"go": "/opt/custom-go/bin/go", "ansible-playbook": "/usr/bin/ansible-playbook"}', ansible_call)
+        self.assertNotIn(str(Path.home() / ".local/bin/go"), " ".join(ansible_call))
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        self.assertIn('GOROOT: ""', tasks)
+
+    def test_exact_installed_version_rejects_update_warning_substring_and_prerelease(self):
+        item = {"name": "terraform", "requires": [], "command": "terraform", "version_key": "TERRAFORM_VERSION"}
+        expected = MOD.load_versions()["TERRAFORM_VERSION"]
+        mutations = (
+            f"Terraform v1.15.0\nYour version is out of date! The latest version is {expected}",
+            f"Terraform v{expected}0",
+            f"Terraform v{expected}-rc1",
+        )
+        for output in mutations:
+            with self.subTest(output=output):
+                result = self.auditor([item], {"/bin/terraform": (0, output)}).run(
+                    bootstrap=False, os_name="linux", arch="amd64"
+                )["terraform"]
+                self.assertEqual("FAIL", result.state)
+        exact = self.auditor([item], {"/bin/terraform": (0, "Terraform v" + expected)}).run(
+            bootstrap=False, os_name="linux", arch="amd64"
+        )["terraform"]
+        self.assertEqual("PASS", exact.state)
+
     def test_checksum_invalid_is_rejected_by_existing_ansible_mechanism(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
@@ -181,6 +263,25 @@ class CapabilityAuditTest(unittest.TestCase):
 
 
 class CapabilityClosureTest(unittest.TestCase):
+    def test_ansible_owner_rejects_direct_pip_mutation(self):
+        canonical = MOD.load_contract()
+        ansible_lint = next(item for item in canonical["capabilities"] if item["name"] == "ansible-lint")
+        ansible_lint["provision"] = {"type": "pip", "package": "ansible-lint"}
+        with self.assertRaisesRegex(ValueError, "canonical provision owner is ansible, not pip"):
+            MOD.validate_contract(canonical)
+
+    def test_standalone_tools_select_all_without_overselecting_targeted_tags(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        expected = {"gitleaks", "helm", "terraform", "kustomize"}
+        self.assertEqual(4, tasks.count("'all' in ansible_run_tags or item.tag in ansible_run_tags"))
+        select = lambda run_tags: {tag for tag in expected if "all" in run_tags or tag in run_tags}
+        self.assertEqual(expected, select(["all"]))
+        self.assertEqual({"terraform"}, select(["terraform"]))
+        # Exact old predicate mutation: under Ansible's implicit `all`, every item vanished.
+        old_select = lambda run_tags: {tag for tag in expected if tag in run_tags}
+        self.assertNotEqual(expected, old_select(["all"]))
+        self.assertEqual(set(), old_select(["all"]))
+
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()
         MOD.validate_contract(canonical)
@@ -197,6 +298,7 @@ class CapabilityClosureTest(unittest.TestCase):
     def test_removed_required_capability_is_rejected(self):
         canonical = MOD.load_contract()
         canonical["capabilities"] = [item for item in canonical["capabilities"] if item["name"] != "gitleaks"]
+        canonical["provision_owners"].pop("gitleaks")
         with self.assertRaisesRegex(ValueError, "undeclared commands: gitleaks"):
             MOD.validate_contract(canonical)
 
