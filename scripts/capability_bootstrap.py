@@ -57,6 +57,12 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     """
     versions = versions or load_versions()
     graph = Graph(contract["capabilities"])
+    quality_names = ("ruff", "oxfmt", "oxlint")
+    quality_items = [graph.items[name] for name in quality_names if name in graph.items]
+    if len(quality_items) == len(quality_names):
+        quality_tags = [item.get("provision", {}).get("tags") for item in quality_items]
+        if len(set(quality_tags)) != len(quality_tags):
+            raise ValueError("independent quality capabilities must use distinct provisioning tags")
     owners = contract.get("provision_owners", {})
     managed = {
         name for name, item in graph.items.items()

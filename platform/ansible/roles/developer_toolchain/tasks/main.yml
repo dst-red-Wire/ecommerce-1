@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint]
+  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -513,7 +513,6 @@
   tags: [toolchain, agent_tools]
 - name: Reconcile pinned source quality tools
   ansible.builtin.import_tasks: quality.yml
-  tags: [toolchain, quality_tools]
 
 # These gate tools deliberately have distinct tags: one failed download must not
 # prevent the capability controller from reconciling unrelated source branches.
