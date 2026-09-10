@@ -516,6 +516,14 @@
 
 # Terraform is distributed as a ZIP archive, so its targeted provisioning path
 # must establish the extractor without selecting the broader toolchain package set.
+- name: Detect Terraform archive extraction prerequisite
+  ansible.builtin.command:
+    argv: [/usr/bin/env, which, unzip]
+  register: terraform_unzip_probe
+  changed_when: false
+  failed_when: false
+  tags: [terraform]
+
 - name: Ensure Terraform archive extraction prerequisite
   ansible.builtin.apt:
     name: unzip
@@ -523,6 +531,7 @@
     update_cache: true
     cache_valid_time: 86400
   become: true
+  when: terraform_unzip_probe.rc != 0
   tags: [terraform]
 
 # These gate tools deliberately have distinct tags: one failed download must not
