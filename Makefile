@@ -1,7 +1,5 @@
 PYTHON := python3
 MANAGED_BIN := $(HOME)/.local/bin
-PATH := $(MANAGED_BIN):$(PATH)
-export PATH
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
@@ -40,6 +38,8 @@ automation: ## Enforce Ansible-first and zero repository Shell scripts
 
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
+
+format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
 format: ## Format Python and frontend sources with Ruff/Oxfmt
 	@ruff format scripts tests
