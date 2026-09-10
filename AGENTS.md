@@ -8,8 +8,8 @@ These rules apply to the whole repository.
 
 Before changing code or structure, read:
 
-1. `docs/architecture/BASELINE_V2.md`
-2. `architecture.lock.yaml`
+1. `architecture.lock.yaml` — the single canonical architecture authority
+2. `docs/architecture/EXACT_TOPOLOGY_V5.md` — a derived index subordinate to the lock
 3. relevant ADRs and domain documentation
 
 Validated architecture is not to be redesigned during implementation unless an explicit contradiction is found and routed back to architecture governance.

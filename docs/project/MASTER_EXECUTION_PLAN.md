@@ -2,7 +2,7 @@
 
 Status: `CHATGPT PM BASELINE — TECHNICAL INPUTS COMPLETE`
 
-This document is the delivery source of truth for project sequencing. It does not replace architecture ADRs, `docs/architecture/BASELINE_V2.md`, `architecture.lock.yaml`, release governance or resilience governance.
+This document is the delivery source of truth for project sequencing. It does not replace the single canonical architecture authority `architecture.lock.yaml`, subordinate architecture ADRs, release governance or resilience governance.
 
 Technical-readiness status and blocker taxonomy: `docs/project/TECHNICAL_READINESS.md`.
 

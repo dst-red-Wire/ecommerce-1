@@ -5,8 +5,8 @@ Status: `CHATGPT PREPARED — EXACT CONTRACTS BOUND`
 Codex must always read, in order:
 
 1. `AGENTS.md`
-2. `docs/architecture/BASELINE_V2.md`
-3. `architecture.lock.yaml`
+2. `architecture.lock.yaml` — single canonical architecture authority
+3. `docs/architecture/EXACT_TOPOLOGY_V5.md` — derived index
 4. `docs/project/MASTER_EXECUTION_PLAN.md`
 5. the milestone issue assigned to the work
 6. the exact architecture contracts listed below
@@ -14,7 +14,7 @@ Codex must always read, in order:
 
 ## Mandatory exact architecture contracts
 
-- `docs/architecture/EXACT_TOPOLOGY_V2.md`
+- `docs/architecture/EXACT_TOPOLOGY_V5.md`
 - `docs/architecture/PREPROD_TOPOLOGY_V2.md`
 - `docs/architecture/PROD_TOPOLOGY_V2.md`
 - `docs/architecture/NETWORK_IPAM_CONTRACT.md`
@@ -50,8 +50,8 @@ Tracker: `#13`.
 Goal: create the minimal repository skeleton and automation entrypoints needed for later milestones without implementing deep business logic.
 
 Required result:
-- exactly 17 backend service directories and two frontends;
-- no checkout service;
+- exactly 19 backend service directories and two frontends;
+- autonomous checkout and fulfillment services;
 - contracts, platform, observability, tests and tools areas;
 - `go.work`, ownership/contribution/security root files;
 - Fleet/Tekton paths, never Flux/Flagger;

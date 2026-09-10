@@ -2,7 +2,7 @@
 
 Status: `EXACT`
 
-This document is authoritative for the standard E-COMMERCE PREPROD JIT topology. It refines `BASELINE_V2.md` without changing its architecture.
+This document is authoritative for the standard E-COMMERCE PREPROD JIT topology. It refines `architecture.lock.yaml` without changing its architecture.
 
 ## Physical layer
 

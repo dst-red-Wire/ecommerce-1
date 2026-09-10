@@ -1,8 +1,8 @@
-# EXACT TOPOLOGY V2 - AUTHORITATIVE INDEX
+# EXACT TOPOLOGY V5 — DERIVED INDEX
 
 Status: `EXACT`
 
-This file is the entrypoint for deterministic infrastructure/application topology. It is not a second baseline; it indexes the exact contracts that refine `BASELINE_V2.md`.
+`architecture.lock.yaml` is the single canonical architecture authority. This index is derived from version 5 of that lock; it explains and links its contracts, has no independent authority, and cannot override the lock. These are approved targets, not evidence of deployed infrastructure.
 
 ## Global flow
 
@@ -16,10 +16,10 @@ api:
   HAProxy -> Caddy + Coraza -> Kong -> Istio Gateway -> Go services
 
 www:
-  ATS -> Storefront Next.js
+  ATS -> Storefront Go + templ + HTMX
 
 admin:
-  ATS -> Admin Next.js
+  ATS -> Admin Go + templ + HTMX
 
 cdn:
   ATS -> SeaweedFS S3 assets
@@ -92,7 +92,13 @@ No default Ceph. No active MinIO CE. See `STORAGE_TOPOLOGY_V2.md` and `config/in
 
 ## Application ownership
 
-Exactly 17 Go services. No checkout service. `order` orchestrates checkout.
+Exactly 19 backend services, as listed in `architecture.lock.yaml` business.services:
+
+`catalog`, `product`, `inventory`, `cart`, `checkout`, `pricing`, `tax`, `order`, `payment`, `fulfillment`, `shipping`, `tracking`, `returns`, `billing`, `fraud-risk`, `search`, `review`, `user-profile`, `notification`.
+
+Checkout and fulfillment are autonomous services. Checkout owns pre-order orchestration; order owns the durable order snapshot; fulfillment owns physical execution orchestration.
+
+The storefront and admin target Go + templ + HTMX in `frontend/go.mod`. Next.js/React/Node is only the migration source, not the target PROD runtime.
 
 - authority/dependencies: `SERVICE_OWNERSHIP_MATRIX.md`
 - data ownership: `DATA_OWNERSHIP_MATRIX.md`
@@ -117,7 +123,21 @@ Gitea -> Tekton -> Harbor -> Fleet -> RKE2 -> Argo Rollouts
 
 ## MLOps
 
-`MLOPS_TOPOLOGY_V1.md` defines DVC/Git/SeaweedFS dataset lineage, MLflow metadata, Harbor Modelcars, deterministic gates, champion/challenger, bounded retraining and recovery.
+The lock’s `mlops` block selects lakeFS for dataset versioning, SeaweedFS S3 for objects, CloudNativePG PostgreSQL for metadata, MLflow for experiments/lineage and Harbor for artifacts. Gitea GitOps owns promotion, Tekton orchestration, Rancher Fleet desired state and Argo Rollouts progressive delivery. Runtime is KServe/vLLM; drift uses Evidently in Tekton batch jobs. DVC is superseded by lakeFS. `MLOPS_TOPOLOGY_V1.md` supplies subordinate lifecycle detail.
+
+## Observability
+
+The lock’s `observability` block selects OpenTelemetry telemetry, Rotel for the application gateway and OpenTelemetry Collector for infrastructure. Prometheus is the metrics protocol; vmagent scrapes into VictoriaMetrics. Infrastructure logs use VictoriaLogs; application observability uses ClickHouse and HyperDX, with self-hosted MongoDB OSS as HyperDX metadata store. vmalert, Alertmanager and Grafana provide alert evaluation, notifications and dashboards. Data Prepper, OpenSearch and Wazuh own the security pipeline. `OBSERVABILITY_TOPOLOGY_V1.md` is subordinate detail; the lock prevails.
+
+## Build dependencies
+
+M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
+
+The lock’s `milestone_dependencies` maps each milestone to its prerequisites: M0 → M1; M1 → M2 and M2.5; M2.5 → M3 → M4; M2 + M4 → M5 → M6 → M7 → M8 → M9.
+
+## Machine governance contracts
+
+`config/contracts/resilience-governance.yaml` encodes existing compromise, evidence and recovery constraints. `config/contracts/security-trust-zones.yaml` indexes Z0–Z6 and encodes existing identity boundaries. Both are subordinate to `architecture.lock.yaml`; neither creates deployment authority.
 
 ## Status rule
 

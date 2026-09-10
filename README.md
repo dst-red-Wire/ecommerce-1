@@ -223,9 +223,9 @@ Les répertoires de plateforme supplémentaires apparaissent uniquement lorsqu�
 Priorité :
 
 1. règles système et sécurité ;
-2. ADR et Skills spécialisés validés ;
-3. `docs/architecture/BASELINE_V2.md` ;
-4. `architecture.lock.yaml` ;
+2. `architecture.lock.yaml`, seule autorité canonique de l’architecture ;
+3. index `docs/architecture/EXACT_TOPOLOGY_V5.md`, dérivé du verrou ;
+4. ADR et documentation spécialisés, subordonnés au verrou pour l’architecture ;
 5. specs et issues d'implémentation ;
 6. anciens prompts/PDF uniquement comme historique.
 

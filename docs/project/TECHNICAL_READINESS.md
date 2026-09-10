@@ -23,8 +23,8 @@ Codex handoff
 | Layer | Authoritative source | Status |
 |---|---|---|
 | Decisions | ADRs + specialized governance Skills | LOCKED |
-| Architecture Baseline | `docs/architecture/BASELINE_V2.md`, `architecture.lock.yaml` | LOCKED |
-| Exact topology | `docs/architecture/EXACT_TOPOLOGY_V2.md`, `PREPROD_TOPOLOGY_V2.md`, `PROD_TOPOLOGY_V2.md`, AIOps/MLOps topology files | EXACT |
+| Architecture Baseline | `architecture.lock.yaml` | LOCKED |
+| Exact topology | `docs/architecture/EXACT_TOPOLOGY_V5.md`, `PREPROD_TOPOLOGY_V2.md`, `PROD_TOPOLOGY_V2.md`, AIOps/MLOps topology files | EXACT |
 | Network/IPAM | `docs/architecture/NETWORK_IPAM_CONTRACT.md`, `config/infrastructure/network-plan.yaml` | EXACT |
 | Storage | `docs/architecture/STORAGE_TOPOLOGY_V2.md`, `config/infrastructure/storage-plan.yaml` | EXACT |
 | Service ownership | `docs/architecture/SERVICE_OWNERSHIP_MATRIX.md`, `config/contracts/service-ownership.yaml` | EXACT |

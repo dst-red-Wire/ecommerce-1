@@ -8,7 +8,7 @@ Status: `EXACT`
 
 ## Data and metadata
 
-- Dataset versioning: DVC + Git/Gitea + SeaweedFS S3.
+- Dataset versioning: lakeFS + Git/Gitea + SeaweedFS S3, as selected by `architecture.lock.yaml`. DVC is superseded.
 - MLflow: experiments, metadata, lineage, run/dataset/model relationships and digests.
 - SeaweedFS S3: dataset/object backend with dedicated buckets by environment/finality.
 - Harbor: authoritative OCI registry for Modelcars and signed RAG snapshots.
