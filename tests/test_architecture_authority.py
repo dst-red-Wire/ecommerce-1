@@ -300,6 +300,46 @@ graph LR
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_forbidden_services_must_remain_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "architecture.lock.yaml"
+            original = path.read_text()
+            for mutation in ("[pricing]", "[checkout]", "[fulfillment]", "[legacy, legacy]", "legacy"):
+                with self.subTest(mutation=mutation):
+                    path.write_text(original.replace("forbidden_services: []", f"forbidden_services: {mutation}", 1))
+                    self.assertTrue(any("business.forbidden_services" in error for error in authority.validate(root)))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_prod_certified_topology_has_an_exact_nested_schema(self):
+        mutations = (
+            ("  physical_hosts_total: 6", "  physical_hosts_total: 6\n  physical_hosts_per_site_override: 5",
+             "prod_certified_topology keys"),
+            ("  sites:\n", "  sites:\n    unknown_site_policy: active\n", "prod_certified_topology.sites keys"),
+            ("    prod-a:\n", "    prod-a:\n      unknown_directive: true\n",
+             "prod_certified_topology.sites.prod-a keys"),
+            ("    prod-b:\n", "    prod-b:\n      unknown_directive: true\n",
+             "prod_certified_topology.sites.prod-b keys"),
+            ("    prod-b:\n      private_block: 10.242.0.0/16\n      physical_hosts:\n"
+             "        - b-host-01\n        - b-host-02\n        - b-host-03\n",
+             "", "prod_certified_topology.sites keys"),
+            ("  physical_hosts_total: 6\n", "", "prod_certified_topology keys"),
+            ("  physical_hosts_total: 6", "  physical_hosts_total: six",
+             "prod_certified_topology.physical_hosts_total must be an integer"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "architecture.lock.yaml"
+            original = path.read_text()
+            for before, after, expected in mutations:
+                with self.subTest(expected=expected):
+                    self.assertIn(before, original)
+                    path.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any(expected in error for error in authority.validate(root)))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_complete_mlops_mapping_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)

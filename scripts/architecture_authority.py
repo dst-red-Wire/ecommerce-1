@@ -9,6 +9,12 @@ AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
 V5_FRONTENDS = ["storefront", "admin"]
+V5_PROD_TOPOLOGY_KEYS = frozenset({
+    "physical_hosts_total", "physical_hosts_per_site", "control_planes_per_site",
+    "workers_per_site", "data_workers_per_site", "general_workers_per_site", "sites",
+})
+V5_PROD_SITES_KEYS = frozenset({"prod-a", "prod-b"})
+V5_PROD_SITE_KEYS = frozenset({"private_block", "physical_hosts"})
 V5_ROOT_KEYS = frozenset({
     "version", "status", "project", "business", "platform", "management_plane",
     "stateful", "dns", "observability", "mlops", "supply_chain",
@@ -49,6 +55,10 @@ V5_SECTION_KEYS = {
         "artifact_registry", "promotion_authority", "orchestration", "desired_state",
         "progressive_delivery", "runtime", "drift",
     }),
+    "prod_certified_topology": V5_PROD_TOPOLOGY_KEYS,
+    "prod_certified_topology.sites": V5_PROD_SITES_KEYS,
+    "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
+    "prod_certified_topology.sites.prod-b": V5_PROD_SITE_KEYS,
 }
 DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = {
@@ -273,8 +283,30 @@ def lock_schema_errors(lock):
                 break
             current = current[part]
         errors.extend(validate_exact_keys(name, current, expected_keys))
+    if errors:
+        return errors
     if not isinstance(lock.get("build_milestones"), list):
         errors.append("build_milestones must be a list")
+    business = lock["business"]
+    forbidden = business["forbidden_services"]
+    if not isinstance(forbidden, list):
+        errors.append("business.forbidden_services must be a list")
+    elif forbidden:
+        errors.append("business.forbidden_services must be empty in the approved V5 schema")
+
+    prod = lock["prod_certified_topology"]
+    for field in V5_PROD_TOPOLOGY_KEYS - {"sites"}:
+        if not isinstance(prod[field], int) or isinstance(prod[field], bool):
+            errors.append(f"prod_certified_topology.{field} must be an integer")
+    for site_name in V5_PROD_SITES_KEYS:
+        site = prod["sites"][site_name]
+        if not isinstance(site["private_block"], str):
+            errors.append(f"prod_certified_topology.sites.{site_name}.private_block must be a string")
+        hosts = site["physical_hosts"]
+        if not isinstance(hosts, list) or not all(isinstance(host, str) for host in hosts):
+            errors.append(f"prod_certified_topology.sites.{site_name}.physical_hosts must be a list of strings")
+        elif len(hosts) != len(set(hosts)):
+            errors.append(f"prod_certified_topology.sites.{site_name}.physical_hosts must be unique")
     return errors
 
 
