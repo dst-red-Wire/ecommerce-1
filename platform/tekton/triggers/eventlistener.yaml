@@ -1,0 +1,17 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata: {name: gitea-tekton}
+spec:
+  serviceAccountName: tekton-eventlistener
+  resources:
+    kubernetesResource: {spec: {template: {spec: {containers: [{name: event-listener, resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 250m, memory: 256Mi}}}]}}}}
+  triggers:
+    - name: signed-push-or-pull-request
+      interceptors:
+        - ref: {name: github}
+          params:
+            - name: secretRef
+              value: {secretName: gitea-webhook-hmac, secretKey: token}
+            - {name: eventTypes, value: [push, pull_request]}
+      bindings: [{ref: gitea-push}]
+      template: {ref: gitea-tekton}

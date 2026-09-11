@@ -19,3 +19,4 @@ resources:
   - tasks/go-cache.yaml
   - tasks/buildkit-component.yaml
   - tasks/qualify-oci.yaml
+  - triggers

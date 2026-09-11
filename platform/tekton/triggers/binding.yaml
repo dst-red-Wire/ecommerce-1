@@ -1,0 +1,9 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata: {name: gitea-push}
+spec:
+  params:
+    - {name: repository-url, value: $(body.repository.clone_url)}
+    - {name: head-sha, value: $(body.after)}
+    - {name: base-sha, value: $(body.before)}
+    - {name: event-type, value: $(header.X-Gitea-Event)}

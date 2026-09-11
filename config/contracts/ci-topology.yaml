@@ -34,7 +34,6 @@ trigger_flow:
     required: true
     algorithm: hmac-sha256
     accepted_signature_headers:
-      - X-Gitea-Signature
       - X-Hub-Signature-256
     secret_source: openbao-via-eso
 
@@ -95,23 +94,6 @@ developer_automation:
   shell_policy: forbidden
   shell_state_mutation_forbidden: true
   tekton_remains_ci_authority: true
-
-developer_accelerators:
-  bazel:
-    role: local-verification-entrypoint
-    source_of_truth: false
-    ci_authority: false
-    may_deploy: false
-  nx:
-    role: derived-contract-graph-visualization
-    source_of_truth: false
-    ci_authority: false
-    may_deploy: false
-  turborepo:
-    role: frontend-task-scheduling-and-local-cache
-    source_of_truth: false
-    ci_authority: false
-    may_deploy: false
 
 rules:
   one_repository_does_not_imply_one_release: true

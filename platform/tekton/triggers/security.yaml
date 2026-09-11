@@ -1,0 +1,29 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: gitea-webhook-hmac}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {kind: ClusterSecretStore, name: openbao}
+  target: {name: gitea-webhook-hmac}
+  data:
+    - secretKey: token
+      remoteRef: {key: ecommerce/tekton/gitea-webhook, property: hmac}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: tekton-trigger-default-deny}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: eventlistener-ingress}
+spec:
+  podSelector: {matchLabels: {eventlistener: gitea-tekton}}
+  policyTypes: [Ingress]
+  ingress: [{ports: [{protocol: TCP, port: 8080}]}]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: tekton-trigger-budget}
+spec:
+  hard: {requests.cpu: "4", requests.memory: 8Gi, limits.cpu: "8", limits.memory: 16Gi}

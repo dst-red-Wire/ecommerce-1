@@ -1,0 +1,8 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: gitea-tekton, annotations: {cert-manager.io/cluster-issuer: internal-ca}}
+spec:
+  tls: [{hosts: [tekton-hooks.example.invalid], secretName: tekton-hooks-tls}]
+  rules:
+    - host: tekton-hooks.example.invalid
+      http: {paths: [{path: /hooks/gitea, pathType: Exact, backend: {service: {name: el-gitea-tekton, port: {number: 8080}}}}]}

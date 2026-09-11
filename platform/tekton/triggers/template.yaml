@@ -1,0 +1,28 @@
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata: {name: gitea-tekton}
+spec:
+  params:
+    - {name: repository-url}
+    - {name: head-sha}
+    - {name: base-sha}
+    - {name: event-type}
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata: {generateName: ecommerce-affected-}
+      spec:
+        serviceAccountName: tekton-pipeline
+        pipelineRef: {name: ecommerce-affected}
+        taskRunTemplate:
+          podTemplate: {securityContext: {runAsNonRoot: true}}
+          serviceAccountName: tekton-pipeline
+        params:
+          - {name: repository-url, value: $(tt.params.repository-url)}
+          - {name: base, value: $(tt.params.base-sha)}
+          - {name: head, value: $(tt.params.head-sha)}
+          - {name: runner-image, value: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+        workspaces:
+          - name: source
+            volumeClaimTemplate:
+              spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 2Gi}}}
