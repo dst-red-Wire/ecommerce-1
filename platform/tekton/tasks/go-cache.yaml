@@ -1,0 +1,30 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: go-cache-policy}
+spec:
+  params:
+    - {name: trusted-source, type: string, default: "false"}
+    - {name: runner-digest, type: string}
+    - {name: go-version, type: string}
+    - {name: go-flags, type: string, default: ""}
+  workspaces:
+    - {name: source}
+    - {name: go-build-cache}
+    - {name: go-module-cache}
+    - {name: evidence}
+  steps:
+    - name: compute-and-validate
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      workingDir: $(workspaces.source.path)
+      env:
+        - {name: GOCACHE, value: $(workspaces.go-build-cache.path)}
+        - {name: GOMODCACHE, value: $(workspaces.go-module-cache.path)}
+      script: |
+        set -eu
+        test "$GOCACHE" != "$(workspaces.source.path)"
+        test "$GOMODCACHE" != "$(workspaces.source.path)"
+        key="$(params.go-version)-$(go env GOOS)-$(go env GOARCH)-$(go env CGO_ENABLED)-$(params.go-flags)-$(sha256sum frontend/go.sum 2>/dev/null | cut -d' ' -f1)-$(params.runner-digest)"
+        printf '%s' "$key" > $(workspaces.evidence.path)/go-cache-key
+        go clean -cache >/dev/null 2>&1 || true
+        go test -race ./...
+        test "$(params.trusted-source)" = true && touch $(workspaces.evidence.path)/cache-write-authorized || true

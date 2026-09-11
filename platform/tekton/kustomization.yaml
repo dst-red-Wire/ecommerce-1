@@ -16,3 +16,4 @@ resources:
   - pipelines/affected.yaml
   - tasks/build-runner-image.yaml
   - pipelines/runner-image.yaml
+  - tasks/go-cache.yaml

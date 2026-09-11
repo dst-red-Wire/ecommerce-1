@@ -1,0 +1,20 @@
+schema_version: 1
+owner: platform-ci
+workspaces: [source, go-build-cache, go-module-cache, evidence]
+paths:
+  source: /workspace/source
+  GOCACHE: /workspace/go-build-cache
+  GOMODCACHE: /workspace/go-module-cache
+key_fields: [go-version, os, architecture, cgo, flags, module-sums, runner-digest]
+trust:
+  cache_can_authorize_gate: false
+  cache_can_authorize_promotion: false
+  untrusted_pull_request_write: false
+  publish_after_success_only: true
+runtime:
+  pvc_names: required
+  storage_class: required
+  sizes: required
+  quota: configurable
+  retention: configurable
+recovery: [missing-cache, corrupt-cache, cold-rebuild]
