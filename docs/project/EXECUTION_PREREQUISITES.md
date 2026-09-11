@@ -27,7 +27,7 @@ Purpose: identify inputs that ChatGPT cannot manufacture and that would otherwis
 - Work handoffs W1-W6 bound to exact architecture context;
 - business readiness gates;
 - risk register;
-- GitHub milestone trackers #13, #14, #16-#22;
+- GitHub milestone trackers #13-#22;
 - Work trackers #23-#25;
 - PREPROD/PROD certification sequencing and evidence expectations.
 

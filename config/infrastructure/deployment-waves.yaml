@@ -35,6 +35,8 @@ waves:
     parallel_groups:
       - [catalog, inventory, pricing, tax, search]
       - [cart, fraud-risk]
+      - [checkout]
+      - [fulfillment]
       - [shipping, tracking]
       - [review, user-profile, notification]
     serial_after_parallel: [order, payment, returns, billing]

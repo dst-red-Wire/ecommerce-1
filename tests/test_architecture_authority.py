@@ -156,6 +156,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             "contract": ("resilience_governance: config/contracts/resilience-governance.yaml",
                          "removed_resilience: config/contracts/resilience-governance.yaml"),
             "dns_ttl": ("critical_ttl_seconds: 60", "critical_ttl_seconds: 120"),
+            "status": ("status: locked-for-build", "status: draft"),
         }
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -165,6 +166,34 @@ class ArchitectureAuthorityTest(unittest.TestCase):
                     self.assertIn(before, original)
                     (root / "architecture.lock.yaml").write_text(original.replace(before, after, 1))
                     self.assertTrue(authority.validate(root))
+
+    def test_lock_status_is_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "architecture.lock.yaml"
+            original = path.read_text()
+            for mutation in ("status: draft", "status: unlocked", ""):
+                path.write_text(original.replace("status: locked-for-build\n", f"{mutation}\n", 1))
+                self.assertTrue(any("status must be locked-for-build" in error for error in authority.validate(root)))
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_complete_mlops_mapping_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            index_path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original_lock = lock_path.read_text()
+            original_index = index_path.read_text()
+            for before, after in (("dataset_versioner: lakefs", "dataset_versioner: pachyderm"),
+                                  ("runtime: kserve-vllm", "runtime: mlflow")):
+                lock_path.write_text(original_lock.replace(before, after, 1))
+                index_path.write_text(original_index.replace(
+                    f"- `{before.replace(': ', '`: `')}`", f"- `{after.replace(': ', '`: `')}`", 1))
+                self.assertTrue(any("complete approved V5 mapping" in error for error in authority.validate(root)))
+                lock_path.write_text(original_lock)
+                index_path.write_text(original_index)
+            self.assertEqual([], authority.validate(root))
 
     def test_delivery_guidance_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -191,7 +220,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
                 readiness.write_text(original)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original_handoff = handoff.read_text()
-            for required in ("## M2.5 prompt", "Entry gate: M1 PROVEN", "Evidence required for M2.5 PROVEN", "That PROVEN state enables M3"):
+            for required in ("## M2.5 prompt", "Tracker: `#15`", "Entry gate: M1 PROVEN", "Evidence required for M2.5 PROVEN", "That PROVEN state enables M3"):
                 handoff.write_text(original_handoff.replace(required, "removed", 1))
                 self.assertTrue(any("executable M2.5" in error for error in authority.validate(root)))
                 handoff.write_text(original_handoff)
@@ -249,11 +278,25 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             root = self.copy_repository(directory)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original = handoff.read_text()
-            for before, after in (("Cart -> Checkout -> Order", "Cart -> Order"),
+            flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
+            for before, after in ((flow, flow.replace(" -> Tax", " -> Order -> Tax")),
+                                  (flow, flow.replace(" -> Fraud/Risk", " -> Order -> Fraud/Risk")),
                                   ("Fulfillment -> Shipping", "Shipping")):
                 handoff.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("M5 must preserve" in error for error in authority.validate(root)))
                 handoff.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_deployment_wave_service_coverage_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "config/infrastructure/deployment-waves.yaml"
+            original = path.read_text()
+            for before, after in (("      - [checkout]\n", ""),
+                                  ("fulfillment, shipping", "unknown-service, shipping")):
+                path.write_text(original.replace(before, after, 1))
+                self.assertTrue(any("deployment waves" in error for error in authority.validate(root)))
+                path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_exact_contract_mutations_are_rejected(self):

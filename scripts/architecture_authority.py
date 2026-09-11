@@ -7,6 +7,15 @@ import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
+LOCK_STATUS = "locked-for-build"
+V5_MLOPS = {
+    "dataset_versioner": "lakefs", "object_storage": "seaweedfs-s3",
+    "metadata_database": "cloudnativepg-postgresql", "experiments_lineage": "mlflow",
+    "artifact_registry": "harbor", "promotion_authority": "gitea-gitops",
+    "orchestration": "tekton", "desired_state": "rancher-fleet",
+    "progressive_delivery": "argo-rollouts", "runtime": "kserve-vllm",
+    "drift": "evidently-tekton-batch",
+}
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
 V5_TOPOLOGY_CONTRACTS = {
     "exact_index": "docs/architecture/EXACT_TOPOLOGY_V5.md",
@@ -285,6 +294,8 @@ def validate(root):
     errors = []
     try:
         lock = load_yaml(root / AUTHORITY)
+        if lock.get("status") != LOCK_STATUS:
+            errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
         if lock["version"] != 5:
             errors.append("architecture.lock.yaml must be version 5")
         if lock["topology_contracts"]["exact_index"] != INDEX:
@@ -295,6 +306,11 @@ def validate(root):
             errors.append("critical DNS TTL must remain 60 seconds")
         if lock["superseded"].get("dvc-dataset-versioner") != "lakefs":
             errors.append("DVC supersession must select lakeFS")
+        mlops_path = root / lock["topology_contracts"]["mlops"]
+        mlops_section = mlops_path.read_text().split("## Locked role mapping", 1)[-1].split("\n## ", 1)[0]
+        subordinate_mlops = dict(re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M))
+        if lock.get("mlops") != V5_MLOPS or subordinate_mlops != V5_MLOPS:
+            errors.append("mlops must match the complete approved V5 mapping and subordinate contract")
         milestones = lock["build_milestones"]
         expected = ["M0-architecture-sync", "M1-monorepo-bootstrap", "M2-golden-service-product",
                     "M2-5-persistent-mgmt-bootstrap", "M3-preprod-infrastructure", "M4-platform-baseline",
@@ -391,8 +407,19 @@ def validate(root):
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m5 = m5_match.group(0) if m5_match else ""
-        if "Cart -> Checkout -> Order" not in m5 or "Fulfillment -> Shipping" not in m5:
+        checkout_flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
+        if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
+        waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
+        deployed = []
+        for wave in waves.get("waves", []):
+            deployed.extend(component for component in wave.get("components", []) if component in lock["business"]["services"])
+            for group in wave.get("parallel_groups", []):
+                deployed.extend(component for component in group if component in lock["business"]["services"])
+            deployed.extend(component for component in wave.get("serial_after_parallel", [])
+                            if component in lock["business"]["services"])
+        if len(deployed) != len(set(deployed)) or set(deployed) != set(lock["business"]["services"]):
+            errors.append("deployment waves must schedule every canonical business service exactly once")
         m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m7 = m7_match.group(0) if m7_match else ""
         if not re.search(r">=\s*80%\s+global coverage", m7, re.I):
@@ -402,7 +429,8 @@ def validate(root):
         handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         handoff = handoff_match.group(0) if handoff_match else ""
         handoff_requirements = ("## M2.5 prompt", "M2-5-persistent-mgmt-bootstrap", "Entry gate: M1 PROVEN",
-                                "Evidence required for M2.5 PROVEN", "Exit gate:", "That PROVEN state enables M3")
+                                "Tracker: `#15`", "Evidence required for M2.5 PROVEN", "Exit gate:",
+                                "That PROVEN state enables M3")
         if any(requirement not in handoff for requirement in handoff_requirements):
             errors.append("CODEX_HANDOFFS.md must define the executable M2.5 entry, evidence, and M3 exit contract")
         router = load_yaml(root / "config/context/router.yaml")

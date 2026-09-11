@@ -105,6 +105,8 @@ Product is the reference pattern. Do not clone product business logic into other
 
 ### M2.5 — Persistent MGMT Bootstrap
 
+Canonical tracker: GitHub issue `#15`.
+
 Bootstrap the persistent management plane from the canonical V5 contracts. M2.5 must be PROVEN before M3 starts.
 
 ### M3 — PREPROD Infrastructure
