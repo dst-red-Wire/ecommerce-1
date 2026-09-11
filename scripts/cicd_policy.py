@@ -43,6 +43,17 @@ def supply(args):
  if proof["git_sha"]!=args.sha or proof["component"]!=args.component or proof["output_digest"]!=args.image: raise ValueError("provenance identity mismatch")
  print(json.dumps({"qualified":True,"git_sha":args.sha,"component":args.component,"image":args.image},sort_keys=True))
 
+def promote(args):
+ import yaml
+ component(args.component); sha(args.sha); digest(args.image)
+ contract=yaml.safe_load((ROOT/"config/contracts/gitops-promotion.yaml").read_text())
+ if args.environment not in contract["environments"]: raise ValueError("unknown environment")
+ proof=json.loads(Path(args.proof).read_text())
+ if not proof.get("qualified") or proof.get("git_sha")!=args.sha or proof.get("component")!=args.component or proof.get("image")!=args.image: raise ValueError("unqualified or mismatched proof")
+ allowed=contract["allowed_paths"][args.environment]
+ if args.changed_path and args.changed_path != allowed: raise ValueError("GitOps modification outside promotion scope")
+ print(json.dumps({"allowed_path":allowed,"image":args.image,"deploy":False,"merge":False},sort_keys=True))
+
 def main():
  p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True);b=sub.add_parser('buildkit-validate')
  for n in ['component','context','sha','candidates','cache']: b.add_argument('--'+n,required=True)
@@ -50,6 +61,9 @@ def main():
  q=sub.add_parser("supply-validate")
  for n in ["component","sha","image","runner","provenance"]: q.add_argument("--"+n,required=True)
  q.add_argument("--scan",choices=["pass","fail"],required=True);q.add_argument("--signature",choices=["valid","invalid"],required=True);q.set_defaults(run=supply)
+ g=sub.add_parser("promote-validate")
+ for n in ["component","environment","sha","image","proof"]: g.add_argument("--"+n,required=True)
+ g.add_argument("--changed-path",default="");g.set_defaults(run=promote)
  a=p.parse_args()
  try:a.run(a)
  except ValueError as e: print(f'FAIL {e}',file=sys.stderr);return 2

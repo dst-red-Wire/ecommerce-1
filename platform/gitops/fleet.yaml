@@ -1,0 +1,11 @@
+defaultNamespace: ecommerce
+targetCustomizations:
+  - name: preprod
+    clusterSelector: {matchLabels: {environment: preprod}}
+    kustomize: {dir: preprod}
+  - name: prod-a
+    clusterSelector: {matchLabels: {site: prod-a}}
+    kustomize: {dir: prod}
+  - name: prod-b
+    clusterSelector: {matchLabels: {site: prod-b}}
+    kustomize: {dir: prod}

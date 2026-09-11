@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata: {name: ecommerce-component}
+spec:
+  replicas: 4
+  revisionHistoryLimit: 3
+  strategy:
+    canary:
+      stableService: ecommerce-stable
+      canaryService: ecommerce-canary
+      steps:
+        - {setWeight: 10}
+        - {pause: {duration: 5m}}
+        - analysis: {templates: [{templateName: ecommerce-slo}]}
+        - {setWeight: 25}
+        - {pause: {}}
+        - {setWeight: 50}
+        - analysis: {templates: [{templateName: ecommerce-slo}]}
+        - {setWeight: 100}
+  selector: {matchLabels: {app: ecommerce-component}}
+  template:
+    metadata: {labels: {app: ecommerce-component}}
+    spec:
+      containers:
+        - {name: app, image: harbor.internal/ecommerce/releases/product@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd}
