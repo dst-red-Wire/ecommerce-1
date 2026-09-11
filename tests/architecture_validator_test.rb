@@ -337,6 +337,19 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_required_topology_contract_registration_and_file_cannot_both_be_deleted
+    %w[deployment_dag observability].each do |contract|
+      with_contract_copy do |root|
+        lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
+        path = lock.fetch("topology_contracts").delete(contract)
+        File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
+        FileUtils.rm(File.join(root, path))
+        assert_includes ArchitectureValidator.validate(root),
+                        "architecture.lock.yaml topology_contracts keys must match the complete approved V5 registry"
+      end
+    end
+  end
+
   def test_machine_contract_paths_must_be_nonempty_strings
     {"non-string" => 42, "empty" => "", "whitespace-only" => "  "}.each do |message, value|
       with_contract_copy do |root|

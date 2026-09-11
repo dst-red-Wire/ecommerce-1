@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -208,6 +209,25 @@ class ArchitectureAuthorityTest(unittest.TestCase):
                 path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_required_topology_contract_registrations_are_rejected_when_file_is_also_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original_lock = lock_path.read_text()
+            for key, relative in (("prod", "docs/architecture/PROD_TOPOLOGY_V2.md"),
+                                  ("mlops", "docs/architecture/MLOPS_TOPOLOGY_V1.md")):
+                with self.subTest(key=key):
+                    mutated = re.sub(rf"^  {key}: .*\n", "", original_lock, count=1, flags=re.M)
+                    lock_path.write_text(mutated)
+                    path = root / relative
+                    contents = path.read_text()
+                    path.unlink()
+                    self.assertTrue(any("complete approved V5 registry" in error
+                                        for error in authority.validate(root)))
+                    path.write_text(contents)
+                    lock_path.write_text(original_lock)
+            self.assertEqual([], authority.validate(root))
+
     def test_exact_contract_mutations_are_rejected(self):
         mutations = (
             ("config/contracts/security-trust-zones.yaml", "  Z6: backup-evidence-dfir\n", ""),
@@ -279,6 +299,10 @@ class ArchitectureAuthorityTest(unittest.TestCase):
 
     def test_derived_role_assignment_mutations_are_rejected(self):
         mutations = (
+            (("- `ci`: `tekton`", "- `ci`: `harbor`"),
+             ("- `registry`: `harbor`", "- `registry`: `tekton`")),
+            (("- `desired_state`: `rancher-fleet`", "- `desired_state`: `argo-rollouts`"),
+             ("- `progressive_delivery`: `argo-rollouts`", "- `progressive_delivery`: `rancher-fleet`")),
             (("- `dataset_versioner`: `lakefs`", "- `dataset_versioner`: `mlflow`"),
              ("- `experiments_lineage`: `mlflow`", "- `experiments_lineage`: `lakefs`")),
             (("- `artifact_registry`: `harbor`", "- `artifact_registry`: `tekton`"),

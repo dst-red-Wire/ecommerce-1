@@ -8,6 +8,11 @@ import subprocess
 AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
+V5_TOPOLOGY_CONTRACTS = {
+    "exact_index", "preprod", "prod", "network_ipam", "mgmt_wireguard_access", "storage",
+    "service_ownership", "data_ownership", "events", "security_zones", "deployment_dag",
+    "aiops", "mlops", "observability",
+}
 
 EXACT_CONTRACTS = {
     "resilience_governance": {
@@ -148,17 +153,19 @@ def derived_index_errors(index, lock):
         if rendered_mlops.get(field) != value:
             errors.append(f"derived index drift from architecture.lock.yaml: mlops.{field}")
 
-    flow_and_delivery = index.split("## AIOps", 1)[0]
-    platform_display = {
-        "rke2": "RKE2", "tekton": "Tekton", "harbor": "Harbor", "rancher-fleet": "Fleet",
-        "argo-rollouts": "Argo Rollouts", "seaweedfs-s3": "SeaweedFS S3",
-    }
-    for field in ("kubernetes", "ci", "registry", "gitops", "progressive_delivery"):
-        value = lock["platform"][field]
-        if platform_display.get(value, value) not in flow_and_delivery:
-            errors.append(f"derived index drift from architecture.lock.yaml: platform.{field}")
-    if platform_display[lock["stateful"]["object_storage"]] not in flow_and_delivery:
-        errors.append("derived index drift from architecture.lock.yaml: stateful.object_storage")
+    delivery_section = index.split("## Delivery", 1)[-1].split("\n## ", 1)[0]
+    rendered_delivery = re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", delivery_section, re.M)
+    expected_delivery = [
+        ("promotion_authority", lock["mlops"]["promotion_authority"]),
+        ("ci", lock["platform"]["ci"]),
+        ("registry", lock["platform"]["registry"]),
+        ("desired_state", lock["platform"]["gitops"]),
+        ("kubernetes", lock["platform"]["kubernetes"]),
+        ("progressive_delivery", lock["platform"]["progressive_delivery"]),
+        ("object_storage", lock["stateful"]["object_storage"]),
+    ]
+    if rendered_delivery != expected_delivery:
+        errors.append("derived index drift from architecture.lock.yaml: delivery role assignments")
     return errors
 
 
@@ -315,7 +322,10 @@ def validate(root):
         )
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
-        for role, relative in lock["topology_contracts"].items():
+        topology_contracts = lock["topology_contracts"]
+        if set(topology_contracts) != V5_TOPOLOGY_CONTRACTS:
+            errors.append("topology_contracts keys must match the complete approved V5 registry")
+        for role, relative in topology_contracts.items():
             if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
                 continue

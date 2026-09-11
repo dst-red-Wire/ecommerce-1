@@ -6,6 +6,11 @@ require "pathname"
 require "yaml"
 
 module ArchitectureValidator
+  V5_TOPOLOGY_CONTRACTS = %w[
+    exact_index preprod prod network_ipam mgmt_wireguard_access storage service_ownership
+    data_ownership events security_zones deployment_dag aiops mlops observability
+  ].freeze
+
   class ContractLoadError < StandardError; end
 
   module_function
@@ -128,6 +133,9 @@ module ArchitectureValidator
 
   def validate_topology_contracts(root, lock)
     declared = expect_mapping(lock["topology_contracts"], "architecture.lock.yaml topology_contracts")
+    unless declared.keys.sort == V5_TOPOLOGY_CONTRACTS.sort
+      raise ContractLoadError, "architecture.lock.yaml topology_contracts keys must match the complete approved V5 registry"
+    end
     declared.each do |key, path|
       label = "architecture.lock.yaml topology_contracts.#{key}"
       unless key.is_a?(String) && !key.strip.empty?
