@@ -17,3 +17,4 @@ resources:
   - tasks/build-runner-image.yaml
   - pipelines/runner-image.yaml
   - tasks/go-cache.yaml
+  - tasks/buildkit-component.yaml

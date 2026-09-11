@@ -1,0 +1,16 @@
+schema_version: 1
+owner: platform-ci
+component_authority: config/contracts/dependency-map.yaml
+repositories:
+  candidates: harbor.internal/ecommerce/candidates
+  cache: harbor.internal/ecommerce/cache
+  releases: harbor.internal/ecommerce/releases
+rules:
+  affected_only: true
+  reject_unknown_component: true
+  context_must_be_relative: true
+  reject_parent_traversal: true
+  trusted_cache_export_only: true
+  candidate_bound_to_git_sha: true
+  output_immutable_digest: true
+  deploys: false

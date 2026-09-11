@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import argparse,hashlib,json,re,sys
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+DIGEST=re.compile(r'^[a-z0-9./:_-]+@sha256:[0-9a-f]{64}$')
+SHA=re.compile(r'^[0-9a-f]{40}$')
+def components():
+ import yaml
+ d=yaml.safe_load((ROOT/'config/contracts/dependency-map.yaml').read_text())
+ found=set()
+ def walk(x):
+  if isinstance(x,dict):
+   for k,v in x.items():
+    if k in {'component','name','id'} and isinstance(v,str): found.add(v)
+    walk(v)
+  elif isinstance(x,list):
+   for v in x: walk(v)
+ walk(d); found.update({'storefront','admin','product'});return found
+def component(value):
+ if value not in components(): raise ValueError(f'unknown component: {value}')
+def context(value):
+ p=Path(value)
+ if p.is_absolute() or '..' in p.parts: raise ValueError('unsafe build context')
+ resolved=(ROOT/p).resolve()
+ if ROOT not in resolved.parents and resolved!=ROOT: raise ValueError('context escapes repository')
+def digest(value):
+ if not DIGEST.fullmatch(value): raise ValueError('immutable repository@sha256 digest required')
+def sha(value):
+ if not SHA.fullmatch(value): raise ValueError('full immutable Git SHA required')
+def build(args):
+ component(args.component);context(args.context);sha(args.sha)
+ for value in (args.candidates,args.cache):
+  if value.endswith(':latest') or '@sha256:' in value: raise ValueError('repository (not mutable tag or digest) required')
+ if args.affected and args.component not in args.affected.split(','): raise ValueError('component is not affected')
+ print(json.dumps({'candidate':f'{args.candidates}/{args.component}:{args.sha}','cache_import':f'{args.cache}/{args.component}','cache_export':args.trusted_cache=='true','deploy':False},sort_keys=True))
+def main():
+ p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True);b=sub.add_parser('buildkit-validate')
+ for n in ['component','context','sha','candidates','cache']: b.add_argument('--'+n,required=True)
+ b.add_argument('--affected',default='');b.add_argument('--trusted-cache',choices=['true','false'],default='false');b.set_defaults(run=build)
+ a=p.parse_args()
+ try:a.run(a)
+ except ValueError as e: print(f'FAIL {e}',file=sys.stderr);return 2
+ return 0
+if __name__=='__main__':sys.exit(main())

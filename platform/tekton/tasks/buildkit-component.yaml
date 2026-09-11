@@ -1,0 +1,31 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: buildkit-component}
+spec:
+  params:
+    - {name: component, type: string}
+    - {name: context, type: string}
+    - {name: source-sha, type: string}
+    - {name: candidate-repository, type: string}
+    - {name: cache-repository, type: string}
+    - {name: affected-components, type: string}
+    - {name: trusted-cache-write, type: string, default: "false"}
+  workspaces: [{name: source}]
+  results: [{name: image-reference}, {name: image-digest}]
+  steps:
+    - name: validate
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      workingDir: $(workspaces.source.path)
+      script: |
+        python3 scripts/cicd_policy.py buildkit-validate --component '$(params.component)' --context '$(params.context)' --sha '$(params.source-sha)' --candidates '$(params.candidate-repository)' --cache '$(params.cache-repository)' --affected '$(params.affected-components)' --trusted-cache '$(params.trusted-cache-write)'
+    - name: build
+      image: moby/buildkit@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      script: |
+        set -eu
+        cache_out=""
+        test '$(params.trusted-cache-write)' != true || cache_out="--export-cache type=registry,ref=$(params.cache-repository)/$(params.component),mode=max"
+        buildctl build --frontend dockerfile.v0 --local context=$(workspaces.source.path)/$(params.context) --local dockerfile=$(workspaces.source.path)/$(params.context) --import-cache type=registry,ref=$(params.cache-repository)/$(params.component) $cache_out --output type=image,name=$(params.candidate-repository)/$(params.component):$(params.source-sha),push=true --metadata-file /tmp/metadata.json
+        digest=$(python3 -c 'import json;print(json.load(open("/tmp/metadata.json"))["containerimage.digest"])')
+        echo "$digest" | grep -E '^sha256:[0-9a-f]{64}$'
+        printf %s "$digest" > $(results.image-digest.path)
+        printf %s '$(params.candidate-repository)/$(params.component)@'"$digest" > $(results.image-reference.path)
