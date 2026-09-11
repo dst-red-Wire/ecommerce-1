@@ -123,9 +123,15 @@ Trust zones and IAM/workload identity boundaries: `SECURITY_TRUST_ZONES.md`. The
 
 ## Delivery
 
-```text
-Gitea -> Tekton -> Harbor -> Fleet -> RKE2 -> Argo Rollouts
-```
+The complete derived delivery/platform flow below mirrors role assignments from the lock exactly, in flow order:
+
+- `promotion_authority`: `gitea-gitops`
+- `ci`: `tekton`
+- `registry`: `harbor`
+- `desired_state`: `rancher-fleet`
+- `kubernetes`: `rke2`
+- `progressive_delivery`: `argo-rollouts`
+- `object_storage`: `seaweedfs-s3`
 
 `DEPLOYMENT_DAG.md` and `config/infrastructure/deployment-waves.yaml` define dependency waves, gates and destruction order.
 
