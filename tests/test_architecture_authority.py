@@ -227,6 +227,25 @@ graph LR
                 index_path.write_text(original_index)
             self.assertEqual([], authority.validate(root))
 
+    def test_duplicate_subordinate_mlops_assignments_are_rejected(self):
+        mutations = (
+            ("dataset_versioner", "mlflow"),
+            ("dataset_versioner", "lakefs"),
+            ("runtime", "mlflow"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/MLOPS_TOPOLOGY_V1.md"
+            original = path.read_text()
+            for role, value in mutations:
+                with self.subTest(role=role, value=value):
+                    assignment = f"- `{role}`: `"
+                    line = next(line for line in original.splitlines() if line.startswith(assignment))
+                    path.write_text(original.replace(line, f"{line}\n- `{role}`: `{value}`", 1))
+                    self.assertIn(f"duplicate subordinate MLOps assignment: {role}", authority.validate(root))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_delivery_guidance_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -287,6 +306,21 @@ graph LR
                                         for error in authority.validate(root)))
                     path.write_text(contents)
                     lock_path.write_text(original_lock)
+            self.assertEqual([], authority.validate(root))
+
+    def test_missing_topology_contract_registrations_return_registry_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original = lock_path.read_text()
+            for key in ("mlops", "prod"):
+                with self.subTest(key=key):
+                    lock_path.write_text(re.sub(rf"^  {key}: .*\n", "", original, count=1, flags=re.M))
+                    self.assertEqual(
+                        ["topology_contracts must match the complete approved V5 role/path registry"],
+                        authority.validate(root),
+                    )
+            lock_path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_v5_registry_role_path_mutations_are_rejected(self):

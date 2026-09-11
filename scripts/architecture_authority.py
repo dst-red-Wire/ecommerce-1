@@ -355,7 +355,10 @@ def validate(root):
             errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
         if lock["version"] != 5:
             errors.append("architecture.lock.yaml must be version 5")
-        if lock["topology_contracts"]["exact_index"] != INDEX:
+        topology_contracts = lock.get("topology_contracts")
+        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
+            return [*errors, "topology_contracts must match the complete approved V5 role/path registry"]
+        if topology_contracts["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
         if lock["observability"].get("hyperdx_metadata_store") != "mongodb-oss-self-hosted":
             errors.append("HyperDX metadata store must be self-hosted MongoDB OSS")
@@ -363,9 +366,15 @@ def validate(root):
             errors.append("critical DNS TTL must remain 60 seconds")
         if lock["superseded"].get("dvc-dataset-versioner") != "lakefs":
             errors.append("DVC supersession must select lakeFS")
-        mlops_path = root / lock["topology_contracts"]["mlops"]
+        mlops_path = root / topology_contracts["mlops"]
         mlops_section = mlops_path.read_text().split("## Locked role mapping", 1)[-1].split("\n## ", 1)[0]
-        subordinate_mlops = dict(re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M))
+        mlops_rows = re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M)
+        seen_mlops = set()
+        for field, _ in mlops_rows:
+            if field in seen_mlops:
+                errors.append(f"duplicate subordinate MLOps assignment: {field}")
+            seen_mlops.add(field)
+        subordinate_mlops = dict(mlops_rows)
         if lock.get("mlops") != V5_MLOPS or subordinate_mlops != V5_MLOPS:
             errors.append("mlops must match the complete approved V5 mapping and subordinate contract")
         milestones = lock["build_milestones"]
@@ -428,9 +437,6 @@ def validate(root):
         )
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
-        topology_contracts = lock["topology_contracts"]
-        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
-            errors.append("topology_contracts must match the complete approved V5 role/path registry")
         for role, relative in topology_contracts.items():
             if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")

@@ -240,7 +240,13 @@ module ArchitectureValidator
 
     mlops_path = lock.dig("topology_contracts", "mlops")
     mlops_section = File.read(File.join(root, mlops_path)).split("## Locked role mapping", 2).last.to_s.split("\n## ", 2).first
-    subordinate_mlops = mlops_section.scan(/^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$/).to_h
+    mlops_rows = mlops_section.scan(/^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$/)
+    seen_mlops = {}
+    mlops_rows.each do |role, _value|
+      errors << "duplicate subordinate MLOps assignment: #{role}" if seen_mlops.key?(role)
+      seen_mlops[role] = true
+    end
+    subordinate_mlops = mlops_rows.to_h
     check_equal(errors, "architecture.lock.yaml mlops", V5_MLOPS, lock["mlops"])
     check_equal(errors, "#{mlops_path} locked role mapping", V5_MLOPS, subordinate_mlops)
 

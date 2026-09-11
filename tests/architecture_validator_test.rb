@@ -25,6 +25,18 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_duplicate_subordinate_mlops_assignments_are_rejected
+    [["dataset_versioner", "mlflow"], ["dataset_versioner", "lakefs"], ["artifact_registry", "harbor"]].each do |role, value|
+      with_contract_copy do |root|
+        path = File.join(root, "docs/architecture/MLOPS_TOPOLOGY_V1.md")
+        contents = File.read(path)
+        line = contents.lines.find { |candidate| candidate.start_with?("- `#{role}`: `") }
+        File.write(path, contents.sub(line, "#{line.chomp}\n- `#{role}`: `#{value}`\n"))
+        assert_includes ArchitectureValidator.validate(root), "duplicate subordinate MLOps assignment: #{role}"
+      end
+    end
+  end
+
   def test_deployment_waves_cover_all_business_services
     %w[checkout fulfillment].each do |service|
       with_contract_copy do |root|
