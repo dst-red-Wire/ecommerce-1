@@ -15,6 +15,41 @@ V5_ROOT_KEYS = frozenset({
     "topology_contracts", "machine_contracts", "prod_certified_topology",
     "superseded", "build_milestones", "milestone_dependencies",
 })
+V5_SECTION_KEYS = {
+    "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
+    "business.frontend_runtime": frozenset({
+        "language", "module", "module_file", "rendering", "interactions", "runtime_nodejs",
+        "migration_source",
+    }),
+    "platform": frozenset({
+        "kubernetes", "node_os", "cni", "mesh", "gitops", "ci", "progressive_delivery",
+        "registry", "secrets", "external_secrets", "workload_identity", "iam",
+        "runtime_security", "autoscaling",
+    }),
+    "platform.autoscaling": frozenset({
+        "synchronous_pods", "event_driven_pods", "certified_nodes", "preprod_perf_burst",
+    }),
+    "management_plane": frozenset({
+        "provider", "lifecycle", "private_block", "kubernetes", "forge", "ci", "registry",
+        "gitops", "bootstrap",
+    }),
+    "management_plane.bootstrap": frozenset({
+        "terraform_opentofu", "ansible", "requires_human_apply_gate",
+    }),
+    "stateful": frozenset({"database", "events", "jobs", "cache", "search", "object_storage"}),
+    "dns": frozenset({"critical_ttl_seconds"}),
+    "observability": frozenset({
+        "telemetry", "application_gateway", "infrastructure_collector", "metrics_protocol",
+        "metrics_scraper", "metrics", "infrastructure_logs", "application_observability_storage",
+        "application_observability_ui", "hyperdx_metadata_store", "alerts", "notifications",
+        "dashboards", "security_pipeline", "security_logs", "security",
+    }),
+    "mlops": frozenset({
+        "dataset_versioner", "object_storage", "metadata_database", "experiments_lineage",
+        "artifact_registry", "promotion_authority", "orchestration", "desired_state",
+        "progressive_delivery", "runtime", "drift",
+    }),
+}
 DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = {
     "dataset_versioner": "lakefs", "object_storage": "seaweedfs-s3",
@@ -80,6 +115,23 @@ V5_MACHINE_CONTRACTS = {
     "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
     "observability_topology": "config/contracts/observability-topology.yaml",
 }
+V5_SECTION_KEYS.update({
+    "superseded": frozenset(V5_SUPERSEDED),
+    "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
+    "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
+})
+V5_MILESTONES = [
+    "M0-architecture-sync", "M1-monorepo-bootstrap", "M2-golden-service-product",
+    "M2-5-persistent-mgmt-bootstrap", "M3-preprod-infrastructure", "M4-platform-baseline",
+    "M5-commerce-vertical-slice", "M6-full-application", "M7-qualification",
+    "M8-preprod-certification", "M9-prod-ab",
+]
+V5_MILESTONE_PREREQUISITES = [[], [0], [1], [1], [3], [4], [2, 5], [6], [7], [8], [9]]
+V5_MILESTONE_DEPENDENCIES = {
+    name: [V5_MILESTONES[index] for index in parents]
+    for name, parents in zip(V5_MILESTONES, V5_MILESTONE_PREREQUISITES)
+}
+V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
 V5_DEPLOYMENT_WAVES = {
     "version": 2,
@@ -184,6 +236,46 @@ puts JSON.generate(data)
     if completed.returncode:
         raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
     return json.loads(completed.stdout)
+
+
+def validate_exact_keys(name, actual, expected_keys):
+    """Validate an exact mapping schema without allowing unknown or missing fields."""
+    if name in ("topology_contracts", "machine_contracts"):
+        label = name
+        return ([] if isinstance(actual, dict) and set(actual) == set(expected_keys)
+                else [f"{label} must match the complete approved V5 role/path registry"])
+    contract_name = "complete approved V5 registry" if name == "superseded" else "complete approved V5 schema"
+    if not isinstance(actual, dict):
+        return [f"{name} must be a mapping with the {contract_name}"]
+    actual_keys = set(actual)
+    if actual_keys == set(expected_keys):
+        return []
+    unknown = sorted(actual_keys - set(expected_keys))
+    missing = sorted(set(expected_keys) - actual_keys)
+    details = []
+    if unknown:
+        details.append("unknown=" + ",".join(unknown))
+    if missing:
+        details.append("missing=" + ",".join(missing))
+    return [f"{name} keys must match the {contract_name} ({'; '.join(details)})"]
+
+
+def lock_schema_errors(lock):
+    """Validate the complete governed lock shape before any cross-contract lookup."""
+    errors = validate_exact_keys("architecture.lock.yaml root", lock, V5_ROOT_KEYS)
+    if errors:
+        return errors
+    for name, expected_keys in V5_SECTION_KEYS.items():
+        current = lock
+        for part in name.split("."):
+            if not isinstance(current, dict) or part not in current:
+                current = None
+                break
+            current = current[part]
+        errors.extend(validate_exact_keys(name, current, expected_keys))
+    if not isinstance(lock.get("build_milestones"), list):
+        errors.append("build_milestones must be a list")
+    return errors
 
 
 def component_is_retired(sentence, component):
@@ -459,8 +551,11 @@ def validate(root):
     errors = []
     try:
         lock = load_yaml(root / AUTHORITY)
-        if not isinstance(lock, dict) or set(lock) != V5_ROOT_KEYS:
-            errors.append("architecture.lock.yaml root keys must match the complete approved V5 schema")
+        structural_errors = lock_schema_errors(lock)
+        if structural_errors:
+            if isinstance(lock, dict) and lock.get("status") != LOCK_STATUS:
+                structural_errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
+            return structural_errors
         if lock.get("status") != LOCK_STATUS:
             errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
         if lock["version"] != 5:
@@ -490,12 +585,8 @@ def validate(root):
         if lock["business"].get("frontends") != V5_FRONTENDS:
             errors.append("business.frontends must match the complete approved V5 frontend set")
         milestones = lock["build_milestones"]
-        expected = ["M0-architecture-sync", "M1-monorepo-bootstrap", "M2-golden-service-product",
-                    "M2-5-persistent-mgmt-bootstrap", "M3-preprod-infrastructure", "M4-platform-baseline",
-                    "M5-commerce-vertical-slice", "M6-full-application", "M7-qualification",
-                    "M8-preprod-certification", "M9-prod-ab"]
-        prerequisites = [[], [0], [1], [1], [3], [4], [2, 5], [6], [7], [8], [9]]
-        dag = {name: [expected[i] for i in parents] for name, parents in zip(expected, prerequisites)}
+        expected = V5_MILESTONES
+        dag = V5_MILESTONE_DEPENDENCIES
         actual_dag = lock.get("milestone_dependencies", {})
         if milestones != expected or set(actual_dag) != set(dag) or any(
             sorted(actual_dag.get(name, [])) != sorted(parents) for name, parents in dag.items()

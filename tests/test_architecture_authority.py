@@ -264,6 +264,31 @@ graph LR
                     path.write_text(originals[path])
                     self.assertEqual([], authority.validate(root))
 
+    def test_governed_lock_sections_reject_unknown_missing_and_wrong_types(self):
+        mutations = (
+            ("  forbidden_services: []", "  forbidden_services: []\n  shadow_services: []", "business keys"),
+            ("  runtime_security: tetragon", "  runtime_security: tetragon\n  legacy_ci: github-actions", "platform keys"),
+            ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
+            ("  gitops: rancher-fleet\n  bootstrap:", "  bootstrap:", "management_plane keys"),
+            ("    migration_source: nextjs-react-node", "    migration_source: nextjs-react-node\n    package_manager: npm",
+             "business.frontend_runtime keys"),
+            ("stateful:\n  database: cloudnativepg-postgresql\n  events: strimzi-kafka-kraft\n"
+             "  jobs: rabbitmq-quorum-queues\n  cache: redis-cluster\n  search: opensearch\n"
+             "  object_storage: seaweedfs-s3", "stateful: []", "stateful must be a mapping"),
+            ("  M9-prod-ab: [M8-preprod-certification]", "", "milestone_dependencies keys"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "architecture.lock.yaml"
+            original = path.read_text()
+            for before, after, expected in mutations:
+                with self.subTest(expected=expected):
+                    self.assertIn(before, original)
+                    path.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any(expected in error for error in authority.validate(root)))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_lock_status_is_exact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
