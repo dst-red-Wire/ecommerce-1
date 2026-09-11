@@ -92,6 +92,15 @@ def derived_index_errors(index, lock):
         if fragment not in index:
             errors.append(f"derived index drift from architecture.lock.yaml: {field}")
 
+    def assignments(section, pattern, mapping):
+        parsed = re.findall(pattern, section, re.M)
+        seen = set()
+        for field, _ in parsed:
+            if field in seen:
+                errors.append(f"duplicate derived index assignment: {mapping}.{field}")
+            seen.add(field)
+        return dict(parsed)
+
     require(f"derived from version {lock['version']} of that lock", "version")
     require(f"TTL is locked at {lock['dns']['critical_ttl_seconds']} seconds", "dns.critical_ttl_seconds")
 
@@ -113,9 +122,9 @@ def derived_index_errors(index, lock):
     require("`, `".join(services), "business.services membership/order")
     frontend = lock["business"]["frontend_runtime"]
     frontend_section = index.split("## Application ownership", 1)[-1].split("\n## ", 1)[0]
-    rendered_frontend = dict(re.findall(
-        r"^- `([a-z_]+)`: `([^`]+)`\s*$", frontend_section, re.M
-    ))
+    rendered_frontend = assignments(
+        frontend_section, r"^- `([a-z_]+)`: `([^`]+)`\s*$", "business.frontend_runtime"
+    )
     for field, value in frontend.items():
         if rendered_frontend.get(field) != str(value).lower():
             errors.append(f"derived index drift from architecture.lock.yaml: business.frontend_runtime.{field}")
@@ -124,17 +133,17 @@ def derived_index_errors(index, lock):
 
     observability = lock["observability"]
     observability_section = index.split("## Observability", 1)[-1].split("\n## ", 1)[0]
-    rendered_observability = dict(re.findall(
-        r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", observability_section, re.M
-    ))
+    rendered_observability = assignments(
+        observability_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "observability"
+    )
     for field, value in observability.items():
         if rendered_observability.get(field) != value:
             errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
 
     mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
-    rendered_mlops = dict(re.findall(
-        r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M
-    ))
+    rendered_mlops = assignments(
+        mlops_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "mlops"
+    )
     for field, value in lock["mlops"].items():
         if rendered_mlops.get(field) != value:
             errors.append(f"derived index drift from architecture.lock.yaml: mlops.{field}")
@@ -173,8 +182,16 @@ def documentation_errors(text):
         if ((topology_claim and not operational_subset)
                 or re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I)) and not historical:
             errors.append("superseded service topology: " + sentence.strip())
-        dvc_retired = re.search(r"\bDVC\s+(?:(?:is|was|has been)\s+)?(?:superseded|historical|rejected|forbidden)\b", sentence, re.I)
-        if re.search(r"\bdvc\b", sentence, re.I) and not (historical or dvc_retired):
+        dvc_retired = re.search(
+            r"\bDVC\s+(?:(?:is|was|has been|remain(?:s|ed)?)\s+)?"
+            r"(?:superseded|historical|rejected|forbidden)\b", sentence, re.I
+        )
+        dvc_remediation = (
+            re.search(r"\bremove(?:s|d)?\b[^.!?;]*\bDVC\b", sentence, re.I)
+            or re.search(r"\breplace\b[^.!?;]*\bDVC\b[^.!?;]*\bwith\s+lakeFS\b", sentence, re.I)
+            or re.search(r"\bmigrat(?:e|es|ed|ing)\b[^.!?;]*\bDVC\b[^.!?;]*\bto\s+lakeFS\b", sentence, re.I)
+        )
+        if re.search(r"\bdvc\b", sentence, re.I) and not (historical or dvc_retired or dvc_remediation):
             errors.append("DVC must be explicitly historical/superseded: " + sentence.strip())
         if re.search(r"next\.?js", sentence, re.I) and re.search(
                 r"target|cible|prod|runtime|ATS\s*->|\buse\b|\buses\b|deploy|frontend|framework|built\s+with",

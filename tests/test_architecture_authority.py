@@ -43,6 +43,22 @@ class ArchitectureAuthorityTest(unittest.TestCase):
         ))
         self.assertEqual([], authority.documentation_errors("DVC has been superseded by lakeFS."))
 
+    def test_dvc_removal_and_lakefs_migration_directives(self):
+        for statement in (
+            "Remove DVC from the bootstrap.", "Migrate DVC datasets to lakeFS.",
+            "Replace DVC with lakeFS.", "Remove remaining DVC configuration.",
+            "DVC is superseded by lakeFS.", "DVC remains historical only.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+        for statement in (
+            "Use DVC for dataset versioning.", "Dataset versioner: DVC.",
+            "Deploy DVC for MLOps datasets.", "DVC is the default dataset versioner.",
+            "Migrate DVC datasets.", "Replace DVC with another versioner.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+
     def test_active_superseded_platform_defaults_are_rejected(self):
         for statement in ("GitOps CD: FluxCD.", "Progressive delivery: Flagger.", "MinIO is the object store.",
                           "Use MinIO Community Edition as the object store.",
@@ -294,6 +310,25 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             self.assertTrue(any("L2 context" in error for error in authority.validate(root)))
             router.write_text(original)
             self.assertEqual([], authority.validate(root))
+
+    def test_duplicate_derived_role_assignments_are_rejected(self):
+        mutations = (
+            ("- `runtime_nodejs`: `false`", "- `runtime_nodejs`: `false`\n- `runtime_nodejs`: `true`"),
+            ("- `runtime_nodejs`: `false`", "- `runtime_nodejs`: `false`\n- `runtime_nodejs`: `false`"),
+            ("- `dataset_versioner`: `lakefs`", "- `dataset_versioner`: `lakefs`\n- `dataset_versioner`: `mlflow`"),
+            ("- `telemetry`: `opentelemetry`", "- `telemetry`: `opentelemetry`\n- `telemetry`: `rotel`"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = index.read_text()
+            for before, after in mutations:
+                with self.subTest(mutation=after):
+                    index.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any("duplicate derived index assignment" in error
+                                        for error in authority.validate(root)))
+                    index.write_text(original)
+                    self.assertEqual([], authority.validate(root))
 
     def test_observability_role_mutations_are_rejected(self):
         mutations = (
