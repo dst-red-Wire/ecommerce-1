@@ -1,0 +1,30 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: qualify-oci}
+spec:
+  params:
+    - {name: image, type: string}
+    - {name: source-sha, type: string}
+    - {name: component, type: string}
+    - {name: runner-digest, type: string}
+    - {name: signing-authorized, type: string, default: "false"}
+  workspaces: [{name: evidence}]
+  results: [{name: qualification-proof}]
+  steps:
+    - name: sbom-scan-provenance
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      script: |
+        set -eu
+        echo '$(params.image)' | grep -E '@sha256:[0-9a-f]{64}$'
+        syft '$(params.image)' -o spdx-json=$(workspaces.evidence.path)/sbom.json
+        oras attach '$(params.image)' --artifact-type application/spdx+json $(workspaces.evidence.path)/sbom.json
+        trivy image --exit-code 1 --severity HIGH,CRITICAL '$(params.image)'
+        python3 scripts/provenance.py --sha '$(params.source-sha)' --component '$(params.component)' --image '$(params.image)' --runner '$(params.runner-digest)' > $(workspaces.evidence.path)/provenance.json
+    - name: sign-and-verify
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      script: |
+        set -eu
+        test '$(params.signing-authorized)' = true
+        cosign sign --yes '$(params.image)'
+        cosign verify '$(params.image)'
+        python3 scripts/cicd_policy.py supply-validate --component '$(params.component)' --sha '$(params.source-sha)' --image '$(params.image)' --runner '$(params.runner-digest)' --provenance $(workspaces.evidence.path)/provenance.json --scan pass --signature valid > $(results.qualification-proof.path)

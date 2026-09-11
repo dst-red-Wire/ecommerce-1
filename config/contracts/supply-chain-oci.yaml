@@ -1,0 +1,10 @@
+schema_version: 1
+owner: platform-security
+sequence: [validate-digest, syft-sbom, oras-attach, trivy-scan, provenance, authorize-signature, cosign-sign, cosign-verify, bind-proof]
+reference_pattern: 'repository@sha256:<64 lowercase hexadecimal>'
+provenance_required: [git_sha, repository, component, runner_digest, build_inputs, output_digest, tool_versions]
+fail_closed: [missing_digest, invalid_digest, blocking_scan, incomplete_provenance, invalid_signature, wrong_sha, wrong_component]
+signing:
+  tags_forbidden: true
+  keys_in_git: false
+  authorization_required: true

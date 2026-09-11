@@ -18,3 +18,4 @@ resources:
   - pipelines/runner-image.yaml
   - tasks/go-cache.yaml
   - tasks/buildkit-component.yaml
+  - tasks/qualify-oci.yaml

@@ -33,10 +33,23 @@ def build(args):
   if value.endswith(':latest') or '@sha256:' in value: raise ValueError('repository (not mutable tag or digest) required')
  if args.affected and args.component not in args.affected.split(','): raise ValueError('component is not affected')
  print(json.dumps({'candidate':f'{args.candidates}/{args.component}:{args.sha}','cache_import':f'{args.cache}/{args.component}','cache_export':args.trusted_cache=='true','deploy':False},sort_keys=True))
+def supply(args):
+ component(args.component); sha(args.sha); digest(args.image); digest(args.runner)
+ if args.scan != "pass": raise ValueError("blocking scan")
+ if args.signature != "valid": raise ValueError("invalid signature")
+ proof=json.loads(Path(args.provenance).read_text())
+ required={"git_sha","repository","component","runner_digest","build_inputs","output_digest","tool_versions"}
+ if not required <= proof.keys(): raise ValueError("incomplete provenance")
+ if proof["git_sha"]!=args.sha or proof["component"]!=args.component or proof["output_digest"]!=args.image: raise ValueError("provenance identity mismatch")
+ print(json.dumps({"qualified":True,"git_sha":args.sha,"component":args.component,"image":args.image},sort_keys=True))
+
 def main():
  p=argparse.ArgumentParser();sub=p.add_subparsers(dest='command',required=True);b=sub.add_parser('buildkit-validate')
  for n in ['component','context','sha','candidates','cache']: b.add_argument('--'+n,required=True)
  b.add_argument('--affected',default='');b.add_argument('--trusted-cache',choices=['true','false'],default='false');b.set_defaults(run=build)
+ q=sub.add_parser("supply-validate")
+ for n in ["component","sha","image","runner","provenance"]: q.add_argument("--"+n,required=True)
+ q.add_argument("--scan",choices=["pass","fail"],required=True);q.add_argument("--signature",choices=["valid","invalid"],required=True);q.set_defaults(run=supply)
  a=p.parse_args()
  try:a.run(a)
  except ValueError as e: print(f'FAIL {e}',file=sys.stderr);return 2
