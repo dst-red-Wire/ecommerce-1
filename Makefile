@@ -43,11 +43,11 @@ format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
 format: ## Format Python and frontend sources with Ruff/Oxfmt
 	@ruff format scripts tests
-	@oxfmt --write frontend/apps frontend/packages frontend/e2e
+	@gofmt -w frontend
 
 format-check: ## Check Ruff/Oxfmt formatting without mutation
 	@ruff format --check scripts tests
-	@oxfmt --check frontend/apps frontend/packages frontend/e2e
+	@test -z "$$(gofmt -l frontend)"
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
@@ -100,13 +100,13 @@ workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
 	@$(ANSIBLE_LOCAL) --tags quality_tools
 
 agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
-	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools
+	@$(ANSIBLE_LOCAL) --tags toolchain,agent_tools,context_tools
 
 context-tools: ## Reconcile token-efficient context tooling with Ansible
 	@$(ANSIBLE_LOCAL) --tags context_tools
@@ -171,8 +171,8 @@ service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 
 .PHONY: site product-check product-run product-benchmark resource-candidate
 
-site: ## Install pinned frontend dependencies and run Storefront + Admin locally
-	@$(MAKE) -C frontend site
+site: ## Run the Go Storefront locally
+	@$(MAKE) -C frontend run-storefront
 
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product

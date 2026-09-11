@@ -96,51 +96,6 @@
       "classification": "managed"
     },
     {
-      "name": "node",
-      "requires": [],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "node",
-      "version_args": [
-        "--version"
-      ],
-      "version_file": "frontend/.node-version",
-      "provision": {
-        "type": "ansible",
-        "tags": "node"
-      },
-      "classification": "managed"
-    },
-    {
-      "name": "corepack",
-      "requires": [
-        "node"
-      ],
-      "command": "corepack",
-      "version_args": [
-        "--version"
-      ],
-      "provision": {
-        "type": "ansible",
-        "tags": "node"
-      },
-      "classification": "conditional"
-    },
-    {
-      "name": "pnpm",
-      "requires": [
-        "corepack"
-      ],
-      "provider": "corepack",
-      "probe": [
-        "corepack",
-        "pnpm",
-        "--version"
-      ],
-      "classification": "conditional"
-    },
-    {
       "name": "go",
       "requires": [],
       "provision_requires": [
@@ -294,28 +249,6 @@
       "classification": "managed"
     },
     {
-      "name": "nx",
-      "requires": [
-        "node"
-      ],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "nx",
-      "version_args": [
-        "--version"
-      ],
-      "version_key": "NX_VERSION",
-      "provision": {
-        "type": "ansible",
-        "tags": "agent_tools"
-      },
-      "classification": "managed",
-      "platforms": [
-        "linux/amd64"
-      ]
-    },
-    {
       "name": "oapi-codegen",
       "requires": [],
       "provision_requires": [
@@ -330,40 +263,6 @@
       "provision": {
         "type": "ansible",
         "tags": "oapi_codegen"
-      },
-      "classification": "managed"
-    },
-    {
-      "name": "oxlint",
-      "requires": [],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "oxlint",
-      "version_args": [
-        "--version"
-      ],
-      "version_key": "OXLINT_VERSION",
-      "provision": {
-        "type": "ansible",
-        "tags": "oxlint"
-      },
-      "classification": "managed"
-    },
-    {
-      "name": "oxfmt",
-      "requires": [],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "oxfmt",
-      "version_args": [
-        "--version"
-      ],
-      "version_key": "OXFMT_VERSION",
-      "provision": {
-        "type": "ansible",
-        "tags": "oxfmt"
       },
       "classification": "managed"
     },
@@ -613,7 +512,6 @@
   ],
   "provision_owners": {
     "ansible-lint": "ansible",
-    "node": "ansible",
     "go": "ansible",
     "sqlc": "ansible",
     "yq": "ansible",
@@ -623,10 +521,7 @@
     "ast-grep": "ansible",
     "oras": "ansible",
     "bazel": "ansible",
-    "nx": "ansible",
     "oapi-codegen": "ansible",
-    "oxlint": "ansible",
-    "oxfmt": "ansible",
     "ruff": "ansible",
     "kubectl": "ansible",
     "helm": "ansible",
@@ -711,10 +606,7 @@
       "tar",
       "oasdiff",
       "oapi-codegen",
-      "go",
-      "corepack",
-      "pnpm",
-      "oxfmt"
+      "go"
     ],
     "automation": [
       "python3",
@@ -725,23 +617,13 @@
       "git",
       "ruby",
       "ruff",
-      "go",
-      "corepack",
-      "pnpm",
-      "node",
-      "oxlint",
-      "oxfmt"
+      "go"
     ],
     "test": [
       "python3",
       "ruby",
       "git",
-      "go",
-      "corepack",
-      "pnpm",
-      "node",
-      "oxlint",
-      "oxfmt"
+      "go"
     ],
     "security": [
       "python3",
@@ -779,7 +661,6 @@
       "yq",
       "rg",
       "fd",
-      "nx",
       "ast-grep"
     ],
     "delivery": [
@@ -793,7 +674,6 @@
   "command_capabilities": {
     "ansible": "ansible-core",
     "gofmt": "go",
-    "pnpm": "pnpm",
     "docker": "docker",
     "terraform": "terraform",
     "tofu": "terraform"

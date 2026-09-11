@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -27,7 +27,7 @@
     update_cache: true
     cache_valid_time: 86400
   become: true
-  tags: [toolchain, go, cgo, node]
+  tags: [toolchain, go, cgo]
 
 - name: Detect ansible-lint pipx prerequisite
   ansible.builtin.command:
@@ -53,23 +53,14 @@
     dest: "{{ local_cache }}/node-v{{ node_version }}-linux-x64.tar.xz"
     checksum: "sha256:{{ node_sha256 }}"
     mode: '0644'
-  tags: [toolchain, node, agent_tools]
+  tags: [toolchain, agent_tools]
 
 - name: Create Node version directory
   ansible.builtin.file:
     path: "{{ local_share }}/toolchains/node/{{ node_version }}"
     state: directory
     mode: '0755'
-  tags: [toolchain, node, agent_tools]
-
-- name: Extract pinned Node runtime
-  ansible.builtin.unarchive:
-    src: "{{ local_cache }}/node-v{{ node_version }}-linux-x64.tar.xz"
-    dest: "{{ local_share }}/toolchains/node/{{ node_version }}"
-    remote_src: true
-    extra_opts: [--strip-components=1]
-    creates: "{{ local_share }}/toolchains/node/{{ node_version }}/bin/node"
-  tags: [toolchain, node, agent_tools]
+  tags: [toolchain, agent_tools]
 
 - name: Link Node and Corepack commands into the user path
   ansible.builtin.file:
@@ -78,15 +69,7 @@
     state: link
     force: true
   loop: [node, npm, npx, corepack]
-  tags: [toolchain, node, agent_tools]
-
-- name: Validate pinned Node runtime
-  ansible.builtin.command:
-    argv: ["{{ local_bin }}/node", --version]
-  register: node_current
-  changed_when: false
-  failed_when: "('v' + node_version) not in node_current.stdout"
-  tags: [toolchain, node, agent_tools]
+  tags: [toolchain, agent_tools]
 
 - name: Download pinned Go archive
   ansible.builtin.get_url:
@@ -386,24 +369,6 @@
   register: nx_manifest
   tags: [toolchain, agent_tools]
 
-- name: Write fail-closed PNPM build policy for isolated Nx
-  ansible.builtin.copy:
-    dest: "{{ local_share }}/nx/pnpm-workspace.yaml"
-    mode: '0644'
-    content: |
-      packages:
-        - "."
-
-      # PNPM 11 fails closed when a dependency exposes an unreviewed build
-      # script. Nx requires its own reviewed postinstall to verify/load the
-      # platform-native binary, so approve only the exact pinned Nx release.
-      # A future Nx version must be reviewed and explicitly re-approved.
-      strictDepBuilds: true
-      allowBuilds:
-        "nx@{{ nx_version }}": true
-  register: nx_pnpm_policy
-  tags: [toolchain, agent_tools]
-
 - name: Check isolated Nx binary
   ansible.builtin.stat:
     path: "{{ local_share }}/nx/node_modules/.bin/nx"
@@ -441,13 +406,6 @@
     dest: "{{ local_bin }}/nx"
     state: link
     force: true
-  tags: [toolchain, agent_tools]
-
-- name: Install pinned frontend dependencies and accelerators
-  ansible.builtin.command:
-    argv: ["{{ local_bin }}/corepack", pnpm, install, --frozen-lockfile, --prefer-offline]
-    chdir: "{{ repo_root }}/frontend"
-  changed_when: false
   tags: [toolchain, agent_tools]
 
 - name: Define isolated Python CLI pins

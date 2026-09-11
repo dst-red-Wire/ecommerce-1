@@ -606,51 +606,45 @@ def documentation_policy() -> int:
     return 0
 
 
-def frontend(action: str, scope: str) -> int:
+def frontend(action: str, scope: str = "") -> int:
+    # Accept both `repoctl frontend storefront` and the compatibility form
+    # `repoctl frontend check storefront` used by existing Tekton tasks.
+    if not scope:
+        scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
-        return fail("frontend usage: action={check|lint|test|build} scope={all|storefront|admin}")
-    ensure_developer("node,quality_tools")
-    require("node")
-    require("corepack")
-    require("oxlint")
-    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
-    pm = package.get("packageManager", "")
-    if not pm.startswith("pnpm@"):
-        return fail(f"frontend packageManager must pin pnpm, got {pm!r}")
-    expected = pm.split("@", 1)[1]
-    actual = output(["corepack", "pnpm", "--version"], cwd=ROOT / "frontend").strip()
-    if actual != expected:
-        return fail(f"pnpm version mismatch: expected {expected}, got {actual}")
-    run(["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline"], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if api_generate("ts", check=True):
-            return 1
-
-    def pnpm(*args: str) -> None:
-        run(["corepack", "pnpm", *args], cwd=ROOT / "frontend")
-
+        return fail("frontend usage: frontend <storefront|admin|all>")
+    require("go")
+    require("gofmt")
+    targets = ["storefront", "admin"] if scope == "all" else [scope]
+    frontend_root = ROOT / "frontend"
     if action in {"check", "lint"}:
-        lint_paths = ["apps", "packages"] if scope == "all" else [f"apps/{scope}", "packages/ui", "packages/api-client"]
-        run(["oxlint", *lint_paths], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if scope == "all":
-            pnpm("run", "typecheck")
-        else:
-            pnpm("--filter", "@noma/ui", "typecheck")
-            pnpm("--filter", "@noma/api-client", "typecheck")
-            pnpm("--filter", f"@noma/{scope}", "typecheck")
+        files = sorted(str(path) for path in frontend_root.rglob("*.go"))
+        formatted = run(["gofmt", "-l", *files], capture=True)
+        if formatted.stdout.strip():
+            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        forbidden_frontend_artifacts()
+        if action == "lint":
+            run(["go", "vet", "./..."], cwd=frontend_root)
     if action in {"check", "test"}:
-        if scope == "all":
-            pnpm("run", "test")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "test")
+        env = dict(os.environ, CGO_ENABLED="1")
+        for target in targets:
+            run(["go", "test", "-race", f"./apps/{target}"], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
-        if scope == "all":
-            pnpm("run", "build")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "build")
+        for target in targets:
+            run(["go", "build", f"./apps/{target}"], cwd=frontend_root)
+    if action == "check":
+        run(["go", "vet", "./..."], cwd=frontend_root)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
+
+
+def forbidden_frontend_artifacts() -> None:
+    forbidden_names = {"package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", ".node-version", ".nvmrc", "next.config.js", "next.config.ts", "playwright.config.ts", "turbo.json", "pnpm-workspace.yaml"}
+    forbidden_suffixes = {".ts", ".tsx"}
+    paths = set(git("ls-files").splitlines()) | set(git("ls-files", "--others", "--exclude-standard").splitlines())
+    violations = sorted(path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes)
+    if violations:
+        raise RuntimeError("forbidden Node.js frontend artifacts: " + ", ".join(violations))
 
 
 def ensure_developer(tags: str) -> None:
@@ -814,7 +808,7 @@ def lint_all() -> int:
     if python_files:
         require("ruff")
         run(["ruff", "check", *python_files])
-    if (ROOT / "frontend" / "package.json").is_file():
+    if (ROOT / "frontend" / "go.mod").is_file():
         frontend("lint", "all")
     print("PASS lint checks completed")
     return 0
@@ -828,7 +822,7 @@ def test_all() -> int:
             ensure_developer("go")
             run(["go", "test", "./..."], cwd=module)
             run(["go", "vet", "./..."], cwd=module)
-    if (ROOT / "frontend" / "package.json").is_file():
+    if (ROOT / "frontend" / "go.mod").is_file():
         frontend("test", "all")
     print("PASS test checks completed")
     return 0
@@ -1837,7 +1831,7 @@ def main() -> int:
     c.add_argument("--generate", action="store_true")
     f = sub.add_parser("frontend")
     f.add_argument("action")
-    f.add_argument("scope")
+    f.add_argument("scope", nargs="?", default="")
     s = sub.add_parser("service")
     s.add_argument("service")
     a = sub.add_parser("affected")
