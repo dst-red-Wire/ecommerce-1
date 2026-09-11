@@ -1,0 +1,10 @@
+schema_version: 1
+owner: platform-ci
+registry: harbor.internal/ecommerce/ci-runner
+base_image: docker.io/library/debian@sha256:3c9c6d5c6a0df65e0f8f94b0b6f018cbb63f4e6f156f6769e4e95f5f8a2f6b74
+publication:
+  requires_authorization: true
+  immutable_reference: true
+  deploys: false
+required_tools: [go, cc, git, make, python3, ruby, templ, sqlc, oapi-codegen, protoc, trivy, syft, cosign, oras, kustomize, buildctl]
+forbidden_tools: [node, npm, pnpm, corepack, github-actions-runner, gitea-actions-runner]

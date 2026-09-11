@@ -1,0 +1,15 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata: {name: ecommerce-runner-image}
+spec:
+  params:
+    - {name: destination, type: string}
+    - {name: publish-authorized, type: string, default: "false"}
+  workspaces: [{name: source}]
+  tasks:
+    - name: build-runner
+      taskRef: {name: build-runner-image}
+      params:
+        - {name: destination, value: $(params.destination)}
+        - {name: publish-authorized, value: $(params.publish-authorized)}
+      workspaces: [{name: source, workspace: source}]

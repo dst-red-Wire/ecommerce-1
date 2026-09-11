@@ -14,3 +14,5 @@ resources:
   - pipelines/go-service.yaml
   - pipelines/platform.yaml
   - pipelines/affected.yaml
+  - tasks/build-runner-image.yaml
+  - pipelines/runner-image.yaml

@@ -1,0 +1,24 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: build-runner-image}
+spec:
+  params:
+    - {name: destination, type: string}
+    - {name: publish-authorized, type: string, default: "false"}
+  results:
+    - {name: image-digest, description: OCI digest produced by BuildKit}
+    - {name: immutable-reference, description: Harbor repository plus digest}
+  workspaces: [{name: source}]
+  steps:
+    - name: validate
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      script: |
+        python3 scripts/repoctl.py runner-validate
+    - name: build-sbom-scan
+      image: moby/buildkit@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      script: |
+        test "$(params.publish-authorized)" = true || { echo publication-not-authorized; exit 1; }
+        buildctl build --frontend dockerfile.v0 --local context=$(workspaces.source.path) --local dockerfile=$(workspaces.source.path)/platform/tekton/runner --output type=image,name=$(params.destination),push=true --metadata-file /tmp/build.json
+        python3 scripts/repoctl.py oci-digest /tmp/build.json
+        syft "$(params.destination)" -o spdx-json=/tmp/sbom.json
+        trivy image --exit-code 1 --severity HIGH,CRITICAL "$(params.destination)"
