@@ -16,6 +16,8 @@ MLOPS = dict(
     drift="evidently-tekton-batch",
 )
 
+SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
+
 EXACT_CONTRACTS = {
     "resilience_governance": {
         "version": 1, "status": "exact", "architecture_authority": AUTHORITY,
@@ -67,11 +69,28 @@ def load_yaml(path):
 
 def component_is_retired(sentence, component):
     """Return true only when retirement/negation applies to the named component."""
-    return bool(re.search(
+    direct_retirement = re.search(
         rf"(?:\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|active)\s+)?(?:{component})\b|"
-        rf"\b(?:{component})\b.{{0,35}}\b(?:is\s+not|not\s+used|forbid(?:den)?|superseded|historical|removed|rejected)\b)",
+        rf"\b(?:{component})\b\s+(?:(?:is|was|has\s+been|remain(?:s|ed)?)\s+)?(?:both\s+)?"
+        rf"(?:not\s+(?:used|selected|(?:the\s+)?(?:active|default|baseline|target))|forbid(?:den)?|superseded|"
+        rf"historical|removed|rejected|retired)\b)",
         sentence, re.I,
-    ))
+    )
+    coordinated_negation = re.search(
+        rf"\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|select|deploy)\s+)?"
+        rf"(?:(?:{SUPERSEDED_COMPONENT})\b\s*(?:,|/|and|or)\s*)*(?:{component})\b",
+        sentence, re.I,
+    )
+    coordinated_retirement = re.search(
+        rf"(?P<components>(?:{SUPERSEDED_COMPONENT})\b(?:\s*(?:,|/|and|or)\s*"
+        rf"(?:{SUPERSEDED_COMPONENT})\b)+)\s+(?:are|were|remain(?:ed)?)\s+(?:both\s+)?"
+        rf"(?:superseded|historical|removed|rejected|retired)\b",
+        sentence, re.I,
+    )
+    shared_retirement = coordinated_retirement and re.search(
+        rf"\b(?:{component})\b", coordinated_retirement.group("components"), re.I
+    )
+    return bool(direct_retirement or coordinated_negation or shared_retirement)
 
 
 def derived_index_errors(index, lock):
@@ -189,12 +208,13 @@ def documentation_errors(text):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
         if re.search(r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?", sentence) and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
-        superseded = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator)?|Loki|Splunk"
-        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object storage|logging|SIEM)"
-        component = re.search(rf"\b(?:{superseded})\b", sentence, re.I)
-        retired = component and component_is_retired(sentence, superseded)
-        if component and re.search(active, sentence, re.I) and not (historical or retired):
-            errors.append("superseded platform default must not be active: " + sentence.strip())
+        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object stor(?:age|e)|logging|SIEM)"
+        components = re.finditer(rf"\b(?:{SUPERSEDED_COMPONENT})\b", sentence, re.I)
+        if re.search(active, sentence, re.I) and not historical:
+            for component in components:
+                if not component_is_retired(sentence, re.escape(component.group())):
+                    errors.append("superseded platform default must not be active: " + sentence.strip())
+                    break
         if (re.search(r"Fluent Bit", sentence, re.I) and
                 re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|shipper)", sentence, re.I)
                 and not historical and not component_is_retired(sentence, r"Fluent Bit")):
