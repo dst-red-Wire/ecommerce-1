@@ -561,6 +561,20 @@ graph LR
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_duplicate_derived_index_private_block_labels_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = path.read_text()
+            marker = "- PROD-A `10.241.0.0/16`"
+            for duplicate in ("- PROD-A `192.0.2.0/24`", marker):
+                with self.subTest(duplicate=duplicate):
+                    path.write_text(original.replace(marker, f"{duplicate}\n{marker}", 1))
+                    self.assertIn("duplicate derived index assignment: network.private_blocks.PROD-A",
+                                  authority.validate(root))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_derived_index_service_list_is_exact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -604,6 +618,45 @@ graph LR
                           authority.validate(root))
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
+
+    def test_duplicate_prose_machine_wave_declarations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/DEPLOYMENT_DAG.md"
+            original = path.read_text()
+            canonical = next(line for line in original.splitlines()
+                             if line.startswith("Machine wave `50-observability` scheduled components:"))
+            for duplicate in (canonical,
+                              "Machine wave `50-observability` scheduled components: `prometheus-server`"):
+                with self.subTest(duplicate=duplicate):
+                    path.write_text(f"{original}\n{duplicate}\n")
+                    self.assertIn("DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability",
+                                  authority.validate(root))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_spire_is_scheduled_once_before_spiffe_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/DEPLOYMENT_DAG.md"
+            original = path.read_text()
+            wave20 = next(line for line in original.splitlines()
+                          if line.startswith("Machine wave `20-network-security`"))
+            wave30 = next(line for line in original.splitlines()
+                          if line.startswith("Machine wave `30-gitops-identity`"))
+            mutations = (
+                original.replace(wave30, f"{wave30}, `spire`", 1),
+                original.replace(f"{wave20}\n\nGate W3:",
+                                 f"Gate W3:", 1).replace(
+                                     "## Wave 4 — GitOps/secrets/mesh control",
+                                     f"## Wave 4 — GitOps/secrets/mesh control\n\n{wave20}", 1),
+            )
+            for mutation in mutations:
+                path.write_text(mutation)
+                self.assertIn("SPIRE must be scheduled exactly once before Gate W3 verifies SPIFFE issuance",
+                              authority.validate(root))
+                path.write_text(original)
+                self.assertEqual([], authority.validate(root))
 
     def test_l2_context_includes_v5_exact_index(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -652,6 +705,24 @@ graph LR
                     self.assertTrue(any("observability." in error for error in authority.validate(root)))
                     index.write_text(original)
                     self.assertEqual([], authority.validate(root))
+
+    def test_observability_role_mapping_is_complete_and_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = index.read_text()
+            marker = "- `telemetry`: `opentelemetry`"
+            mutations = (
+                original.replace(marker, f"{marker}\n- `retention_store`: `thanos`", 1),
+                original.replace(f"{marker}\n", "", 1),
+                original.replace(marker, f"{marker}\n{marker}", 1),
+                original.replace(marker, "- `telemetry`: `rotel`", 1),
+            )
+            for mutation in mutations:
+                index.write_text(mutation)
+                self.assertTrue(any("observability" in error for error in authority.validate(root)))
+                index.write_text(original)
+                self.assertEqual([], authority.validate(root))
 
     def test_exact_topology_status_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

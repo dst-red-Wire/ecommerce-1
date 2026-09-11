@@ -42,13 +42,14 @@ Parallel where dependencies permit:
 - Kyverno policies;
 - Pod Security labels/policies;
 - Tetragon;
-- SPIRE server/agents.
+
+Machine wave `20-network-security` scheduled components: `cilium`, `hubble`, `pod-security`, `kyverno`, `tetragon`, `spire`
 
 Gate W3: default-deny policy test, SPIFFE issuance, Cilium health and policy admission pass.
 
 ## Wave 4 — GitOps/secrets/mesh control
 
-Machine wave `30-gitops-identity` scheduled components: `rancher-fleet`, `argo-rollouts`, `spire`, `istio`
+Machine wave `30-gitops-identity` scheduled components: `rancher-fleet`, `argo-rollouts`, `istio`
 
 - Rancher Fleet agent/bundles owns desired-state reconciliation;
 - Argo Rollouts owns progressive delivery;

@@ -206,9 +206,11 @@ def derived_index_errors(index, lock, network_plan):
         errors.append("derived index drift from architecture.lock.yaml: PROD per-site control-plane/worker counts")
     require(f"{prod['data_workers_per_site']} data workers + {prod['general_workers_per_site']} general", "PROD worker roles")
     network_section = index.split("## Network", 1)[-1].split("\n## ", 1)[0]
-    rendered_blocks = dict(re.findall(
-        r"^- (PREPROD|PROD-A|PROD-B|permanent MGMT) `([^`]+)`\s*$", network_section, re.M
-    ))
+    rendered_blocks = assignments(
+        network_section,
+        r"^- (PREPROD|PROD-A|PROD-B|permanent MGMT) `([^`]+)`\s*$",
+        "network.private_blocks",
+    )
     address_domains = network_plan.get("address_domains", {})
     expected_blocks = {
         "PREPROD": address_domains.get("preprod"),
@@ -245,9 +247,11 @@ def derived_index_errors(index, lock, network_plan):
     rendered_observability = assignments(
         observability_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "observability"
     )
-    for field, value in observability.items():
-        if rendered_observability.get(field) != value:
-            errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
+    if rendered_observability != observability:
+        errors.append("derived index drift from architecture.lock.yaml: observability role assignments")
+        for field, value in observability.items():
+            if rendered_observability.get(field) != value:
+                errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
 
     mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
     rendered_mlops = assignments(
@@ -504,16 +508,36 @@ def validate(root):
         if waves.get("status") != "exact":
             errors.append("deployment-waves.yaml status must be exact")
         deployment_dag = (root / topology_contracts["deployment_dag"]).read_text()
-        for wave_id in ("30-gitops-identity", "50-observability"):
+        prose_wave_declarations = {}
+        for match in re.finditer(
+            r"^Machine wave `(?P<id>[a-z0-9-]+)` scheduled components: (?P<components>.+)$",
+            deployment_dag, re.M,
+        ):
+            prose_wave_declarations.setdefault(match.group("id"), []).append(match)
+        for wave_id in ("20-network-security", "30-gitops-identity", "50-observability"):
             matching_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == wave_id]
             machine_components = matching_waves[0].get("components", []) if len(matching_waves) == 1 else []
-            prose_match = re.search(
-                rf"^Machine wave `{re.escape(wave_id)}` scheduled components: (?P<components>.+)$",
-                deployment_dag, re.M,
-            )
+            prose_matches = prose_wave_declarations.get(wave_id, [])
+            prose_match = prose_matches[0] if len(prose_matches) == 1 else None
             prose_components = re.findall(r"`([a-z0-9-]+)`", prose_match.group("components")) if prose_match else []
-            if len(matching_waves) != 1 or prose_components != machine_components:
+            if len(matching_waves) != 1 or len(prose_matches) != 1 or prose_components != machine_components:
                 errors.append(f"DEPLOYMENT_DAG.md must exactly mirror machine wave {wave_id}")
+        spire_waves = []
+        for wave in waves.get("waves", []):
+            scheduled_components = list(wave.get("components", []))
+            scheduled_components.extend(
+                component for group in wave.get("parallel_groups", []) for component in group
+            )
+            scheduled_components.extend(wave.get("serial_after_parallel", []))
+            spire_waves.extend(wave.get("id") for component in scheduled_components if component == "spire")
+        spire_prose = [
+            match for matches in prose_wave_declarations.values() for match in matches
+            if "spire" in re.findall(r"`([a-z0-9-]+)`", match.group("components"))
+        ]
+        gate_w3_position = deployment_dag.find("Gate W3:")
+        if (len(spire_waves) != 1 or len(spire_prose) != 1 or gate_w3_position < 0
+                or spire_prose[0].start() > gate_w3_position):
+            errors.append("SPIRE must be scheduled exactly once before Gate W3 verifies SPIFFE issuance")
         deployed = []
         scheduled = []
         positions = {}

@@ -9,10 +9,10 @@ waves:
     components: [rke2-control-plane, rke2-workers]
   - id: 20-network-security
     requires: [10-rke2]
-    components: [cilium, hubble, pod-security, kyverno, tetragon]
+    components: [cilium, hubble, pod-security, kyverno, tetragon, spire]
   - id: 30-gitops-identity
     requires: [20-network-security]
-    components: [rancher-fleet, argo-rollouts, spire, istio]
+    components: [rancher-fleet, argo-rollouts, istio]
   - id: 40-secrets-registry-ci
     requires: [30-gitops-identity]
     components: [openbao, external-secrets, harbor, tekton]
