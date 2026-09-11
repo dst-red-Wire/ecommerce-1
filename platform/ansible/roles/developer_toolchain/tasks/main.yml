@@ -47,30 +47,6 @@
   when: ansible_lint_pipx_probe.rc != 0
   tags: [toolchain, ansible_lint]
 
-- name: Download pinned Node archive
-  ansible.builtin.get_url:
-    url: "https://nodejs.org/dist/v{{ node_version }}/node-v{{ node_version }}-linux-x64.tar.xz"
-    dest: "{{ local_cache }}/node-v{{ node_version }}-linux-x64.tar.xz"
-    checksum: "sha256:{{ node_sha256 }}"
-    mode: '0644'
-  tags: [toolchain, agent_tools]
-
-- name: Create Node version directory
-  ansible.builtin.file:
-    path: "{{ local_share }}/toolchains/node/{{ node_version }}"
-    state: directory
-    mode: '0755'
-  tags: [toolchain, agent_tools]
-
-- name: Link Node and Corepack commands into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/toolchains/node/{{ node_version }}/bin/{{ item }}"
-    dest: "{{ local_bin }}/{{ item }}"
-    state: link
-    force: true
-  loop: [node, npm, npx, corepack]
-  tags: [toolchain, agent_tools]
-
 - name: Download pinned Go archive
   ansible.builtin.get_url:
     url: "https://go.dev/dl/go{{ go_version }}.linux-amd64.tar.gz"
@@ -347,66 +323,6 @@
   when: oapi_codegen_current.rc != 0 or ('v' + oapi_codegen_version) not in oapi_codegen_current.stdout
   changed_when: true
   tags: [toolchain, agent_tools, oapi_codegen]
-
-- name: Create isolated Nx tool workspace
-  ansible.builtin.file:
-    path: "{{ local_share }}/nx"
-    state: directory
-    mode: '0755'
-  tags: [toolchain, agent_tools]
-
-- name: Write pinned Nx package manifest
-  ansible.builtin.copy:
-    dest: "{{ local_share }}/nx/package.json"
-    mode: '0644'
-    content: |
-      {
-        "name": "ecommerce-1-nx-tool",
-        "private": true,
-        "packageManager": "pnpm@{{ pnpm_version }}",
-        "dependencies": {"nx": "{{ nx_version }}"}
-      }
-  register: nx_manifest
-  tags: [toolchain, agent_tools]
-
-- name: Check isolated Nx binary
-  ansible.builtin.stat:
-    path: "{{ local_share }}/nx/node_modules/.bin/nx"
-  register: nx_binary
-  tags: [toolchain, agent_tools]
-
-- name: Install isolated pinned Nx dependency
-  ansible.builtin.command:
-    argv: ["{{ local_bin }}/corepack", pnpm, install, --no-frozen-lockfile]
-    chdir: "{{ local_share }}/nx"
-  when: nx_manifest.changed or nx_pnpm_policy.changed or not nx_binary.stat.exists
-  changed_when: true
-  tags: [toolchain, agent_tools]
-
-- name: Read isolated Nx version after reviewed postinstall
-  ansible.builtin.command:
-    argv: ["{{ local_share }}/nx/node_modules/.bin/nx", --version]
-    chdir: "{{ local_share }}/nx"
-  register: nx_current
-  changed_when: false
-  tags: [toolchain, agent_tools]
-
-- name: Validate exact isolated Nx local version
-  ansible.builtin.assert:
-    that:
-      - "('- Local: v' + nx_version) in nx_current.stdout_lines"
-    fail_msg: >-
-      Expected isolated Nx local version v{{ nx_version }}, but `nx --version` returned:
-      {{ nx_current.stdout | default('<no stdout>') }}
-  tags: [toolchain, agent_tools]
-
-- name: Link Nx into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/nx/node_modules/.bin/nx"
-    dest: "{{ local_bin }}/nx"
-    state: link
-    force: true
-  tags: [toolchain, agent_tools]
 
 - name: Define isolated Python CLI pins
   ansible.builtin.set_fact:

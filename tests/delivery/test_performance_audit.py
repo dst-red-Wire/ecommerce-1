@@ -42,15 +42,7 @@ class PerformanceAuditTests(unittest.TestCase):
         (root / "scripts").mkdir(parents=True)
         (root / "services" / "product").mkdir(parents=True)
         (root / "frontend").mkdir(parents=True)
-        (root / "scripts" / "repoctl.py").write_text(
-            'run(["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline"])\n',
-            encoding="utf-8",
-        )
         (root / "services" / "product" / "go.mod").write_text("module example/product\n", encoding="utf-8")
-        (root / "frontend" / "package.json").write_text(
-            json.dumps({"scripts": {"build": "turbo run build"}}), encoding="utf-8"
-        )
-        (root / "frontend" / "turbo.json").write_text('{"tasks":{"build":{"outputs":["dist/**"]}}}\n', encoding="utf-8")
         task = root / "platform" / "tekton" / "tasks" / "component-gates.yaml"
         task.parent.mkdir(parents=True)
         task.write_text(
@@ -101,12 +93,9 @@ class PerformanceAuditTests(unittest.TestCase):
             root = self.make_root(temp)
             layers = {row["layer"]: row for row in AUDIT.cache_layers(root)}
         self.assertTrue(layers["L1-evidence"]["enabled"])
-        self.assertTrue(layers["L2-pnpm-store"]["enabled"])
-        self.assertTrue(layers["L3-turborepo"]["enabled"])
         self.assertTrue(layers["L3-go"]["enabled"])
         self.assertTrue(layers["L3-go"]["pipeline_workspace_shared"])
         self.assertFalse(layers["L4-buildkit"]["enabled"])
-        self.assertIn("cannot authorize PASS", layers["L3-turborepo"]["authorization"])
 
     def test_audit_is_fail_closed_about_content_cache_authority(self):
         with tempfile.TemporaryDirectory() as temp:

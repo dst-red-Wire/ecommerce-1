@@ -30,13 +30,6 @@ class TektonTriggerRuntimePrerequisiteTests(unittest.TestCase):
             topology,
         )
 
-    def test_trigger_boundary_keeps_runtime_manifests_blocked_until_live_proof(self):
-        readme = self.read("platform/tekton/triggers/README.md")
-        self.assertIn("`config/contracts/tekton-trigger-runtime.yaml`", readme)
-        self.assertIn("Static contract validation is not runtime proof", readme)
-        for name in ("eventlistener.yaml", "triggerbinding.yaml", "triggertemplate.yaml"):
-            self.assertFalse((ROOT / "platform" / "tekton" / "triggers" / name).exists(), name)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ toolchain reconciliation belongs to platform/ansible/developer.yml.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import json
 import os
@@ -89,10 +90,16 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    effective_env = dict(os.environ if env is None else env)
+    # A selected pinned Go binary must infer its matching distribution root;
+    # workstation managers frequently export a stale GOROOT/GOBIN globally.
+    if cmd and Path(cmd[0]).name in {"go", "gofmt"}:
+        effective_env.pop("GOROOT", None)
+        effective_env.pop("GOBIN", None)
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
-        env=env,
+        env=effective_env,
         text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
@@ -216,15 +223,6 @@ def developer_state_ready(tags: str) -> bool:
     """Fast-path: avoid Ansible startup when requested local state is already exact."""
     wanted = {tag.strip() for tag in tags.split(",") if tag.strip()}
     pins = pinned_versions()
-    if "node" in wanted:
-        node = shutil.which("node")
-        corepack = shutil.which("corepack")
-        if not node or not corepack:
-            return False
-        expected_node = (ROOT / "frontend" / ".node-version").read_text(encoding="utf-8").strip()
-        got = run([node, "--version"], check=False, capture=True)
-        if got.returncode or got.stdout.strip() != f"v{expected_node}":
-            return False
     if "go" in wanted or "cgo" in wanted:
         go = shutil.which("go")
         gofmt = shutil.which("gofmt")
@@ -370,7 +368,7 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     rewrite_refs(service_doc)
 
     # Generation must now be self-contained. Keep internal refs intact so named
-    # service schemas retain stable generated Go/TypeScript type names.
+    # service schemas retain stable generated Go type names.
     leftovers: list[str] = []
 
     def collect_external(node):
@@ -390,9 +388,9 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     return service_doc
 
 
-def api_generate(target: str = "all", service: str = "", check: bool = False) -> int:
-    if target not in {"all", "go", "ts"}:
-        return fail("api-generate target must be all, go, or ts")
+def api_generate(target: str = "go", service: str = "", check: bool = False) -> int:
+    if target != "go":
+        return fail("api-generate target must be go")
     registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
     contracts = registry.get("contracts", {})
     common_entry = registry.get("common_components")
@@ -433,37 +431,6 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
                     # module/runtime context instead of warning from repository root.
                     run(["oapi-codegen", "--config", str(config_path), str(bundled_spec)], cwd=module)
                     run(["gofmt", "-w", str(generated)], cwd=module)
-            if target in {"all", "ts"}:
-                require("corepack")
-                require("oxfmt")
-                out_dir = ROOT / "frontend" / "packages" / "api-client" / "src" / "generated"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                generated = out_dir / f"{name}.ts"
-                p = run(
-                    ["corepack", "pnpm", "--dir", "frontend", "exec", "openapi-typescript", str(bundled_spec)],
-                    capture=True,
-                )
-                candidate = Path(temp_dir) / f"{name}.generated.ts"
-                candidate.write_text(p.stdout, encoding="utf-8")
-                run(
-                    [
-                        "oxfmt",
-                        "--config",
-                        str(ROOT / "frontend" / ".oxfmtrc.json"),
-                        "--write",
-                        str(candidate),
-                    ],
-                    cwd=ROOT / "frontend",
-                )
-                canonical = candidate.read_text(encoding="utf-8")
-                if check:
-                    if not generated.is_file():
-                        return fail(f"generated TypeScript API client is missing: {generated.relative_to(ROOT)}", 1)
-                    current = generated.read_text(encoding="utf-8")
-                    if current != canonical:
-                        return fail(f"generated TypeScript API client is stale: {generated.relative_to(ROOT)}", 1)
-                else:
-                    generated.write_text(canonical, encoding="utf-8")
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -535,7 +502,7 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
     if generate or contract_changed:
-        api_generate("all")
+        api_generate("go")
     print("PASS OpenAPI and cross-registry contract checks completed")
     return 0
 
@@ -580,7 +547,9 @@ def automation_policy() -> int:
     build = ROOT / "BUILD.bazel"
     if build.is_file() and "sh_binary(" in build.read_text(encoding="utf-8"):
         return fail("automation policy: Bazel sh_binary is forbidden; use py_binary/native targets", 1)
-    print("PASS automation policy: zero repository *.sh files and no Tekton shell wrappers")
+    if node_policy():
+        return 1
+    print("PASS automation policy: zero repository *.sh files, no Tekton shell wrappers, and no active Node tooling")
     return 0
 
 
@@ -622,7 +591,8 @@ def frontend(action: str, scope: str = "") -> int:
         formatted = run(["gofmt", "-l", *files], capture=True)
         if formatted.stdout.strip():
             return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
-        forbidden_frontend_artifacts()
+        if node_policy():
+            return 1
         if action == "lint":
             run(["go", "vet", "./..."], cwd=frontend_root)
     if action in {"check", "test"}:
@@ -639,13 +609,87 @@ def frontend(action: str, scope: str = "") -> int:
     return 0
 
 
-def forbidden_frontend_artifacts() -> None:
-    forbidden_names = {"package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", ".node-version", ".nvmrc", "next.config.js", "next.config.ts", "playwright.config.ts", "turbo.json", "pnpm-workspace.yaml"}
+def node_policy(root: Path = ROOT) -> int:
+    """Reject Node-family files and executable automation in the effective worktree."""
+    forbidden_names = {
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "yarn.lock",
+        "turbo.json",
+        "nx.json",
+        ".node-version",
+        ".nvmrc",
+    }
+    forbidden_globs = ("next.config.*", "playwright.config.*", "vitest.config.*")
     forbidden_suffixes = {".ts", ".tsx"}
-    paths = set(git("ls-files").splitlines()) | set(git("ls-files", "--others", "--exclude-standard").splitlines())
-    violations = sorted(path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes)
+    forbidden_dirs = {".next", "node_modules"}
+    candidates = set(output(["git", "ls-files", "--cached", "--others"], cwd=root).splitlines())
+    violations: list[str] = []
+    for relative in sorted(candidates):
+        path = root / relative
+        if not path.exists():
+            continue
+        name = Path(relative).name
+        if (
+            name in forbidden_names
+            or Path(relative).suffix in forbidden_suffixes
+            or set(Path(relative).parts) & forbidden_dirs
+            or any(Path(relative).match(pattern) for pattern in forbidden_globs)
+        ):
+            violations.append(relative)
+
+    banned = {"node", "npm", "npx", "pnpm", "corepack", "nx", "turbo", "next", "vitest", "playwright"}
+    for relative in sorted(candidates):
+        path = root / relative
+        if not path.is_file() or relative.startswith(("tests/", "docs/")):
+            continue
+        if relative == "Makefile":
+            for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                target = re.match(r"^([A-Za-z0-9_.-]+)\s*:", line)
+                words = set(re.findall(r"[A-Za-z][A-Za-z0-9-]*", line.lstrip("\t")))
+                if (target and target.group(1) in banned) or (line.startswith("\t") and words & banned):
+                    violations.append(f"{relative}:{number}: active command {sorted(words & banned)}")
+        elif relative.startswith("scripts/") and path.suffix == ".py":
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+            for call in (item for item in ast.walk(tree) if isinstance(item, ast.Call)):
+                function = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
+                if function not in {"run", "output", "require", "Popen"}:
+                    continue
+                literals = {
+                    value.value
+                    for value in ast.walk(call)
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                }
+                words = (
+                    set().union(*(set(re.findall(r"[A-Za-z][A-Za-z0-9-]*", value)) for value in literals))
+                    if literals
+                    else set()
+                )
+                if words & banned:
+                    violations.append(f"{relative}:{call.lineno}: active command {sorted(words & banned)}")
+        elif relative.startswith(("platform/ansible/", "platform/tekton/")) and path.suffix in {".yml", ".yaml"}:
+            for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if line.lstrip().startswith("#") or "forbidden" in line.lower():
+                    continue
+                words = set(re.findall(r"[A-Za-z][A-Za-z0-9-]*", line))
+                if words & banned:
+                    violations.append(f"{relative}:{number}: active automation {sorted(words & banned)}")
+    capability = root / "config/toolchain/capabilities.json"
+    if capability.is_file():
+        data = json.loads(capability.read_text(encoding="utf-8"))
+        for item in data.get("capabilities", []):
+            values = {str(item.get("name", "")), str(item.get("command", "")), str(item.get("provider", ""))}
+            if values & banned:
+                violations.append(f"config/toolchain/capabilities.json: active capability {sorted(values & banned)}")
     if violations:
-        raise RuntimeError("forbidden Node.js frontend artifacts: " + ", ".join(violations))
+        print("FAIL global Node.js prohibition: active artifacts or automation found", file=sys.stderr)
+        for violation in sorted(set(violations)):
+            print(f"  {violation}", file=sys.stderr)
+        return 1
+    print("PASS global Node.js prohibition: worktree and automation are native-only")
+    return 0
 
 
 def ensure_developer(tags: str) -> None:
@@ -678,7 +722,7 @@ def service_check(service: str) -> int:
     module = ROOT / "services" / service
     if not (module / "go.mod").is_file():
         return fail(f"service module does not exist: services/{service}/go.mod")
-    ensure_developer("go,cgo,sqlc,docker")
+    ensure_developer("go,cgo,sqlc")
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
     env["CGO_ENABLED"] = "1"
@@ -703,11 +747,15 @@ def service_check(service: str) -> int:
             return fail(f"gofmt required for {service}", 1)
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        run(
-            ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
-            cwd=module,
-            env=env,
-        )
+        docker = shutil.which("docker")
+        if docker and run([docker, "info"], check=False, capture=True).returncode == 0:
+            run(
+                ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
+                cwd=module,
+                env=env,
+            )
+        else:
+            print("SKIP environnemental — aucun moteur de conteneurs utilisable")
     run(["go", "vet", "./..."], cwd=module, env=env)
     run(["go", "build", "./..."], cwd=module, env=env)
     print(f"PASS {service} service checks completed")
@@ -735,14 +783,15 @@ def security() -> int:
 
 
 def terraform_check() -> int:
-    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    terraform_root = ROOT / "platform" / "terraform"
+    tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-    tool = shutil.which("tofu") or shutil.which("terraform")
+    tool = shutil.which("terraform")
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
-    run([tool, "fmt", "-check", "-recursive", "-diff"])
+        return fail("Terraform sources exist but the canonical terraform executable is not installed")
+    run([tool, "fmt", "-check", "-recursive", "-diff"], cwd=terraform_root)
     for directory in sorted({p.parent for p in tf_files}):
         print(f"CHECK terraform: {directory.relative_to(ROOT)}")
         if "modules" in directory.parts and "platform" in directory.parts:
@@ -1594,7 +1643,6 @@ def doctor() -> int:
         "docker",
         "bazel",
         "bazelisk",
-        "nx",
         "oasdiff",
         "oapi-codegen",
         "oxlint",
@@ -1850,13 +1898,9 @@ def main() -> int:
     ctx = sub.add_parser("context")
     ctx.add_argument("task", nargs="?", default="")
     gen = sub.add_parser("api-generate")
-    gen.add_argument("--target", default="all")
+    gen.add_argument("--target", default="go", choices=["go"])
     gen.add_argument("--service", default="")
     gen.add_argument("--check", action="store_true")
-    mock = sub.add_parser("api-mock")
-    mock.add_argument("--service", default="product")
-    mock.add_argument("--port", type=int, default=4010)
-    nx = sub.add_parser("nx-graph")
     sg = sub.add_parser("service-new")
     sg.add_argument("--service", required=True)
     sg.add_argument("--dry-run", action="store_true")
@@ -1940,47 +1984,9 @@ def main() -> int:
         if args.cmd == "failure-context":
             return failure_context(args.gate, args.component)
         if args.cmd == "context":
-            return run(
-                [sys.executable, "scripts/context-pack.py", "--task", args.task], check=False
-            ).returncode
+            return run([sys.executable, "scripts/context-pack.py", "--task", args.task], check=False).returncode
         if args.cmd == "api-generate":
             return api_generate(args.target, args.service, args.check)
-        if args.cmd == "api-mock":
-            spec = (
-                ruby_yaml("config/contracts/public-api-contracts.yaml")
-                .get("contracts", {})
-                .get(args.service, {})
-                .get("path")
-            )
-            if not spec:
-                return fail(f"api-mock service not registered: {args.service}")
-            env = os.environ.copy()
-            env["SCARF_ANALYTICS"] = "false"
-            return run(
-                [
-                    "corepack",
-                    "pnpm",
-                    "exec",
-                    "prism",
-                    "mock",
-                    f"../{spec}",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(args.port),
-                    "--dynamic",
-                ],
-                cwd=ROOT / "frontend",
-                env=env,
-            ).returncode
-        if args.cmd == "nx-graph":
-            materialize = run([sys.executable, "scripts/nx-graph.py"], check=False)
-            if materialize.returncode:
-                return materialize.returncode
-            out = ROOT / ".context/nx-workspace"
-            return run(
-                ["nx", "graph", "--file", str(ROOT / ".context/nx-graph.html"), "--focus", "frontend-admin"], cwd=out
-            ).returncode
         if args.cmd == "service-new":
             cmd = [sys.executable, "scripts/servicegen.py", "--service", args.service] + (
                 ["--dry-run"] if args.dry_run else []

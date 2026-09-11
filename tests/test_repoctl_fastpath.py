@@ -21,7 +21,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             with self.assertRaisesRegex(MOD.MissingRunnerPrerequisite, "runner prerequisite missing: ruby"):
                 MOD.require("ruby")
 
-    def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
+    def test_terraform_check_uses_canonical_terraform_when_both_executables_exist(self):
         calls = []
 
         def fake_which(command):
@@ -35,7 +35,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             self.assertEqual(0, MOD.terraform_check())
 
         self.assertTrue(calls)
-        self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+        self.assertTrue(all(call[0] == "/opt/bin/terraform" for call in calls))
 
     def test_exact_state_skips_ansible_startup(self):
         with (

@@ -193,13 +193,6 @@ def _file_contains(path: Path, needles: tuple[str, ...]) -> bool:
 
 
 def cache_layers(root: Path) -> list[dict[str, Any]]:
-    controller_candidates = [root / "scripts" / "repoctl.py", root / "scripts" / "repoctl_core.py"]
-    pnpm_prefer_offline = any(
-        _file_contains(path, ("pnpm", "--prefer-offline")) for path in controller_candidates if path.is_file()
-    )
-    frontend_package = root / "frontend" / "package.json"
-    turbo_config = root / "frontend" / "turbo.json"
-    turbo_enabled = _file_contains(frontend_package, ("turbo run",)) and turbo_config.is_file()
     go_modules = list((root / "services").glob("*/go.mod")) if (root / "services").is_dir() else []
     component_task = root / "platform" / "tekton" / "tasks" / "component-gates.yaml"
     go_pipeline_cache = (
@@ -223,7 +216,7 @@ def cache_layers(root: Path) -> list[dict[str, Any]]:
         ).splitlines()
         candidates = [root / relative for relative in tracked if relative]
     except (OSError, subprocess.CalledProcessError):
-        ignored_parts = {"node_modules", ".next", ".turbo", ".terraform", "vendor", ".git", ".context"}
+        ignored_parts = {".terraform", "vendor", ".git", ".context"}
         for base in (root / "platform", root / "services", root / "frontend"):
             if base.exists():
                 candidates.extend(
@@ -256,22 +249,6 @@ def cache_layers(root: Path) -> list[dict[str, Any]]:
             "scope": "gate execution avoidance",
             "cross_machine_capable": True,
             "authorization": "authenticated OCI evidence when configured",
-        },
-        {
-            "layer": "L2-pnpm-store",
-            "mechanism": "pnpm prefer-offline store reuse",
-            "enabled": pnpm_prefer_offline,
-            "scope": "dependency fetch/install",
-            "cross_machine_capable": False,
-            "authorization": "performance-only; cannot authorize PASS",
-        },
-        {
-            "layer": "L3-turborepo",
-            "mechanism": "content-addressed frontend task cache",
-            "enabled": turbo_enabled,
-            "scope": "frontend typecheck/test/build",
-            "cross_machine_capable": False,
-            "authorization": "performance-only; cannot authorize PASS",
         },
         {
             "layer": "L3-go",

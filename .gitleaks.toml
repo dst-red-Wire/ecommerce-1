@@ -12,3 +12,7 @@ paths = [
   '''(^|/)test-results/''',
   '''(^|/)tests/fixtures/''',
 ]
+commits = [
+  # Historical false positive: Ruby compares the declared key set to a constant list.
+  "1c32f8abad270261778475427b1bc41086dd29a7",
+]

@@ -57,8 +57,7 @@ module AffectedComponents
         components << "service:#{service}"
       when %r{\Afrontend/apps/(storefront|admin)/}
         components << "frontend:#{Regexp.last_match(1)}"
-      when %r{\Afrontend/packages/},
-           %r{\Afrontend/(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|eslint\.config\.mjs|vitest\.setup\.ts|playwright\.config\.ts|turbo\.json)\z}
+      when %r{\Afrontend/packages/}
         FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }
       when %r{\Afrontend/e2e/}
         FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }

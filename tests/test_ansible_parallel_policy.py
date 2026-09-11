@@ -57,23 +57,6 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
             self.assertIn("Run focused Ansible lint before expensive verification", text)
         self.assertTrue(True if not agents else "Parallelize only independent work" in agents)
 
-    def test_nx_version_validation_matches_real_multiline_cli_output(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        self.assertNotIn("nx_current.stdout | trim != nx_version", tasks)
-        self.assertIn("('- Local: v' + nx_version) in nx_current.stdout_lines", tasks)
-
-        observed_stdout = "Nx Version:\n- Local: v23.2.0\n- Global: Not found"
-        observed_lines = [line.strip() for line in observed_stdout.splitlines()]
-        self.assertIn("- Local: v23.2.0", observed_lines)
-        self.assertNotEqual(observed_stdout.strip(), "23.2.0")
-
-    def test_scarf_build_script_is_explicitly_denied(self):
-        workspace = (ROOT / "frontend/pnpm-workspace.yaml").read_text()
-        self.assertIn("allowBuilds:", workspace)
-        self.assertIn("unrs-resolver: true", workspace)
-        self.assertIn("'@scarf/scarf': false", workspace)
-        self.assertNotIn("dangerouslyAllowAllBuilds", workspace)
-
 
 if __name__ == "__main__":
     unittest.main()

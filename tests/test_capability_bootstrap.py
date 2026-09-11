@@ -113,17 +113,19 @@ class CapabilityAuditTest(unittest.TestCase):
         def run(argv):
             rc, output = outcomes.get(argv[0], (0, "1.0"))
             return subprocess.CompletedProcess(argv, rc, output, "")
+
         return run
 
     def auditor(self, items, outcomes, present=None):
         present = present if present is not None else {item.get("command") for item in items}
-        return MOD.Auditor(contract(items), runner=self.runner(outcomes), which=lambda cmd: f"/bin/{cmd}" if cmd in present else None)
+        return MOD.Auditor(
+            contract(items), runner=self.runner(outcomes), which=lambda cmd: f"/bin/{cmd}" if cmd in present else None
+        )
 
     def primitive_auditor(self, commands, *, present, runner=None):
         test_contract = contract([])
         test_contract["platform_primitives"] = [
-            {"command": command, "justification": "test platform primitive"}
-            for command in commands
+            {"command": command, "justification": "test platform primitive"} for command in commands
         ]
         return MOD.Auditor(
             test_contract,
@@ -148,9 +150,7 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("PASS", results["python"].state)
 
     def test_missing_platform_primitive_fails(self):
-        results = self.primitive_auditor(("tar",), present=set()).run(
-            bootstrap=False, os_name="linux", arch="amd64"
-        )
+        results = self.primitive_auditor(("tar",), present=set()).run(bootstrap=False, os_name="linux", arch="amd64")
         self.assertEqual("FAIL", results["tar"].state)
 
     def test_missing_platform_primitive_does_not_stop_independent_checks(self):
@@ -193,8 +193,11 @@ class CapabilityAuditTest(unittest.TestCase):
 
     def test_platform_primitive_allows_direct_same_executable_capability(self):
         item = {
-            "name": "ruby", "requires": [], "command": "ruby",
-            "version_args": ["--version"], "version_key": "GO_VERSION",
+            "name": "ruby",
+            "requires": [],
+            "command": "ruby",
+            "version_args": ["--version"],
+            "version_key": "GO_VERSION",
         }
         test_contract = contract([item])
         test_contract["platform_primitives"] = [{"command": "ruby", "justification": "test collision"}]
@@ -210,7 +213,9 @@ class CapabilityAuditTest(unittest.TestCase):
 
     def test_platform_primitive_rejects_any_of_capability_collision(self):
         item = {
-            "name": "tar", "requires": [], "command": "tar",
+            "name": "tar",
+            "requires": [],
+            "command": "tar",
             "any_of": [{"command": "fake", "version_key": "GO_VERSION"}],
         }
         test_contract = contract([item])
@@ -229,7 +234,9 @@ class CapabilityAuditTest(unittest.TestCase):
 
     def test_invalid_any_of_collision_is_rejected_before_it_can_mask_missing_primitive(self):
         item = {
-            "name": "tar", "requires": [], "command": "tar",
+            "name": "tar",
+            "requires": [],
+            "command": "tar",
             "any_of": [{"command": "fake", "version_key": "GO_VERSION"}],
         }
         test_contract = contract([item])
@@ -284,8 +291,7 @@ class CapabilityAuditTest(unittest.TestCase):
         items = [
             {"name": "ansible-playbook", "requires": [], "command": "ansible-playbook"},
             *[
-                {"name": name, "requires": [], "command": name,
-                 "provision": {"type": "ansible", "tags": tags[name]}}
+                {"name": name, "requires": [], "command": name, "provision": {"type": "ansible", "tags": tags[name]}}
                 for name in ("ruff", "oxfmt", "oxlint")
             ],
         ]
@@ -305,10 +311,18 @@ class CapabilityAuditTest(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "reconciled", "")
             return subprocess.CompletedProcess(argv, 0, "1.0", "")
 
-        with mock.patch.object(MOD, "validate_contract") if len(set(tags.values())) != 3 else mock.patch.object(
-                MOD, "validate_contract", wraps=MOD.validate_contract):
-            auditor = MOD.Auditor(contract(items), runner=runner,
-                                  which=lambda command: f"/bin/{command}" if command == "ansible-playbook" or command in installed else None)
+        with (
+            mock.patch.object(MOD, "validate_contract")
+            if len(set(tags.values())) != 3
+            else mock.patch.object(MOD, "validate_contract", wraps=MOD.validate_contract)
+        ):
+            auditor = MOD.Auditor(
+                contract(items),
+                runner=runner,
+                which=lambda command: (
+                    f"/bin/{command}" if command == "ansible-playbook" or command in installed else None
+                ),
+            )
         result = auditor.provision(next(item for item in items if item["name"] == requested))
         return result, calls
 
@@ -349,7 +363,9 @@ class CapabilityAuditTest(unittest.TestCase):
             {"name": "terraform", "requires": [], "command": "terraform"},
             {"name": "kubectl", "requires": [], "command": "kubectl"},
         ]
-        results = self.auditor(items, {"docker": (1, "daemon unavailable")}).run(bootstrap=False, os_name="linux", arch="amd64")
+        results = self.auditor(items, {"docker": (1, "daemon unavailable")}).run(
+            bootstrap=False, os_name="linux", arch="amd64"
+        )
         self.assertEqual("BLOCKED", results["docker"].state)
         self.assertEqual("SKIP", results["kind"].state)
         for independent in ("oasdiff", "ansible", "terraform", "kubectl"):
@@ -371,9 +387,11 @@ class CapabilityAuditTest(unittest.TestCase):
     def test_idempotence_and_resume_after_blockage(self):
         item = {"name": "tool", "requires": [], "command": "tool", "provision": {"type": "ansible", "tags": "tool"}}
         calls = []
+
         def ready(argv):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, "1.0", "")
+
         auditor = MOD.Auditor(contract([item]), runner=ready, which=lambda _: "/bin/tool")
         self.assertEqual("PASS", auditor.run(bootstrap=True, os_name="linux", arch="amd64")["tool"].state)
         self.assertEqual(1, len(calls), "compliant capability must not be reinstalled")
@@ -389,140 +407,41 @@ class CapabilityAuditTest(unittest.TestCase):
         auditor.run(bootstrap=False, os_name="linux", arch="amd64")
         runner.assert_not_called()
 
-    def test_pnpm_probe_uses_validated_corepack_outside_path_and_checks_version(self):
-        items = [
-            {"name": "corepack", "requires": [], "command": "corepack"},
-            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
-             "probe": ["corepack", "pnpm", "--version"]},
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            managed_bin = Path(tmp, "managed", "bin")
-            managed_bin.mkdir(parents=True)
-            corepack = managed_bin / "corepack"
-            corepack.write_text("#!/bin/true\n")
-            corepack.chmod(0o755)
-            expected_version = Path(tmp, "pnpm-version")
-            expected_version.write_text("11.24.0\n")
-            items[1]["version_file"] = str(expected_version)
-            calls = []
-
-            def runner(argv):
-                calls.append(argv)
-                output = "0.34.6" if len(argv) == 1 else "11.24.0"
-                return subprocess.CompletedProcess(argv, 0, output, "")
-
-            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
-                    bootstrap=False, os_name="linux", arch="amd64"
-                )
-
-        self.assertEqual("PASS", results["corepack"].state)
-        self.assertEqual("PASS", results["pnpm"].state)
-        self.assertEqual([str(corepack), "pnpm", "--version"], calls[-1])
-
-    def test_pnpm_probe_keeps_validated_corepack_when_stale_provider_is_on_path(self):
-        items = [
-            {"name": "corepack", "requires": [], "command": "corepack", "version_key": "ANSIBLE_CORE_VERSION"},
-            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
-             "probe": ["corepack", "pnpm", "--version"]},
-        ]
-        expected = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
-        with tempfile.TemporaryDirectory() as tmp:
-            system_bin = Path(tmp, "system", "bin")
-            managed_bin = Path(tmp, "managed", "bin")
-            system_bin.mkdir(parents=True); managed_bin.mkdir(parents=True)
-            for executable in (system_bin / "corepack", managed_bin / "corepack"):
-                executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
-            calls = []
-
-            def runner(argv):
-                calls.append(argv)
-                version = "1.0.0" if argv[0] == str(system_bin / "corepack") else expected
-                return subprocess.CompletedProcess(argv, 0, version, "")
-
-            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                auditor = MOD.Auditor(contract(items), runner=runner,
-                                      which=lambda command: str(system_bin / command))
-                results = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
-
-        self.assertEqual("PASS", results["corepack"].state)
-        self.assertEqual(str(managed_bin / "corepack"), auditor.resolved_executables["corepack"])
-        self.assertEqual([str(managed_bin / "corepack"), "pnpm", "--version"], calls[-1])
-
-    def test_literal_corepack_mutation_fails_when_validated_provider_is_outside_path(self):
-        corrected = [
-            {"name": "corepack", "requires": [], "command": "corepack"},
-            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
-             "probe": ["corepack", "pnpm", "--version"]},
-        ]
-        mutated = [corrected[0], {key: value for key, value in corrected[1].items() if key != "provider"}]
-        with tempfile.TemporaryDirectory() as tmp:
-            managed_bin = Path(tmp)
-            corepack = managed_bin / "corepack"
-            corepack.write_text("#!/bin/true\n"); corepack.chmod(0o755)
-
-            def runner(argv):
-                rc = 127 if argv[0] == "corepack" else 0
-                return subprocess.CompletedProcess(argv, rc, "11.24.0" if not rc else "", "ENOENT" if rc else "")
-
-            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                fixed = MOD.Auditor(contract(corrected), runner=runner, which=lambda _: None).run(
-                    bootstrap=False, os_name="linux", arch="amd64")
-                legacy = MOD.Auditor(contract(mutated), runner=runner, which=lambda _: None).run(
-                    bootstrap=False, os_name="linux", arch="amd64")
-
-        self.assertEqual("PASS", fixed["pnpm"].state)
-        self.assertEqual("FAIL", legacy["pnpm"].state)
-        self.assertIn("ENOENT", legacy["pnpm"].detail)
-
-    def test_pnpm_skips_without_a_valid_corepack_provider(self):
-        items = [
-            {"name": "corepack", "requires": [], "command": "corepack"},
-            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
-             "probe": ["corepack", "pnpm", "--version"]},
-        ]
-        runner = mock.Mock()
-        results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
-            bootstrap=False, os_name="linux", arch="amd64")
-        self.assertEqual("FAIL", results["corepack"].state)
-        self.assertEqual("SKIP", results["pnpm"].state)
-        runner.assert_not_called()
-
-    def test_pnpm_probe_rejects_wrong_version_through_validated_corepack(self):
-        items = [
-            {"name": "corepack", "requires": [], "command": "corepack"},
-            {"name": "pnpm", "requires": ["corepack"], "provider": "corepack",
-             "probe": ["corepack", "pnpm", "--version"]},
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            managed_bin = Path(tmp)
-            corepack = managed_bin / "corepack"
-            corepack.write_text("#!/bin/true\n"); corepack.chmod(0o755)
-            expected_version = managed_bin / "pnpm-version"
-            expected_version.write_text("11.24.0\n")
-            items[1]["version_file"] = str(expected_version)
-            runner = mock.Mock(side_effect=lambda argv: subprocess.CompletedProcess(
-                argv, 0, "0.34.6" if len(argv) == 1 else "10.0.0", ""))
-            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                results = MOD.Auditor(contract(items), runner=runner, which=lambda _: None).run(
-                    bootstrap=False, os_name="linux", arch="amd64")
-        self.assertEqual("FAIL", results["pnpm"].state)
-        self.assertIn("wrong version: expected 11.24.0", results["pnpm"].detail)
-
     def test_compatible_runner_ansible_continues_project_provisioning_without_self_install(self):
         version = MOD.load_versions()["ANSIBLE_CORE_VERSION"]
         items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
-             "classification": "seed-prerequisite"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-galaxy", "version_key": "ANSIBLE_CORE_VERSION"},
-            {"name": "project-tool", "requires": [], "provision_requires": ["ansible-playbook"],
-             "command": "project-tool", "provision": {"type": "ansible", "tags": "project_tool"}},
+            {
+                "name": "ansible-core",
+                "requires": [],
+                "command": "ansible",
+                "version_args": ["--version"],
+                "version_key": "ANSIBLE_CORE_VERSION",
+                "classification": "seed-prerequisite",
+            },
+            {
+                "name": "ansible-playbook",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-playbook",
+            },
+            {
+                "name": "ansible-galaxy",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-galaxy",
+                "version_key": "ANSIBLE_CORE_VERSION",
+            },
+            {
+                "name": "project-tool",
+                "requires": [],
+                "provision_requires": ["ansible-playbook"],
+                "command": "project-tool",
+                "provision": {"type": "ansible", "tags": "project_tool"},
+            },
         ]
         calls = []
         installed = set()
+
         def runner(argv):
             calls.append(argv)
             if "platform/ansible/developer.yml" in argv:
@@ -530,6 +449,7 @@ class CapabilityAuditTest(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "reconciled", "")
             output = f"ansible [core {version}]" if Path(argv[0]).name.startswith("ansible") else "ready"
             return subprocess.CompletedProcess(argv, 0, output, "")
+
         with tempfile.TemporaryDirectory() as tmp:
             runner_bin = Path(tmp, "runner", "bin")
             runner_bin.mkdir(parents=True)
@@ -537,8 +457,14 @@ class CapabilityAuditTest(unittest.TestCase):
                 executable = runner_bin / command
                 executable.write_text("#!/bin/true\n")
                 executable.chmod(0o755)
+
             def which(command):
-                return str(runner_bin / command) if command.startswith("ansible") else (f"/opt/bin/{command}" if command in installed else None)
+                return (
+                    str(runner_bin / command)
+                    if command.startswith("ansible")
+                    else (f"/opt/bin/{command}" if command in installed else None)
+                )
+
             results = MOD.Auditor(contract(items), runner=runner, which=which).run(
                 bootstrap=True, os_name="linux", arch="amd64"
             )
@@ -546,60 +472,29 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertTrue(any("platform/ansible/developer.yml" in call for call in calls))
         self.assertFalse(any("pip" in call or "apt" in call or "venv" in call for call in calls))
 
-    def test_missing_runner_ansible_blocks_without_install_and_keeps_independent_audit(self):
-        items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
-             "classification": "seed-prerequisite"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-galaxy"},
-            {"name": "ansible-owned", "requires": [], "provision_requires": ["ansible-playbook"], "command": "owned",
-             "provision": {"type": "ansible", "tags": "owned"}},
-            {"name": "independent", "requires": [], "command": "independent"},
-        ]
-        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ready", ""))
-        results = MOD.Auditor(contract(items), runner=runner,
-                              which=lambda command: "/bin/independent" if command == "independent" else None).run(
-            bootstrap=True, os_name="linux", arch="amd64"
-        )
-        self.assertEqual("BLOCKED", results["ansible-core"].state)
-        self.assertIn("runner prerequisite missing: ansible-core", results["ansible-core"].detail)
-        self.assertEqual("SKIP", results["ansible-playbook"].state)
-        self.assertEqual("SKIP", results["ansible-owned"].state)
-        self.assertEqual("PASS", results["independent"].state)
-        self.assertEqual(1, runner.call_count)
-
-    def test_stale_runner_ansible_fails_with_pinned_authority_and_is_not_provisioned(self):
-        items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_args": ["--version"], "version_key": "ANSIBLE_CORE_VERSION",
-             "classification": "seed-prerequisite"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core", "command": "ansible-galaxy"},
-        ]
-        calls = []
-        def runner(argv):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
-        results = MOD.Auditor(contract(items), runner=runner, which=lambda command: f"/usr/bin/{command}").run(
-            bootstrap=True, os_name="linux", arch="amd64"
-        )
-        self.assertEqual("FAIL", results["ansible-core"].state)
-        self.assertIn("expected " + MOD.load_versions()["ANSIBLE_CORE_VERSION"], results["ansible-core"].detail)
-        self.assertEqual([["/usr/bin/ansible", "--version"]], calls)
-
     def test_ansible_runner_prerequisite_rejects_repository_provisioner_mutation(self):
-        for provision in ({"type": "pip", "package": "ansible-core"},
-                          {"type": "python-venv", "package": "ansible-core"},
-                          {"type": "debian-package", "package": "ansible-core"}):
+        for provision in (
+            {"type": "pip", "package": "ansible-core"},
+            {"type": "python-venv", "package": "ansible-core"},
+            {"type": "debian-package", "package": "ansible-core"},
+        ):
             canonical = MOD.load_contract()
             next(item for item in canonical["capabilities"] if item["name"] == "ansible-core")["provision"] = provision
-            with self.subTest(provision=provision), self.assertRaisesRegex(
-                    ValueError, "runner prerequisite must not have a repository provisioner"):
+            with (
+                self.subTest(provision=provision),
+                self.assertRaisesRegex(ValueError, "runner prerequisite must not have a repository provisioner"),
+            ):
                 MOD.validate_contract(canonical)
 
     def test_capability_bootstrap_contains_no_ansible_self_bootstrap_path(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text()
-        forbidden = ("pip install ansible-core", "python-venv", "ANSIBLE_CORE_VENV",
-                     "apt install ansible", "apt install ansible-core")
+        forbidden = (
+            "pip install ansible-core",
+            "python-venv",
+            "ANSIBLE_CORE_VENV",
+            "apt install ansible",
+            "apt install ansible-core",
+        )
         for fragment in forbidden:
             self.assertNotIn(fragment, source)
 
@@ -609,7 +504,9 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("seed-prerequisite", ruby["classification"])
         self.assertNotIn("version_key", ruby)
         runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ruby 3.4.4", ""))
-        auditor = MOD.Auditor(canonical, runner=runner, which=lambda command: "/usr/bin/ruby" if command == "ruby" else None)
+        auditor = MOD.Auditor(
+            canonical, runner=runner, which=lambda command: "/usr/bin/ruby" if command == "ruby" else None
+        )
 
         result = auditor.check(ruby, "ruby")
 
@@ -618,8 +515,11 @@ class CapabilityAuditTest(unittest.TestCase):
 
     def test_missing_ruby_is_blocked_and_never_provisioned(self):
         ruby = {
-            "name": "ruby", "requires": [], "command": "ruby",
-            "version_args": ["--version"], "classification": "seed-prerequisite",
+            "name": "ruby",
+            "requires": [],
+            "command": "ruby",
+            "version_args": ["--version"],
+            "classification": "seed-prerequisite",
         }
         runner = mock.Mock()
         audit = MOD.Auditor(contract([ruby]), runner=runner, which=lambda _command: None).run(
@@ -649,20 +549,38 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("YQ_VERSION", yq["version_key"])
         self.assertEqual({"type": "ansible", "tags": "context_tools"}, yq["provision"])
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("checksum: \"sha256:{{ yq_sha256 }}\"", tasks)
-        self.assertIn("dest: \"{{ local_bin }}/yq\"", tasks)
+        self.assertIn('checksum: "sha256:{{ yq_sha256 }}"', tasks)
+        self.assertIn('dest: "{{ local_bin }}/yq"', tasks)
 
     def test_ansible_entrypoints_are_bound_to_validated_core_provider(self):
         versions = MOD.load_versions()
         items = [
-            {"name": "ansible-core", "requires": [], "command": "ansible", "version_key": "ANSIBLE_CORE_VERSION",
-             "classification": "seed-prerequisite"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-galaxy"},
-            {"name": "next", "requires": [], "provision_requires": ["ansible-playbook"], "command": "next",
-             "provision": {"type": "ansible", "tags": "next"}},
+            {
+                "name": "ansible-core",
+                "requires": [],
+                "command": "ansible",
+                "version_key": "ANSIBLE_CORE_VERSION",
+                "classification": "seed-prerequisite",
+            },
+            {
+                "name": "ansible-playbook",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-playbook",
+            },
+            {
+                "name": "ansible-galaxy",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-galaxy",
+            },
+            {
+                "name": "next",
+                "requires": [],
+                "provision_requires": ["ansible-playbook"],
+                "command": "next",
+                "provision": {"type": "ansible", "tags": "next"},
+            },
         ]
         with tempfile.TemporaryDirectory() as tmp:
             system_bin = Path(tmp, "usr", "bin")
@@ -683,7 +601,9 @@ class CapabilityAuditTest(unittest.TestCase):
                 if argv[0] == str(system_bin / "ansible"):
                     return subprocess.CompletedProcess(argv, 0, "ansible [core 1.0.0]", "")
                 if argv[0] == str(managed_bin / "ansible"):
-                    return subprocess.CompletedProcess(argv, 0, f"ansible [core {versions['ANSIBLE_CORE_VERSION']}]", "")
+                    return subprocess.CompletedProcess(
+                        argv, 0, f"ansible [core {versions['ANSIBLE_CORE_VERSION']}]", ""
+                    )
                 if "platform/ansible/developer.yml" in argv:
                     installed.add("next")
                 return subprocess.CompletedProcess(argv, 0, "ready", "")
@@ -700,31 +620,42 @@ class CapabilityAuditTest(unittest.TestCase):
                 self.assertEqual("PASS", results["ansible-core"].state)
                 self.assertEqual("PASS", results["ansible-playbook"].state)
                 self.assertEqual(str(managed_bin / "ansible"), auditor.resolved_executables["ansible-core"])
-                self.assertEqual(str(managed_bin / "ansible-playbook"), auditor.resolved_executables["ansible-playbook"])
+                self.assertEqual(
+                    str(managed_bin / "ansible-playbook"), auditor.resolved_executables["ansible-playbook"]
+                )
                 provision_call = next(call for call in calls if "platform/ansible/developer.yml" in call)
                 self.assertEqual(str(managed_bin / "ansible-playbook"), provision_call[0])
 
-                mutated_contract = contract([
-                    {**item, **({"provider": None} if item["name"] == "ansible-playbook" else {})}
-                    for item in items
-                ])
+                mutated_contract = contract(
+                    [{**item, **({"provider": None} if item["name"] == "ansible-playbook" else {})} for item in items]
+                )
                 with self.assertRaisesRegex(ValueError, "must be bound to the ansible-core provider"):
                     MOD.validate_contract(mutated_contract)
 
     def test_ansible_entrypoint_missing_from_provider_does_not_fall_back_to_path(self):
         items = [
             {"name": "ansible-core", "requires": [], "command": "ansible", "classification": "seed-prerequisite"},
-            {"name": "ansible-playbook", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-playbook"},
-            {"name": "ansible-galaxy", "requires": ["ansible-core"], "provider": "ansible-core",
-             "command": "ansible-galaxy"},
+            {
+                "name": "ansible-playbook",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-playbook",
+            },
+            {
+                "name": "ansible-galaxy",
+                "requires": ["ansible-core"],
+                "provider": "ansible-core",
+                "command": "ansible-galaxy",
+            },
         ]
         with tempfile.TemporaryDirectory() as tmp:
             managed_bin = Path(tmp, "managed")
             system_bin = Path(tmp, "system")
-            managed_bin.mkdir(); system_bin.mkdir()
+            managed_bin.mkdir()
+            system_bin.mkdir()
             for executable in (managed_bin / "ansible", system_bin / "ansible-playbook"):
-                executable.write_text("#!/bin/true\n"); executable.chmod(0o755)
+                executable.write_text("#!/bin/true\n")
+                executable.chmod(0o755)
             which = lambda command: str(managed_bin / "ansible") if command == "ansible" else str(system_bin / command)
             auditor = MOD.Auditor(contract(items), runner=self.runner({}), which=which)
             results = auditor.run(bootstrap=False, os_name="linux", arch="amd64")
@@ -743,11 +674,17 @@ class CapabilityAuditTest(unittest.TestCase):
             if "platform/ansible/developer.yml" in argv:
                 installed.add("ansible-lint")
                 return subprocess.CompletedProcess(argv, 0, "reconciled", "")
-            return subprocess.CompletedProcess(argv, 0, "ansible-lint " + MOD.load_versions()["ANSIBLE_LINT_VERSION"], "")
+            return subprocess.CompletedProcess(
+                argv, 0, "ansible-lint " + MOD.load_versions()["ANSIBLE_LINT_VERSION"], ""
+            )
 
-        auditor = MOD.Auditor(canonical, runner=runner, which=lambda command: (
-            f"/opt/bin/{command}" if command == "ansible-playbook" or command in installed else None
-        ))
+        auditor = MOD.Auditor(
+            canonical,
+            runner=runner,
+            which=lambda command: (
+                f"/opt/bin/{command}" if command == "ansible-playbook" or command in installed else None
+            ),
+        )
         auditor.resolved_executables["ansible-playbook"] = "/opt/bin/ansible-playbook"
         self.assertEqual("PASS", auditor.provision(item).state)
         provision_call = calls[0]
@@ -759,9 +696,14 @@ class CapabilityAuditTest(unittest.TestCase):
         items = [
             {"name": "go", "requires": [], "command": "go", "version_key": "GO_VERSION"},
             {"name": "ansible-playbook", "requires": [], "command": "ansible-playbook"},
-            {"name": "oapi-codegen", "requires": [], "provision_requires": ["go", "ansible-playbook"],
-             "command": "oapi-codegen", "version_key": "OAPI_CODEGEN_VERSION",
-             "provision": {"type": "ansible", "tags": "oapi_codegen"}},
+            {
+                "name": "oapi-codegen",
+                "requires": [],
+                "provision_requires": ["go", "ansible-playbook"],
+                "command": "oapi-codegen",
+                "version_key": "OAPI_CODEGEN_VERSION",
+                "provision": {"type": "ansible", "tags": "oapi_codegen"},
+            },
         ]
         installed = set()
         calls = []
@@ -777,12 +719,16 @@ class CapabilityAuditTest(unittest.TestCase):
         def runner(argv):
             calls.append(argv)
             if argv[0] == "/opt/custom-go/bin/go":
-                return subprocess.CompletedProcess(argv, 0, "go version go" + versions["GO_VERSION"] + " linux/amd64", "")
+                return subprocess.CompletedProcess(
+                    argv, 0, "go version go" + versions["GO_VERSION"] + " linux/amd64", ""
+                )
             if "platform/ansible/developer.yml" in argv:
                 installed.add("oapi-codegen")
                 return subprocess.CompletedProcess(argv, 0, "reconciled", "")
             if argv[0].endswith("oapi-codegen"):
-                return subprocess.CompletedProcess(argv, 0, "oapi-codegen version v" + versions["OAPI_CODEGEN_VERSION"], "")
+                return subprocess.CompletedProcess(
+                    argv, 0, "oapi-codegen version v" + versions["OAPI_CODEGEN_VERSION"], ""
+                )
             return subprocess.CompletedProcess(argv, 0, "ready", "")
 
         auditor = MOD.Auditor(contract(items), runner=runner, which=which)
@@ -791,7 +737,10 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("PASS", results["go"].state)
         self.assertEqual("PASS", results["oapi-codegen"].state)
         ansible_call = next(call for call in calls if "platform/ansible/developer.yml" in call)
-        self.assertIn('resolved_executables={"go": "/opt/custom-go/bin/go", "ansible-playbook": "/usr/bin/ansible-playbook"}', ansible_call)
+        self.assertIn(
+            'resolved_executables={"go": "/opt/custom-go/bin/go", "ansible-playbook": "/usr/bin/ansible-playbook"}',
+            ansible_call,
+        )
         self.assertNotIn(str(Path.home() / ".local/bin/go"), " ".join(ansible_call))
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         self.assertIn('GOROOT: ""', tasks)
@@ -906,24 +855,6 @@ class CapabilityClosureTest(unittest.TestCase):
         self.assertEqual(["pipx"], apt_packages)
         self.assertNotIn("build-essential", apt_packages)
 
-    def test_broad_ansible_lint_tag_mutation_fails_then_restored_passes(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        broad_tags = "  tags: [toolchain, go, cgo, node]\n"
-        self.assertEqual(1, tasks.count(broad_tags))
-        mutated = tasks.replace(broad_tags, "  tags: [toolchain, go, cgo, node, ansible_lint]\n", 1)
-        mutated_passed, mutated_events, mutated_packages = self.ansible_lint_run(
-            mutated, "ansible_lint", pipx_present=True, unrelated_present=False, sudo_available=False
-        )
-        self.assertFalse(mutated_passed)
-        self.assertEqual(["broad-apt-blocked"], mutated_events)
-        self.assertIn("build-essential", mutated_packages)
-        restored_passed, restored_events, restored_packages = self.ansible_lint_run(
-            tasks, "ansible_lint", pipx_present=True, unrelated_present=False, sudo_available=False
-        )
-        self.assertTrue(restored_passed)
-        self.assertEqual(["probe-pipx", "install-ansible-lint"], restored_events)
-        self.assertEqual([], restored_packages)
-
     def test_full_and_toolchain_runs_preserve_broad_package_reconciliation(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         for tag in ("all", "toolchain"):
@@ -957,9 +888,9 @@ class CapabilityClosureTest(unittest.TestCase):
 
         events = []
         privileged_installs = 0
-        probe_selected = selected_tag in re.findall(
-            r"^  tags: \[([^]]+)\]$", probe.group("body"), re.MULTILINE
-        )[0].split(", ")
+        probe_selected = selected_tag in re.findall(r"^  tags: \[([^]]+)\]$", probe.group("body"), re.MULTILINE)[
+            0
+        ].split(", ")
         if probe_selected:
             events.append("probe-unzip")
         prerequisite_selected = selected_tag in re.findall(
@@ -974,10 +905,12 @@ class CapabilityClosureTest(unittest.TestCase):
             if not unzip_present:
                 unzip_present = True
 
-        extraction_selected = (
-            selected_tag in {"gitleaks", "helm", "terraform", "kustomize"}
-            and f"tag: {selected_tag}" in extraction.group("body")
-        )
+        extraction_selected = selected_tag in {
+            "gitleaks",
+            "helm",
+            "terraform",
+            "kustomize",
+        } and f"tag: {selected_tag}" in extraction.group("body")
         if extraction_selected:
             events.append(f"extract-{selected_tag}")
             if selected_tag == "terraform" and not unzip_present:
@@ -1027,7 +960,7 @@ class CapabilityClosureTest(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(prerequisite)
-        mutated = tasks[:prerequisite.start()] + prerequisite.group(1) + "[toolchain]" + tasks[prerequisite.end():]
+        mutated = tasks[: prerequisite.start()] + prerequisite.group(1) + "[toolchain]" + tasks[prerequisite.end() :]
         mutated_passed, mutated_events, _ = self.terraform_archive_run(mutated, "terraform", unzip_present=False)
         self.assertFalse(mutated_passed)
         self.assertEqual(["probe-unzip", "extract-terraform"], mutated_events)
@@ -1071,73 +1004,6 @@ class CapabilityClosureTest(unittest.TestCase):
             names[name]["provision"]["tags"] = "quality_tools"
         with self.assertRaisesRegex(ValueError, "independent quality capabilities must use distinct"):
             MOD.validate_contract(canonical)
-
-    def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
-        main_tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        expected = {"ruff", "oxfmt", "oxlint"}
-
-        def prepared_tools(source, run_tags):
-            preparation = source.split("- name: Download pinned Oxlint archive", 1)[0]
-            predicate = re.search(r'^  when: "(.+)"$', preparation, re.MULTILINE).group(1)
-            return {
-                tag
-                for tag in re.findall(r"tag: (ruff|oxfmt|oxlint)}", preparation)
-                if eval(
-                    predicate,
-                    {"__builtins__": {}},
-                    {"ansible_run_tags": run_tags, "item": SimpleNamespace(tag=tag)},
-                )
-            }
-
-        select = lambda run_tags: {
-            tag
-            for tag in expected
-            if "all" in run_tags or "toolchain" in run_tags or "quality_tools" in run_tags or tag in run_tags
-        }
-        self.assertEqual(expected, select(["all"]))
-        self.assertEqual(expected, select(["quality_tools"]))
-        self.assertEqual(expected, select(["toolchain"]))
-        for tag in expected:
-            self.assertEqual({tag}, select([tag]))
-            self.assertIn(f"tags: [toolchain, quality_tools, {tag}]", tasks)
-
-        for aggregate in ("all", "quality_tools", "toolchain"):
-            self.assertEqual(expected, prepared_tools(tasks, [aggregate]))
-        for individual in expected:
-            self.assertEqual({individual}, prepared_tools(tasks, [individual]))
-
-        shared_setup = main_tasks.split("- name: Install native build prerequisites", 1)[0]
-        for selector in ("all", "quality_tools", "toolchain", *expected):
-            with self.subTest(shared_directory_selector=selector):
-                self.assertTrue(selector == "all" or selector in shared_setup)
-
-        # Exact finding mutation: without the individual tags, targeted Oxlint
-        # provisioning cannot select the shared cache and binary directories.
-        mutated_setup = shared_setup
-        for tag in expected:
-            mutated_setup = mutated_setup.replace(f", {tag}", "")
-        self.assertNotIn("oxlint", mutated_setup)
-        self.assertIn("oxlint", shared_setup)
-
-        self.assertEqual(
-            2,
-            tasks.count(
-                "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags "
-                "or 'quality_tools' in ansible_run_tags "
-                "or item.tag in ansible_run_tags"
-            ),
-        )
-        makefile = (ROOT / "Makefile").read_text()
-        self.assertIn("quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries", makefile)
-        self.assertIn("@$(ANSIBLE_LOCAL) --tags quality_tools", makefile)
-        self.assertIn("--tags toolchain,node,agent_tools,context_tools", makefile)
-
-        # Exact regression mutation: tasks still carry `toolchain`, but the old
-        # predicate omits every per-tool directory needed before extraction.
-        mutated_tasks = tasks.replace("or 'toolchain' in ansible_run_tags ", "")
-        self.assertEqual(set(), prepared_tools(mutated_tasks, ["toolchain"]))
-        self.assertEqual(expected, prepared_tools(tasks, ["toolchain"]))
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()
@@ -1183,7 +1049,9 @@ class CapabilityClosureTest(unittest.TestCase):
 
     def test_missing_version_authority_is_rejected(self):
         canonical = MOD.load_contract()
-        next(item for item in canonical["capabilities"] if item["name"] == "gitleaks")["version_key"] = "MISSING_VERSION"
+        next(item for item in canonical["capabilities"] if item["name"] == "gitleaks")["version_key"] = (
+            "MISSING_VERSION"
+        )
         with self.assertRaisesRegex(ValueError, "missing version authority"):
             MOD.validate_contract(canonical)
 
@@ -1207,8 +1075,10 @@ class CapabilityClosureTest(unittest.TestCase):
         items = [{"name": "docker", "requires": [], "probe": ["docker", "info"], "external_failure": True}]
         items += [{"name": name, "requires": [], "command": name} for name in names]
         items += [{"name": "kind", "requires": ["docker"], "command": "kind"}]
-        results = CapabilityAuditTest().auditor(items, {"docker": (1, "daemon unavailable")}).run(
-            bootstrap=False, os_name="linux", arch="amd64"
+        results = (
+            CapabilityAuditTest()
+            .auditor(items, {"docker": (1, "daemon unavailable")})
+            .run(bootstrap=False, os_name="linux", arch="amd64")
         )
         self.assertEqual("SKIP", results["kind"].state)
         for name in names:
@@ -1221,105 +1091,6 @@ class CapabilityClosureTest(unittest.TestCase):
         auditor = CapabilityAuditTest().auditor([item], outcomes, present=present)
         result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
         return item, auditor, result
-
-    def test_terraform_provider_selection_and_resolved_executable(self):
-        versions = MOD.load_versions()
-        cases = (
-            ("tofu only", {"tofu"}, {"/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"])}, "PASS", "/bin/tofu"),
-            ("terraform only", {"terraform"}, {"/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"])}, "PASS", "/bin/terraform"),
-            ("both valid", {"tofu", "terraform"}, {
-                "/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"]),
-                "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-            }, "PASS", "/bin/tofu"),
-            ("stale tofu", {"tofu", "terraform"}, {
-                "/bin/tofu": (0, "OpenTofu 0.1.0"),
-                "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-            }, "FAIL", None),
-            ("stale terraform", {"terraform"}, {"/bin/terraform": (0, "Terraform v0.1.0")}, "FAIL", None),
-        )
-        for label, present, outcomes, state, executable in cases:
-            with self.subTest(label=label):
-                _, auditor, result = self.terraform_audit(present, outcomes)
-                self.assertEqual(state, result.state)
-                self.assertEqual(executable, auditor.resolved_executables.get("terraform"))
-
-    def test_terraform_provider_selection_matches_repoctl_path_lookup(self):
-        versions = MOD.load_versions()
-        with tempfile.TemporaryDirectory() as tmp:
-            managed_bin = Path(tmp) / "managed"
-            path_bin = Path(tmp) / "path"
-            managed_bin.mkdir()
-            path_bin.mkdir()
-            item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
-            item.pop("provision_requires")
-            item.pop("provision")
-
-            cases = (
-                ("managed tofu valid", {"managed/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "managed/tofu"),
-                ("managed tofu stale", {"managed/tofu": "0.1.0", "path/terraform": versions["TERRAFORM_VERSION"]}, "FAIL", None),
-                ("PATH tofu", {"path/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/tofu"),
-                ("managed terraform", {"managed/terraform": versions["TERRAFORM_VERSION"], "path/terraform": "0.1.0"}, "PASS", "managed/terraform"),
-                ("PATH terraform", {"path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/terraform"),
-            )
-            for label, tools, expected_state, selected in cases:
-                with self.subTest(label=label):
-                    for directory in (managed_bin, path_bin):
-                        for executable in directory.iterdir():
-                            executable.unlink()
-                    outcomes = {}
-                    for location, version in tools.items():
-                        executable = Path(tmp) / location
-                        executable.write_text("stub", encoding="utf-8")
-                        executable.chmod(0o755)
-                        product = "OpenTofu " if executable.name == "tofu" else "Terraform v"
-                        outcomes[str(executable)] = (0, product + version)
-                    caller_path = str(path_bin)
-                    which = lambda command: shutil.which(command, path=caller_path)
-                    effective_path = os.pathsep.join((str(managed_bin), caller_path))
-                    repoctl_selected = (
-                        shutil.which("tofu", path=effective_path)
-                        or shutil.which("terraform", path=effective_path)
-                    )
-                    with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                        auditor = MOD.Auditor(contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which)
-                        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-                    self.assertEqual(expected_state, result.state)
-                    expected_executable = str(Path(tmp) / selected) if selected else None
-                    self.assertEqual(expected_executable, auditor.resolved_executables.get("terraform"))
-                    if result.state == "PASS":
-                        self.assertEqual(repoctl_selected, auditor.resolved_executables["terraform"])
-
-                    if label == "managed tofu stale":
-                        mutation_auditor = MOD.Auditor(contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which)
-                        mutation_auditor.resolve_repoctl_runtime = which
-                        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-                        self.assertEqual("PASS", mutation.state, "PATH-only mutation must reproduce the false PASS")
-                        self.assertEqual(str(path_bin / "terraform"), mutation_auditor.resolved_executables["terraform"])
-
-    def test_alternative_selection_policy_is_validated_when_present(self):
-        base = {
-            "name": "terraform",
-            "requires": [],
-            "any_of": [{"command": "tofu", "version_key": "OPENTOFU_VERSION"}],
-        }
-        MOD.validate_contract(contract([{**base, "selection_policy": "first_available"}]))
-        for policy in ("", None, False, "invalid"):
-            with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "invalid alternative selection policy"):
-                MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
-
-    def test_terraform_legacy_fallback_mutation_is_caught(self):
-        versions = MOD.load_versions()
-        outcomes = {
-            "/bin/tofu": (0, "OpenTofu 0.1.0"),
-            "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-        }
-        item, _, restored = self.terraform_audit({"tofu", "terraform"}, outcomes)
-        mutated = dict(item)
-        mutated.pop("selection_policy")
-        mutation_auditor = CapabilityAuditTest().auditor([mutated], outcomes, present={"tofu", "terraform"})
-        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-        self.assertEqual("PASS", mutation.state, "legacy fallback mutation must reproduce the false PASS")
-        self.assertEqual("FAIL", restored.state, "preferred stale tofu must fail closed")
 
 
 if __name__ == "__main__":

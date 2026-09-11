@@ -267,6 +267,40 @@
       "classification": "managed"
     },
     {
+      "name": "oxlint",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oxlint",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OXLINT_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "oxlint"
+      },
+      "classification": "managed"
+    },
+    {
+      "name": "oxfmt",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oxfmt",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OXFMT_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "oxfmt"
+      },
+      "classification": "managed"
+    },
+    {
       "name": "ruff",
       "requires": [],
       "provision_requires": [
@@ -418,22 +452,9 @@
       ],
       "classification": "managed",
       "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
-      "selection_policy": "first_available",
-      "any_of": [
-        {
-          "command": "tofu",
-          "version_args": [
-            "version"
-          ],
-          "version_key": "OPENTOFU_VERSION"
-        },
-        {
-          "command": "terraform",
-          "version_args": [
-            "version"
-          ],
-          "version_key": "TERRAFORM_VERSION"
-        }
+      "command": "terraform",
+      "version_args": [
+        "version"
       ]
     },
     {
@@ -529,7 +550,9 @@
     "terraform": "ansible",
     "kustomize": "ansible",
     "kind": "ansible",
-    "gitleaks": "ansible"
+    "gitleaks": "ansible",
+    "oxlint": "ansible",
+    "oxfmt": "ansible"
   },
   "seed_prerequisites": [
     {
@@ -675,8 +698,7 @@
     "ansible": "ansible-core",
     "gofmt": "go",
     "docker": "docker",
-    "terraform": "terraform",
-    "tofu": "terraform"
+    "terraform": "terraform"
   },
   "gate_sources": [
     "scripts/repoctl.py",

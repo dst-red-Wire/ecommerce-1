@@ -58,7 +58,7 @@ system: ## Run cross-system repository tests without replaying component suites
 security: ## Scan working tree for secrets
 	@$(PYTHON) scripts/repoctl.py security
 
-terraform: ## Validate Terraform/OpenTofu sources when present
+terraform: ## Validate canonical Terraform sources when present
 	@$(PYTHON) scripts/repoctl.py terraform
 
 ansible: ## Validate Ansible sources and local developer playbook syntax
@@ -105,7 +105,7 @@ workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and deve
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
 	@$(ANSIBLE_LOCAL) --tags quality_tools
 
-agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
+agent-tools: ## Reconcile Bazel/OpenAPI/context tooling with Ansible
 	@$(ANSIBLE_LOCAL) --tags toolchain,agent_tools,context_tools
 
 context-tools: ## Reconcile token-efficient context tooling with Ansible
@@ -141,7 +141,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
-.PHONY: context diff-context failure-context nx-graph bazel-verify
+.PHONY: context diff-context failure-context bazel-verify
 
 context: ## Build bounded task-aware context pack; use TASK="..."
 	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
@@ -152,19 +152,13 @@ diff-context: ## Build compact diff-only context pack
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
 
-nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
-	@$(PYTHON) scripts/repoctl.py nx-graph
-
 bazel-verify: ## Run affected-only verification through pinned Bazel
 	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 
-.PHONY: api-generate api-mock service-new
+.PHONY: api-generate service-new
 
-api-generate: ## Generate Go and TypeScript bindings from registered OpenAPI contracts
-	@$(PYTHON) scripts/repoctl.py api-generate --target all $(if $(SERVICE),--service $(SERVICE),)
-
-api-mock: ## Start Prism mock; use SERVICE=product PORT=4010
-	@$(PYTHON) scripts/repoctl.py api-mock --service "$${SERVICE:-product}" --port "$${PORT:-4010}"
+api-generate: ## Generate Go bindings from registered OpenAPI contracts
+	@$(PYTHON) scripts/repoctl.py api-generate --target go $(if $(SERVICE),--service $(SERVICE),)
 
 service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)

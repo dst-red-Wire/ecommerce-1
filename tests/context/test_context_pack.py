@@ -33,17 +33,20 @@ class RoutingTests(unittest.TestCase):
             home = pathlib.Path(tmp) / "home"
             log = pathlib.Path(tmp) / "called"
             binary = self._managed_yq(home, log)
-            with mock.patch.object(pathlib.Path, "home", return_value=home), mock.patch.dict(
-                os.environ, {"PATH": "/usr/bin"}
+            with (
+                mock.patch.object(pathlib.Path, "home", return_value=home),
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}),
             ):
                 result = MOD.yq_json(".", ROOT / "config/context/router.yaml")
             self.assertEqual({"levels": {}}, result)
             self.assertEqual(str(binary), log.read_text(encoding="utf-8"))
 
     def test_missing_managed_yq_is_reported_before_subprocess(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            pathlib.Path, "home", return_value=pathlib.Path(tmp)
-        ), mock.patch.object(subprocess, "run") as run:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(tmp)),
+            mock.patch.object(subprocess, "run") as run,
+        ):
             with self.assertRaisesRegex(RuntimeError, "managed yq missing: run `make context-tools`"):
                 MOD.yq_json(".", ROOT / "config/context/router.yaml")
             run.assert_not_called()
@@ -55,8 +58,9 @@ class RoutingTests(unittest.TestCase):
             system.mkdir()
             (system / "yq").write_text("#!/bin/true\n", encoding="utf-8")
             (system / "yq").chmod(0o755)
-            with mock.patch.object(pathlib.Path, "home", return_value=root / "home"), mock.patch.dict(
-                os.environ, {"PATH": str(system)}
+            with (
+                mock.patch.object(pathlib.Path, "home", return_value=root / "home"),
+                mock.patch.dict(os.environ, {"PATH": str(system)}),
             ):
                 with self.assertRaisesRegex(RuntimeError, "managed yq missing"):
                     MOD.yq_json(".", ROOT / "config/context/router.yaml")

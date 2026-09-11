@@ -150,8 +150,6 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
     suffix = target.suffix.lower()
     specs = {
         ".go": ("go", ["func $F($$$A) $$$R { $$$B }", "type $T struct { $$$F }"]),
-        ".ts": ("typescript", ["function $F($$$A) { $$$B }", "interface $T { $$$F }"]),
-        ".tsx": ("tsx", ["function $F($$$A) { $$$B }", "const $F = ($$$A) => $B"]),
     }
     if suffix not in specs:
         return ""

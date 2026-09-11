@@ -13,8 +13,9 @@ class DockerPublishBoundaryTest(unittest.TestCase):
         self.assertIn("powershell.exe", PLAYBOOK)
         self.assertIn("retries: 30", PLAYBOOK)
 
-    def test_service_gate_requests_ansible_docker_capability(self):
-        self.assertIn('ensure_developer("go,cgo,sqlc,docker")', CONTROLLER)
+    def test_service_gate_treats_container_runtime_as_optional(self):
+        self.assertIn('ensure_developer("go,cgo,sqlc")', CONTROLLER)
+        self.assertIn("SKIP environnemental — aucun moteur de conteneurs utilisable", CONTROLLER)
         self.assertNotIn("ensure-docker-daemon.sh", CONTROLLER)
 
 

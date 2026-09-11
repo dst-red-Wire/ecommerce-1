@@ -65,8 +65,7 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             raise ValueError("independent quality capabilities must use distinct provisioning tags")
     owners = contract.get("provision_owners", {})
     managed = {
-        name for name, item in graph.items.items()
-        if item.get("classification") == "managed" and item.get("provision")
+        name for name, item in graph.items.items() if item.get("classification") == "managed" and item.get("provision")
     }
     if set(owners) != managed:
         missing = sorted(managed - set(owners))
@@ -111,14 +110,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             if key == "platform_primitives" and capability:
                 capability_command = capability.get("command")
                 probe = capability.get("probe") or []
-                if (
-                    capability_command != command
-                    or capability.get("any_of")
-                    or (probe and probe[0] != command)
-                ):
+                if capability_command != command or capability.get("any_of") or (probe and probe[0] != command):
                     raise ValueError(
-                        f"primitive {command} collides with capability {command} "
-                        "that is not a direct executable check"
+                        f"primitive {command} collides with capability {command} that is not a direct executable check"
                     )
             if command in external:
                 raise ValueError(f"command has multiple external classifications: {command}")
@@ -139,15 +133,15 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             alternative_key = alternative.get("version_key")
             if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
                 raise ValueError(f"{name}: alternative requires command and version authority")
-        if "selection_policy" in item and (
-            item["selection_policy"] != "first_available" or not item.get("any_of")
-        ):
+        if "selection_policy" in item and (item["selection_policy"] != "first_available" or not item.get("any_of")):
             raise ValueError(f"{name}: invalid alternative selection policy")
         provision_authority = item.get("provision_authority")
         if provision_authority and not versions.get(provision_authority):
             raise ValueError(f"{name}: missing provision authority {provision_authority}")
-        if classification == "managed" and item.get("provision") and not (
-            version_key or item.get("version_file") or item.get("provision_authority")
+        if (
+            classification == "managed"
+            and item.get("provision")
+            and not (version_key or item.get("version_file") or item.get("provision_authority"))
         ):
             raise ValueError(f"{name}: provisioned capability has no version authority")
         if classification == "platform-provided" and not item.get("justification"):
@@ -207,7 +201,9 @@ def normalized_platform(system: str | None = None, machine: str | None = None) -
     context = os.environ.get("BOOTSTRAP_CONTEXT", "")
     if not context:
         release = platform.release().lower()
-        context = "wsl2" if os_name == "linux" and "microsoft" in release else ("ci" if os.environ.get("CI") else "native")
+        context = (
+            "wsl2" if os_name == "linux" and "microsoft" in release else ("ci" if os.environ.get("CI") else "native")
+        )
     return os_name, arch, context
 
 
@@ -244,6 +240,8 @@ class Graph:
 
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -252,8 +250,9 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 class Auditor:
-    def __init__(self, contract: dict, *, runner: Runner = default_runner,
-                 which: Callable[[str], str | None] = shutil.which):
+    def __init__(
+        self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which
+    ):
         self.contract = contract
         validate_contract(contract)
         self.graph = Graph(contract["capabilities"])
@@ -329,15 +328,18 @@ class Auditor:
                 for alternative in alternatives:
                     resolved = self.resolve_repoctl_runtime(alternative["command"])
                     if resolved:
-                        return self.check({
-                            **item,
-                            **alternative,
-                            "any_of": [],
-                            "resolved_executable": resolved,
-                        }, capability_name)
-                return Result("FAIL", "alternatives absent: " + ", ".join(
-                    alternative["command"] for alternative in alternatives
-                ))
+                        return self.check(
+                            {
+                                **item,
+                                **alternative,
+                                "any_of": [],
+                                "resolved_executable": resolved,
+                            },
+                            capability_name,
+                        )
+                return Result(
+                    "FAIL", "alternatives absent: " + ", ".join(alternative["command"] for alternative in alternatives)
+                )
             failures = []
             for alternative in alternatives:
                 result = self.check({**item, **alternative, "any_of": []}, capability_name)
@@ -352,14 +354,13 @@ class Auditor:
             provider_executable = self.resolved_executables.get(provider)
             provider_item = self.graph.items[provider]
             provider_command = (
-                provider_executable
-                if argv and argv[0] == provider_item["command"]
-                else self.provider_entrypoint(item)
+                provider_executable if argv and argv[0] == provider_item["command"] else self.provider_entrypoint(item)
             )
             resolved_candidates = [provider_command] if provider_command else []
         elif item.get("isolated"):
             resolved_candidates = [
-                str(candidate) for directory in MANAGED_BIN_DIRS
+                str(candidate)
+                for directory in MANAGED_BIN_DIRS
                 if (candidate := directory / command).is_file() and os.access(candidate, os.X_OK)
             ]
         else:
@@ -385,8 +386,12 @@ class Auditor:
             proc = self.runner(candidate_argv)
             detail = " ".join((proc.stdout or proc.stderr).strip().split())
             if proc.returncode:
-                last = Result("BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}")
-            elif expected and self.installed_version(detail, item.get("version_parser", "first_semver")) != expected.removeprefix("v"):
+                last = Result(
+                    "BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}"
+                )
+            elif expected and self.installed_version(
+                detail, item.get("version_parser", "first_semver")
+            ) != expected.removeprefix("v"):
                 installed = self.installed_version(detail, item.get("version_parser", "first_semver"))
                 last = Result("FAIL", f"wrong version: expected {expected}; got {installed or detail or 'unknown'}")
             else:
@@ -407,7 +412,22 @@ class Auditor:
             ansible_playbook = ansible_playbook or self.resolve("ansible-playbook")
         if not ansible_playbook:
             return Result("BLOCKED", "validated ansible-playbook provider is unavailable")
-        command = [ansible_playbook, "-i", "localhost,", "-c", "local", "platform/ansible/developer.yml", "-e", f"repo_root={ROOT}", "-e", f"ansible_python_interpreter={sys.executable}", "-e", "resolved_executables=" + json.dumps(self.resolved_executables), "--tags", spec["tags"]]
+        command = [
+            ansible_playbook,
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "-e",
+            f"ansible_python_interpreter={sys.executable}",
+            "-e",
+            "resolved_executables=" + json.dumps(self.resolved_executables),
+            "--tags",
+            spec["tags"],
+        ]
         proc = self.runner(command)
         if proc.returncode:
             detail = " ".join((proc.stderr or proc.stdout).strip().split())[:300]
@@ -429,7 +449,11 @@ class Auditor:
             result = self.check(item, name)
             if bootstrap and result.state == "FAIL" and item.get("provision"):
                 unavailable = [dep for dep in item.get("provision_requires", []) if results[dep].state != "PASS"]
-                result = Result("SKIP", "provision requires " + ", ".join(unavailable)) if unavailable else self.provision(item)
+                result = (
+                    Result("SKIP", "provision requires " + ", ".join(unavailable))
+                    if unavailable
+                    else self.provision(item)
+                )
             results[name] = result
         for primitive in self.contract.get("platform_primitives", []):
             command = primitive["command"]

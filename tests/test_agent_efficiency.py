@@ -12,27 +12,17 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn(".context/evidence/", text)
         self.assertNotIn("- governance: PASS", text)
 
-    def test_frontend_uses_turbo_but_keeps_pnpm(self):
-        package = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
-        self.assertEqual("pnpm@11.24.0", package["packageManager"])
-        self.assertEqual("turbo run typecheck", package["scripts"]["typecheck"])
-        self.assertEqual("2.10.12", package["devDependencies"]["turbo"])
-
-    def test_bazel_and_nx_are_not_tekton_replacements(self):
+    def test_native_frontend_and_tekton_authority(self):
         topology = (ROOT / "config/contracts/ci-topology.yaml").read_text(encoding="utf-8")
         self.assertIn("ci: tekton", topology)
-        self.assertIn("role: local-verification-entrypoint", topology)
-        self.assertIn("role: derived-contract-graph-visualization", topology)
-        self.assertIn("role: frontend-task-scheduling-and-local-cache", topology)
+        self.assertFalse((ROOT / "frontend/package.json").exists())
+        self.assertFalse((ROOT / "scripts/nx-graph.py").exists())
 
-    def test_node_and_corepack_are_reconciled_by_ansible(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
-        self.assertIn(
-            "NODE_SHA256_LINUX_X64=2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2", versions
-        )
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("Download pinned Node archive", tasks)
-        self.assertIn("Link Node and Corepack commands", tasks)
+    def test_ansible_does_not_reconcile_node_tooling(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8").lower()
+        self.assertNotIn("nodejs.org", tasks)
+        self.assertNotIn("corepack", tasks)
+        self.assertNotIn("pnpm", tasks)
 
     def test_prepush_reuses_evidence_only_for_current_base(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
@@ -55,16 +45,6 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         )
         self.assertIn("oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz", tasks)
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
-
-    def test_isolated_nx_has_exact_fail_closed_build_approval(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("Write fail-closed PNPM build policy for isolated Nx", tasks)
-        self.assertIn("strictDepBuilds: true", tasks)
-        self.assertIn('"nx@{{ nx_version }}": true', tasks)
-        self.assertIn("nx_pnpm_policy.changed", tasks)
-        self.assertIn("Validate exact isolated Nx local version", tasks)
-        self.assertNotIn("pnpm approve-builds", tasks)
-        self.assertNotIn("dangerouslyAllowAllBuilds", tasks)
 
 
 if __name__ == "__main__":

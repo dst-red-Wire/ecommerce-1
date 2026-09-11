@@ -5,7 +5,7 @@
 ## Pipeline classes
 
 - `global`: architecture/governance, API contracts, secret scan and shell automation.
-- `frontend`: Storefront or Admin, parameterized by scope and using the PNPM workspace.
+- `frontend`: Storefront or Admin, parameterized by scope and using the native Go workspace.
 - `go-service`: one autonomous `services/<service>` Go module at a time.
 - `platform`: Terraform or Ansible validation without performing apply/mutation.
 
