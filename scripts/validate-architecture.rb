@@ -148,8 +148,8 @@ module ArchitectureValidator
       end
       contents = File.read(real_path)
       status = contents.match(/^Status:\s*`([^`]*)`\s*$/i)
-      status_token = status && status[1].strip.split(/\s+/, 2).first
-      unless status_token&.casecmp?("EXACT")
+      status_value = status && status[1].strip
+      unless status_value&.casecmp?("EXACT")
         raise ContractLoadError, "#{label} must reference a readable EXACT topology contract: #{path}"
       end
     end

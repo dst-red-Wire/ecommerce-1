@@ -29,7 +29,7 @@ class ArchitectureValidatorTest < Minitest::Test
   end
 
   def test_topology_status_requires_exact_token
-    %w[INEXACT NOT-EXACT EXACTLY DRAFT].each do |status|
+    ["INEXACT", "EXACT DRAFT", "NOT-EXACT", "EXACTLY", "DRAFT"].each do |status|
       with_contract_copy do |root|
         path = File.join(root, "docs/architecture/PROD_TOPOLOGY_V2.md")
         File.write(path, File.read(path).sub("Status: `EXACT`", "Status: `#{status}`"))

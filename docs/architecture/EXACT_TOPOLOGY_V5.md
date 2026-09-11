@@ -100,7 +100,17 @@ Exactly 19 backend services, as listed in `architecture.lock.yaml` business.serv
 
 Checkout and fulfillment are autonomous services. Checkout owns pre-order orchestration; order owns the durable order snapshot; fulfillment owns physical execution orchestration.
 
-The storefront and admin target Go + templ + HTMX in `frontend/go.mod`. Next.js/React/Node is only the migration source, not the target PROD runtime.
+The derived frontend runtime assignments below mirror the lock’s `business.frontend_runtime` mapping exactly:
+
+- `language`: `go`
+- `module`: `frontend`
+- `module_file`: `frontend/go.mod`
+- `rendering`: `templ`
+- `interactions`: `htmx`
+- `runtime_nodejs`: `false`
+- `migration_source`: `nextjs-react-node`
+
+Next.js/React/Node is only the migration source, not the target PROD runtime.
 
 - authority/dependencies: `SERVICE_OWNERSHIP_MATRIX.md`
 - data ownership: `DATA_OWNERSHIP_MATRIX.md`
@@ -125,7 +135,21 @@ Gitea -> Tekton -> Harbor -> Fleet -> RKE2 -> Argo Rollouts
 
 ## MLOps
 
-The lock’s `mlops` block selects lakeFS for dataset versioning, SeaweedFS S3 for objects, CloudNativePG PostgreSQL for metadata, MLflow for experiments/lineage and Harbor for artifacts. Gitea GitOps owns promotion, Tekton orchestration, Rancher Fleet desired state and Argo Rollouts progressive delivery. Runtime is KServe/vLLM; drift uses Evidently in Tekton batch jobs. DVC is superseded by lakeFS. `MLOPS_TOPOLOGY_V1.md` supplies subordinate lifecycle detail.
+The derived role assignments below mirror the lock’s `mlops` mapping exactly:
+
+- `dataset_versioner`: `lakefs`
+- `object_storage`: `seaweedfs-s3`
+- `metadata_database`: `cloudnativepg-postgresql`
+- `experiments_lineage`: `mlflow`
+- `artifact_registry`: `harbor`
+- `promotion_authority`: `gitea-gitops`
+- `orchestration`: `tekton`
+- `desired_state`: `rancher-fleet`
+- `progressive_delivery`: `argo-rollouts`
+- `runtime`: `kserve-vllm`
+- `drift`: `evidently-tekton-batch`
+
+DVC is superseded by lakeFS. `MLOPS_TOPOLOGY_V1.md` supplies subordinate lifecycle detail.
 
 ## Observability
 

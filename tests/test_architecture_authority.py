@@ -261,6 +261,30 @@ class ArchitectureAuthorityTest(unittest.TestCase):
                     index.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+    def test_derived_role_assignment_mutations_are_rejected(self):
+        mutations = (
+            (("- `dataset_versioner`: `lakefs`", "- `dataset_versioner`: `mlflow`"),
+             ("- `experiments_lineage`: `mlflow`", "- `experiments_lineage`: `lakefs`")),
+            (("- `artifact_registry`: `harbor`", "- `artifact_registry`: `tekton`"),
+             ("- `orchestration`: `tekton`", "- `orchestration`: `harbor`")),
+            (("- `runtime_nodejs`: `false`", "- `runtime_nodejs`: `true`"),),
+            (("- `module_file`: `frontend/go.mod`", "- `module_file`: `frontend/node.mod`"),),
+            (("- `migration_source`: `nextjs-react-node`", "- `migration_source`: `go-templ-htmx`"),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = index.read_text()
+            for replacements in mutations:
+                with self.subTest(mutation=replacements):
+                    mutated = original
+                    for before, after in replacements:
+                        mutated = mutated.replace(before, after, 1)
+                    index.write_text(mutated)
+                    self.assertTrue(any("derived index drift" in error for error in authority.validate(root)))
+                    index.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_l2_context_contract_mutation_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -295,11 +319,26 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             root = self.copy_repository(directory)
             topology = root / "docs/architecture/PROD_TOPOLOGY_V2.md"
             original = topology.read_text()
-            for status in ("INEXACT", "NOT-EXACT", "EXACTLY", "DRAFT"):
+            for status in ("INEXACT", "EXACT DRAFT", "NOT-EXACT", "EXACTLY", "DRAFT"):
                 topology.write_text(original.replace("Status: `EXACT`", f"Status: `{status}`", 1))
                 self.assertTrue(any("readable and EXACT" in error for error in authority.validate(root)))
             topology.write_text(original.replace("Status: `EXACT`", "status: `exact`", 1))
             self.assertEqual([], authority.validate(root))
+
+    def test_m7_coverage_threshold_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            handoff = root / "docs/project/CODEX_HANDOFFS.md"
+            original = handoff.read_text()
+            for before, after in ((">=80% global coverage", ""),
+                                  (">=80% global coverage", "79% global coverage"),
+                                  (">=90% critical-code coverage", ""),
+                                  (">=90% critical-code coverage", "89% critical-code coverage")):
+                with self.subTest(mutation=f"{before} -> {after}"):
+                    handoff.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any("coverage" in error for error in authority.validate(root)))
+                    handoff.write_text(original)
+                    self.assertEqual([], authority.validate(root))
 
     def test_management_plane_mutations_are_rejected(self):
         mutations = (

@@ -199,7 +199,7 @@ Tracker: `#20`.
 Goal: turn the implemented system into a release candidate with evidence.
 
 Execute/generate automation for:
-- unit, race, fuzz, coverage;
+- unit, race, fuzz, coverage with >=80% global coverage and >=90% critical-code coverage;
 - integration/Testcontainers;
 - OpenAPI/gRPC/Kafka contract compatibility;
 - BDD;

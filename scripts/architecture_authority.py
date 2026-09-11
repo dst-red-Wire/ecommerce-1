@@ -7,15 +7,6 @@ import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
-MLOPS = dict(
-    dataset_versioner="lakefs", object_storage="seaweedfs-s3",
-    metadata_database="cloudnativepg-postgresql", experiments_lineage="mlflow",
-    artifact_registry="harbor", promotion_authority="gitea-gitops",
-    orchestration="tekton", desired_state="rancher-fleet",
-    progressive_delivery="argo-rollouts", runtime="kserve-vllm",
-    drift="evidently-tekton-batch",
-)
-
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
 
 EXACT_CONTRACTS = {
@@ -121,8 +112,13 @@ def derived_index_errors(index, lock):
     require(f"Exactly {len(services)} backend services", "business.services count")
     require("`, `".join(services), "business.services membership/order")
     frontend = lock["business"]["frontend_runtime"]
-    frontend_target = f"{frontend['language'].title()} + {frontend['rendering']} + {frontend['interactions'].upper()}"
-    require(f"The storefront and admin target {frontend_target}", "business.frontend_runtime target")
+    frontend_section = index.split("## Application ownership", 1)[-1].split("\n## ", 1)[0]
+    rendered_frontend = dict(re.findall(
+        r"^- `([a-z_]+)`: `([^`]+)`\s*$", frontend_section, re.M
+    ))
+    for field, value in frontend.items():
+        if rendered_frontend.get(field) != str(value).lower():
+            errors.append(f"derived index drift from architecture.lock.yaml: business.frontend_runtime.{field}")
     require("Next.js/React/Node is only the migration source", "business.frontend_runtime migration source")
     require(f"M2.5 is `{lock['build_milestones'][3]}`", "M2.5 milestone identity")
 
@@ -136,14 +132,11 @@ def derived_index_errors(index, lock):
             errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
 
     mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
-    mlops_display = {
-        "lakefs": "lakeFS", "seaweedfs-s3": "SeaweedFS S3", "cloudnativepg-postgresql": "CloudNativePG PostgreSQL",
-        "mlflow": "MLflow", "harbor": "Harbor", "gitea-gitops": "Gitea GitOps", "tekton": "Tekton",
-        "rancher-fleet": "Rancher Fleet", "argo-rollouts": "Argo Rollouts", "kserve-vllm": "KServe/vLLM",
-        "evidently-tekton-batch": "Evidently in Tekton batch",
-    }
+    rendered_mlops = dict(re.findall(
+        r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M
+    ))
     for field, value in lock["mlops"].items():
-        if mlops_display.get(value, value) not in mlops_section:
+        if rendered_mlops.get(field) != value:
             errors.append(f"derived index drift from architecture.lock.yaml: mlops.{field}")
 
     flow_and_delivery = index.split("## AIOps", 1)[0]
@@ -241,8 +234,6 @@ def validate(root):
             errors.append("architecture.lock.yaml must be version 5")
         if lock["topology_contracts"]["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
-        if lock.get("mlops") != MLOPS:
-            errors.append("MLOps must match the approved V5 choices")
         if lock["observability"].get("hyperdx_metadata_store") != "mongodb-oss-self-hosted":
             errors.append("HyperDX metadata store must be self-hosted MongoDB OSS")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
@@ -317,8 +308,8 @@ def validate(root):
                 continue
             contents = path.read_text()
             status = re.search(r"^Status:\s*`([^`]*)`\s*$", contents, re.M | re.I)
-            status_token = status.group(1).strip().split(maxsplit=1)[0].upper() if status else None
-            if not contents.strip() or status_token != "EXACT":
+            status_value = status.group(1).strip().upper() if status else None
+            if not contents.strip() or status_value != "EXACT":
                 errors.append(f"topology contract must be readable and EXACT: {relative}")
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
@@ -338,6 +329,12 @@ def validate(root):
         if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
+        m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
+        m7 = m7_match.group(0) if m7_match else ""
+        if not re.search(r">=\s*80%\s+global coverage", m7, re.I):
+            errors.append("CODEX_HANDOFFS.md M7 must require >=80% global coverage")
+        if not re.search(r">=\s*90%\s+critical-code coverage", m7, re.I):
+            errors.append("CODEX_HANDOFFS.md M7 must require >=90% critical-code coverage")
         handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         handoff = handoff_match.group(0) if handoff_match else ""
         handoff_requirements = ("## M2.5 prompt", "M2-5-persistent-mgmt-bootstrap", "Entry gate: M1 PROVEN",
