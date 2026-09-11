@@ -6,7 +6,7 @@ Purpose: identify inputs that ChatGPT cannot manufacture and that would otherwis
 
 ## A. Inputs ChatGPT has prepared
 
-- canonical architecture baseline V2;
+- canonical V5 authority `architecture.lock.yaml` and its derived index `docs/architecture/EXACT_TOPOLOGY_V5.md`;
 - machine-readable architecture lock;
 - exact PREPROD topology;
 - exact PROD A/B topology;

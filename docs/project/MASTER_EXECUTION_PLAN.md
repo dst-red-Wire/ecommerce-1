@@ -33,7 +33,7 @@ Only these statuses are allowed:
 
 | Milestone | Primary owner | Objective | Entry gate | Exit gate | Current status |
 |---|---|---|---|---|---|
-| M0 Architecture Sync | ChatGPT | lock canonical V2 baseline and remove architecture collisions | validated project decisions | baseline, lock, agent rules and merged sync PR | DONE |
+| M0 Architecture Sync | ChatGPT | lock `architecture.lock.yaml` as the canonical V5 authority and remove architecture collisions | validated project decisions | V5 lock, derived index, agent rules and merged sync PR | DONE |
 | M1 Monorepo Bootstrap | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | READY FOR CODEX |
 | M2 Golden Service Product | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | BLOCKED by M1 |
 | M2.5 Persistent MGMT Bootstrap | Codex | bootstrap the persistent management plane required before PREPROD | M1 PROVEN | persistent MGMT bootstrap PROVEN under the canonical architecture contracts | BLOCKED by M1 |

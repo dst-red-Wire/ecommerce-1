@@ -52,6 +52,50 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_canonical_frontends_and_deployment_are_exact
+    [->(data) { data["business"]["frontends"].delete("admin") },
+     ->(data) { data["business"]["frontends"] = %w[storefront portal] }].each do |mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml", &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends") }
+      end
+    end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].each { |wave| wave.fetch("components", []).delete("storefront") }
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
+    end
+  end
+
+  def test_deployment_dependency_order_and_mlops_coverage
+    [["checkout", "order"], ["fulfillment", "shipping"]].each do |service, dependency|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          commerce = data["waves"].find { |wave| wave["id"] == "90-commerce" }
+          commerce["parallel_groups"].each { |group| group.delete(service) }
+          commerce["serial_after_parallel"].delete(service)
+          if service == "checkout"
+            commerce["parallel_groups"].first << service
+          else
+            commerce["parallel_groups"].first << service
+            commerce["parallel_groups"].first.delete("shipping")
+            commerce["parallel_groups"][1] << "shipping"
+          end
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("#{service} after synchronous dependency #{dependency}") }
+      end
+    end
+    ArchitectureValidator::DEPLOYABLE_MLOPS.each do |component|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].each { |wave| wave.fetch("serial_after_parallel", []).delete(component) }
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("MLOps") }
+      end
+    end
+  end
+
   ROOT = File.expand_path("..", __dir__)
   BASE_CONTRACT_FILES = %w[
     architecture.lock.yaml

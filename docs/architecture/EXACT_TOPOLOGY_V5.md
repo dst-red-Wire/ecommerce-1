@@ -102,6 +102,8 @@ Checkout and fulfillment are autonomous services. Checkout owns pre-order orches
 
 The derived frontend runtime assignments below mirror the lock’s `business.frontend_runtime` mapping exactly:
 
+The canonical frontends are exactly `storefront` and `admin`.
+
 - `language`: `go`
 - `module`: `frontend`
 - `module_file`: `frontend/go.mod`

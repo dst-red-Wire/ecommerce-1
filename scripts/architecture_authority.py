@@ -8,6 +8,8 @@ import subprocess
 AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
+V5_FRONTENDS = ["storefront", "admin"]
+DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = {
     "dataset_versioner": "lakefs", "object_storage": "seaweedfs-s3",
     "metadata_database": "cloudnativepg-postgresql", "experiments_lineage": "mlflow",
@@ -210,6 +212,7 @@ def derived_index_errors(index, lock):
     services = lock["business"]["services"]
     require(f"Exactly {len(services)} backend services", "business.services count")
     require("`, `".join(services), "business.services membership/order")
+    require("The canonical frontends are exactly `storefront` and `admin`.", "business.frontends")
     frontend = lock["business"]["frontend_runtime"]
     frontend_section = index.split("## Application ownership", 1)[-1].split("\n## ", 1)[0]
     rendered_frontend = assignments(
@@ -304,7 +307,12 @@ def documentation_errors(text):
             )
             if not (historical or migration or nextjs_retired):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
-        if re.search(r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?", sentence) and not historical:
+        removed_v2_authority = re.search(
+            r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?|"
+            r"\b(?:baseline\s+V2|canonical\s+V2(?:\s+(?:architecture\s+)?baseline)?|V2\s+canonical\s+baseline|V2\s+baseline)\b",
+            sentence, re.I,
+        )
+        if removed_v2_authority and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
         active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object stor(?:age|e)|logging|SIEM)"
         components = re.finditer(rf"\b(?:{SUPERSEDED_COMPONENT})\b", sentence, re.I)
@@ -377,6 +385,8 @@ def validate(root):
         subordinate_mlops = dict(mlops_rows)
         if lock.get("mlops") != V5_MLOPS or subordinate_mlops != V5_MLOPS:
             errors.append("mlops must match the complete approved V5 mapping and subordinate contract")
+        if lock["business"].get("frontends") != V5_FRONTENDS:
+            errors.append("business.frontends must match the complete approved V5 frontend set")
         milestones = lock["build_milestones"]
         expected = ["M0-architecture-sync", "M1-monorepo-bootstrap", "M2-golden-service-product",
                     "M2-5-persistent-mgmt-bootstrap", "M3-preprod-infrastructure", "M4-platform-baseline",
@@ -475,7 +485,20 @@ def validate(root):
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
         deployed = []
-        for wave in waves.get("waves", []):
+        scheduled = []
+        positions = {}
+        for wave_number, wave in enumerate(waves.get("waves", [])):
+            for component in wave.get("components", []):
+                scheduled.append(component)
+                positions.setdefault(component, (wave_number, 0))
+            groups = wave.get("parallel_groups", [])
+            for group_number, group in enumerate(groups, 1):
+                for component in group:
+                    scheduled.append(component)
+                    positions.setdefault(component, (wave_number, group_number))
+            for serial_number, component in enumerate(wave.get("serial_after_parallel", []), len(groups) + 1):
+                scheduled.append(component)
+                positions.setdefault(component, (wave_number, serial_number))
             deployed.extend(component for component in wave.get("components", []) if component in lock["business"]["services"])
             for group in wave.get("parallel_groups", []):
                 deployed.extend(component for component in group if component in lock["business"]["services"])
@@ -483,6 +506,26 @@ def validate(root):
                             if component in lock["business"]["services"])
         if len(deployed) != len(set(deployed)) or set(deployed) != set(lock["business"]["services"]):
             errors.append("deployment waves must schedule every canonical business service exactly once")
+        deployed_frontends = [component for component in scheduled if component in V5_FRONTENDS]
+        if deployed_frontends != V5_FRONTENDS:
+            errors.append("deployment waves must schedule every canonical V5 frontend exactly once")
+        dependencies = load_yaml(root / lock["machine_contracts"]["dependency_map"])["services"]
+        for service, contract in dependencies.items():
+            for dependency in contract.get("sync", []):
+                if service in positions and dependency in positions and positions[service] <= positions[dependency]:
+                    errors.append(f"deployment ordering requires {service} after synchronous dependency {dependency}")
+        mlops_deployed = [component for component in scheduled if component in DEPLOYABLE_MLOPS]
+        if mlops_deployed != DEPLOYABLE_MLOPS:
+            errors.append("deployment waves must schedule every canonical deployable MLOps component exactly once")
+        mlops_dependencies = {
+            "lakefs": ["seaweedfs"], "mlflow": ["lakefs", "cloudnativepg"],
+            "kserve-vllm": ["mlflow", "harbor", "tekton", "rancher-fleet", "argo-rollouts"],
+            "evidently-tekton-batch": ["kserve-vllm", "tekton"],
+        }
+        for component, required in mlops_dependencies.items():
+            for dependency in required:
+                if component not in positions or dependency not in positions or positions[component] <= positions[dependency]:
+                    errors.append(f"deployment ordering requires {component} after MLOps dependency {dependency}")
         m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m7 = m7_match.group(0) if m7_match else ""
         if not re.search(r">=\s*80%\s+global coverage", m7, re.I):

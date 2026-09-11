@@ -30,6 +30,8 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             "DVC is the active dataset versioner; lakeFS was rejected.",
             "Exactly 17 services; the historical diagram is attached.",
             "BASELINE_V2.md is canonical; the prior plan is superseded.",
+            "Use the canonical V2 baseline.", "Synchronize with baseline V2.",
+            "M0 locks the V2 canonical baseline.",
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
@@ -43,6 +45,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             "Historical: DVC was used.\nDataset versioning: DVC."
         ))
         self.assertEqual([], authority.documentation_errors("DVC has been superseded by lakeFS."))
+        self.assertEqual([], authority.documentation_errors("Historical: the V2 baseline preceded the V5 lock."))
 
     def test_dvc_removal_and_lakefs_migration_directives(self):
         for statement in (
@@ -227,6 +230,21 @@ graph LR
                 index_path.write_text(original_index)
             self.assertEqual([], authority.validate(root))
 
+    def test_canonical_frontend_set_and_deployment_are_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original_lock = lock_path.read_text()
+            for mutation in ("    - admin\n", "    - storefront\n", "    - admin\n    - portal\n"):
+                lock_path.write_text(original_lock.replace("    - admin\n", mutation, 1) if "portal" in mutation
+                                     else original_lock.replace(mutation, "", 1))
+                self.assertTrue(any("frontends" in error for error in authority.validate(root)))
+                lock_path.write_text(original_lock)
+            waves = root / "config/infrastructure/deployment-waves.yaml"
+            original_waves = waves.read_text()
+            waves.write_text(original_waves.replace("components: [storefront, admin]", "components: [storefront]"))
+            self.assertTrue(any("frontend" in error for error in authority.validate(root)))
+
     def test_duplicate_subordinate_mlops_assignments_are_rejected(self):
         mutations = (
             ("dataset_versioner", "mlflow"),
@@ -358,10 +376,32 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "config/infrastructure/deployment-waves.yaml"
             original = path.read_text()
-            for before, after in (("      - [checkout]\n", ""),
-                                  ("      - [fulfillment]\n", "      - [unknown-service]\n")):
+            for before, after in (("notification, order, payment", "notification, payment"),
+                                  ("tracking, fulfillment, review", "tracking, unknown-service, review")):
                 path.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("deployment waves" in error for error in authority.validate(root)))
+                path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_deployment_dependency_ordering_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "config/infrastructure/deployment-waves.yaml"
+            original = path.read_text()
+            for before, after in (("      - [catalog, cart]\n    serial_after_parallel: [checkout]",
+                                   "      - [catalog, cart, checkout]\n    serial_after_parallel: []"),
+                                  ("shipping, fraud-risk", "fraud-risk")):
+                path.write_text(original.replace(before, after, 1))
+                self.assertTrue(any("deployment" in error for error in authority.validate(root)))
+                path.write_text(original)
+            path.write_text(original.replace("shipping, fraud-risk", "fraud-risk", 1).replace(
+                "tracking, fulfillment", "tracking, fulfillment, shipping", 1))
+            self.assertTrue(any("fulfillment after synchronous dependency shipping" in error
+                                for error in authority.validate(root)))
+            path.write_text(original)
+            for component in authority.DEPLOYABLE_MLOPS:
+                path.write_text(original.replace(f", {component}", "", 1).replace(f"[{component}, ", "[", 1))
+                self.assertTrue(any("MLOps" in error for error in authority.validate(root)))
                 path.write_text(original)
             self.assertEqual([], authority.validate(root))
 

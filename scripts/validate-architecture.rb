@@ -7,6 +7,8 @@ require "yaml"
 
 module ArchitectureValidator
   LOCK_STATUS = "locked-for-build"
+  V5_FRONTENDS = %w[storefront admin].freeze
+  DEPLOYABLE_MLOPS = %w[lakefs mlflow kserve-vllm evidently-tekton-batch].freeze
   V5_MLOPS = {
     "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
     "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
@@ -312,6 +314,51 @@ module ArchitectureValidator
     end.select { |component| canonical_services.include?(component) }
     check_equal(errors, "business services scheduled exactly once in #{File.basename(deployment_waves_path)}",
                 canonical_services, deployed_services.sort)
+    check_equal(errors, "architecture.lock.yaml canonical frontends", V5_FRONTENDS,
+                expect_array(lock.dig("business", "frontends"), "architecture.lock.yaml business.frontends"))
+    scheduled_components = []
+    deployment_positions = {}
+    deployment_waves.fetch("waves").each_with_index do |wave, wave_index|
+      wave.fetch("components", []).each do |component|
+        scheduled_components << component
+        deployment_positions[component] ||= [wave_index, 0]
+      end
+      groups = wave.fetch("parallel_groups", [])
+      groups.each_with_index do |group, group_index|
+        group.each do |component|
+          scheduled_components << component
+          deployment_positions[component] ||= [wave_index, group_index + 1]
+        end
+      end
+      wave.fetch("serial_after_parallel", []).each_with_index do |component, serial_index|
+        scheduled_components << component
+        deployment_positions[component] ||= [wave_index, groups.length + serial_index + 1]
+      end
+    end
+    deployed_frontends = scheduled_components.select { |component| V5_FRONTENDS.include?(component) }
+    check_equal(errors, "canonical frontends scheduled exactly once in #{File.basename(deployment_waves_path)}",
+                V5_FRONTENDS, deployed_frontends)
+    dependencies.fetch("services").each do |service, contract|
+      contract.fetch("sync", []).each do |dependency|
+        next unless deployment_positions.key?(service) && deployment_positions.key?(dependency)
+        next if (deployment_positions[service] <=> deployment_positions[dependency]).positive?
+
+        errors << "deployment ordering requires #{service} after synchronous dependency #{dependency}"
+      end
+    end
+    deployed_mlops = scheduled_components.select { |component| DEPLOYABLE_MLOPS.include?(component) }
+    check_equal(errors, "canonical deployable MLOps components scheduled exactly once", DEPLOYABLE_MLOPS, deployed_mlops)
+    {
+      "lakefs" => %w[seaweedfs], "mlflow" => %w[lakefs cloudnativepg],
+      "kserve-vllm" => %w[mlflow harbor tekton rancher-fleet argo-rollouts],
+      "evidently-tekton-batch" => %w[kserve-vllm tekton]
+    }.each do |component, required|
+      required.each do |dependency|
+        ordered = deployment_positions.key?(component) && deployment_positions.key?(dependency) &&
+                  (deployment_positions[component] <=> deployment_positions[dependency]).positive?
+        errors << "deployment ordering requires #{component} after MLOps dependency #{dependency}" unless ordered
+      end
+    end
     %w[checkout fulfillment].each do |required_service|
       service_sets.each do |name, names|
         errors << "#{required_service} service is required in #{name}" unless names.include?(required_service)

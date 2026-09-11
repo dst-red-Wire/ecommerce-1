@@ -254,4 +254,4 @@ La création initiale du monorepo est gouvernée par :
 instruction/dev/PROMPT_IA_00_BOOTSTRAP_MONOREPO.md
 ```
 
-Ce prompt doit rester synchronisé avec la baseline V2 avant toute exécution Codex.
+Ce prompt doit rester synchronisé avec `architecture.lock.yaml`, l’autorité canonique V5, et son index dérivé `docs/architecture/EXACT_TOPOLOGY_V5.md` avant toute exécution Codex.
