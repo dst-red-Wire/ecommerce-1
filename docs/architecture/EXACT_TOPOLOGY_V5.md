@@ -129,7 +129,26 @@ The lock’s `mlops` block selects lakeFS for dataset versioning, SeaweedFS S3 f
 
 ## Observability
 
-The lock’s `observability` block selects OpenTelemetry telemetry, Rotel for the application gateway and OpenTelemetry Collector for infrastructure. Prometheus is the metrics protocol; vmagent scrapes into VictoriaMetrics. Infrastructure logs use VictoriaLogs; application observability uses ClickHouse and HyperDX, with self-hosted MongoDB OSS as HyperDX metadata store. vmalert, Alertmanager and Grafana provide alert evaluation, notifications and dashboards. Data Prepper, OpenSearch and Wazuh own the security pipeline. `OBSERVABILITY_TOPOLOGY_V1.md` is subordinate detail; the lock prevails.
+The derived role assignments below mirror the lock’s `observability` mapping exactly:
+
+- `telemetry`: `opentelemetry`
+- `application_gateway`: `rotel`
+- `infrastructure_collector`: `opentelemetry-collector`
+- `metrics_protocol`: `prometheus`
+- `metrics_scraper`: `vmagent`
+- `metrics`: `victoriametrics`
+- `infrastructure_logs`: `victorialogs`
+- `application_observability_storage`: `clickhouse`
+- `application_observability_ui`: `hyperdx`
+- `hyperdx_metadata_store`: `mongodb-oss-self-hosted`
+- `alerts`: `vmalert`
+- `notifications`: `alertmanager`
+- `dashboards`: `grafana`
+- `security_pipeline`: `data-prepper`
+- `security_logs`: `opensearch`
+- `security`: `wazuh`
+
+`OBSERVABILITY_TOPOLOGY_V1.md` is subordinate detail; the lock prevails.
 
 ## Build dependencies
 

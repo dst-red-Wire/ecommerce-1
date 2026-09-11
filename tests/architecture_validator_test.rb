@@ -28,6 +28,28 @@ class ArchitectureValidatorTest < Minitest::Test
     assert_empty ArchitectureValidator.validate(ROOT)
   end
 
+  def test_topology_status_requires_exact_token
+    %w[INEXACT NOT-EXACT EXACTLY DRAFT].each do |status|
+      with_contract_copy do |root|
+        path = File.join(root, "docs/architecture/PROD_TOPOLOGY_V2.md")
+        File.write(path, File.read(path).sub("Status: `EXACT`", "Status: `#{status}`"))
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("readable EXACT") }
+      end
+    end
+  end
+
+  def test_management_plane_provider_and_human_gate_are_cross_checked
+    {
+      "MGMT inventory provider" => lambda { |data| data["management_plane"]["provider"] = "aws" },
+      "MGMT human apply gate" => lambda { |data| data["management_plane"]["bootstrap"]["requires_human_apply_gate"] = false }
+    }.each do |message, mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml", &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
+    end
+  end
+
   SERVICE_MUTATIONS = {
     "missing checkout in dependency map" => lambda { |root|
       mutate_yaml(root, "config/contracts/dependency-map.yaml") do |data|

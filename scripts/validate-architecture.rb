@@ -147,7 +147,9 @@ module ArchitectureValidator
         raise ContractLoadError, "#{label} resolves outside the repository: #{path.inspect}"
       end
       contents = File.read(real_path)
-      unless contents.match?(/^Status:\s*`[^`]*EXACT[^`]*`/i)
+      status = contents.match(/^Status:\s*`([^`]*)`\s*$/i)
+      status_token = status && status[1].strip.split(/\s+/, 2).first
+      unless status_token&.casecmp?("EXACT")
         raise ContractLoadError, "#{label} must reference a readable EXACT topology contract: #{path}"
       end
     end
@@ -191,6 +193,8 @@ module ArchitectureValidator
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
     network, = required_machine_contract(contracts, "network_plan")
     mgmt, = required_machine_contract(contracts, "mgmt_inventory")
+    mgmt_gateways, = required_machine_contract(contracts, "mgmt_access_gateways")
+    mgmt_wireguard, = required_machine_contract(contracts, "mgmt_wireguard_access")
     prod, = required_machine_contract(contracts, "prod_inventory")
     resilience, resilience_path = required_machine_contract(contracts, "resilience_governance")
     trust_zones, trust_zones_path = required_machine_contract(contracts, "security_trust_zones")
@@ -199,6 +203,27 @@ module ArchitectureValidator
       check_equal(errors, "#{path} status", "exact", contract["status"])
       check_equal(errors, "#{path} architecture authority", "architecture.lock.yaml", contract["architecture_authority"])
     end
+    management = expect_mapping(lock["management_plane"], "architecture.lock.yaml management_plane")
+    check_equal(errors, "MGMT inventory provider", management["provider"], mgmt["provider"])
+    check_equal(errors, "MGMT gateway provider", management["provider"], mgmt_gateways["provider"])
+    check_equal(errors, "MGMT WireGuard provider", management["provider"], mgmt_wireguard.dig("gateway", "provider"))
+    check_equal(errors, "MGMT inventory lifecycle", management["lifecycle"], mgmt.dig("lifecycle", "mode"))
+    check_equal(errors, "MGMT gateway lifecycle", management["lifecycle"], mgmt_gateways.dig("lifecycle", "mode"))
+    check_equal(errors, "MGMT WireGuard lifecycle", management["lifecycle"], mgmt_wireguard.dig("gateway", "lifecycle"))
+    check_equal(errors, "MGMT private block", management["private_block"], mgmt["private_block"])
+    %w[forge ci registry gitops].each do |role|
+      check_equal(errors, "MGMT #{role}", management[role], mgmt.dig("platform_services", role))
+    end
+    profile_prefixes = expect_mapping(mgmt["vm_profiles"], "mgmt-inventory.yaml vm_profiles").keys.map { |name| name.split("-", 2).first }.uniq
+    check_equal(errors, "MGMT Kubernetes", [management["kubernetes"]], profile_prefixes)
+    check_equal(errors, "MGMT Terraform/OpenTofu bootstrap", true, management.dig("bootstrap", "terraform_opentofu"))
+    check_equal(errors, "MGMT inventory Terraform/OpenTofu bootstrap", "terraform-opentofu", mgmt.dig("bootstrap", "infrastructure"))
+    check_equal(errors, "MGMT Ansible bootstrap", true, management.dig("bootstrap", "ansible"))
+    check_equal(errors, "MGMT inventory Ansible bootstrap", "ansible", mgmt.dig("bootstrap", "configuration"))
+    check_equal(errors, "MGMT human apply gate", true, management.dig("bootstrap", "requires_human_apply_gate"))
+    check_equal(errors, "MGMT inventory human apply gate", true, mgmt.dig("bootstrap", "human_apply_gate"))
+    check_equal(errors, "MGMT gateway human apply gate", true, mgmt_gateways.dig("implementation", "human_apply_gate"))
+    check_equal(errors, "MGMT WireGuard provider apply gate", "required", mgmt_wireguard.dig("human_gates", "provider_apply"))
     check_equal(errors, "security trust zones", {
       "Z0" => "internet-untrusted", "Z1" => "public-edge-dmz", "Z2" => "kubernetes-ingress-service-mesh",
       "Z3" => "application-workloads", "Z4" => "stateful-data", "Z5" => "permanent-mgmt",

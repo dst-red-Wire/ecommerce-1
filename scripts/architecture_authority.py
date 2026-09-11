@@ -108,18 +108,12 @@ def derived_index_errors(index, lock):
     require(f"M2.5 is `{lock['build_milestones'][3]}`", "M2.5 milestone identity")
 
     observability = lock["observability"]
-    display = {
-        "opentelemetry": "OpenTelemetry", "rotel": "Rotel", "opentelemetry-collector": "OpenTelemetry Collector",
-        "prometheus": "Prometheus", "vmagent": "vmagent", "victoriametrics": "VictoriaMetrics",
-        "victorialogs": "VictoriaLogs", "clickhouse": "ClickHouse", "hyperdx": "HyperDX",
-        "mongodb-oss-self-hosted": "self-hosted MongoDB OSS", "vmalert": "vmalert",
-        "alertmanager": "Alertmanager", "grafana": "Grafana", "data-prepper": "Data Prepper",
-        "opensearch": "OpenSearch", "wazuh": "Wazuh",
-    }
     observability_section = index.split("## Observability", 1)[-1].split("\n## ", 1)[0]
+    rendered_observability = dict(re.findall(
+        r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", observability_section, re.M
+    ))
     for field, value in observability.items():
-        require_value = display.get(value, value)
-        if require_value not in observability_section:
+        if rendered_observability.get(field) != value:
             errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
 
     mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
@@ -190,7 +184,7 @@ def documentation_errors(text):
         if re.search(r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?", sentence) and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
         superseded = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator)?|Loki|Splunk"
-        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object storage|logging|SIEM)"
+        active = r"(?:active|default|baseline|target|use|uses|deploy|select|GitOps(?: CD)?|progressive delivery|object stor(?:age|e)|logging|SIEM)"
         component = re.search(rf"\b(?:{superseded})\b", sentence, re.I)
         retired = component and component_is_retired(sentence, superseded)
         if component and re.search(active, sentence, re.I) and not (historical or retired):
@@ -259,6 +253,40 @@ def validate(root):
         for relative in lock["machine_contracts"].values():
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
+        management = lock["management_plane"]
+        inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
+        gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
+        wireguard = load_yaml(root / lock["machine_contracts"]["mgmt_wireguard_access"])
+        management_checks = {
+            "provider": (inventory.get("provider"), gateways.get("provider"), wireguard.get("gateway", {}).get("provider")),
+            "lifecycle": (inventory.get("lifecycle", {}).get("mode"), gateways.get("lifecycle", {}).get("mode"),
+                          wireguard.get("gateway", {}).get("lifecycle")),
+            "private_block": (inventory.get("private_block"),),
+            "kubernetes": ((management.get("kubernetes") if inventory.get("vm_profiles") and all(
+                name.startswith(f"{management.get('kubernetes')}-") for name in inventory["vm_profiles"]
+            ) else None),),
+            "forge": (inventory.get("platform_services", {}).get("forge"),),
+            "ci": (inventory.get("platform_services", {}).get("ci"),),
+            "registry": (inventory.get("platform_services", {}).get("registry"),),
+            "gitops": (inventory.get("platform_services", {}).get("gitops"),),
+        }
+        for field, subordinate_values in management_checks.items():
+            if any(value != management.get(field) for value in subordinate_values):
+                errors.append(f"management_plane.{field} contradicts subordinate MGMT contracts")
+        bootstrap = management.get("bootstrap", {})
+        if (bootstrap.get("terraform_opentofu") is not True
+                or inventory.get("bootstrap", {}).get("infrastructure") != "terraform-opentofu"
+                or bootstrap.get("ansible") is not True
+                or inventory.get("bootstrap", {}).get("configuration") != "ansible"):
+            errors.append("management_plane.bootstrap contradicts the MGMT inventory")
+        human_gates = (
+            bootstrap.get("requires_human_apply_gate"),
+            inventory.get("bootstrap", {}).get("human_apply_gate"),
+            gateways.get("implementation", {}).get("human_apply_gate"),
+            wireguard.get("human_gates", {}).get("provider_apply") == "required",
+        )
+        if any(gate is not True for gate in human_gates):
+            errors.append("management_plane.bootstrap requires the locked human apply gate")
         for role, relative in lock["topology_contracts"].items():
             if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
@@ -268,7 +296,9 @@ def validate(root):
                 errors.append(f"missing topology contract: {relative}")
                 continue
             contents = path.read_text()
-            if not contents.strip() or not re.search(r"^Status:\s*`[^`]*EXACT[^`]*`", contents, re.M | re.I):
+            status = re.search(r"^Status:\s*`([^`]*)`\s*$", contents, re.M | re.I)
+            status_token = status.group(1).strip().split(maxsplit=1)[0].upper() if status else None
+            if not contents.strip() or status_token != "EXACT":
                 errors.append(f"topology contract must be readable and EXACT: {relative}")
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:

@@ -44,7 +44,8 @@ class ArchitectureAuthorityTest(unittest.TestCase):
         self.assertEqual([], authority.documentation_errors("DVC has been superseded by lakeFS."))
 
     def test_active_superseded_platform_defaults_are_rejected(self):
-        for statement in ("GitOps CD: FluxCD.", "Progressive delivery: Flagger.",
+        for statement in ("GitOps CD: FluxCD.", "Progressive delivery: Flagger.", "MinIO is the object store.",
+                          "Use MinIO Community Edition as the object store.",
                           "Object storage default: MinIO Community Edition.",
                           "Logging baseline: Loki.", "SIEM: Splunk.",
                           "General logging pipeline: Fluent Bit."):
@@ -259,6 +260,52 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             self.assertTrue(any("L2 context" in error for error in authority.validate(root)))
             router.write_text(original)
             self.assertEqual([], authority.validate(root))
+
+    def test_observability_role_mutations_are_rejected(self):
+        mutations = (
+            ("- `application_gateway`: `rotel`", "- `application_gateway`: `opentelemetry-collector`"),
+            ("- `application_observability_storage`: `clickhouse`",
+             "- `application_observability_storage`: `victorialogs`"),
+            ("- `hyperdx_metadata_store`: `mongodb-oss-self-hosted`",
+             "- `hyperdx_metadata_store`: `postgresql`"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = index.read_text()
+            for before, after in mutations:
+                with self.subTest(mutation=before):
+                    index.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any("observability." in error for error in authority.validate(root)))
+                    index.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_exact_topology_status_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            topology = root / "docs/architecture/PROD_TOPOLOGY_V2.md"
+            original = topology.read_text()
+            for status in ("INEXACT", "NOT-EXACT", "EXACTLY", "DRAFT"):
+                topology.write_text(original.replace("Status: `EXACT`", f"Status: `{status}`", 1))
+                self.assertTrue(any("readable and EXACT" in error for error in authority.validate(root)))
+            topology.write_text(original.replace("Status: `EXACT`", "status: `exact`", 1))
+            self.assertEqual([], authority.validate(root))
+
+    def test_management_plane_mutations_are_rejected(self):
+        mutations = (
+            ("architecture.lock.yaml", "provider: hetzner-cloud", "provider: aws"),
+            ("architecture.lock.yaml", "requires_human_apply_gate: true", "requires_human_apply_gate: false"),
+            ("config/infrastructure/mgmt-inventory.yaml", "provider: hetzner-cloud", "provider: aws"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            for relative, before, after in mutations:
+                path = root / relative
+                original = path.read_text()
+                path.write_text(original.replace(before, after, 1))
+                self.assertTrue(any("management_plane" in error for error in authority.validate(root)))
+                path.write_text(original)
+                self.assertEqual([], authority.validate(root))
 
     def test_new_documents_and_missing_authority_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
