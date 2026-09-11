@@ -176,7 +176,7 @@ def documentation_clauses(text):
             diagram_fence = False
 
 
-def derived_index_errors(index, lock):
+def derived_index_errors(index, lock, network_plan):
     """Cross-check facts rendered by the derived index against their lock values."""
     errors = []
 
@@ -205,13 +205,29 @@ def derived_index_errors(index, lock):
     if index.count(f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers") != site_count:
         errors.append("derived index drift from architecture.lock.yaml: PROD per-site control-plane/worker counts")
     require(f"{prod['data_workers_per_site']} data workers + {prod['general_workers_per_site']} general", "PROD worker roles")
-    for site, values in prod["sites"].items():
-        require(values["private_block"], f"prod_certified_topology.sites.{site}.private_block")
-    require(lock["management_plane"]["private_block"], "management_plane.private_block")
+    network_section = index.split("## Network", 1)[-1].split("\n## ", 1)[0]
+    rendered_blocks = dict(re.findall(
+        r"^- (PREPROD|PROD-A|PROD-B|permanent MGMT) `([^`]+)`\s*$", network_section, re.M
+    ))
+    address_domains = network_plan.get("address_domains", {})
+    expected_blocks = {
+        "PREPROD": address_domains.get("preprod"),
+        "PROD-A": prod["sites"]["prod-a"]["private_block"],
+        "PROD-B": prod["sites"]["prod-b"]["private_block"],
+        "permanent MGMT": lock["management_plane"]["private_block"],
+    }
+    if rendered_blocks != expected_blocks:
+        errors.append("derived index drift from architecture.lock.yaml: labeled private block mapping")
 
     services = lock["business"]["services"]
     require(f"Exactly {len(services)} backend services", "business.services count")
-    require("`, `".join(services), "business.services membership/order")
+    service_match = re.search(
+        r"^Exactly \d+ backend services, as listed in `architecture\.lock\.yaml` business\.services:\s*\n\n"
+        r"(?P<list>[^\n]+)$", index, re.M
+    )
+    rendered_services = re.findall(r"`([a-z0-9-]+)`", service_match.group("list")) if service_match else []
+    if rendered_services != services:
+        errors.append("derived index drift from architecture.lock.yaml: business.services membership/order")
     require("The canonical frontends are exactly `storefront` and `admin`.", "business.frontends")
     frontend = lock["business"]["frontend_runtime"]
     frontend_section = index.split("## Application ownership", 1)[-1].split("\n## ", 1)[0]
@@ -463,7 +479,8 @@ def validate(root):
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
-        errors.extend(derived_index_errors(index, lock))
+        network_plan = load_yaml(root / lock["machine_contracts"]["network_plan"])
+        errors.extend(derived_index_errors(index, lock, network_plan))
         for relative in ("AGENTS.md", "README.md"):
             text = (root / relative).read_text()
             if not re.search(r"architecture.lock.yaml.{0,12}(?:— the single canonical architecture authority|, seule autorité canonique)", text):
@@ -486,6 +503,17 @@ def validate(root):
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
         if waves.get("status") != "exact":
             errors.append("deployment-waves.yaml status must be exact")
+        deployment_dag = (root / topology_contracts["deployment_dag"]).read_text()
+        for wave_id in ("30-gitops-identity", "50-observability"):
+            matching_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == wave_id]
+            machine_components = matching_waves[0].get("components", []) if len(matching_waves) == 1 else []
+            prose_match = re.search(
+                rf"^Machine wave `{re.escape(wave_id)}` scheduled components: (?P<components>.+)$",
+                deployment_dag, re.M,
+            )
+            prose_components = re.findall(r"`([a-z0-9-]+)`", prose_match.group("components")) if prose_match else []
+            if len(matching_waves) != 1 or prose_components != machine_components:
+                errors.append(f"DEPLOYMENT_DAG.md must exactly mirror machine wave {wave_id}")
         deployed = []
         scheduled = []
         positions = {}

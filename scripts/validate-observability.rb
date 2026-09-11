@@ -114,12 +114,20 @@ module ObservabilityTopologyValidator
 
     waves_path = lock.dig("machine_contracts", "deployment_waves")
     waves = load_yaml(File.join(root, waves_path.to_s))
-    wave = Array(waves["waves"]).find { |entry| entry["id"] == "50-observability" }
+    matching_waves = Array(waves["waves"]).select { |entry| entry["id"] == "50-observability" }
+    unless matching_waves.length == 1
+      errors << "deployment wave 50-observability must occur exactly once"
+      return errors
+    end
+    wave = matching_waves.first
     components = Array(wave && wave["components"])
-    required = DEPLOYMENT_COMPONENT_FIELDS.map { |field| summary[field] }
+    required = DEPLOYMENT_COMPONENT_FIELDS.reject { |field| field == "security" }.map { |field| summary[field] }
     required << "#{summary['security_logs']}-security"
+    required << summary["security"]
     missing = required.compact.uniq - components
     errors << "deployment wave 50 missing canonical observability components: #{missing.join(', ')}" unless missing.empty?
+    expected_components = required.compact.uniq
+    errors << "deployment wave 50 must exactly match canonical observability components" unless components == expected_components
     forbidden_wave = %w[prometheus prometheus-server fluent-bit opensearch-logs]
     active_forbidden = components & forbidden_wave
     errors << "deployment wave 50 activates superseded general observability roles: #{active_forbidden.join(', ')}" unless active_forbidden.empty?

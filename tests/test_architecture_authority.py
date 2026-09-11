@@ -540,6 +540,71 @@ graph LR
             router.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_derived_index_private_blocks_are_bound_to_site_labels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = path.read_text()
+            mutations = (
+                original.replace("PROD-A `10.241.0.0/16`", "PROD-A `10.242.0.0/16`").replace(
+                    "PROD-B `10.242.0.0/16`", "PROD-B `10.241.0.0/16`"),
+                original.replace("permanent MGMT `10.243.0.0/16`", "permanent MGMT `10.241.0.0/16`"),
+                original.replace("PROD-B `10.242.0.0/16`", "PROD-B `10.243.0.0/16`"),
+                original.replace("PROD-B `10.242.0.0/16`", "PROD-B `10.241.0.0/16`"),
+            )
+            for mutation in mutations:
+                path.write_text(mutation)
+                self.assertIn(
+                    "derived index drift from architecture.lock.yaml: labeled private block mapping",
+                    authority.validate(root),
+                )
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_derived_index_service_list_is_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original = path.read_text()
+            service_list = "`catalog`, `product`"
+            for replacement in (
+                "`warehouse`, `catalog`, `product`",
+                "`catalog`, `product`, `product`",
+                "`catalog`, `warehouse`",
+                "`product`",
+            ):
+                path.write_text(original.replace(service_list, replacement, 1))
+                self.assertIn(
+                    "derived index drift from architecture.lock.yaml: business.services membership/order",
+                    authority.validate(root),
+                )
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_exact_prose_dag_mirrors_delivery_and_observability_waves(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/DEPLOYMENT_DAG.md"
+            original = path.read_text()
+            for component, wave_id in (("rotel", "50-observability"), ("clickhouse", "50-observability"),
+                                       ("hyperdx", "50-observability"),
+                                       ("mongodb-oss-self-hosted", "50-observability"),
+                                       ("vmalert", "50-observability"),
+                                       ("argo-rollouts", "30-gitops-identity")):
+                marker = f"`{component}`"
+                line = next(line for line in original.splitlines()
+                            if line.startswith(f"Machine wave `{wave_id}` scheduled components:"))
+                path.write_text(original.replace(line, line.replace(marker, "", 1), 1))
+                self.assertIn(f"DEPLOYMENT_DAG.md must exactly mirror machine wave {wave_id}",
+                              authority.validate(root))
+            line = next(line for line in original.splitlines()
+                        if line.startswith("Machine wave `50-observability` scheduled components:"))
+            path.write_text(original.replace(line, f"{line}, `prometheus-server`", 1))
+            self.assertIn("DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability",
+                          authority.validate(root))
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_l2_context_includes_v5_exact_index(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)

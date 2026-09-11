@@ -48,7 +48,10 @@ Gate W3: default-deny policy test, SPIFFE issuance, Cilium health and policy adm
 
 ## Wave 4 — GitOps/secrets/mesh control
 
-- Rancher Fleet agent/bundles;
+Machine wave `30-gitops-identity` scheduled components: `rancher-fleet`, `argo-rollouts`, `spire`, `istio`
+
+- Rancher Fleet agent/bundles owns desired-state reconciliation;
+- Argo Rollouts owns progressive delivery;
 - OpenBao Kubernetes auth/bootstrap completion;
 - ESO;
 - Istio control plane;
@@ -62,8 +65,12 @@ Parallel groups:
 
 A. Harbor integrations/robot accounts/signature verification hooks.
 B. Tekton pipelines/tasks.
-C. OTel Collector, vmagent, VictoriaMetrics, VictoriaLogs, Alertmanager, Grafana.
+C. OTel Collector; vmagent + VictoriaMetrics; VictoriaLogs; Rotel -> ClickHouse -> HyperDX with mongodb-oss-self-hosted metadata; vmalert + Alertmanager; Grafana.
 D. Data Prepper -> OpenSearch + Wazuh security-only integrations.
+
+Machine wave `50-observability` scheduled components: `opentelemetry-collector`, `rotel`, `vmagent`, `victoriametrics`, `victorialogs`, `clickhouse`, `hyperdx`, `mongodb-oss-self-hosted`, `vmalert`, `alertmanager`, `grafana`, `data-prepper`, `opensearch-security`, `wazuh`
+
+The observability boundaries are OTel Collector for collection; vmagent + VictoriaMetrics for metrics; VictoriaLogs for infrastructure logs; Rotel -> ClickHouse -> HyperDX for application observability, with mongodb-oss-self-hosted for HyperDX metadata; vmalert + Alertmanager for alerts; and Data Prepper -> OpenSearch + Wazuh for the security-only pipeline.
 
 Gate W5: pipeline dry-run, registry pull-by-digest, telemetry/log/security event flow pass.
 
