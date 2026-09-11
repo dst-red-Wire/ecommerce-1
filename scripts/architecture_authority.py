@@ -506,8 +506,9 @@ def validate(root):
                             if component in lock["business"]["services"])
         if len(deployed) != len(set(deployed)) or set(deployed) != set(lock["business"]["services"]):
             errors.append("deployment waves must schedule every canonical business service exactly once")
-        deployed_frontends = [component for component in scheduled if component in V5_FRONTENDS]
-        if deployed_frontends != V5_FRONTENDS:
+        frontend_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == "100-frontends"]
+        deployed_frontends = frontend_waves[0].get("components", []) if len(frontend_waves) == 1 else []
+        if len(frontend_waves) != 1 or deployed_frontends != V5_FRONTENDS:
             errors.append("deployment waves must schedule every canonical V5 frontend exactly once")
         dependencies = load_yaml(root / lock["machine_contracts"]["dependency_map"])["services"]
         for service, contract in dependencies.items():

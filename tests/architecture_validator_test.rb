@@ -66,6 +66,12 @@ class ArchitectureValidatorTest < Minitest::Test
       end
       assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
     end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "100-frontends" }["components"] << "portal"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
+    end
   end
 
   def test_deployment_dependency_order_and_mlops_coverage
@@ -93,6 +99,14 @@ class ArchitectureValidatorTest < Minitest::Test
         end
         assert ArchitectureValidator.validate(root).any? { |error| error.include?("MLOps") }
       end
+    end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        mlops = data["waves"].find { |wave| wave["id"] == "95-mlops" }
+        mlops["serial_after_parallel"].delete("lakefs")
+        data["waves"].first["components"] << "lakefs"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("lakefs after MLOps dependency seaweedfs") }
     end
   end
 

@@ -244,6 +244,9 @@ graph LR
             original_waves = waves.read_text()
             waves.write_text(original_waves.replace("components: [storefront, admin]", "components: [storefront]"))
             self.assertTrue(any("frontend" in error for error in authority.validate(root)))
+            waves.write_text(original_waves.replace("components: [storefront, admin]",
+                                                    "components: [storefront, admin, portal]"))
+            self.assertTrue(any("frontend" in error for error in authority.validate(root)))
 
     def test_duplicate_subordinate_mlops_assignments_are_rejected(self):
         mutations = (
@@ -403,6 +406,13 @@ graph LR
                 path.write_text(original.replace(f", {component}", "", 1).replace(f"[{component}, ", "[", 1))
                 self.assertTrue(any("MLOps" in error for error in authority.validate(root)))
                 path.write_text(original)
+            path.write_text(original.replace("components: [network, dns-prerequisites, time-sync, image-mirrors]",
+                                             "components: [network, dns-prerequisites, time-sync, image-mirrors, lakefs]")
+                                 .replace("serial_after_parallel: [lakefs, mlflow, kserve-vllm, evidently-tekton-batch]",
+                                          "serial_after_parallel: [mlflow, kserve-vllm, evidently-tekton-batch]"))
+            self.assertTrue(any("lakefs after MLOps dependency seaweedfs" in error
+                                for error in authority.validate(root)))
+            path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_exact_contract_mutations_are_rejected(self):

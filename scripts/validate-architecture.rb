@@ -335,7 +335,8 @@ module ArchitectureValidator
         deployment_positions[component] ||= [wave_index, groups.length + serial_index + 1]
       end
     end
-    deployed_frontends = scheduled_components.select { |component| V5_FRONTENDS.include?(component) }
+    frontend_waves = deployment_waves.fetch("waves").select { |wave| wave["id"] == "100-frontends" }
+    deployed_frontends = frontend_waves.length == 1 ? frontend_waves.first.fetch("components", []) : []
     check_equal(errors, "canonical frontends scheduled exactly once in #{File.basename(deployment_waves_path)}",
                 V5_FRONTENDS, deployed_frontends)
     dependencies.fetch("services").each do |service, contract|
