@@ -1,8 +1,9 @@
 ---
 profile: basic
-skip_list:
-  # Existing role variables predate role-prefix enforcement; renaming them is a
-  # separate compatibility migration, not part of validation closure.
-  - var-naming[no-role-prefix]
-  # The management play intentionally fans independent hosts out with strategy free.
-  - run-once[play]
+exclude_paths:
+  # These are architecture/Kubernetes contracts, not Ansible task files.
+  - architecture.lock.yaml
+  - .pre-commit-config.yaml
+  - config/
+  - platform/gitops/
+  - platform/tekton/

@@ -21,6 +21,7 @@ CONTRACT = ROOT / "config/toolchain/capabilities.json"
 VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
+REQUIREMENTS = {"required-static", "optional-runtime"}
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
@@ -57,6 +58,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     """
     versions = versions or load_versions()
     graph = Graph(contract["capabilities"])
+    for name, item in graph.items.items():
+        if item.get("requirement") not in REQUIREMENTS:
+            raise ValueError(f"{name}: invalid or missing requirement")
     quality_names = ("ruff", "oxfmt", "oxlint")
     quality_items = [graph.items[name] for name in quality_names if name in graph.items]
     if len(quality_items) == len(quality_names):
@@ -249,6 +253,15 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
+def profile_succeeded(results: dict[str, Result], contract: dict, profile: str) -> bool:
+    graph = Graph(contract["capabilities"])
+    required = {
+        name for name, item in graph.items.items() if profile == "runtime" or item["requirement"] == "required-static"
+    }
+    required.update(primitive["command"] for primitive in contract.get("platform_primitives", []))
+    return all(results[name].state == "PASS" for name in required)
+
+
 class Auditor:
     def __init__(
         self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which
@@ -434,7 +447,9 @@ class Auditor:
             return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
         return self.check(item, item["name"])
 
-    def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
+    def run(self, *, bootstrap: bool, os_name: str, arch: str, profile: str = "static") -> dict[str, Result]:
+        if profile not in {"static", "runtime"}:
+            raise ValueError(f"unknown capability profile: {profile}")
         results: dict[str, Result] = {}
         for name in self.graph.order():
             item = self.graph.items[name]
@@ -462,6 +477,11 @@ class Auditor:
                 results[command] = platform_failure or (
                     Result("PASS", "ready") if self.which(command) else Result("FAIL", "tool absent")
                 )
+        if profile == "static":
+            for name, item in self.graph.items.items():
+                result = results[name]
+                if item["requirement"] == "optional-runtime" and result.state != "PASS":
+                    results[name] = Result("SKIP", f"environmental: {result.state.lower()} - {result.detail}")
         return results
 
 
@@ -471,15 +491,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contract", type=Path, default=CONTRACT)
     parser.add_argument("--os")
     parser.add_argument("--arch")
+    parser.add_argument("--profile", choices=("static", "runtime"), default="static")
+    parser.add_argument("--evidence", type=Path)
     args = parser.parse_args(argv)
     contract = load_contract(args.contract)
     auditor = Auditor(contract)
     os_name, arch, context = normalized_platform(args.os, args.arch)
     print(f"PLATFORM os={os_name} arch={arch} context={context}")
-    results = auditor.run(bootstrap=args.mode == "bootstrap", os_name=os_name, arch=arch)
+    results = auditor.run(bootstrap=args.mode == "bootstrap", os_name=os_name, arch=arch, profile=args.profile)
     for name, result in results.items():
         print(f"{result.state:<11} {name:<25} {result.detail}")
-    return 0 if all(result.state == "PASS" for result in results.values()) else 1
+    evidence = {
+        "schema_version": 1,
+        "mode": args.mode,
+        "profile": args.profile,
+        "platform": {"os": os_name, "arch": arch, "context": context},
+        "results": {name: {"state": result.state, "detail": result.detail} for name, result in results.items()},
+    }
+    if args.evidence:
+        args.evidence.parent.mkdir(parents=True, exist_ok=True)
+        args.evidence.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+    return 0 if profile_succeeded(results, contract, args.profile) else 1
 
 
 if __name__ == "__main__":

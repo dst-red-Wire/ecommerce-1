@@ -1,0 +1,13 @@
+# Pre-prefix role-variable compatibility debt is confined to these ten files.
+# New files and every other ansible-lint rule remain enforced; remove entries as
+# each role's public variables and registered facts are migrated atomically.
+platform/ansible/roles/api_codegen/defaults/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/api_codegen/tasks/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/developer_toolchain/defaults/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/developer_toolchain/tasks/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/developer_toolchain/tasks/quality.yml var-naming[no-role-prefix]
+platform/ansible/roles/developer_workstation/tasks/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/mgmt_private_network/tasks/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/product_persistence/tasks/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/rke2_agent/defaults/main.yml var-naming[no-role-prefix]
+platform/ansible/roles/rke2_server/defaults/main.yml var-naming[no-role-prefix]

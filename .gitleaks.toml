@@ -3,16 +3,23 @@ title = "E-Commerce repository gitleaks configuration"
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Ignore documentation placeholders and generated test fixtures"
 paths = [
   '''(^|/)\.git/''',
+  '''(^|/)\.ansible/''',
   '''(^|/)node_modules/''',
   '''(^|/)vendor/''',
   '''(^|/)test-results/''',
   '''(^|/)tests/fixtures/''',
 ]
-commits = [
-  # Historical false positive: Ruby compares the declared key set to a constant list.
-  "1c32f8abad270261778475427b1bc41086dd29a7",
-]
+# This historical match is a topology-registry constant comparison, not a
+# credential. All three constraints must match so other content in the file and
+# every other finding in the commit remain subject to the default rules.
+[[allowlists]]
+description = "Historical V5 topology registry key-set comparison"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^scripts/validate-architecture\.rb$''']
+regexTarget = "line"
+regexes = ['''declared\.keys\.sort\s*==\s*V5_TOPOLOGY_CONTRACTS\.sort''']

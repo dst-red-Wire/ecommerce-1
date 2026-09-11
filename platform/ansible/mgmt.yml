@@ -4,7 +4,7 @@
   become: true
   gather_facts: true
   # Hosts are intentionally independent; no task uses run_once in this play.
-  strategy: free  # noqa: run-once[play]
+  strategy: free # noqa: run-once[play]
 
   tasks:
     - name: Apply Rocky baseline with bounded host concurrency
@@ -47,8 +47,6 @@
   hosts: rke2_agents
   become: true
   gather_facts: false
-  # Worker enrolment is safe to schedule independently within rolling batches.
-  strategy: free  # noqa: run-once[play]
   serial: '25%'
 
   tasks:

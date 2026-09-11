@@ -5,6 +5,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class AnsibleParallelPolicyTests(unittest.TestCase):
+    def test_ansible_lint_has_no_global_rule_disabling(self):
+        import yaml
+
+        config = yaml.safe_load((ROOT / ".ansible-lint").read_text())
+        self.assertFalse(config.get("skip_list"), "ansible-lint rules must be waived only at the exact source line")
+
     def test_multi_host_forks_are_bounded(self):
         cfg = (ROOT / "platform/ansible/ansible.cfg").read_text()
         self.assertIn("forks = 30", cfg)
@@ -17,6 +23,9 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
         data = yaml.safe_load(text)
 
         self.assertIn("strategy: free", text)
+        self.assertEqual(1, text.count("strategy: free # noqa: run-once[play]"))
+        free_play = next(play for play in data if play.get("strategy") == "free")
+        self.assertTrue(all("run_once" not in task for task in free_play["tasks"]))
         self.assertIn("serial: 1", text)
         self.assertIn("serial: '25%'", text)
 

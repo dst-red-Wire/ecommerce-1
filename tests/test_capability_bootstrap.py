@@ -83,6 +83,7 @@ def contract(items):
     for item in items:
         item = dict(item)
         item.setdefault("classification", "conditional")
+        item.setdefault("requirement", "required-static")
         normalized.append(item)
     commands = [item["command"] for item in normalized if item.get("command")]
     return {
@@ -780,6 +781,63 @@ class CapabilityAuditTest(unittest.TestCase):
 
 
 class CapabilityClosureTest(unittest.TestCase):
+    def test_static_profile_skips_absent_optional_docker_without_masking_it_as_pass(self):
+        items = [
+            {"name": "terraform", "requires": [], "command": "terraform", "requirement": "required-static"},
+            {"name": "gitleaks", "requires": [], "command": "gitleaks", "requirement": "required-static"},
+            {
+                "name": "docker",
+                "requires": [],
+                "probe": ["docker", "info"],
+                "external_failure": True,
+                "requirement": "optional-runtime",
+            },
+        ]
+        auditor = CapabilityAuditTest().auditor(
+            items,
+            {"terraform": (0, "Terraform v1.0.0"), "gitleaks": (0, "gitleaks 1.0.0"), "docker": (1, "")},
+        )
+        results = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="static")
+        self.assertEqual("SKIP", results["docker"].state)
+        self.assertIn("environmental", results["docker"].detail)
+        self.assertTrue(MOD.profile_succeeded(results, auditor.contract, "static"))
+
+    def test_static_profile_fails_when_terraform_or_gitleaks_is_absent(self):
+        for missing in ("terraform", "gitleaks"):
+            with self.subTest(missing=missing):
+                items = [
+                    {"name": name, "requires": [], "command": name, "requirement": "required-static"}
+                    for name in ("terraform", "gitleaks")
+                ]
+                auditor = CapabilityAuditTest().auditor(items, {}, present={"terraform", "gitleaks"} - {missing})
+                with mock.patch.object(MOD, "MANAGED_BIN_DIRS", ()):
+                    results = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="static")
+                self.assertEqual("FAIL", results[missing].state)
+                self.assertFalse(MOD.profile_succeeded(results, auditor.contract, "static"))
+
+    def test_runtime_profile_fails_closed_when_docker_is_unavailable(self):
+        item = {
+            "name": "docker",
+            "requires": [],
+            "probe": ["docker", "info"],
+            "external_failure": True,
+            "requirement": "optional-runtime",
+        }
+        auditor = CapabilityAuditTest().auditor([item], {"docker": (1, "daemon unavailable")})
+        results = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="runtime")
+        self.assertEqual("BLOCKED", results["docker"].state)
+        self.assertFalse(MOD.profile_succeeded(results, auditor.contract, "runtime"))
+
+    def test_unmet_gate_is_never_reported_as_pass(self):
+        items = [
+            {"name": "docker", "requires": [], "command": "docker", "requirement": "optional-runtime"},
+            {"name": "container-tests", "requires": ["docker"], "virtual": True, "requirement": "optional-runtime"},
+        ]
+        auditor = CapabilityAuditTest().auditor(items, {}, present=set())
+        results = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="static")
+        self.assertEqual("SKIP", results["container-tests"].state)
+        self.assertNotEqual("PASS", results["container-tests"].state)
+
     @staticmethod
     def ansible_lint_run(source, selected_tag, pipx_present, unrelated_present=True, sudo_available=True):
         broad = re.search(
