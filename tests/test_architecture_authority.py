@@ -72,12 +72,22 @@ class ArchitectureAuthorityTest(unittest.TestCase):
     def test_retirement_is_scoped_to_the_superseded_component(self):
         for statement in ("FluxCD, not Fleet, is the GitOps CD default.",
                           "MinIO, not SeaweedFS, is the object store.",
-                          "Fluent Bit, not VictoriaLogs, is the general logging baseline."):
+                          "Fluent Bit, not VictoriaLogs, is the general logging baseline.",
+                          "FluxCD is superseded, and Flagger is the active progressive delivery controller.",
+                          "FluxCD is superseded, but use MinIO Community Edition as object storage.",
+                          "MinIO is superseded, but Fluent Bit is the general logging pipeline.",
+                          "Flagger is retired; FluxCD is the GitOps CD default.",
+                          "Loki is superseded, but Splunk is the SIEM baseline."):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
         for statement in ("FluxCD is superseded by Fleet.", "FluxCD is not the active GitOps controller.",
                           "Do not use FluxCD; use Fleet.", "Fluent Bit is not used for general logging.",
-                          "MinIO CE has been superseded by SeaweedFS."):
+                          "MinIO CE has been superseded by SeaweedFS.",
+                          "FluxCD is superseded and Flagger is superseded.",
+                          "FluxCD and Flagger are both superseded.",
+                          "Do not use FluxCD or Flagger.",
+                          "MinIO Community Edition is superseded by SeaweedFS.",
+                          "Loki and Splunk remain historical references only."):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
