@@ -293,7 +293,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             path = root / "config/infrastructure/deployment-waves.yaml"
             original = path.read_text()
             for before, after in (("      - [checkout]\n", ""),
-                                  ("fulfillment, shipping", "unknown-service, shipping")):
+                                  ("      - [fulfillment]\n", "      - [unknown-service]\n")):
                 path.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("deployment waves" in error for error in authority.validate(root)))
                 path.write_text(original)
