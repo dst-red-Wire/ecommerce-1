@@ -72,6 +72,25 @@ class ArchitectureValidatorTest < Minitest::Test
       end
       assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
     end
+    %w[storefront admin].each do |frontend|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].find { |wave| wave["id"] == "00-underlay" }["components"] << frontend
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled exactly once") }
+      end
+    end
+  end
+
+  def test_deployment_waves_status_is_exact
+    ["draft", "inexact", nil].each do |status|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          status.nil? ? data.delete("status") : data["status"] = status
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("status") }
+      end
+    end
   end
 
   def test_deployment_dependency_order_and_mlops_coverage

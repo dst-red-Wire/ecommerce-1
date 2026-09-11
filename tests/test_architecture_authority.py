@@ -247,6 +247,24 @@ graph LR
             waves.write_text(original_waves.replace("components: [storefront, admin]",
                                                     "components: [storefront, admin, portal]"))
             self.assertTrue(any("frontend" in error for error in authority.validate(root)))
+            for frontend in ("storefront", "admin"):
+                waves.write_text(original_waves.replace(
+                    "components: [network, dns-prerequisites, time-sync, image-mirrors]",
+                    f"components: [network, dns-prerequisites, time-sync, image-mirrors, {frontend}]"))
+                self.assertTrue(any("frontend" in error for error in authority.validate(root)))
+            waves.write_text(original_waves)
+            self.assertEqual([], authority.validate(root))
+
+    def test_deployment_waves_status_is_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            waves = root / "config/infrastructure/deployment-waves.yaml"
+            original = waves.read_text()
+            for mutation in ("status: draft", "status: inexact", ""):
+                waves.write_text(original.replace("status: exact\n", f"{mutation}\n", 1))
+                self.assertIn("deployment-waves.yaml status must be exact", authority.validate(root))
+            waves.write_text(original)
+            self.assertEqual([], authority.validate(root))
 
     def test_duplicate_subordinate_mlops_assignments_are_rejected(self):
         mutations = (
@@ -518,6 +536,16 @@ graph LR
             router = root / "config/context/router.yaml"
             original = router.read_text()
             router.write_text(original.replace("      - config/contracts/resilience-governance.yaml\n", "", 1))
+            self.assertTrue(any("L2 context" in error for error in authority.validate(root)))
+            router.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_l2_context_includes_v5_exact_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            router = root / "config/context/router.yaml"
+            original = router.read_text()
+            router.write_text(original.replace("    - docs/architecture/EXACT_TOPOLOGY_V5.md\n", "", 1))
             self.assertTrue(any("L2 context" in error for error in authority.validate(root)))
             router.write_text(original)
             self.assertEqual([], authority.validate(root))

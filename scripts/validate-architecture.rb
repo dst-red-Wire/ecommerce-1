@@ -239,6 +239,7 @@ module ArchitectureValidator
     resilience, resilience_path = required_machine_contract(contracts, "resilience_governance")
     trust_zones, trust_zones_path = required_machine_contract(contracts, "security_trust_zones")
     deployment_waves, deployment_waves_path = required_machine_contract(contracts, "deployment_waves")
+    check_equal(errors, "#{deployment_waves_path} status", "exact", deployment_waves["status"])
 
     mlops_path = lock.dig("topology_contracts", "mlops")
     mlops_section = File.read(File.join(root, mlops_path)).split("## Locked role mapping", 2).last.to_s.split("\n## ", 2).first
@@ -337,8 +338,10 @@ module ArchitectureValidator
     end
     frontend_waves = deployment_waves.fetch("waves").select { |wave| wave["id"] == "100-frontends" }
     deployed_frontends = frontend_waves.length == 1 ? frontend_waves.first.fetch("components", []) : []
-    check_equal(errors, "canonical frontends scheduled exactly once in #{File.basename(deployment_waves_path)}",
+    check_equal(errors, "canonical frontends scheduled in 100-frontends in #{File.basename(deployment_waves_path)}",
                 V5_FRONTENDS, deployed_frontends)
+    check_equal(errors, "canonical frontends scheduled exactly once in #{File.basename(deployment_waves_path)}",
+                V5_FRONTENDS, scheduled_components.select { |component| V5_FRONTENDS.include?(component) })
     dependencies.fetch("services").each do |service, contract|
       contract.fetch("sync", []).each do |dependency|
         next unless deployment_positions.key?(service) && deployment_positions.key?(dependency)

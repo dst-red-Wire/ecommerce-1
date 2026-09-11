@@ -484,6 +484,8 @@ def validate(root):
         if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
+        if waves.get("status") != "exact":
+            errors.append("deployment-waves.yaml status must be exact")
         deployed = []
         scheduled = []
         positions = {}
@@ -508,7 +510,9 @@ def validate(root):
             errors.append("deployment waves must schedule every canonical business service exactly once")
         frontend_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == "100-frontends"]
         deployed_frontends = frontend_waves[0].get("components", []) if len(frontend_waves) == 1 else []
-        if len(frontend_waves) != 1 or deployed_frontends != V5_FRONTENDS:
+        scheduled_frontends = [component for component in scheduled if component in V5_FRONTENDS]
+        if (len(frontend_waves) != 1 or deployed_frontends != V5_FRONTENDS
+                or scheduled_frontends != V5_FRONTENDS):
             errors.append("deployment waves must schedule every canonical V5 frontend exactly once")
         dependencies = load_yaml(root / lock["machine_contracts"]["dependency_map"])["services"]
         for service, contract in dependencies.items():
@@ -543,6 +547,8 @@ def validate(root):
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]
+        if INDEX not in l2_canonical:
+            errors.append(f"L2 context must include exact contract: {INDEX}")
         for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")

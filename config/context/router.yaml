@@ -73,6 +73,7 @@ canonical:
   L2:
     - AGENTS.md
     - architecture.lock.yaml
+    - docs/architecture/EXACT_TOPOLOGY_V5.md
     - config/contracts/review-policy.yaml
     - config/contracts/ci-topology.yaml
     - config/contracts/resilience-governance.yaml
