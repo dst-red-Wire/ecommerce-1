@@ -36,6 +36,8 @@ levels:
       - infrastructure
       - resilience
       - recovery
+      - mlops
+      - aiops
   L1:
     description: domain, API, service or frontend contract change
     max_bytes: 24576
@@ -78,6 +80,9 @@ canonical:
     - config/contracts/ci-topology.yaml
     - config/contracts/resilience-governance.yaml
     - config/contracts/security-trust-zones.yaml
+    - config/infrastructure/deployment-waves.yaml
+    - docs/architecture/AIOPS_TOPOLOGY_V1.md
+    - docs/architecture/MLOPS_TOPOLOGY_V1.md
   L1:
     - config/contracts/service-ownership.yaml
     - config/contracts/dependency-map.yaml

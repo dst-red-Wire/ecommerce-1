@@ -9,6 +9,12 @@ AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
 V5_FRONTENDS = ["storefront", "admin"]
+V5_ROOT_KEYS = frozenset({
+    "version", "status", "project", "business", "platform", "management_plane",
+    "stateful", "dns", "observability", "mlops", "supply_chain",
+    "topology_contracts", "machine_contracts", "prod_certified_topology",
+    "superseded", "build_milestones", "milestone_dependencies",
+})
 DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = {
     "dataset_versioner": "lakefs", "object_storage": "seaweedfs-s3",
@@ -17,6 +23,25 @@ V5_MLOPS = {
     "orchestration": "tekton", "desired_state": "rancher-fleet",
     "progressive_delivery": "argo-rollouts", "runtime": "kserve-vllm",
     "drift": "evidently-tekton-batch",
+}
+V5_OBSERVABILITY = {
+    "telemetry": "opentelemetry", "application_gateway": "rotel",
+    "infrastructure_collector": "opentelemetry-collector", "metrics_protocol": "prometheus",
+    "metrics_scraper": "vmagent", "metrics": "victoriametrics",
+    "infrastructure_logs": "victorialogs", "application_observability_storage": "clickhouse",
+    "application_observability_ui": "hyperdx", "hyperdx_metadata_store": "mongodb-oss-self-hosted",
+    "alerts": "vmalert", "notifications": "alertmanager", "dashboards": "grafana",
+    "security_pipeline": "data-prepper", "security_logs": "opensearch", "security": "wazuh",
+}
+V5_SUPERSEDED = {
+    "dvc-dataset-versioner": "lakefs", "nextjs-frontend-runtime": "go-templ-htmx",
+    "fluxcd": "rancher-fleet", "flagger": "argo-rollouts", "minio-community": "seaweedfs-s3",
+    "loki": "victorialogs", "prometheus-server-tsdb": "victoriametrics",
+    "fluent-bit-general-log-shipper": "opentelemetry-collector",
+    "opensearch-general-logs": "victorialogs",
+    "data-prepper-general-logs": "security-only-data-prepper", "splunk": "wazuh-opensearch",
+    "prod-physical-hosts-per-site-5": "prod-physical-hosts-per-site-3",
+    "rook-ceph-launch-baseline": "no-default-ceph", "woodpecker-ci": "tekton",
 }
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
 V5_TOPOLOGY_CONTRACTS = {
@@ -55,6 +80,49 @@ V5_MACHINE_CONTRACTS = {
     "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
     "observability_topology": "config/contracts/observability-topology.yaml",
 }
+
+V5_DEPLOYMENT_WAVES = {
+    "version": 2,
+    "status": "exact",
+    "waves": [
+        {"id": "00-underlay", "requires": [],
+         "components": ["network", "dns-prerequisites", "time-sync", "image-mirrors"]},
+        {"id": "10-rke2", "requires": ["00-underlay"],
+         "components": ["rke2-control-plane", "rke2-workers"]},
+        {"id": "20-network-security", "requires": ["10-rke2"],
+         "components": ["cilium", "hubble", "pod-security", "kyverno", "tetragon", "spire"]},
+        {"id": "30-gitops-identity", "requires": ["20-network-security"],
+         "components": ["rancher-fleet", "argo-rollouts", "istio"]},
+        {"id": "40-secrets-registry-ci", "requires": ["30-gitops-identity"],
+         "components": ["openbao", "external-secrets", "harbor", "tekton"]},
+        {"id": "50-observability", "requires": ["40-secrets-registry-ci"],
+         "components": ["opentelemetry-collector", "rotel", "vmagent", "victoriametrics",
+                        "victorialogs", "clickhouse", "hyperdx", "mongodb-oss-self-hosted",
+                        "vmalert", "alertmanager", "grafana", "data-prepper", "opensearch-security", "wazuh"]},
+        {"id": "60-stateful", "requires": ["40-secrets-registry-ci", "20-network-security"],
+         "parallel_groups": [["cloudnativepg", "strimzi-kafka", "rabbitmq", "redis", "seaweedfs"],
+                             ["opensearch-business", "apicurio"]]},
+        {"id": "70-iam-edge", "requires": ["60-stateful", "30-gitops-identity"],
+         "components": ["keycloak", "haproxy", "caddy", "coraza", "kong", "ats",
+                        "istio-gateway", "squid-egress"]},
+        {"id": "80-golden-service", "requires": ["50-observability", "60-stateful", "70-iam-edge"],
+         "components": ["product"]},
+        {"id": "90-commerce", "requires": ["80-golden-service"],
+         "parallel_groups": [["inventory", "tax", "shipping", "fraud-risk", "user-profile", "search",
+                              "notification", "order", "payment"],
+                             ["pricing", "tracking", "fulfillment", "review", "returns", "billing"],
+                             ["catalog", "cart"]], "serial_after_parallel": ["checkout"]},
+        {"id": "95-mlops", "requires": ["40-secrets-registry-ci", "60-stateful"],
+         "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]},
+        {"id": "100-frontends", "requires": ["90-commerce"], "components": ["storefront", "admin"]},
+        {"id": "110-qualification", "requires": ["100-frontends"],
+         "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"]},
+    ],
+    "rules": {"wait_only_on_declared_dependencies": True, "fail_fast_on_blocking_gate": True,
+              "no_perf_before_prior_gates": True, "no_chaos_dr_before_prior_gates": True,
+              "no_prod_promotion_from_test_state": True},
+}
+MIRRORED_WAVES = ("20-network-security", "30-gitops-identity", "50-observability")
 
 EXACT_CONTRACTS = {
     "resilience_governance": {
@@ -97,8 +165,21 @@ EXACT_CONTRACTS = {
 
 def load_yaml(path):
     """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
-    command = ["ruby", "-rpsych", "-rjson", "-e",
-               "data = Psych.safe_load(File.read(ARGV[0]), aliases: false); puts JSON.generate(data)", str(path)]
+    ruby = """
+document = Psych.parse_file(ARGV[0])
+walk = lambda do |node|
+  if node.is_a?(Psych::Nodes::Mapping)
+    keys = node.children.each_slice(2).map { |key, _| key.value }
+    duplicate = keys.group_by(&:itself).find { |_, values| values.length > 1 }
+    raise "duplicate YAML mapping key: #{duplicate[0]}" if duplicate
+  end
+  Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
+end
+walk.call(document)
+data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
+puts JSON.generate(data)
+"""
+    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
@@ -236,9 +317,9 @@ def derived_index_errors(index, lock, network_plan):
     rendered_frontend = assignments(
         frontend_section, r"^- `([a-z_]+)`: `([^`]+)`\s*$", "business.frontend_runtime"
     )
-    for field, value in frontend.items():
-        if rendered_frontend.get(field) != str(value).lower():
-            errors.append(f"derived index drift from architecture.lock.yaml: business.frontend_runtime.{field}")
+    expected_frontend = {field: str(value).lower() for field, value in frontend.items()}
+    if rendered_frontend != expected_frontend:
+        errors.append("derived index drift from architecture.lock.yaml: business.frontend_runtime role assignments")
     require("Next.js/React/Node is only the migration source", "business.frontend_runtime migration source")
     require(f"M2.5 is `{lock['build_milestones'][3]}`", "M2.5 milestone identity")
 
@@ -257,9 +338,8 @@ def derived_index_errors(index, lock, network_plan):
     rendered_mlops = assignments(
         mlops_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "mlops"
     )
-    for field, value in lock["mlops"].items():
-        if rendered_mlops.get(field) != value:
-            errors.append(f"derived index drift from architecture.lock.yaml: mlops.{field}")
+    if rendered_mlops != lock["mlops"]:
+        errors.append("derived index drift from architecture.lock.yaml: mlops role assignments")
 
     delivery_section = index.split("## Delivery", 1)[-1].split("\n## ", 1)[0]
     rendered_delivery = re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", delivery_section, re.M)
@@ -379,6 +459,8 @@ def validate(root):
     errors = []
     try:
         lock = load_yaml(root / AUTHORITY)
+        if not isinstance(lock, dict) or set(lock) != V5_ROOT_KEYS:
+            errors.append("architecture.lock.yaml root keys must match the complete approved V5 schema")
         if lock.get("status") != LOCK_STATUS:
             errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
         if lock["version"] != 5:
@@ -388,12 +470,12 @@ def validate(root):
             return [*errors, "topology_contracts must match the complete approved V5 role/path registry"]
         if topology_contracts["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
-        if lock["observability"].get("hyperdx_metadata_store") != "mongodb-oss-self-hosted":
-            errors.append("HyperDX metadata store must be self-hosted MongoDB OSS")
+        if lock.get("observability") != V5_OBSERVABILITY:
+            errors.append("observability must match the complete approved V5 mapping")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
             errors.append("critical DNS TTL must remain 60 seconds")
-        if lock["superseded"].get("dvc-dataset-versioner") != "lakefs":
-            errors.append("DVC supersession must select lakeFS")
+        if lock.get("superseded") != V5_SUPERSEDED:
+            errors.append("superseded must match the complete approved V5 registry")
         mlops_path = root / topology_contracts["mlops"]
         mlops_section = mlops_path.read_text().split("## Locked role mapping", 1)[-1].split("\n## ", 1)[0]
         mlops_rows = re.findall(r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", mlops_section, re.M)
@@ -505,6 +587,8 @@ def validate(root):
         if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
+        if waves != V5_DEPLOYMENT_WAVES:
+            errors.append("deployment-waves.yaml must match the complete approved V5 schedule")
         if waves.get("status") != "exact":
             errors.append("deployment-waves.yaml status must be exact")
         deployment_dag = (root / topology_contracts["deployment_dag"]).read_text()
@@ -514,7 +598,9 @@ def validate(root):
             deployment_dag, re.M,
         ):
             prose_wave_declarations.setdefault(match.group("id"), []).append(match)
-        for wave_id in ("20-network-security", "30-gitops-identity", "50-observability"):
+        if set(prose_wave_declarations) != set(MIRRORED_WAVES):
+            errors.append("DEPLOYMENT_DAG.md machine wave declarations must match the approved mirrored wave set")
+        for wave_id in MIRRORED_WAVES:
             matching_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == wave_id]
             machine_components = matching_waves[0].get("components", []) if len(matching_waves) == 1 else []
             prose_matches = prose_wave_declarations.get(wave_id, [])
@@ -599,12 +685,17 @@ def validate(root):
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]
-        if INDEX not in l2_canonical:
-            errors.append(f"L2 context must include exact contract: {INDEX}")
+        canonical_l2_contracts = (
+            INDEX, "config/infrastructure/deployment-waves.yaml",
+            "docs/architecture/AIOPS_TOPOLOGY_V1.md", "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+        )
+        for relative in canonical_l2_contracts:
+            if relative not in l2_canonical:
+                errors.append(f"L2 context must include exact contract: {relative}")
         for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
-        for keyword in ("resilience", "recovery"):
+        for keyword in ("resilience", "recovery", "mlops", "aiops"):
             if keyword not in router["levels"]["L2"]["task_keywords"]:
                 errors.append(f"L2 context must route {keyword} tasks")
         for old in ("BASELINE_V2.md", "EXACT_TOPOLOGY_V2.md"):

@@ -202,6 +202,68 @@ graph LR
                     (root / "architecture.lock.yaml").write_text(original.replace(before, after, 1))
                     self.assertTrue(authority.validate(root))
 
+    def test_closed_world_v5_mutation_matrix(self):
+        """Unknown, duplicate, missing, and contradictory exact declarations all fail closed."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            index_path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            waves_path = root / "config/infrastructure/deployment-waves.yaml"
+            dag_path = root / "docs/architecture/DEPLOYMENT_DAG.md"
+            originals = {path: path.read_text() for path in (lock_path, index_path, waves_path, dag_path)}
+            mutations = (
+                (lock_path, originals[lock_path] + "\nci: github-actions\n", "root keys"),
+                (lock_path, originals[lock_path].replace("project: ecommerce\n", "", 1), "root keys"),
+                (lock_path, originals[lock_path].replace("  fluxcd: rancher-fleet", "  fluxcd: fluxcd", 1),
+                 "complete approved V5 registry"),
+                (lock_path, originals[lock_path].replace(
+                    "  fluxcd: rancher-fleet", "  fluxcd: rancher-fleet\n  legacy-gitops: fluxcd", 1),
+                 "complete approved V5 registry"),
+                (lock_path, originals[lock_path].replace(
+                    "  dataset_versioner: lakefs",
+                    "  dataset_versioner: lakefs\n  dataset_versioner: lakefs", 1),
+                 "duplicate YAML mapping key"),
+                (index_path, originals[index_path].replace(
+                    "- `dataset_versioner`: `lakefs`",
+                    "- `dataset_versioner`: `lakefs`\n- `feature_store`: `feast`", 1), "mlops role assignments"),
+                (index_path, originals[index_path].replace(
+                    "- `dataset_versioner`: `lakefs`",
+                    "- `dataset_versioner`: `lakefs`\n- `dataset_versioner`: `lakefs`", 1),
+                 "duplicate derived index assignment"),
+                (index_path, originals[index_path].replace(
+                    "- `metrics`: `victoriametrics`",
+                    "- `metrics`: `victoriametrics`\n- `retention_store`: `thanos`", 1),
+                 "observability role assignments"),
+                (index_path, originals[index_path].replace(
+                    "- `metrics`: `victoriametrics`",
+                    "- `metrics`: `victoriametrics`\n- `metrics`: `victoriametrics`", 1),
+                 "duplicate derived index assignment"),
+                (waves_path, originals[waves_path].replace(
+                    "rules:\n", "  - id: 97-legacy-gitops\n    requires: [95-mlops]\n    components: [fluxcd]\nrules:\n", 1),
+                 "complete approved V5 schedule"),
+                (waves_path, originals[waves_path].replace(
+                    "  - id: 10-rke2", "  - id: 00-underlay\n    requires: []\n    components: [network]\n  - id: 10-rke2", 1),
+                 "complete approved V5 schedule"),
+                (waves_path, originals[waves_path].replace(
+                    "components: [rke2-control-plane, rke2-workers]",
+                    "components: [rke2-control-plane, rke2-workers, legacy-node]", 1),
+                 "complete approved V5 schedule"),
+                (index_path, originals[index_path].replace(
+                    "- PROD-A `10.241.0.0/16`",
+                    "- PROD-A `10.241.0.0/16`\n- PROD-A `10.241.0.0/16`", 1),
+                 "duplicate derived index assignment"),
+                (dag_path, originals[dag_path] + "\n" + next(
+                    line for line in originals[dag_path].splitlines()
+                    if line.startswith("Machine wave `50-observability`")
+                ) + "\n", "exactly mirror machine wave 50-observability"),
+            )
+            for path, mutation, expected in mutations:
+                with self.subTest(path=path.relative_to(root), expected=expected):
+                    path.write_text(mutation)
+                    self.assertTrue(any(expected in error for error in authority.validate(root)))
+                    path.write_text(originals[path])
+                    self.assertEqual([], authority.validate(root))
+
     def test_lock_status_is_exact(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
