@@ -630,8 +630,9 @@ def frontend(action: str, scope: str = "") -> int:
         for target in targets:
             run(["go", "test", "-race", f"./apps/{target}"], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
-        for target in targets:
-            run(["go", "build", f"./apps/{target}"], cwd=frontend_root)
+        with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
+            for target in targets:
+                run(["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"], cwd=frontend_root)
     if action == "check":
         run(["go", "vet", "./..."], cwd=frontend_root)
     print(f"PASS frontend {scope} {action} checks completed")
