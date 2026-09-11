@@ -6,6 +6,15 @@ require "pathname"
 require "yaml"
 
 module ArchitectureValidator
+  LOCK_STATUS = "locked-for-build"
+  V5_MLOPS = {
+    "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
+    "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
+    "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
+    "orchestration" => "tekton", "desired_state" => "rancher-fleet",
+    "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
+    "drift" => "evidently-tekton-batch"
+  }.freeze
   V5_TOPOLOGY_CONTRACTS = {
     "exact_index" => "docs/architecture/EXACT_TOPOLOGY_V5.md", "preprod" => "docs/architecture/PREPROD_TOPOLOGY_V2.md",
     "prod" => "docs/architecture/PROD_TOPOLOGY_V2.md", "network_ipam" => "docs/architecture/NETWORK_IPAM_CONTRACT.md",
@@ -214,6 +223,7 @@ module ArchitectureValidator
   def validate(root)
     errors = []
     lock = expect_mapping(load_yaml(root, "architecture.lock.yaml"), "architecture.lock.yaml")
+    check_equal(errors, "architecture.lock.yaml status", LOCK_STATUS, lock["status"])
     validate_topology_contracts(root, lock)
     contracts = load_machine_contracts(root, lock)
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
@@ -226,6 +236,13 @@ module ArchitectureValidator
     prod, = required_machine_contract(contracts, "prod_inventory")
     resilience, resilience_path = required_machine_contract(contracts, "resilience_governance")
     trust_zones, trust_zones_path = required_machine_contract(contracts, "security_trust_zones")
+    deployment_waves, deployment_waves_path = required_machine_contract(contracts, "deployment_waves")
+
+    mlops_path = lock.dig("topology_contracts", "mlops")
+    mlops_section = File.read(File.join(root, mlops_path)).split("## Locked role mapping", 2).last.to_s.split("\n## ", 2).first
+    subordinate_mlops = mlops_section.scan(/^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$/).to_h
+    check_equal(errors, "architecture.lock.yaml mlops", V5_MLOPS, lock["mlops"])
+    check_equal(errors, "#{mlops_path} locked role mapping", V5_MLOPS, subordinate_mlops)
 
     [resilience, trust_zones].zip([resilience_path, trust_zones_path]).each do |contract, path|
       check_equal(errors, "#{path} status", "exact", contract["status"])
@@ -284,6 +301,11 @@ module ArchitectureValidator
     expected_service_count = 19
     service_sets.each { |name, names| check_equal(errors, "19 services in #{name}", canonical_services, names.sort) }
     errors << "architecture must contain exactly 19 services" unless canonical_services.length == expected_service_count
+    deployed_services = deployment_waves.fetch("waves").flat_map do |wave|
+      wave.fetch("components", []) + wave.fetch("parallel_groups", []).flatten + wave.fetch("serial_after_parallel", [])
+    end.select { |component| canonical_services.include?(component) }
+    check_equal(errors, "business services scheduled exactly once in #{File.basename(deployment_waves_path)}",
+                canonical_services, deployed_services.sort)
     %w[checkout fulfillment].each do |required_service|
       service_sets.each do |name, names|
         errors << "#{required_service} service is required in #{name}" unless names.include?(required_service)

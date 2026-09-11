@@ -7,6 +7,39 @@ require "yaml"
 require_relative "../scripts/validate-architecture"
 
 class ArchitectureValidatorTest < Minitest::Test
+  def test_root_lock_status_is_exact
+    ["draft", "unlocked", nil].each do |status|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") { |data| status ? data["status"] = status : data.delete("status") }
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("status") }
+      end
+    end
+  end
+
+  def test_complete_mlops_mapping_is_exact
+    [%w[dataset_versioner pachyderm], %w[runtime mlflow]].each do |role, value|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") { |data| data["mlops"][role] = value }
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("mlops") }
+      end
+    end
+  end
+
+  def test_deployment_waves_cover_all_business_services
+    %w[checkout fulfillment].each do |service|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].each do |wave|
+            wave.fetch("components", []).delete(service)
+            wave.fetch("parallel_groups", []).each { |group| group.delete(service) }
+            wave.fetch("serial_after_parallel", []).delete(service)
+          end
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("scheduled exactly once") }
+      end
+    end
+  end
+
   ROOT = File.expand_path("..", __dir__)
   BASE_CONTRACT_FILES = %w[
     architecture.lock.yaml

@@ -97,7 +97,9 @@ Do not hardcode credentials. Do not claim real provider provisioning when creden
 
 ## M2.5 prompt — Persistent MGMT Bootstrap
 
-Canonical milestone: `M2-5-persistent-mgmt-bootstrap`. Assignment requires a tracker scoped to this milestone.
+Tracker: `#15`.
+
+Canonical milestone: `M2-5-persistent-mgmt-bootstrap`.
 
 Goal: implement only the persistent management-plane bootstrap described by `architecture.lock.yaml` and its declared MGMT topology and machine contracts. This handoff is governance metadata; it does not grant deployment/apply permission.
 
@@ -155,7 +157,7 @@ Goal: prove a real user-facing commerce path through the actual platform without
 Implement in four bounded slices:
 
 A. `Storefront -> Catalog/Product/Search/Pricing/Inventory`
-B. `Cart -> Checkout -> Order -> Tax -> Fraud/Risk -> Payment`
+B. `Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order -> Payment`
 C. `Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
