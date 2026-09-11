@@ -97,9 +97,12 @@ def load_yaml(path):
 def component_is_retired(sentence, component):
     """Return true only when retirement/negation applies to the named component."""
     direct_retirement = re.search(
-        rf"(?:\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|active)\s+)?(?:{component})\b|"
+        rf"(?:\b(?:remove|removes|removed|removing)\s+(?:remaining\s+)?(?:{component})\b|"
+        rf"\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|active)\s+)?(?:{component})\b|"
         rf"\b(?:{component})\b\s+(?:(?:is|was|has\s+been|remain(?:s|ed)?)\s+)?(?:both\s+)?"
-        rf"(?:not\s+(?:used|selected|(?:the\s+)?(?:active|default|baseline|target))|forbid(?:den)?|superseded|"
+        rf"(?:not\s+(?:used|selected|(?:the\s+)?(?:active|default|baseline|target|"
+        rf"(?:CD|GitOps|rollout)\s+controller|(?:infrastructure\s+)?log\s+store|"
+        rf"(?:object|S3)\s+(?:store|backend)|SIEM|(?:general\s+)?log\s+shipper))|forbid(?:den)?|superseded|"
         rf"historical|removed|rejected|retired)\b)",
         sentence, re.I,
     )
@@ -118,6 +121,48 @@ def component_is_retired(sentence, component):
         rf"\b(?:{component})\b", coordinated_retirement.group("components"), re.I
     )
     return bool(direct_retirement or coordinated_negation or shared_retirement)
+
+
+def documentation_clauses(text):
+    """Yield clauses with only their explicitly labelled historical scope."""
+    section_scopes = []
+    labelled_block = False
+    labelled_content = False
+    diagram_fence = False
+    marker = r"(?:historical|superseded|alternatives rejected)"
+
+    for line in text.splitlines():
+        heading = re.match(r"\s*(#{1,6})\s+(.*)", line)
+        if heading:
+            level = len(heading.group(1))
+            section_scopes = [(parent_level, scope) for parent_level, scope in section_scopes
+                              if parent_level < level]
+            parent_scope = any(scope for _, scope in section_scopes)
+            explicit_scope = bool(re.match(rf"\s*{marker}\b", heading.group(2), re.I))
+            section_scopes.append((level, parent_scope or explicit_scope))
+            labelled_block = False
+            labelled_content = False
+
+        if re.match(rf"\s*[-#>\s]*{marker}\s*:\s*$", line, re.I):
+            labelled_block = True
+            labelled_content = False
+        elif not line.strip():
+            if labelled_content:
+                labelled_block = False
+                labelled_content = False
+            continue
+        elif labelled_block:
+            labelled_content = True
+
+        opening_diagram_fence = bool(re.match(r"\s*```(?:mermaid|plantuml|dot)\b", line, re.I))
+        if opening_diagram_fence:
+            diagram_fence = True
+        historical = any(scope for _, scope in section_scopes) or labelled_block
+        for clause in re.split(r";|(?<=[.!?])\s+", line):
+            if clause.strip():
+                yield clause, historical, diagram_fence
+        if diagram_fence and re.match(r"\s*```\s*$", line) and not opening_diagram_fence:
+            diagram_fence = False
 
 
 def derived_index_errors(index, lock):
@@ -203,12 +248,14 @@ def derived_index_errors(index, lock):
 def documentation_errors(text):
     """Inspect every sentence, including code blocks; no document-wide exemptions."""
     errors = []
-    normalized = re.sub(r"[`*]", "", text)
-    for sentence in re.split(r"\n|;|(?<=[.!?])\s+", normalized):
+    # Preserve fenced-diagram delimiters for scoped historical validation.
+    normalized = re.sub(r"[*]", "", text)
+    for sentence, scoped_historical, in_diagram in documentation_clauses(normalized):
         # Only an explicit label on this clause qualifies it as historical.
         # An unrelated mention of migration or rejection cannot exempt a claim.
-        historical = (re.match(r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I)
-                      or re.search(r"\bdiagram\b.*\b(?:historical|superseded)\b", sentence, re.I))
+        historical = scoped_historical or re.match(
+            r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I
+        )
         operational_subset = re.search(
             r"\b17\s+of\s+19\b|\b(?:healthy|deployed|available|ready|complete|remain(?:s|ing)?|unavailable|progress)\b",
             sentence, re.I,
@@ -257,8 +304,18 @@ def documentation_errors(text):
                 if not component_is_retired(sentence, re.escape(component.group())):
                     errors.append("superseded platform default must not be active: " + sentence.strip())
                     break
+        if in_diagram and re.search(rf"\b(?:{SUPERSEDED_COMPONENT})\b", sentence, re.I) and not historical:
+            errors.append("superseded architecture diagram must be explicitly labelled: " + sentence.strip())
+        active_role = re.search(
+            rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+(?:is|acts?\s+as|:)\s+(?:the\s+)?"
+            r"(?:(?:CD|GitOps|rollout)\s+controller|(?:infrastructure\s+)?log\s+store|"
+            r"(?:object|S3)\s+(?:store|backend)|SIEM)", sentence, re.I,
+        )
+        if (active_role and not historical
+                and not component_is_retired(sentence, re.escape(active_role.group("component")))):
+            errors.append("superseded platform role must not be active: " + sentence.strip())
         if (re.search(r"Fluent Bit", sentence, re.I) and
-                re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|shipper)", sentence, re.I)
+                re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|(?:log\s+)?shipper)", sentence, re.I)
                 and not historical and not component_is_retired(sentence, r"Fluent Bit")):
             errors.append("Fluent Bit general logging is superseded: " + sentence.strip())
         negated = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not|only)\b", sentence, re.I)

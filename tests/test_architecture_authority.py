@@ -69,6 +69,38 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
 
+    def test_direct_superseded_role_assignments_are_rejected(self):
+        for statement in (
+            "FluxCD is the CD controller.", "Flagger is the rollout controller.",
+            "Loki is the infrastructure log store.", "MinIO is the S3 backend.",
+            "Splunk is the SIEM.", "Fluent Bit is the general log shipper.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+
+        for statement in (
+            "FluxCD is superseded by Rancher Fleet.", "Flagger is replaced by Argo Rollouts.",
+            "Loki is historical only.", "MinIO is not the S3 backend; SeaweedFS is.",
+            "Remove MinIO and use SeaweedFS.", "Migrate DVC datasets to lakeFS.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
+    def test_superseded_diagrams_require_a_scoped_explicit_label(self):
+        diagram = """## Deployment topology
+```mermaid
+graph LR
+  Git --> FluxCD --> MinIO
+  Flagger --> Loki
+```
+"""
+        self.assertTrue(authority.documentation_errors(diagram))
+        self.assertEqual([], authority.documentation_errors(diagram.replace(
+            "## Deployment topology", "## Historical deployment topology", 1
+        )))
+        self.assertEqual([], authority.documentation_errors("Superseded:\n" + diagram.split("\n", 1)[1]))
+        self.assertTrue(authority.documentation_errors("Historical: prior notes.\n\n" + diagram))
+
     def test_restricted_observability_roles_are_semantic(self):
         for statement in (
             "General logging pipeline: Data Prepper + OpenSearch.",
