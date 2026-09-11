@@ -43,7 +43,7 @@ class CIAuthorityTest < Minitest::Test
 
   def test_developer_accelerators_are_not_control_planes
     accelerators = yaml("config/contracts/ci-topology.yaml").fetch("developer_accelerators")
-    assert_equal %w[bazel nx turborepo], accelerators.keys.sort
+    assert_equal %w[bazel], accelerators.keys.sort
     accelerators.each do |name, contract|
       assert_equal false, contract["source_of_truth"], name
       assert_equal false, contract["ci_authority"], name
@@ -107,14 +107,12 @@ class CIAuthorityTest < Minitest::Test
     assert_equal false, runtime.dig("activation", "static_contract_is_runtime_proof")
   end
 
-  def test_frontend_ci_uses_declared_pnpm_workspace
-    package = JSON.parse(read("frontend/package.json"))
-    assert_match(/\Apnpm@\d/, package.fetch("packageManager"))
-    assert File.file?(File.join(ROOT, "frontend/pnpm-lock.yaml"))
-    assert File.file?(File.join(ROOT, "frontend/pnpm-workspace.yaml"))
-    refute File.exist?(File.join(ROOT, "frontend/package-lock.json"))
+  def test_frontend_ci_uses_declared_go_module
+    assert File.file?(File.join(ROOT, "frontend/go.mod"))
+    assert File.file?(File.join(ROOT, "frontend/assets/htmx.min.js"))
+    refute File.exist?(File.join(ROOT, "frontend/package.json"))
+    refute File.exist?(File.join(ROOT, "frontend/pnpm-lock.yaml"))
     controller = read("scripts/repoctl.py")
-    refute_match(/\bnpm ci\b/, controller)
-    refute_includes controller, "package-lock.json"
+    assert_includes controller, 'go", "test", "-race"'
   end
 end

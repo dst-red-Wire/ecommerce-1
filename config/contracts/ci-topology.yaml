@@ -95,6 +95,13 @@ developer_automation:
   shell_state_mutation_forbidden: true
   tekton_remains_ci_authority: true
 
+developer_accelerators:
+  bazel:
+    role: local-verification-entrypoint
+    source_of_truth: false
+    ci_authority: false
+    may_deploy: false
+
 rules:
   one_repository_does_not_imply_one_release: true
   independent_component_artifacts: true

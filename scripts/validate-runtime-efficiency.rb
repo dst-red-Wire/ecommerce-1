@@ -72,18 +72,18 @@ module RuntimeEfficiencyValidator
     add(errors, policy.dig("service_mesh", "ambient_mode") == "forbidden-until-spire-support-and-lock-change",
         "ambient mode must stay blocked while SPIRE is canonical")
 
-    validate_next_config(errors, root, "frontend/apps/storefront/next.config.ts")
-    validate_next_config(errors, root, "frontend/apps/admin/next.config.ts")
+    validate_go_frontend(errors, root, policy)
     validate_product_containerfile(errors, root, policy)
     errors
   rescue Errno::ENOENT, Psych::Exception => e
     [e.message]
   end
 
-  def validate_next_config(errors, root, relative)
-    content = File.read(File.join(root, relative))
-    add(errors, content.include?('output: "standalone"'), "#{relative} must enable Next.js standalone output")
-    add(errors, content.include?("outputFileTracingRoot"), "#{relative} must trace from the frontend workspace")
+  def validate_go_frontend(errors, root, policy)
+    add(errors, policy.dig("frontend", "production_runtime") == "go-templ-htmx", "frontend runtime must be Go + templ + HTMX")
+    add(errors, policy.dig("frontend", "nodejs") == "forbidden", "Node.js must be forbidden")
+    add(errors, File.file?(File.join(root, "frontend/go.mod")), "frontend Go module must exist")
+    add(errors, File.file?(File.join(root, "frontend/assets/htmx.min.js")), "vendored HTMX must exist")
   end
 
   def validate_product_containerfile(errors, root, policy)
