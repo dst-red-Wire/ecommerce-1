@@ -20,3 +20,4 @@ resources:
   - tasks/buildkit-component.yaml
   - tasks/qualify-oci.yaml
   - triggers
+  - tasks/collect-performance.yaml

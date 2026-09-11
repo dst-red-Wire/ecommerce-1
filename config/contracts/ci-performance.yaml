@@ -1,0 +1,5 @@
+schema_version: 1
+collection: every-pipeline
+metrics: [gate_duration, critical_path, queue_time, gates_executed, gates_reused, gates_skipped, evidence_reuse_rate, gocache_hit_ratio, gomodcache_hit_ratio, buildkit_hit_ratio, build_duration, test_duration, scan_duration, push_duration, commit_to_ci_result, qualification_to_preprod]
+deep_analysis_triggers: [structural_change, runner_change, cache_change, automatic_regression]
+periodic_monthly_benchmark: false

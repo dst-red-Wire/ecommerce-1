@@ -1,0 +1,15 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata: {name: collect-ci-performance}
+spec:
+  params:
+    - {name: pipeline-start, type: string}
+    - {name: commit-time, type: string}
+    - {name: qualification-time, type: string, default: ""}
+    - {name: gate-summary, type: string}
+  workspaces: [{name: evidence}]
+  steps:
+    - name: collect
+      image: harbor.internal/ecommerce/ci-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      script: |
+        python3 scripts/performance_audit.py --evidence $(workspaces.evidence.path)/pipeline-evidence.json --output $(workspaces.evidence.path)/performance.json
