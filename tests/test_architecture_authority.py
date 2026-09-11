@@ -222,10 +222,38 @@ class ArchitectureAuthorityTest(unittest.TestCase):
                     path = root / relative
                     contents = path.read_text()
                     path.unlink()
-                    self.assertTrue(any("complete approved V5 registry" in error
+                    self.assertTrue(any("complete approved V5 role/path registry" in error
                                         for error in authority.validate(root)))
                     path.write_text(contents)
                     lock_path.write_text(original_lock)
+            self.assertEqual([], authority.validate(root))
+
+    def test_v5_registry_role_path_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original = lock_path.read_text()
+            for first, second in (("preprod", "prod"), ("mlops", "observability")):
+                mutated = re.sub(rf"(^  {first}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[second]}", original, flags=re.M)
+                mutated = re.sub(rf"(^  {second}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[first]}", mutated, flags=re.M)
+                lock_path.write_text(mutated)
+                self.assertTrue(any("topology_contracts must match" in error for error in authority.validate(root)))
+                lock_path.write_text(original)
+            mutated = original.replace("  preprod_inventory: config/infrastructure/preprod-inventory.yaml\n", "")
+            lock_path.write_text(mutated)
+            (root / "config/infrastructure/preprod-inventory.yaml").unlink()
+            self.assertTrue(any("machine_contracts must match" in error for error in authority.validate(root)))
+
+    def test_m5_autonomous_domain_handoff_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            handoff = root / "docs/project/CODEX_HANDOFFS.md"
+            original = handoff.read_text()
+            for before, after in (("Cart -> Checkout -> Order", "Cart -> Order"),
+                                  ("Fulfillment -> Shipping", "Shipping")):
+                handoff.write_text(original.replace(before, after, 1))
+                self.assertTrue(any("M5 must preserve" in error for error in authority.validate(root)))
+                handoff.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_exact_contract_mutations_are_rejected(self):

@@ -155,8 +155,8 @@ Goal: prove a real user-facing commerce path through the actual platform without
 Implement in four bounded slices:
 
 A. `Storefront -> Catalog/Product/Search/Pricing/Inventory`
-B. `Cart -> Order -> Tax -> Fraud/Risk -> Payment`
-C. `Shipping -> Tracking -> Returns -> Billing -> Notification`
+B. `Cart -> Checkout -> Order -> Tax -> Fraud/Risk -> Payment`
+C. `Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
 For each slice:

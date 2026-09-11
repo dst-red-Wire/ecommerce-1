@@ -9,9 +9,40 @@ AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
 V5_TOPOLOGY_CONTRACTS = {
-    "exact_index", "preprod", "prod", "network_ipam", "mgmt_wireguard_access", "storage",
-    "service_ownership", "data_ownership", "events", "security_zones", "deployment_dag",
-    "aiops", "mlops", "observability",
+    "exact_index": "docs/architecture/EXACT_TOPOLOGY_V5.md",
+    "preprod": "docs/architecture/PREPROD_TOPOLOGY_V2.md",
+    "prod": "docs/architecture/PROD_TOPOLOGY_V2.md",
+    "network_ipam": "docs/architecture/NETWORK_IPAM_CONTRACT.md",
+    "mgmt_wireguard_access": "docs/architecture/MGMT_WIREGUARD_ACCESS.md",
+    "storage": "docs/architecture/STORAGE_TOPOLOGY_V2.md",
+    "service_ownership": "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md",
+    "data_ownership": "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
+    "events": "docs/architecture/EVENT_CONTRACT_MATRIX.md",
+    "security_zones": "docs/architecture/SECURITY_TRUST_ZONES.md",
+    "deployment_dag": "docs/architecture/DEPLOYMENT_DAG.md",
+    "aiops": "docs/architecture/AIOPS_TOPOLOGY_V1.md",
+    "mlops": "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+    "observability": "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md",
+}
+V5_MACHINE_CONTRACTS = {
+    "resilience_governance": "config/contracts/resilience-governance.yaml",
+    "security_trust_zones": "config/contracts/security-trust-zones.yaml",
+    "review_policy": "config/contracts/review-policy.yaml",
+    "mgmt_inventory": "config/infrastructure/mgmt-inventory.yaml",
+    "preprod_inventory": "config/infrastructure/preprod-inventory.yaml",
+    "prod_inventory": "config/infrastructure/prod-inventory.yaml",
+    "network_plan": "config/infrastructure/network-plan.yaml",
+    "mgmt_wireguard_access": "config/contracts/mgmt-wireguard-access.yaml",
+    "mgmt_access_gateways": "config/infrastructure/mgmt-access-gateways.yaml",
+    "storage_plan": "config/infrastructure/storage-plan.yaml",
+    "deployment_waves": "config/infrastructure/deployment-waves.yaml",
+    "service_ownership": "config/contracts/service-ownership.yaml",
+    "event_contracts": "config/contracts/event-contracts.yaml",
+    "dependency_map": "config/contracts/dependency-map.yaml",
+    "public_api_contracts": "config/contracts/public-api-contracts.yaml",
+    "ci_topology": "config/contracts/ci-topology.yaml",
+    "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
+    "observability_topology": "config/contracts/observability-topology.yaml",
 }
 
 EXACT_CONTRACTS = {
@@ -283,6 +314,8 @@ def validate(root):
             contract = load_yaml(root / relative)
             if contract != EXACT_CONTRACTS[key]:
                 errors.append(f"{relative} must match its exact V5 invariants")
+        if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
+            errors.append("machine_contracts must match the complete approved V5 role/path registry")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
@@ -323,8 +356,8 @@ def validate(root):
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
         topology_contracts = lock["topology_contracts"]
-        if set(topology_contracts) != V5_TOPOLOGY_CONTRACTS:
-            errors.append("topology_contracts keys must match the complete approved V5 registry")
+        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
+            errors.append("topology_contracts must match the complete approved V5 role/path registry")
         for role, relative in topology_contracts.items():
             if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
                 errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
@@ -356,6 +389,10 @@ def validate(root):
         if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
+        m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
+        m5 = m5_match.group(0) if m5_match else ""
+        if "Cart -> Checkout -> Order" not in m5 or "Fulfillment -> Shipping" not in m5:
+            errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
         m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m7 = m7_match.group(0) if m7_match else ""
         if not re.search(r">=\s*80%\s+global coverage", m7, re.I):

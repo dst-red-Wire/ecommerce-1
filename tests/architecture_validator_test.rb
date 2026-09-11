@@ -345,7 +345,7 @@ class ArchitectureValidatorTest < Minitest::Test
         File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
         FileUtils.rm(File.join(root, path))
         assert_includes ArchitectureValidator.validate(root),
-                        "architecture.lock.yaml topology_contracts keys must match the complete approved V5 registry"
+                        "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
       end
     end
   end
@@ -359,6 +359,28 @@ class ArchitectureValidatorTest < Minitest::Test
         errors = ArchitectureValidator.validate(root)
         assert errors.any? { |error| error.include?("must declare a non-empty relative path") }, message
       end
+    end
+  end
+
+  def test_v5_registry_role_path_assignments_are_exact
+    {"topology_contracts" => %w[preprod prod], "machine_contracts" => %w[preprod_inventory prod_inventory]}.each do |registry, keys|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") do |data|
+          data[registry][keys[0]], data[registry][keys[1]] = data[registry][keys[1]], data[registry][keys[0]]
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("complete approved V5 role/path registry") }
+      end
+    end
+  end
+
+  def test_required_machine_contract_registration_and_file_cannot_both_be_deleted
+    with_contract_copy do |root|
+      lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
+      path = lock.fetch("machine_contracts").delete("deployment_waves")
+      File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
+      FileUtils.rm(File.join(root, path))
+      assert_includes ArchitectureValidator.validate(root),
+                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
     end
   end
 
@@ -445,16 +467,15 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
-  def test_validator_consumes_declared_machine_contract_path
+  def test_validator_rejects_noncanonical_machine_contract_path
     with_contract_copy do |root|
       alternate = "config/infrastructure/alternate-network-plan.yaml"
       FileUtils.cp(File.join(root, "config/infrastructure/network-plan.yaml"), File.join(root, alternate))
       mutate_yaml(root, alternate) { |data| data["validation"]["require_unique_ips"] = false }
       mutate_yaml(root, "architecture.lock.yaml") { |data| data["machine_contracts"]["network_plan"] = alternate }
 
-      assert ArchitectureValidator.validate(root).any? do |error|
-        error.include?("network-plan.validation.require_unique_ips")
-      end
+      assert_includes ArchitectureValidator.validate(root),
+                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
     end
   end
 

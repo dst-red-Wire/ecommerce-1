@@ -6,10 +6,26 @@ require "pathname"
 require "yaml"
 
 module ArchitectureValidator
-  V5_TOPOLOGY_CONTRACTS = %w[
-    exact_index preprod prod network_ipam mgmt_wireguard_access storage service_ownership
-    data_ownership events security_zones deployment_dag aiops mlops observability
-  ].freeze
+  V5_TOPOLOGY_CONTRACTS = {
+    "exact_index" => "docs/architecture/EXACT_TOPOLOGY_V5.md", "preprod" => "docs/architecture/PREPROD_TOPOLOGY_V2.md",
+    "prod" => "docs/architecture/PROD_TOPOLOGY_V2.md", "network_ipam" => "docs/architecture/NETWORK_IPAM_CONTRACT.md",
+    "mgmt_wireguard_access" => "docs/architecture/MGMT_WIREGUARD_ACCESS.md", "storage" => "docs/architecture/STORAGE_TOPOLOGY_V2.md",
+    "service_ownership" => "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "data_ownership" => "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
+    "events" => "docs/architecture/EVENT_CONTRACT_MATRIX.md", "security_zones" => "docs/architecture/SECURITY_TRUST_ZONES.md",
+    "deployment_dag" => "docs/architecture/DEPLOYMENT_DAG.md", "aiops" => "docs/architecture/AIOPS_TOPOLOGY_V1.md",
+    "mlops" => "docs/architecture/MLOPS_TOPOLOGY_V1.md", "observability" => "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md"
+  }.freeze
+  V5_MACHINE_CONTRACTS = {
+    "resilience_governance" => "config/contracts/resilience-governance.yaml", "security_trust_zones" => "config/contracts/security-trust-zones.yaml",
+    "review_policy" => "config/contracts/review-policy.yaml", "mgmt_inventory" => "config/infrastructure/mgmt-inventory.yaml",
+    "preprod_inventory" => "config/infrastructure/preprod-inventory.yaml", "prod_inventory" => "config/infrastructure/prod-inventory.yaml",
+    "network_plan" => "config/infrastructure/network-plan.yaml", "mgmt_wireguard_access" => "config/contracts/mgmt-wireguard-access.yaml",
+    "mgmt_access_gateways" => "config/infrastructure/mgmt-access-gateways.yaml", "storage_plan" => "config/infrastructure/storage-plan.yaml",
+    "deployment_waves" => "config/infrastructure/deployment-waves.yaml", "service_ownership" => "config/contracts/service-ownership.yaml",
+    "event_contracts" => "config/contracts/event-contracts.yaml", "dependency_map" => "config/contracts/dependency-map.yaml",
+    "public_api_contracts" => "config/contracts/public-api-contracts.yaml", "ci_topology" => "config/contracts/ci-topology.yaml",
+    "runtime_efficiency" => "config/contracts/runtime-efficiency.yaml", "observability_topology" => "config/contracts/observability-topology.yaml"
+  }.freeze
 
   class ContractLoadError < StandardError; end
 
@@ -120,21 +136,25 @@ module ArchitectureValidator
 
   def load_machine_contracts(root, lock)
     declared = expect_mapping(lock["machine_contracts"], "architecture.lock.yaml machine_contracts")
-    declared.each_with_object({}) do |(key, path), contracts|
+    contracts = declared.each_with_object({}) do |(key, path), loaded|
       unless key.is_a?(String) && !key.strip.empty?
         raise ContractLoadError, "architecture.lock.yaml machine_contracts keys must be non-empty strings"
       end
 
       validated_path = machine_contract_path(root, key, path)
       contract = load_yaml(root, validated_path)
-      contracts[key] = [expect_mapping(contract, validated_path), validated_path]
+      loaded[key] = [expect_mapping(contract, validated_path), validated_path]
     end
+    unless declared == V5_MACHINE_CONTRACTS
+      raise ContractLoadError, "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
+    end
+    contracts
   end
 
   def validate_topology_contracts(root, lock)
     declared = expect_mapping(lock["topology_contracts"], "architecture.lock.yaml topology_contracts")
-    unless declared.keys.sort == V5_TOPOLOGY_CONTRACTS.sort
-      raise ContractLoadError, "architecture.lock.yaml topology_contracts keys must match the complete approved V5 registry"
+    unless declared == V5_TOPOLOGY_CONTRACTS
+      raise ContractLoadError, "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
     end
     declared.each do |key, path|
       label = "architecture.lock.yaml topology_contracts.#{key}"
