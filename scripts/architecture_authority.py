@@ -9,6 +9,11 @@ AUTHORITY = "architecture.lock.yaml"
 INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
 V5_FRONTENDS = ["storefront", "admin"]
+EXPECTED_V5_FRONTEND_RUNTIME = {
+    "language": "go", "module": "frontend", "module_file": "frontend/go.mod",
+    "rendering": "templ", "interactions": "htmx", "runtime_nodejs": False,
+    "migration_source": "nextjs-react-node",
+}
 V5_PROD_TOPOLOGY_KEYS = frozenset({
     "physical_hosts_total", "physical_hosts_per_site", "control_planes_per_site",
     "workers_per_site", "data_workers_per_site", "general_workers_per_site", "sites",
@@ -177,7 +182,7 @@ V5_DEPLOYMENT_WAVES = {
         {"id": "95-mlops", "requires": ["40-secrets-registry-ci", "60-stateful"],
          "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]},
         {"id": "100-frontends", "requires": ["90-commerce"], "components": ["storefront", "admin"]},
-        {"id": "110-qualification", "requires": ["100-frontends"],
+        {"id": "110-qualification", "requires": ["100-frontends", "95-mlops"],
          "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"]},
     ],
     "rules": {"wait_only_on_declared_dependencies": True, "fail_fast_on_blocking_gate": True,
@@ -406,15 +411,84 @@ def is_operational_progress_clause(sentence):
 
 
 def find_superseded_role_assignment(sentence):
-    """Find active superseded components assigned a governed architecture role."""
+    """Find either direction of an active component/role assignment."""
     role = (r"(?:(?:CD|GitOps|rollout)\s+(?:controller|delivery)|progressive\s+delivery|"
             r"(?:object|S3)\s+(?:store|backend)|infrastructure\s+logs?|(?:infrastructure\s+)?log\s+store|"
             r"SIEM|(?:general\s+)?log\s+shipper)")
-    return re.search(
-        rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+"
-        rf"(?:is|acts?\s+as|serves?\s+as|provides?|owns?|stores?|backs?|powers?|hosts?|:)\s+(?:the\s+)?{role}\b",
-        sentence, re.I,
+    verb = r"(?:is|are|was|were|acts?\s+as|serves?\s+as|provides?|owns?|stores?|backs?|powers?|hosts?|:)"
+    component_first = rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+{verb}\s+(?:the\s+)?{role}\b"
+    role_first = rf"\b(?:the\s+)?{role}\b\s+{verb}\s+(?:the\s+)?(?P<reverse_component>{SUPERSEDED_COMPONENT})\b"
+    return re.search(rf"(?:{component_first}|{role_first})", sentence, re.I)
+
+
+def superseded_assignment_component(match):
+    """Return the component captured in either governed assignment direction."""
+    return match.group("component") or match.group("reverse_component")
+
+
+def wave_ancestors(waves, wave_id):
+    """Return transitive declared prerequisites without relying on YAML order."""
+    prerequisites = {wave.get("id"): wave.get("requires", []) for wave in waves}
+    ancestors, pending = set(), list(prerequisites.get(wave_id, []))
+    while pending:
+        dependency = pending.pop()
+        if dependency in ancestors:
+            continue
+        ancestors.add(dependency)
+        pending.extend(prerequisites.get(dependency, []))
+    return ancestors
+
+
+def security_source_errors(source, contract):
+    """Cross-check the bounded explicit facts rendered by the security source."""
+    errors = []
+    zone_names = {
+        "internet-untrusted": "Internet / untrusted", "public-edge-dmz": "Public Edge / DMZ",
+        "kubernetes-ingress-service-mesh": "Kubernetes ingress / service mesh",
+        "application-workloads": "Application workloads", "stateful-data": "Stateful data",
+        "permanent-mgmt": "Permanent MGMT", "backup-evidence-dfir": "Backup / evidence / DFIR",
+    }
+    for zone, identity in contract["zones"].items():
+        if not re.search(rf"^###\s+{re.escape(zone)}\s+—\s+{re.escape(zone_names[identity])}\s*$", source, re.M | re.I):
+            errors.append(f"security source drift: zone {zone} must identify {identity}")
+    facts = (
+        (contract["human_iam"]["customers_realm"], r"Keycloak\s+`(?P<value>[^`]+)`\s+realm:\s*customer identities"),
+        (contract["human_iam"]["workforce_realm"], r"Keycloak\s+`(?P<value>[^`]+)`\s+realm:\s*staff/operators"),
+        (contract["human_iam"]["privileged_authentication"], r"privileged workforce flows require (?P<value>WebAuthn/passkeys backed by hardware keys)"),
+        (contract["human_iam"]["customer_tokens_for_mgmt"], r"(?P<value>no) customer token is accepted for MGMT administrative APIs"),
+        (contract["workload_identity"]["cross_environment"], r"Cross-environment workload identity is (?P<value>denied by default)"),
+        (contract["workload_identity"]["federation_requires"], r"federation requires explicit (?P<value>architecture/security review)"),
+        (contract["secrets"]["flow"], r"`(?P<value>OpenBao -> ESO -> Kubernetes Secret/runtime mount)` where applicable"),
+        (contract["egress"]["default"], r"## Egress\s+\n\s*(?P<value>Default deny)\."),
+        (contract["egress"]["application_path"], r"application egress uses (?P<value>approved Istio Egress/Squid) path"),
+        (contract["egress"]["logging"], r"approved Istio Egress/Squid path with (?P<value>logging)"),
+        (contract["egress"]["exceptions"], r"logging and (?P<value>documented) exception"),
     )
+    normalizations = {
+        "WebAuthn/passkeys backed by hardware keys": "hardware-backed-webauthn-passkeys",
+        "no": "forbidden", "denied by default": "deny-by-default",
+        "architecture/security review": "architecture-security-review",
+        "OpenBao -> ESO -> Kubernetes Secret/runtime mount": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
+        "Default deny": "deny", "approved Istio Egress/Squid": "approved-istio-egress-squid",
+        "logging": "required", "documented": "documented",
+    }
+    for expected, pattern in facts:
+        match = re.search(pattern, source, re.I)
+        rendered = normalizations.get(match.group("value"), match.group("value") if match else None) if match else None
+        if rendered != expected:
+            errors.append(f"security source drift: expected {expected}")
+    trust_domains = re.findall(r"^- (PREPROD|PROD-A|PROD-B)\s*$", source, re.M)
+    if trust_domains != contract["workload_identity"]["trust_domains"]:
+        errors.append("security source drift: workload trust domains")
+    forbidden_patterns = {
+        "git": r"secrets in Git", "image-layers": r"secrets in image layers", "ci-logs": r"secrets in CI logs",
+        "bootstrap-credentials-after-preprod-destroy": r"long-lived bootstrap credentials left active after PREPROD destroy",
+        "application-access-to-openbao-admin-credentials": r"application access to OpenBao administrative credentials",
+    }
+    for case in contract["secrets"]["forbidden"]:
+        if not re.search(rf"^- {forbidden_patterns[case]}[.;]?\s*$", source, re.M | re.I):
+            errors.append(f"security source drift: forbidden secret case {case}")
+    return errors
 
 
 def documentation_clauses(text):
@@ -603,7 +677,7 @@ def documentation_errors(text):
             errors.append("superseded architecture diagram must be explicitly labelled: " + sentence.strip())
         active_role = find_superseded_role_assignment(sentence)
         if (active_role and not historical
-                and not component_is_retired(sentence, re.escape(active_role.group("component")))):
+                and not component_is_retired(sentence, re.escape(superseded_assignment_component(active_role)))):
             errors.append("superseded platform role must not be active: " + sentence.strip())
         if (re.search(r"Fluent Bit", sentence, re.I) and
                 re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|(?:log\s+)?shipper)", sentence, re.I)
@@ -649,6 +723,8 @@ def validate(root):
             errors.append("exact index must be the derived V5 index")
         if lock.get("observability") != V5_OBSERVABILITY:
             errors.append("observability must match the complete approved V5 mapping")
+        if lock["business"].get("frontend_runtime") != EXPECTED_V5_FRONTEND_RUNTIME:
+            errors.append("business.frontend_runtime must match the approved V5 mapping")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
             errors.append("critical DNS TTL must remain 60 seconds")
         if lock.get("superseded") != V5_SUPERSEDED:
@@ -681,6 +757,9 @@ def validate(root):
             contract = load_yaml(root / relative)
             if contract != EXACT_CONTRACTS[key]:
                 errors.append(f"{relative} must match its exact V5 invariants")
+            if key == "security_trust_zones" and contract == EXACT_CONTRACTS[key]:
+                source = (root / contract["source"]).read_text()
+                errors.extend(security_source_errors(source, contract))
         if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
             errors.append("machine_contracts must match the complete approved V5 role/path registry")
         # The Ruby architecture validator also checks all declared contract paths
@@ -763,11 +842,26 @@ def validate(root):
         checkout_flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
         if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
+        m4_match = re.search(r"^## M4 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
+        m4 = m4_match.group(0) if m4_match else ""
+        m4_order_match = re.search(r"^Order:\s*\n`([^`]+)`\.\s*$", m4, re.M)
+        approved_m4_order = [
+            "RKE2", "Cilium/Hubble", "Fleet", "Argo Rollouts", "Kyverno/Pod Security",
+            "SPIRE", "Istio", "OpenBao/ESO", "Harbor", "Tekton",
+            "observability/security logging", "stateful platform",
+        ]
+        rendered_m4_order = ([item.strip() for item in m4_order_match.group(1).split("->")]
+                             if m4_order_match else [])
+        if rendered_m4_order != approved_m4_order:
+            errors.append("CODEX_HANDOFFS.md M4 order must match the approved platform schedule")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
         if waves != V5_DEPLOYMENT_WAVES:
             errors.append("deployment-waves.yaml must match the complete approved V5 schedule")
         if waves.get("status") != "exact":
             errors.append("deployment-waves.yaml status must be exact")
+        qualification_ancestors = wave_ancestors(waves.get("waves", []), "110-qualification")
+        if not {"100-frontends", "95-mlops"}.issubset(qualification_ancestors):
+            errors.append("deployment qualification must depend on both frontend and MLOps completion")
         deployment_dag = (root / topology_contracts["deployment_dag"]).read_text()
         prose_wave_declarations = {}
         for match in re.finditer(

@@ -44,7 +44,7 @@ waves:
     requires: [90-commerce]
     components: [storefront, admin]
   - id: 110-qualification
-    requires: [100-frontends]
+    requires: [100-frontends, 95-mlops]
     components: [smoke, security, contracts, integration, bdd, e2e, performance, chaos-dr]
 rules:
   wait_only_on_declared_dependencies: true

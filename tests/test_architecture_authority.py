@@ -101,6 +101,21 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
+    def test_reversed_superseded_role_assignments_are_rejected(self):
+        for statement in (
+            "The S3 backend is MinIO.", "The object store is MinIO Community Edition.",
+            "The infrastructure log store is Loki.", "The GitOps controller is FluxCD.",
+            "The rollout controller is Flagger.", "The SIEM is Splunk.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in (
+            "Historical: The S3 backend was MinIO.",
+            "Superseded: The infrastructure log store was Loki.",
+        ):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
     def test_superseded_diagrams_require_a_scoped_explicit_label(self):
         diagram = """## Deployment topology
 ```mermaid
@@ -242,6 +257,20 @@ graph LR
                     self.assertIn(before, original)
                     (root / "architecture.lock.yaml").write_text(original.replace(before, after, 1))
                     self.assertTrue(authority.validate(root))
+
+    def test_approved_frontend_runtime_rejects_coordinated_lock_and_index_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            index = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
+            original_lock, original_index = lock.read_text(), index.read_text()
+            lock.write_text(original_lock.replace("    rendering: templ", "    rendering: react", 1))
+            index.write_text(original_index.replace("- `rendering`: `templ`", "- `rendering`: `react`", 1))
+            self.assertIn("business.frontend_runtime must match the approved V5 mapping",
+                          authority.validate(root))
+            lock.write_text(original_lock)
+            index.write_text(original_index)
+            self.assertEqual([], authority.validate(root))
 
     def test_closed_world_v5_mutation_matrix(self):
         """Unknown, duplicate, missing, and contradictory exact declarations all fail closed."""
@@ -601,6 +630,29 @@ graph LR
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_qualification_explicitly_depends_on_frontend_and_mlops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "config/infrastructure/deployment-waves.yaml"
+            original = path.read_text()
+            path.write_text(original.replace("requires: [100-frontends, 95-mlops]",
+                                             "requires: [100-frontends]", 1))
+            self.assertIn("deployment qualification must depend on both frontend and MLOps completion",
+                          authority.validate(root))
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_m4_handoff_order_includes_argo_rollouts_exactly_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/project/CODEX_HANDOFFS.md"
+            original = path.read_text()
+            path.write_text(original.replace(" -> Argo Rollouts", "", 1))
+            self.assertIn("CODEX_HANDOFFS.md M4 order must match the approved platform schedule",
+                          authority.validate(root))
+            path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_exact_contract_mutations_are_rejected(self):
         mutations = (
             ("config/contracts/security-trust-zones.yaml", "  Z6: backup-evidence-dfir\n", ""),
@@ -621,6 +673,26 @@ graph LR
                     self.assertTrue(any(relative in error for error in authority.validate(root)))
                     path.write_text(original)
             self.assertEqual([], authority.validate(root))
+
+    def test_security_source_is_cross_checked_against_machine_contract(self):
+        mutations = (
+            ("Default deny", "Default allow"),
+            ("no customer token is accepted for MGMT administrative APIs",
+             "customer tokens are accepted for MGMT administrative APIs"),
+            ("Cross-environment workload identity is denied by default",
+             "Cross-environment workload identity is allowed by default"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            path = root / "docs/architecture/SECURITY_TRUST_ZONES.md"
+            original = path.read_text()
+            for before, after in mutations:
+                with self.subTest(mutation=f"{before} -> {after}"):
+                    self.assertIn(before, original)
+                    path.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any("security source drift" in error for error in authority.validate(root)))
+                    path.write_text(original)
+                    self.assertEqual([], authority.validate(root))
 
     def test_observability_guidance_mutation_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
