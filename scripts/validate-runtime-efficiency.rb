@@ -73,7 +73,7 @@ module RuntimeEfficiencyValidator
         "ambient mode must stay blocked while SPIRE is canonical")
 
     validate_go_frontend(errors, root, policy)
-    validate_product_containerfile(errors, root, policy)
+    validate_service_containerfiles(errors, root, policy, lock.fetch("business").fetch("services"))
     errors
   rescue Errno::ENOENT, Psych::Exception => e
     [e.message]
@@ -93,17 +93,19 @@ module RuntimeEfficiencyValidator
         "frontend/package.json must be absent from the Go application runtime")
   end
 
-  def validate_product_containerfile(errors, root, policy)
-    relative = "services/product/Containerfile"
-    content = File.read(File.join(root, relative))
+  def validate_service_containerfiles(errors, root, policy, services)
     builder = policy.fetch("images").fetch("go_builder")
     expected = "#{builder.fetch('image')}:#{builder.fetch('tag')}@#{builder.fetch('digest')}"
-    add(errors, content.include?(expected), "#{relative} must pin the reviewed Go builder digest")
-    add(errors, content.include?("TARGETARCH"), "#{relative} must support target architecture selection")
-    add(errors, content.include?("CGO_ENABLED=0"), "#{relative} must build a static Go binary")
-    add(errors, content.match?(/^FROM scratch$/), "#{relative} runtime must be scratch")
-    add(errors, content.include?("USER 65532:65532"), "#{relative} runtime must be non-root")
-    add(errors, !content.match?(/:latest\b/), "#{relative} must not use mutable latest tags")
+    services.each do |service|
+      relative = "services/#{service}/Containerfile"
+      content = File.read(File.join(root, relative))
+      add(errors, content.include?(expected), "#{relative} must pin the reviewed Go builder digest")
+      add(errors, content.include?("TARGETARCH"), "#{relative} must support target architecture selection")
+      add(errors, content.include?("CGO_ENABLED=0"), "#{relative} must build a static Go binary")
+      add(errors, content.match?(/^FROM scratch$/), "#{relative} runtime must be scratch")
+      add(errors, content.include?("USER 65532:65532"), "#{relative} runtime must be non-root")
+      add(errors, !content.match?(/:latest\b/), "#{relative} must not use mutable latest tags")
+    end
   end
 end
 

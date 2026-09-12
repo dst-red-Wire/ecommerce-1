@@ -425,17 +425,21 @@ def api_generate(target: str = "go", service: str = "", check: bool = False) -> 
                 else:
                     if not (module / "go.mod").is_file():
                         return fail(f"api-generate implemented service lacks go.mod: services/{name}/go.mod")
-                    out_dir.mkdir(parents=True, exist_ok=True)
                     generated = out_dir / "openapi.gen.go"
+                    candidate = Path(temp_dir) / f"{name}.openapi.gen.go" if check else generated
+                    if not check:
+                        out_dir.mkdir(parents=True, exist_ok=True)
                     config_path = Path(temp_dir) / f"{name}.oapi-codegen.yaml"
                     config_path.write_text(
-                        f"package: generated\noutput: {generated}\ngenerate:\n  models: true\n  std-http-server: true\n  strict-server: true\n",
+                        f"package: generated\noutput: {candidate}\ngenerate:\n  models: true\n  std-http-server: true\n  strict-server: true\n",
                         encoding="utf-8",
                     )
                     # Run from the owning Go module so oapi-codegen can resolve the
                     # module/runtime context instead of warning from repository root.
                     run(["oapi-codegen", "--config", str(config_path), str(bundled_spec)], cwd=module)
-                    run(["gofmt", "-w", str(generated)], cwd=module)
+                    run(["gofmt", "-w", str(candidate)], cwd=module)
+                    if check and (not generated.is_file() or candidate.read_bytes() != generated.read_bytes()):
+                        return fail(f"generated API binding is stale: {generated.relative_to(ROOT)}")
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -650,7 +654,18 @@ def site() -> int:
         binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
         for target, binary in zip(("storefront", "admin"), binaries, strict=True):
             run(["go", "build", "-o", str(binary), f"./apps/{target}"], cwd=ROOT / "frontend", env=env)
-        processes = [subprocess.Popen([str(binary)], cwd=ROOT / "frontend", env=env) for binary in binaries]
+        addresses = (
+            os.environ.get("STOREFRONT_HTTP_ADDR", ":8080"),
+            os.environ.get("ADMIN_HTTP_ADDR", ":8081"),
+        )
+        processes = [
+            subprocess.Popen(
+                [str(binary)],
+                cwd=ROOT / "frontend",
+                env=dict(env, HTTP_ADDR=address),
+            )
+            for binary, address in zip(binaries, addresses, strict=True)
+        ]
         previous_handlers = {}
 
         def interrupt(_signum, _frame):
@@ -676,10 +691,24 @@ def site() -> int:
 
 
 def forbidden_frontend_artifacts() -> None:
-    forbidden_names = {"package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", ".node-version", ".nvmrc", "next.config.js", "next.config.ts", "playwright.config.ts", "turbo.json", "pnpm-workspace.yaml"}
+    forbidden_names = {
+        "package.json",
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "yarn.lock",
+        ".node-version",
+        ".nvmrc",
+        "next.config.js",
+        "next.config.ts",
+        "playwright.config.ts",
+        "turbo.json",
+        "pnpm-workspace.yaml",
+    }
     forbidden_suffixes = {".ts", ".tsx"}
     paths = set(git("ls-files").splitlines()) | set(git("ls-files", "--others", "--exclude-standard").splitlines())
-    violations = sorted(path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes)
+    violations = sorted(
+        path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes
+    )
     if violations:
         raise RuntimeError("forbidden Node.js frontend artifacts: " + ", ".join(violations))
 
@@ -852,7 +881,9 @@ def lint_all() -> int:
         require("ruff")
         run(["ruff", "check", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
-        frontend("lint", "all")
+        result = frontend("lint", "all")
+        if result:
+            return result
     print("PASS lint checks completed")
     return 0
 
@@ -1982,9 +2013,7 @@ def main() -> int:
         if args.cmd == "failure-context":
             return failure_context(args.gate, args.component)
         if args.cmd == "context":
-            return run(
-                [sys.executable, "scripts/context-pack.py", "--task", args.task], check=False
-            ).returncode
+            return run([sys.executable, "scripts/context-pack.py", "--task", args.task], check=False).returncode
         if args.cmd == "api-generate":
             return api_generate(args.target, args.service, args.check)
         if args.cmd == "nx-graph":

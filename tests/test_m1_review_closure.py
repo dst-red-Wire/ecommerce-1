@@ -112,6 +112,26 @@ class M1ReviewClosureTests(unittest.TestCase):
         self.assertTrue(storefront.terminated)
         self.assertFalse(admin.terminated)
 
+    def test_site_assigns_distinct_addresses(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        site = source[source.index("def site(") : source.index("def forbidden_frontend_artifacts(")]
+        self.assertIn('os.environ.get("STOREFRONT_HTTP_ADDR", ":8080")', site)
+        self.assertIn('os.environ.get("ADMIN_HTTP_ADDR", ":8081")', site)
+        self.assertIn("env=dict(env, HTTP_ADDR=address)", site)
+
+    def test_frontend_lint_failure_is_propagated(self):
+        with (
+            mock.patch.object(REPOCTL, "require"),
+            mock.patch.object(
+                REPOCTL,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            ),
+            mock.patch.object(REPOCTL, "automation_policy", return_value=0),
+            mock.patch.object(REPOCTL, "frontend", return_value=7),
+        ):
+            self.assertEqual(7, REPOCTL.lint_all())
+
     def test_frontend_servers_have_bounded_header_timeouts(self):
         for app in ("storefront", "admin"):
             source = (ROOT / "frontend" / "apps" / app / "main.go").read_text(encoding="utf-8")

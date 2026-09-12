@@ -23,4 +23,10 @@ class RuntimeEfficiencyTest < Minitest::Test
     assert_equal "fixed-exact-contract", policy.dig("node_capacity", "prod")
     assert_equal "existing-gate-only", policy.dig("node_capacity", "preprod_perf_burst")
   end
+
+  def test_every_canonical_service_containerfile_is_validated
+    source = File.read(File.join(ROOT, "scripts/validate-runtime-efficiency.rb"))
+    assert_includes source, 'services.each do |service|'
+    assert_includes source, 'relative = "services/#{service}/Containerfile"'
+  end
 end
