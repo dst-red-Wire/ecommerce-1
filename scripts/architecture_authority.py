@@ -307,6 +307,9 @@ def lock_schema_errors(lock):
             errors.append(f"prod_certified_topology.sites.{site_name}.physical_hosts must be a list of strings")
         elif len(hosts) != len(set(hosts)):
             errors.append(f"prod_certified_topology.sites.{site_name}.physical_hosts must be unique")
+    all_prod_hosts = [host for site in prod["sites"].values() for host in site["physical_hosts"]]
+    if len(all_prod_hosts) != len(set(all_prod_hosts)):
+        errors.append("prod_certified_topology physical hosts must be globally unique across PROD sites")
     return errors
 
 
@@ -337,6 +340,81 @@ def component_is_retired(sentence, component):
         rf"\b(?:{component})\b", coordinated_retirement.group("components"), re.I
     )
     return bool(direct_retirement or coordinated_negation or shared_retirement)
+
+
+def is_explicit_historical_clause(sentence, scoped_historical=False):
+    """Recognize only local, explicit historical/superseded scope."""
+    return bool(scoped_historical or re.match(
+        r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I
+    ))
+
+
+def is_dvc_retirement_clause(sentence):
+    """Accept DVC only when it is explicitly the retired/source technology."""
+    return bool(
+        re.search(r"\bremove(?:s|d|ing)?\s+(?:remaining\s+)?DVC\b", sentence, re.I)
+        or re.search(r"\breplace(?:s|d|ing)?\s+DVC\b[^.!?;]*\bwith\s+lakeFS\b", sentence, re.I)
+        or re.search(r"\bmigrat(?:e|es|ed|ing)\s+DVC(?:\s+datasets?)?\b[^.!?;]*\bto\s+lakeFS\b", sentence, re.I)
+        or re.search(r"\bDVC\b\s+(?:(?:is|was|has\s+been|remain(?:s|ed)?)\s+)?"
+                     r"(?:superseded|historical|rejected|forbidden)\b", sentence, re.I)
+    )
+
+
+def is_nextjs_active_target_clause(sentence):
+    """Detect an explicit active/target assignment before migration exemptions."""
+    return bool(re.search(
+        r"(?:next\.?js\b\s+(?:is|as)\s+(?:the\s+)?target\s+runtime\b|"
+        r"\btarget\s+runtime\b\s*(?:is|:)?\s*next\.?js\b|"
+        r"\bproduction\s+frontend\b[^.!?;]*\b(?:use|uses|is)\b[^.!?;]*next\.?js\b|"
+        r"\bdeploy\s+next\.?js\b|\bfrontend\b[^.!?;]*\b(?:use|uses)\s+next\.?js\b[^.!?;]*\bas\s+(?:its\s+|the\s+)?target\s+runtime\b)",
+        sentence, re.I,
+    ))
+
+
+def is_nextjs_migration_source_clause(sentence):
+    """Require Next.js to be identified as the source/temporary side of migration."""
+    return bool(
+        re.search(r"next\.?js(?:/React/Node(?:\.js)?)?\s+is\s+(?:only\s+)?the\s+migration\s+source", sentence, re.I)
+        or re.search(r"\bmigration\b[^.!?;]*\bnext\.?js\b[^.!?;]*\b(?:to|vers)\s+Go\b", sentence, re.I)
+        or re.search(r"\b(?:migrat(?:e|es|ed|ing)|migration)\b[^.!?;]*\bfrom\s+next\.?js\b[^.!?;]*\bto\s+Go\b", sentence, re.I)
+        or re.search(r"\bnext\.?js\b[^.!?;]*\b(?:remains?|legacy)\b[^.!?;]*\b(?:only|until)\b[^.!?;]*\b(?:migration|Go)\b", sentence, re.I)
+        or re.search(r"\bnext\.?js\b[^.!?;]*\b(?:source|legacy)\b[^.!?;]*\btarget\b[^.!?;]*\bGo\b", sentence, re.I)
+        or re.search(r"\b(?:currently|actuellement)\s+(?:use|uses|utilise(?:nt)?)\s+next\.?js\b", sentence, re.I)
+        or re.search(r"\bactuellement\s+next\.?js\b[^.!?;]*\bcible\s+Go\b", sentence, re.I)
+    )
+
+
+def is_explicit_topology_claim(sentence):
+    """Return true for canonical composition assertions, regardless of progress words."""
+    count = re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\b", sentence, re.I)
+    explicit_count = re.search(r"\bexactly\s+17\s+(?:(?:go|backend)\s+)*services?\b", sentence, re.I)
+    architecture_assignment = (
+        re.search(r"\b(?:canonical\s+architecture|architecture|topology|platform)\b", sentence, re.I)
+        and re.search(r"\b(?:exactly|complete|consists?\s+of|there\s+are|has|includes?|defines?|baseline|with)\b", sentence, re.I)
+    ) or re.search(r"\b(?:our\s+)?backend\s+(?:consists?\s+of|has|includes?|defines?)\b", sentence, re.I)
+    return bool(count and (explicit_count or architecture_assignment))
+
+
+def is_operational_progress_clause(sentence):
+    """Recognize concrete rollout/health subsets, never generic 'complete'."""
+    return bool(
+        re.search(r"\b17\s+of\s+19\b[^.!?;]*\b(?:deployed|healthy|available|ready)\b", sentence, re.I)
+        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:deployed|healthy|available|ready|affected|unavailable)\b", sentence, re.I)
+        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:have\s+completed|currently\s+have)\b", sentence, re.I)
+        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\bcomplete\b[^.!?;]*\b(?:two|2)\s+remain\b", sentence, re.I)
+    )
+
+
+def find_superseded_role_assignment(sentence):
+    """Find active superseded components assigned a governed architecture role."""
+    role = (r"(?:(?:CD|GitOps|rollout)\s+(?:controller|delivery)|progressive\s+delivery|"
+            r"(?:object|S3)\s+(?:store|backend)|infrastructure\s+logs?|(?:infrastructure\s+)?log\s+store|"
+            r"SIEM|(?:general\s+)?log\s+shipper)")
+    return re.search(
+        rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+"
+        rf"(?:is|acts?\s+as|serves?\s+as|provides?|owns?|stores?|backs?|powers?|hosts?|:)\s+(?:the\s+)?{role}\b",
+        sentence, re.I,
+    )
 
 
 def documentation_clauses(text):
@@ -489,47 +567,23 @@ def documentation_errors(text):
     for sentence, scoped_historical, in_diagram in documentation_clauses(normalized):
         # Only an explicit label on this clause qualifies it as historical.
         # An unrelated mention of migration or rejection cannot exempt a claim.
-        historical = scoped_historical or re.match(
-            r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I
-        )
-        operational_subset = re.search(
-            r"\b17\s+of\s+19\b|\b(?:healthy|deployed|available|ready|complete|remain(?:s|ing)?|unavailable|progress)\b",
-            sentence, re.I,
-        )
-        topology_claim = (
-            re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\b", sentence, re.I)
-            and re.search(r"\b(?:exactly|total(?:s|ing)?|architecture|topology|platform|backend|consists?\s+of|there\s+are|has|includes?|defines?|baseline)\b", sentence, re.I)
-        )
-        if ((topology_claim and not operational_subset)
+        historical = is_explicit_historical_clause(sentence, scoped_historical)
+        topology_claim = is_explicit_topology_claim(sentence)
+        if (topology_claim
                 or re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I)) and not historical:
             errors.append("superseded service topology: " + sentence.strip())
-        dvc_retired = re.search(
-            r"\bDVC\s+(?:(?:is|was|has been|remain(?:s|ed)?)\s+)?"
-            r"(?:superseded|historical|rejected|forbidden)\b", sentence, re.I
-        )
-        dvc_remediation = (
-            re.search(r"\bremove(?:s|d)?\b[^.!?;]*\bDVC\b", sentence, re.I)
-            or re.search(r"\breplace\b[^.!?;]*\bDVC\b[^.!?;]*\bwith\s+lakeFS\b", sentence, re.I)
-            or re.search(r"\bmigrat(?:e|es|ed|ing)\b[^.!?;]*\bDVC\b[^.!?;]*\bto\s+lakeFS\b", sentence, re.I)
-        )
-        if re.search(r"\bdvc\b", sentence, re.I) and not (historical or dvc_retired or dvc_remediation):
+        if re.search(r"\bdvc\b", sentence, re.I) and not (historical or is_dvc_retirement_clause(sentence)):
             errors.append("DVC must be explicitly historical/superseded: " + sentence.strip())
         if re.search(r"next\.?js", sentence, re.I) and re.search(
                 r"target|cible|prod|runtime|ATS\s*->|\buse\b|\buses\b|deploy|frontend|framework|built\s+with",
                 sentence, re.I):
-            migration = re.search(
-                r"next\.?js(?:/React/Node(?:\.js)?)?\s+(?:is (?:only )?the migration source|est la source de migration)"
-                r"|actuellement Next\.js, cible Go|Migration du runtime frontend Next\.js vers Go"
-                r"|existing Next\.js implementation remains until migration", sentence, re.I
-            )
-            migration = migration or (re.search(r"\bmigration\b", sentence, re.I)
-                                      and re.search(r"\b(?:only|source|reference|legacy|currently)\b", sentence, re.I))
-            migration = migration or re.search(r"\bcurrently\s+use(?:s)?\b", sentence, re.I)
+            active_target = is_nextjs_active_target_clause(sentence)
+            migration = is_nextjs_migration_source_clause(sentence)
             nextjs_retired = re.search(
                 r"next\.?js.{0,30}\b(?:superseded|historical|rejected|forbidden|removed|not\s+(?:the\s+)?(?:target|runtime))\b",
                 sentence, re.I,
             )
-            if not (historical or migration or nextjs_retired):
+            if active_target or not (historical or migration or nextjs_retired):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
         removed_v2_authority = re.search(
             r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?|"
@@ -547,11 +601,7 @@ def documentation_errors(text):
                     break
         if in_diagram and re.search(rf"\b(?:{SUPERSEDED_COMPONENT})\b", sentence, re.I) and not historical:
             errors.append("superseded architecture diagram must be explicitly labelled: " + sentence.strip())
-        active_role = re.search(
-            rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+(?:is|acts?\s+as|:)\s+(?:the\s+)?"
-            r"(?:(?:CD|GitOps|rollout)\s+controller|(?:infrastructure\s+)?log\s+store|"
-            r"(?:object|S3)\s+(?:store|backend)|SIEM)", sentence, re.I,
-        )
+        active_role = find_superseded_role_assignment(sentence)
         if (active_role and not historical
                 and not component_is_retired(sentence, re.escape(active_role.group("component")))):
             errors.append("superseded platform role must not be active: " + sentence.strip())
@@ -704,6 +754,10 @@ def validate(root):
         if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
+        mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
+        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+            if f"`{relative}`" not in mandatory_handoffs:
+                errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m5 = m5_match.group(0) if m5_match else ""
         checkout_flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"

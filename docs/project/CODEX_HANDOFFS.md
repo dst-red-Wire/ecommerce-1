@@ -31,6 +31,8 @@ Codex must always read, in order:
 - `config/infrastructure/network-plan.yaml`
 - `config/infrastructure/storage-plan.yaml`
 - `config/infrastructure/deployment-waves.yaml`
+- `config/contracts/resilience-governance.yaml`
+- `config/contracts/security-trust-zones.yaml`
 - `config/contracts/service-ownership.yaml`
 - `config/contracts/event-contracts.yaml`
 - `config/contracts/dependency-map.yaml`

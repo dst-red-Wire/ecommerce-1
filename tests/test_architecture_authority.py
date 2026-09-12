@@ -62,6 +62,8 @@ class ArchitectureAuthorityTest(unittest.TestCase):
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
+        self.assertTrue(authority.documentation_errors("Remove lakeFS and use DVC as the dataset versioner."))
+        self.assertEqual([], authority.documentation_errors("Remove DVC and use lakeFS as the dataset versioner."))
 
     def test_active_superseded_platform_defaults_are_rejected(self):
         for statement in ("GitOps CD: FluxCD.", "Progressive delivery: Flagger.", "MinIO is the object store.",
@@ -86,6 +88,16 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             "Loki is historical only.", "MinIO is not the S3 backend; SeaweedFS is.",
             "Remove MinIO and use SeaweedFS.", "Migrate DVC datasets to lakeFS.",
         ):
+            with self.subTest(statement=statement):
+                self.assertEqual([], authority.documentation_errors(statement))
+
+    def test_superseded_ownership_verbs_are_rejected(self):
+        for statement in ("MinIO provides the S3 backend.", "FluxCD owns GitOps delivery.",
+                          "Loki stores infrastructure logs.", "Flagger powers progressive delivery."):
+            with self.subTest(statement=statement):
+                self.assertTrue(authority.documentation_errors(statement))
+        for statement in ("Historical: MinIO provided the S3 backend.",
+                          "Superseded: Loki was the infrastructure log store."):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
@@ -154,6 +166,8 @@ graph LR
                           "Next.js is superseded as the PROD frontend target."):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
+        self.assertTrue(authority.documentation_errors("The frontend currently uses Next.js as its target runtime."))
+        self.assertEqual([], authority.documentation_errors("Next.js is only the migration source; target runtime is Go."))
 
     def test_topology_assertions_and_operational_subsets(self):
         for statement in ("The topology consists of 17 backend services.", "The architecture includes 17 services.",
@@ -166,6 +180,33 @@ graph LR
                           "17 services currently have generated clients.", "17 of 19 services are healthy."):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
+        self.assertTrue(authority.documentation_errors(
+            "The canonical architecture is complete with exactly 17 backend services."
+        ))
+        self.assertEqual([], authority.documentation_errors("17 of 19 backend services are currently deployed."))
+
+    def test_prod_hosts_are_globally_unique_across_sites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            lock.write_text(original.replace("        - b-host-01", "        - a-host-01", 1))
+            self.assertTrue(any("globally unique" in error for error in authority.validate(root)))
+            lock.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_mandatory_handoffs_include_machine_governance_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            handoff = root / "docs/project/CODEX_HANDOFFS.md"
+            original = handoff.read_text()
+            for relative in ("config/contracts/resilience-governance.yaml",
+                             "config/contracts/security-trust-zones.yaml"):
+                with self.subTest(relative=relative):
+                    handoff.write_text(original.replace(f"- `{relative}`\n", "", 1))
+                    self.assertTrue(any(relative in error for error in authority.validate(root)))
+                    handoff.write_text(original)
+                    self.assertEqual([], authority.validate(root))
 
     def test_operational_service_counts_are_not_topology_claims(self):
         self.assertEqual([], authority.documentation_errors("Incident impact: 17 services were unavailable."))

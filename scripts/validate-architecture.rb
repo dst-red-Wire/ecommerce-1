@@ -525,6 +525,10 @@ module ArchitectureValidator
       prod_sites.fetch(site, {}).fetch("physical_hosts", {}).length
     end
     check_equal(errors, "PROD total physical hosts", topology.fetch("physical_hosts_total"), total_physical_hosts)
+    canonical_prod_hosts = topology_sites.values.flat_map { |site| site.fetch("physical_hosts") }
+    inventory_prod_hosts = prod_sites.values.flat_map { |site| site.fetch("physical_hosts", {}).keys }
+    errors << "canonical PROD physical hosts must be globally unique across sites" unless canonical_prod_hosts.uniq.length == canonical_prod_hosts.length
+    errors << "inventory PROD physical hosts must be globally unique across sites" unless inventory_prod_hosts.uniq.length == inventory_prod_hosts.length
     {
       "physical_hosts_total" => 6,
       "physical_hosts_per_site" => 3,

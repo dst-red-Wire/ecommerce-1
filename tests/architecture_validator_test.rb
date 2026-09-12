@@ -356,6 +356,20 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_prod_host_reused_across_sites
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["prod_certified_topology"]["sites"]["prod-b"]["physical_hosts"][0] = "a-host-01"
+      end
+      mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") do |data|
+        host = data["sites"]["prod-b"]["physical_hosts"].delete("b-host-01")
+        data["sites"]["prod-b"]["physical_hosts"]["a-host-01"] = host
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("globally unique across sites") }
+    end
+  end
+
   def test_rejects_coordinated_prod_site_rename
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/network-plan.yaml") do |data|
