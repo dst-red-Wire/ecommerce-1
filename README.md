@@ -45,8 +45,8 @@ La chaîne transactionnelle centrale est `Cart -> Checkout -> Order -> Payment -
 - `frontend/apps/storefront` : cible Go + templ + HTMX, mobile-first.
 - `frontend/apps/admin` : cible Go + templ + HTMX.
 - Module unique : `frontend/go.mod`; les applications restent déployables séparément.
-- Next.js/React/Node.js est la source de migration. Node.js peut rester temporairement pour Playwright, CSS/build tooling et compatibilité, mais n’est plus le runtime frontend PROD cible.
-- Design system partagé : [`frontend/packages/ui`](frontend/packages/ui/README.md).
+- Next.js/React/Node.js est uniquement la source historique de migration. Aucun runtime ni graphe de dépendances applicatif Node.js n'est actif.
+- Le rendu et les composants partagés appartiennent au module Go dans [`frontend/internal/web`](frontend/internal/web).
 - Références et provenance NOMA : [`docs/design`](docs/design/README.md).
 
 ## Prise en main locale du site
@@ -57,20 +57,12 @@ Le frontend NOMA est directement consultable depuis le navigateur Windows lorsqu
 make site
 ```
 
-Cette commande installe les dépendances frontend verrouillées avec le lockfile, puis démarre simultanément le Storefront et l'Admin. Garder le terminal ouvert pendant la consultation et utiliser `Ctrl+C` pour arrêter les serveurs.
+Cette commande démarre simultanément le Storefront et l'Admin Go. Garder le terminal ouvert pendant la consultation et utiliser `Ctrl+C` pour arrêter les serveurs.
 
-- Storefront : <http://localhost:3000>
-- Admin : <http://localhost:3001>
-- Admin tablette : <http://localhost:3001/tablet>
-- Admin mobile : <http://localhost:3001/mobile>
+- Storefront : <http://localhost:8080>
+- Admin : <http://localhost:8081>
 
-Le mode par défaut utilise les données mock déterministes. Pour tester le catalogue public DummyJSON :
-
-```sh
-NOMA_DATA_ADAPTER=public make site
-```
-
-`PEXELS_API_KEY` reste optionnelle et doit être injectée comme secret côté serveur, hors Git et sans préfixe `NEXT_PUBLIC_`. Les détails de développement, de validation et les limites fonctionnelles courantes sont documentés dans [`frontend/README.md`](frontend/README.md).
+Le bootstrap M1 sert des données de démonstration déterministes. Les intégrations applicatives restent hors du périmètre M1. Les détails de développement sont documentés dans [`frontend/README.md`](frontend/README.md).
 
 ## Contrats
 

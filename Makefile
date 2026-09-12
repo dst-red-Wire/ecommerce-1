@@ -41,11 +41,11 @@ lint: automation ## Lint Go, Python and frontend sources with declared toolchain
 
 format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
-format: ## Format Python and frontend sources with Ruff/Oxfmt
+format: ## Format Python and Go frontend sources
 	@ruff format scripts tests
 	@gofmt -w frontend
 
-format-check: ## Check Ruff/Oxfmt formatting without mutation
+format-check: ## Check Ruff and Go formatting without mutation
 	@ruff format --check scripts tests
 	@test -z "$$(gofmt -l frontend)"
 
@@ -168,8 +168,8 @@ service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 
 .PHONY: site product-check product-run product-benchmark resource-candidate
 
-site: ## Run the Go Storefront locally
-	@$(MAKE) -C frontend run-storefront
+site: ## Run Storefront and Admin Go frontends locally
+	@$(PYTHON) scripts/repoctl.py site
 
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product

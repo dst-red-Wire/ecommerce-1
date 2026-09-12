@@ -42,7 +42,9 @@ func (a App) Handler() http.Handler {
 	m.HandleFunc("POST /cart/items", a.route)
 	m.HandleFunc("GET /cart", a.route)
 	m.HandleFunc("GET /products", a.route)
-	m.HandleFunc("POST /products/{id}/stock", a.route)
+	if a.Admin {
+		m.HandleFunc("POST /products/{id}/stock", a.route)
+	}
 	m.HandleFunc("GET /orders", a.route)
 	m.HandleFunc("GET /stocks", a.route)
 	m.HandleFunc("GET /error", func(w http.ResponseWriter, r *http.Request) {

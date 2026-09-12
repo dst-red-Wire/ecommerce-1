@@ -443,13 +443,6 @@
     force: true
   tags: [toolchain, agent_tools]
 
-- name: Install pinned frontend dependencies and accelerators
-  ansible.builtin.command:
-    argv: ["{{ local_bin }}/corepack", pnpm, install, --frozen-lockfile, --prefer-offline]
-    chdir: "{{ repo_root }}/frontend"
-  changed_when: false
-  tags: [toolchain, agent_tools]
-
 - name: Define isolated Python CLI pins
   ansible.builtin.set_fact:
     developer_pipx_packages:

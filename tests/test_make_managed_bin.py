@@ -88,16 +88,12 @@ class MakeManagedBinTest(unittest.TestCase):
             managed_bin.mkdir(parents=True)
             system_bin.mkdir()
             self._write_tool(managed_bin, "ruff", log)
-            self._write_tool(managed_bin, "oxfmt", log)
 
             result = self._run_format_check(home, system_bin)
 
             self.assertEqual(0, result.returncode, result.stdout)
             self.assertEqual(
-                [
-                    "ruff format --check scripts tests",
-                    "oxfmt --check frontend/apps frontend/packages frontend/e2e",
-                ],
+                ["ruff format --check scripts tests"],
                 log.read_text(encoding="utf-8").splitlines(),
             )
 
@@ -111,7 +107,6 @@ class MakeManagedBinTest(unittest.TestCase):
             managed_bin.mkdir(parents=True)
             system_bin.mkdir()
             self._write_tool(managed_bin, "ruff", log)
-            self._write_tool(managed_bin, "oxfmt", log)
             mutated_makefile = root / "Makefile"
             source = MAKEFILE.read_text(encoding="utf-8")
             mutation = "format format-check: export PATH := $(MANAGED_BIN):$(PATH)\n\n"

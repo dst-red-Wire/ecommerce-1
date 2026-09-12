@@ -1,7 +1,7 @@
 ---
 - name: Generate API bindings from canonical OpenAPI contracts
   ansible.builtin.command:
-    argv: [python3, scripts/repoctl.py, api-generate, --target, all]
+    argv: [python3, scripts/repoctl.py, api-generate, --target, go]
     chdir: "{{ repo_root }}"
   environment:
     PATH: "{{ ansible_env.HOME }}/.local/bin:{{ ansible_env.PATH }}"

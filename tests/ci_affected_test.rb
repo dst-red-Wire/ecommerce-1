@@ -79,11 +79,13 @@ class CIAffectedTest < Minitest::Test
   end
 
   def test_storefront_change_is_component_scoped
-    assert_equal %w[frontend:storefront global], classify("frontend/apps/storefront/app/page.tsx")
+    assert_equal %w[frontend:storefront global], classify("frontend/apps/storefront/main.go")
   end
 
-  def test_shared_frontend_package_impacts_both_apps
-    assert_equal %w[frontend:admin frontend:storefront global], classify("frontend/packages/ui/button.tsx")
+  def test_shared_frontend_go_paths_impact_both_apps
+    %w[frontend/go.mod frontend/internal/web/web.go frontend/templates/page.templ frontend/static/site.css].each do |path|
+      assert_equal %w[frontend:admin frontend:storefront global], classify(path), path
+    end
   end
 
   def test_service_change_is_scoped_to_the_service

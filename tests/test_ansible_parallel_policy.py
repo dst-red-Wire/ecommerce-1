@@ -67,12 +67,10 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
         self.assertIn("- Local: v23.2.0", observed_lines)
         self.assertNotEqual(observed_stdout.strip(), "23.2.0")
 
-    def test_scarf_build_script_is_explicitly_denied(self):
-        workspace = (ROOT / "frontend/pnpm-workspace.yaml").read_text()
-        self.assertIn("allowBuilds:", workspace)
-        self.assertIn("unrs-resolver: true", workspace)
-        self.assertIn("'@scarf/scarf': false", workspace)
-        self.assertNotIn("dangerouslyAllowAllBuilds", workspace)
+    def test_frontend_bootstrap_does_not_install_node_dependencies(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
+        self.assertNotIn("Install pinned frontend dependencies", tasks)
+        self.assertNotIn('chdir: "{{ repo_root }}/frontend"', tasks)
 
 
 if __name__ == "__main__":

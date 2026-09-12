@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -506,7 +507,9 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
     if generate or contract_changed:
-        api_generate("all")
+        result = api_generate("go")
+        if result:
+            return result
     print("PASS OpenAPI and cross-registry contract checks completed")
     return 0
 
@@ -584,30 +587,70 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
+    ensure_developer("go,cgo")
+    managed_bin = Path.home() / ".local/bin"
+    env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     require("go")
     require("gofmt")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
-        formatted = run(["gofmt", "-l", *files], capture=True)
+        formatted = run(["gofmt", "-l", *files], capture=True, env=env)
         if formatted.stdout.strip():
             return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
         forbidden_frontend_artifacts()
+        if action == "check":
+            with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
+                generated_root = Path(temp_dir) / "frontend"
+                shutil.copytree(frontend_root, generated_root)
+                run(["go", "run", "github.com/a-h/templ/cmd/templ@v0.3.1020", "generate"], cwd=generated_root, env=env)
+                committed = sorted(frontend_root.rglob("*_templ.go"))
+                generated = sorted(generated_root.rglob("*_templ.go"))
+                relative_committed = [path.relative_to(frontend_root) for path in committed]
+                relative_generated = [path.relative_to(generated_root) for path in generated]
+                if relative_committed != relative_generated:
+                    return fail("frontend templ generated file set is stale")
+                for relative in relative_committed:
+                    if (frontend_root / relative).read_bytes() != (generated_root / relative).read_bytes():
+                        return fail(f"frontend templ generated code is stale: {relative}")
         if action == "lint":
-            run(["go", "vet", "./..."], cwd=frontend_root)
+            run(["go", "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
-        env = dict(os.environ, CGO_ENABLED="1")
+        env = dict(env, CGO_ENABLED="1")
         for target in targets:
             run(["go", "test", "-race", f"./apps/{target}"], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
-                run(["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"], cwd=frontend_root)
+                run(["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"], cwd=frontend_root, env=env)
     if action == "check":
-        run(["go", "vet", "./..."], cwd=frontend_root)
+        run(["go", "vet", "./..."], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
+
+
+def site() -> int:
+    """Run both independently deployable Go frontends until interrupted."""
+    ensure_developer("go")
+    env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
+    processes = [
+        subprocess.Popen(["go", "run", "./apps/storefront"], cwd=ROOT / "frontend", env=env),
+        subprocess.Popen(["go", "run", "./apps/admin"], cwd=ROOT / "frontend", env=env),
+    ]
+    try:
+        while all(process.poll() is None for process in processes):
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+        for process in processes:
+            process.wait()
+    failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
+    return failed[0] if failed else 0
 
 
 def forbidden_frontend_artifacts() -> None:
@@ -1795,6 +1838,7 @@ def main() -> int:
         "git-sync",
         "precommit",
         "prepush",
+        "site",
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
@@ -1895,6 +1939,8 @@ def main() -> int:
             return system_check()
         if args.cmd == "frontend":
             return frontend(args.action, args.scope)
+        if args.cmd == "site":
+            return site()
         if args.cmd == "service":
             return service_check(args.service)
         if args.cmd == "affected":
