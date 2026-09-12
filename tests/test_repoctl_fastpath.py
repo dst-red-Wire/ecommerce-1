@@ -73,7 +73,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
 
     def test_exact_versions_are_detected_without_ansible(self):
-        pins = {"GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
+        pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
         commands = {
             "node": "/bin/node",
             "corepack": "/bin/corepack",

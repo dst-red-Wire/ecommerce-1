@@ -107,14 +107,13 @@ class CIAuthorityTest < Minitest::Test
     assert_equal false, runtime.dig("activation", "static_contract_is_runtime_proof")
   end
 
-  def test_frontend_ci_uses_declared_pnpm_workspace
-    package = JSON.parse(read("frontend/package.json"))
-    assert_match(/\Apnpm@\d/, package.fetch("packageManager"))
-    assert File.file?(File.join(ROOT, "frontend/pnpm-lock.yaml"))
-    assert File.file?(File.join(ROOT, "frontend/pnpm-workspace.yaml"))
-    refute File.exist?(File.join(ROOT, "frontend/package-lock.json"))
+  def test_frontend_ci_uses_canonical_go_workspace
+    assert File.file?(File.join(ROOT, "frontend/go.mod"))
+    assert_includes read("go.work"), "./frontend"
+    refute File.exist?(File.join(ROOT, "frontend/package.json"))
+    refute File.exist?(File.join(ROOT, "frontend/pnpm-lock.yaml"))
     controller = read("scripts/repoctl.py")
-    refute_match(/\bnpm ci\b/, controller)
-    refute_includes controller, "package-lock.json"
+    assert_includes controller, '["go", "vet", "./..."]'
+    assert_includes controller, '["go", "build", "-o"'
   end
 end

@@ -221,7 +221,7 @@ def developer_state_ready(tags: str) -> bool:
         corepack = shutil.which("corepack")
         if not node or not corepack:
             return False
-        expected_node = (ROOT / "frontend" / ".node-version").read_text(encoding="utf-8").strip()
+        expected_node = pins.get("NODE_VERSION", "")
         got = run([node, "--version"], check=False, capture=True)
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
@@ -392,9 +392,9 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     return service_doc
 
 
-def api_generate(target: str = "all", service: str = "", check: bool = False) -> int:
-    if target not in {"all", "go", "ts"}:
-        return fail("api-generate target must be all, go, or ts")
+def api_generate(target: str = "go", service: str = "", check: bool = False) -> int:
+    if target != "go":
+        return fail("api-generate target must be go; Node.js application bindings are forbidden")
     registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
     contracts = registry.get("contracts", {})
     common_entry = registry.get("common_components")
@@ -414,7 +414,7 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
         with tempfile.TemporaryDirectory(prefix=f"ecommerce-{name}-openapi-") as temp_dir:
             bundled_spec = Path(temp_dir) / f"{name}.bundled.json"
             bundled_spec.write_text(json.dumps(bundled_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            if target in {"all", "go"}:
+            if target == "go":
                 require("oapi-codegen")
                 require("gofmt")
                 module = ROOT / "services" / name
@@ -435,37 +435,6 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
                     # module/runtime context instead of warning from repository root.
                     run(["oapi-codegen", "--config", str(config_path), str(bundled_spec)], cwd=module)
                     run(["gofmt", "-w", str(generated)], cwd=module)
-            if target in {"all", "ts"}:
-                require("corepack")
-                require("oxfmt")
-                out_dir = ROOT / "frontend" / "packages" / "api-client" / "src" / "generated"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                generated = out_dir / f"{name}.ts"
-                p = run(
-                    ["corepack", "pnpm", "--dir", "frontend", "exec", "openapi-typescript", str(bundled_spec)],
-                    capture=True,
-                )
-                candidate = Path(temp_dir) / f"{name}.generated.ts"
-                candidate.write_text(p.stdout, encoding="utf-8")
-                run(
-                    [
-                        "oxfmt",
-                        "--config",
-                        str(ROOT / "frontend" / ".oxfmtrc.json"),
-                        "--write",
-                        str(candidate),
-                    ],
-                    cwd=ROOT / "frontend",
-                )
-                canonical = candidate.read_text(encoding="utf-8")
-                if check:
-                    if not generated.is_file():
-                        return fail(f"generated TypeScript API client is missing: {generated.relative_to(ROOT)}", 1)
-                    current = generated.read_text(encoding="utf-8")
-                    if current != canonical:
-                        return fail(f"generated TypeScript API client is stale: {generated.relative_to(ROOT)}", 1)
-                else:
-                    generated.write_text(canonical, encoding="utf-8")
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -608,51 +577,46 @@ def documentation_policy() -> int:
     return 0
 
 
-def frontend(action: str, scope: str) -> int:
+def frontend(action: str, scope: str = "") -> int:
+    # Accept both `repoctl frontend storefront` and the compatibility form
+    # `repoctl frontend check storefront` used by existing Tekton tasks.
+    if not scope:
+        scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
-        return fail("frontend usage: action={check|lint|test|build} scope={all|storefront|admin}")
-    ensure_developer("node,quality_tools")
-    require("node")
-    require("corepack")
-    require("oxlint")
-    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
-    pm = package.get("packageManager", "")
-    if not pm.startswith("pnpm@"):
-        return fail(f"frontend packageManager must pin pnpm, got {pm!r}")
-    expected = pm.split("@", 1)[1]
-    actual = output(["corepack", "pnpm", "--version"], cwd=ROOT / "frontend").strip()
-    if actual != expected:
-        return fail(f"pnpm version mismatch: expected {expected}, got {actual}")
-    run(["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline"], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if api_generate("ts", check=True):
-            return 1
-
-    def pnpm(*args: str) -> None:
-        run(["corepack", "pnpm", *args], cwd=ROOT / "frontend")
-
+        return fail("frontend usage: frontend <storefront|admin|all>")
+    require("go")
+    require("gofmt")
+    targets = ["storefront", "admin"] if scope == "all" else [scope]
+    frontend_root = ROOT / "frontend"
     if action in {"check", "lint"}:
-        lint_paths = ["apps", "packages"] if scope == "all" else [f"apps/{scope}", "packages/ui", "packages/api-client"]
-        run(["oxlint", *lint_paths], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if scope == "all":
-            pnpm("run", "typecheck")
-        else:
-            pnpm("--filter", "@noma/ui", "typecheck")
-            pnpm("--filter", "@noma/api-client", "typecheck")
-            pnpm("--filter", f"@noma/{scope}", "typecheck")
+        files = sorted(str(path) for path in frontend_root.rglob("*.go"))
+        formatted = run(["gofmt", "-l", *files], capture=True)
+        if formatted.stdout.strip():
+            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        forbidden_frontend_artifacts()
+        if action == "lint":
+            run(["go", "vet", "./..."], cwd=frontend_root)
     if action in {"check", "test"}:
-        if scope == "all":
-            pnpm("run", "test")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "test")
+        env = dict(os.environ, CGO_ENABLED="1")
+        for target in targets:
+            run(["go", "test", "-race", f"./apps/{target}"], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
-        if scope == "all":
-            pnpm("run", "build")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "build")
+        with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
+            for target in targets:
+                run(["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"], cwd=frontend_root)
+    if action == "check":
+        run(["go", "vet", "./..."], cwd=frontend_root)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
+
+
+def forbidden_frontend_artifacts() -> None:
+    forbidden_names = {"package.json", "pnpm-lock.yaml", "package-lock.json", "yarn.lock", ".node-version", ".nvmrc", "next.config.js", "next.config.ts", "playwright.config.ts", "turbo.json", "pnpm-workspace.yaml"}
+    forbidden_suffixes = {".ts", ".tsx"}
+    paths = set(git("ls-files").splitlines()) | set(git("ls-files", "--others", "--exclude-standard").splitlines())
+    violations = sorted(path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes)
+    if violations:
+        raise RuntimeError("forbidden Node.js frontend artifacts: " + ", ".join(violations))
 
 
 def ensure_developer(tags: str) -> None:
@@ -816,7 +780,7 @@ def lint_all() -> int:
     if python_files:
         require("ruff")
         run(["ruff", "check", *python_files])
-    if (ROOT / "frontend" / "package.json").is_file():
+    if (ROOT / "frontend" / "go.mod").is_file():
         frontend("lint", "all")
     print("PASS lint checks completed")
     return 0
@@ -830,7 +794,7 @@ def test_all() -> int:
             ensure_developer("go")
             run(["go", "test", "./..."], cwd=module)
             run(["go", "vet", "./..."], cwd=module)
-    if (ROOT / "frontend" / "package.json").is_file():
+    if (ROOT / "frontend" / "go.mod").is_file():
         frontend("test", "all")
     print("PASS test checks completed")
     return 0
@@ -1839,7 +1803,7 @@ def main() -> int:
     c.add_argument("--generate", action="store_true")
     f = sub.add_parser("frontend")
     f.add_argument("action")
-    f.add_argument("scope")
+    f.add_argument("scope", nargs="?", default="")
     s = sub.add_parser("service")
     s.add_argument("service")
     a = sub.add_parser("affected")
@@ -1857,12 +1821,9 @@ def main() -> int:
     ctx = sub.add_parser("context")
     ctx.add_argument("task", nargs="?", default="")
     gen = sub.add_parser("api-generate")
-    gen.add_argument("--target", default="all")
+    gen.add_argument("--target", default="go")
     gen.add_argument("--service", default="")
     gen.add_argument("--check", action="store_true")
-    mock = sub.add_parser("api-mock")
-    mock.add_argument("--service", default="product")
-    mock.add_argument("--port", type=int, default=4010)
     nx = sub.add_parser("nx-graph")
     sg = sub.add_parser("service-new")
     sg.add_argument("--service", required=True)
@@ -1952,34 +1913,6 @@ def main() -> int:
             ).returncode
         if args.cmd == "api-generate":
             return api_generate(args.target, args.service, args.check)
-        if args.cmd == "api-mock":
-            spec = (
-                ruby_yaml("config/contracts/public-api-contracts.yaml")
-                .get("contracts", {})
-                .get(args.service, {})
-                .get("path")
-            )
-            if not spec:
-                return fail(f"api-mock service not registered: {args.service}")
-            env = os.environ.copy()
-            env["SCARF_ANALYTICS"] = "false"
-            return run(
-                [
-                    "corepack",
-                    "pnpm",
-                    "exec",
-                    "prism",
-                    "mock",
-                    f"../{spec}",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(args.port),
-                    "--dynamic",
-                ],
-                cwd=ROOT / "frontend",
-                env=env,
-            ).returncode
         if args.cmd == "nx-graph":
             materialize = run([sys.executable, "scripts/nx-graph.py"], check=False)
             if materialize.returncode:

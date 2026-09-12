@@ -105,7 +105,7 @@
       "version_args": [
         "--version"
       ],
-      "version_file": "frontend/.node-version",
+      "version_key": "NODE_VERSION",
       "provision": {
         "type": "ansible",
         "tags": "node"

@@ -43,11 +43,11 @@ format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
 format: ## Format Python and frontend sources with Ruff/Oxfmt
 	@ruff format scripts tests
-	@oxfmt --write frontend/apps frontend/packages frontend/e2e
+	@gofmt -w frontend
 
 format-check: ## Check Ruff/Oxfmt formatting without mutation
 	@ruff format --check scripts tests
-	@oxfmt --check frontend/apps frontend/packages frontend/e2e
+	@test -z "$$(gofmt -l frontend)"
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
@@ -158,21 +158,18 @@ nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 bazel-verify: ## Run affected-only verification through pinned Bazel
 	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 
-.PHONY: api-generate api-mock service-new
+.PHONY: api-generate service-new
 
-api-generate: ## Generate Go and TypeScript bindings from registered OpenAPI contracts
-	@$(PYTHON) scripts/repoctl.py api-generate --target all $(if $(SERVICE),--service $(SERVICE),)
-
-api-mock: ## Start Prism mock; use SERVICE=product PORT=4010
-	@$(PYTHON) scripts/repoctl.py api-mock --service "$${SERVICE:-product}" --port "$${PORT:-4010}"
+api-generate: ## Generate Go bindings from registered OpenAPI contracts
+	@$(PYTHON) scripts/repoctl.py api-generate --target go $(if $(SERVICE),--service $(SERVICE),)
 
 service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)
 
 .PHONY: site product-check product-run product-benchmark resource-candidate
 
-site: ## Install pinned frontend dependencies and run Storefront + Admin locally
-	@$(MAKE) -C frontend site
+site: ## Run the Go Storefront locally
+	@$(MAKE) -C frontend run-storefront
 
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product
