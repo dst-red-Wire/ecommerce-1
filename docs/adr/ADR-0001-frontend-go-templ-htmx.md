@@ -4,7 +4,7 @@ Status: ACCEPTED
 
 ## Context
 
-Storefront and Admin currently use Next.js/React/Node.js. This is a migration, not a completed bootstrap. No CPU or memory gain is considered proven without PREPROD benchmarks.
+Storefront and Admin previously used Next.js/React/Node.js. M1 completes the application-runtime migration to the locked target. No CPU or memory gain is considered proven without PREPROD benchmarks.
 
 ## Decision
 
