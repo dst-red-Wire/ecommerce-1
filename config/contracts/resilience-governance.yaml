@@ -1,0 +1,30 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+# Encodes existing repository rules; defines no new RTO/RPO or apply permission.
+sources:
+  - docs/architecture/SECURITY_TRUST_ZONES.md
+  - docs/architecture/DEPLOYMENT_DAG.md
+  - docs/architecture/PROD_TOPOLOGY_V2.md
+  - docs/architecture/MLOPS_TOPOLOGY_V1.md
+compromise:
+  scope: reproducible-compromised-nodes-and-workloads
+  sequence: [isolate, acquire-evidence, destroy, rebuild-via-gitops-iac]
+  manual_cleaning_restores_trust: false
+  exception: specialized-forensic-requirement
+evidence:
+  destroy_required_forensic_evidence: forbidden
+  acquisition_may_delay_jit_teardown: true
+  write_identity_separate_from_delete_admin: true
+  immutability: where-policy-requires
+site_recovery:
+  sequence:
+    - health-evidence
+    - quorum-fencing
+    - write-authority-decision
+    - stateful-promotion-recovery
+    - application-routing
+    - dns-gslb-change
+mlops_recovery:
+  promotion: frozen-during-recovery
+  required_assets: [postgresql-metadata-backup, independent-object-backup, harbor-recovery, tested-restore-procedures]

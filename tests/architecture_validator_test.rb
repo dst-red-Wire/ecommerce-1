@@ -7,6 +7,128 @@ require "yaml"
 require_relative "../scripts/validate-architecture"
 
 class ArchitectureValidatorTest < Minitest::Test
+  def test_root_lock_status_is_exact
+    ["draft", "unlocked", nil].each do |status|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") { |data| status ? data["status"] = status : data.delete("status") }
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("status") }
+      end
+    end
+  end
+
+  def test_complete_mlops_mapping_is_exact
+    [%w[dataset_versioner pachyderm], %w[runtime mlflow]].each do |role, value|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") { |data| data["mlops"][role] = value }
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("mlops") }
+      end
+    end
+  end
+
+  def test_duplicate_subordinate_mlops_assignments_are_rejected
+    [["dataset_versioner", "mlflow"], ["dataset_versioner", "lakefs"], ["artifact_registry", "harbor"]].each do |role, value|
+      with_contract_copy do |root|
+        path = File.join(root, "docs/architecture/MLOPS_TOPOLOGY_V1.md")
+        contents = File.read(path)
+        line = contents.lines.find { |candidate| candidate.start_with?("- `#{role}`: `") }
+        File.write(path, contents.sub(line, "#{line.chomp}\n- `#{role}`: `#{value}`\n"))
+        assert_includes ArchitectureValidator.validate(root), "duplicate subordinate MLOps assignment: #{role}"
+      end
+    end
+  end
+
+  def test_deployment_waves_cover_all_business_services
+    %w[checkout fulfillment].each do |service|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].each do |wave|
+            wave.fetch("components", []).delete(service)
+            wave.fetch("parallel_groups", []).each { |group| group.delete(service) }
+            wave.fetch("serial_after_parallel", []).delete(service)
+          end
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("scheduled exactly once") }
+      end
+    end
+  end
+
+  def test_canonical_frontends_and_deployment_are_exact
+    [->(data) { data["business"]["frontends"].delete("admin") },
+     ->(data) { data["business"]["frontends"] = %w[storefront portal] }].each do |mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml", &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends") }
+      end
+    end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].each { |wave| wave.fetch("components", []).delete("storefront") }
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
+    end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        data["waves"].find { |wave| wave["id"] == "100-frontends" }["components"] << "portal"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled") }
+    end
+    %w[storefront admin].each do |frontend|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].find { |wave| wave["id"] == "00-underlay" }["components"] << frontend
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("frontends scheduled exactly once") }
+      end
+    end
+  end
+
+  def test_deployment_waves_status_is_exact
+    ["draft", "inexact", nil].each do |status|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          status.nil? ? data.delete("status") : data["status"] = status
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("status") }
+      end
+    end
+  end
+
+  def test_deployment_dependency_order_and_mlops_coverage
+    [["checkout", "order"], ["fulfillment", "shipping"]].each do |service, dependency|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          commerce = data["waves"].find { |wave| wave["id"] == "90-commerce" }
+          commerce["parallel_groups"].each { |group| group.delete(service) }
+          commerce["serial_after_parallel"].delete(service)
+          if service == "checkout"
+            commerce["parallel_groups"].first << service
+          else
+            commerce["parallel_groups"].first << service
+            commerce["parallel_groups"].first.delete("shipping")
+            commerce["parallel_groups"][1] << "shipping"
+          end
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("#{service} after synchronous dependency #{dependency}") }
+      end
+    end
+    ArchitectureValidator::DEPLOYABLE_MLOPS.each do |component|
+      with_contract_copy do |root|
+        mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+          data["waves"].each { |wave| wave.fetch("serial_after_parallel", []).delete(component) }
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("MLOps") }
+      end
+    end
+    with_contract_copy do |root|
+      mutate_yaml(root, "config/infrastructure/deployment-waves.yaml") do |data|
+        mlops = data["waves"].find { |wave| wave["id"] == "95-mlops" }
+        mlops["serial_after_parallel"].delete("lakefs")
+        data["waves"].first["components"] << "lakefs"
+      end
+      assert ArchitectureValidator.validate(root).any? { |error| error.include?("lakefs after MLOps dependency seaweedfs") }
+    end
+  end
+
   ROOT = File.expand_path("..", __dir__)
   BASE_CONTRACT_FILES = %w[
     architecture.lock.yaml
@@ -20,11 +142,34 @@ class ArchitectureValidatorTest < Minitest::Test
   def contract_files(root = ROOT)
     lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
     machine_contracts = lock.fetch("machine_contracts").values
-    (BASE_CONTRACT_FILES + machine_contracts).uniq
+    topology_contracts = lock.fetch("topology_contracts").values
+    (BASE_CONTRACT_FILES + machine_contracts + topology_contracts).uniq
   end
 
   def test_repository_contracts_are_consistent
     assert_empty ArchitectureValidator.validate(ROOT)
+  end
+
+  def test_topology_status_requires_exact_token
+    ["INEXACT", "EXACT DRAFT", "NOT-EXACT", "EXACTLY", "DRAFT"].each do |status|
+      with_contract_copy do |root|
+        path = File.join(root, "docs/architecture/PROD_TOPOLOGY_V2.md")
+        File.write(path, File.read(path).sub("Status: `EXACT`", "Status: `#{status}`"))
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("readable EXACT") }
+      end
+    end
+  end
+
+  def test_management_plane_provider_and_human_gate_are_cross_checked
+    {
+      "MGMT inventory provider" => lambda { |data| data["management_plane"]["provider"] = "aws" },
+      "MGMT human apply gate" => lambda { |data| data["management_plane"]["bootstrap"]["requires_human_apply_gate"] = false }
+    }.each do |message, mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml", &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
+    end
   end
 
   SERVICE_MUTATIONS = {
@@ -211,6 +356,20 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_rejects_prod_host_reused_across_sites
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["prod_certified_topology"]["sites"]["prod-b"]["physical_hosts"][0] = "a-host-01"
+      end
+      mutate_yaml(root, "config/infrastructure/prod-inventory.yaml") do |data|
+        host = data["sites"]["prod-b"]["physical_hosts"].delete("b-host-01")
+        data["sites"]["prod-b"]["physical_hosts"]["a-host-01"] = host
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("globally unique across sites") }
+    end
+  end
+
   def test_rejects_coordinated_prod_site_rename
     with_contract_copy do |root|
       mutate_yaml(root, "config/infrastructure/network-plan.yaml") do |data|
@@ -303,6 +462,30 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_all_declared_topology_contract_paths_must_exist
+    %w[prod deployment_dag security_zones observability].each do |contract|
+      with_contract_copy do |root|
+        path = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml"))).fetch("topology_contracts").fetch(contract)
+        FileUtils.rm(File.join(root, path))
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("topology_contracts.#{contract} declared file does not exist") }, contract
+      end
+    end
+  end
+
+  def test_required_topology_contract_registration_and_file_cannot_both_be_deleted
+    %w[deployment_dag observability].each do |contract|
+      with_contract_copy do |root|
+        lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
+        path = lock.fetch("topology_contracts").delete(contract)
+        File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
+        FileUtils.rm(File.join(root, path))
+        assert_includes ArchitectureValidator.validate(root),
+                        "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
+      end
+    end
+  end
+
   def test_machine_contract_paths_must_be_nonempty_strings
     {"non-string" => 42, "empty" => "", "whitespace-only" => "  "}.each do |message, value|
       with_contract_copy do |root|
@@ -312,6 +495,28 @@ class ArchitectureValidatorTest < Minitest::Test
         errors = ArchitectureValidator.validate(root)
         assert errors.any? { |error| error.include?("must declare a non-empty relative path") }, message
       end
+    end
+  end
+
+  def test_v5_registry_role_path_assignments_are_exact
+    {"topology_contracts" => %w[preprod prod], "machine_contracts" => %w[preprod_inventory prod_inventory]}.each do |registry, keys|
+      with_contract_copy do |root|
+        mutate_yaml(root, "architecture.lock.yaml") do |data|
+          data[registry][keys[0]], data[registry][keys[1]] = data[registry][keys[1]], data[registry][keys[0]]
+        end
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?("complete approved V5 role/path registry") }
+      end
+    end
+  end
+
+  def test_required_machine_contract_registration_and_file_cannot_both_be_deleted
+    with_contract_copy do |root|
+      lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
+      path = lock.fetch("machine_contracts").delete("deployment_waves")
+      File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
+      FileUtils.rm(File.join(root, path))
+      assert_includes ArchitectureValidator.validate(root),
+                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
     end
   end
 
@@ -398,16 +603,15 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
-  def test_validator_consumes_declared_machine_contract_path
+  def test_validator_rejects_noncanonical_machine_contract_path
     with_contract_copy do |root|
       alternate = "config/infrastructure/alternate-network-plan.yaml"
       FileUtils.cp(File.join(root, "config/infrastructure/network-plan.yaml"), File.join(root, alternate))
       mutate_yaml(root, alternate) { |data| data["validation"]["require_unique_ips"] = false }
       mutate_yaml(root, "architecture.lock.yaml") { |data| data["machine_contracts"]["network_plan"] = alternate }
 
-      assert ArchitectureValidator.validate(root).any? do |error|
-        error.include?("network-plan.validation.require_unique_ips")
-      end
+      assert_includes ArchitectureValidator.validate(root),
+                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
     end
   end
 
@@ -450,6 +654,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform runtime_security] => "falco",
       %w[stateful object_storage] => "minio-community",
       %w[observability application_gateway] => "opentelemetry-collector",
+      %w[observability hyperdx_metadata_store] => "postgresql",
       %w[observability metrics] => "prometheus",
       %w[observability infrastructure_logs] => "loki",
       %w[observability security_pipeline] => "logstash",
@@ -616,6 +821,22 @@ class ArchitectureValidatorTest < Minitest::Test
       assert_equal 1, errors.size
       assert_includes errors.first, "is not valid YAML"
       assert_includes errors.first, "alias"
+    end
+  end
+
+  def test_exact_security_and_resilience_invariants_are_enforced
+    mutations = {
+      ["config/contracts/security-trust-zones.yaml", "security trust zones"] => lambda { |data| data["zones"].delete("Z6") },
+      ["config/contracts/security-trust-zones.yaml", "security secret handling"] => lambda { |data| data["secrets"]["forbidden"].delete("ci-logs") },
+      ["config/contracts/security-trust-zones.yaml", "security egress"] => lambda { |data| data["egress"]["default"] = "allow" },
+      ["config/contracts/resilience-governance.yaml", "forensic evidence preservation"] => lambda { |data| data["evidence"]["destroy_required_forensic_evidence"] = "allowed" },
+      ["config/contracts/resilience-governance.yaml", "site recovery sequence"] => lambda { |data| data["site_recovery"]["sequence"].delete("dns-gslb-change") }
+    }
+    mutations.each do |(relative, message), mutation|
+      with_contract_copy do |root|
+        mutate_yaml(root, relative, &mutation)
+        assert ArchitectureValidator.validate(root).any? { |error| error.include?(message) }, message
+      end
     end
   end
 

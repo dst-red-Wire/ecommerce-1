@@ -6,6 +6,38 @@ require "pathname"
 require "yaml"
 
 module ArchitectureValidator
+  LOCK_STATUS = "locked-for-build"
+  V5_FRONTENDS = %w[storefront admin].freeze
+  DEPLOYABLE_MLOPS = %w[lakefs mlflow kserve-vllm evidently-tekton-batch].freeze
+  V5_MLOPS = {
+    "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
+    "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
+    "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
+    "orchestration" => "tekton", "desired_state" => "rancher-fleet",
+    "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
+    "drift" => "evidently-tekton-batch"
+  }.freeze
+  V5_TOPOLOGY_CONTRACTS = {
+    "exact_index" => "docs/architecture/EXACT_TOPOLOGY_V5.md", "preprod" => "docs/architecture/PREPROD_TOPOLOGY_V2.md",
+    "prod" => "docs/architecture/PROD_TOPOLOGY_V2.md", "network_ipam" => "docs/architecture/NETWORK_IPAM_CONTRACT.md",
+    "mgmt_wireguard_access" => "docs/architecture/MGMT_WIREGUARD_ACCESS.md", "storage" => "docs/architecture/STORAGE_TOPOLOGY_V2.md",
+    "service_ownership" => "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "data_ownership" => "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
+    "events" => "docs/architecture/EVENT_CONTRACT_MATRIX.md", "security_zones" => "docs/architecture/SECURITY_TRUST_ZONES.md",
+    "deployment_dag" => "docs/architecture/DEPLOYMENT_DAG.md", "aiops" => "docs/architecture/AIOPS_TOPOLOGY_V1.md",
+    "mlops" => "docs/architecture/MLOPS_TOPOLOGY_V1.md", "observability" => "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md"
+  }.freeze
+  V5_MACHINE_CONTRACTS = {
+    "resilience_governance" => "config/contracts/resilience-governance.yaml", "security_trust_zones" => "config/contracts/security-trust-zones.yaml",
+    "review_policy" => "config/contracts/review-policy.yaml", "mgmt_inventory" => "config/infrastructure/mgmt-inventory.yaml",
+    "preprod_inventory" => "config/infrastructure/preprod-inventory.yaml", "prod_inventory" => "config/infrastructure/prod-inventory.yaml",
+    "network_plan" => "config/infrastructure/network-plan.yaml", "mgmt_wireguard_access" => "config/contracts/mgmt-wireguard-access.yaml",
+    "mgmt_access_gateways" => "config/infrastructure/mgmt-access-gateways.yaml", "storage_plan" => "config/infrastructure/storage-plan.yaml",
+    "deployment_waves" => "config/infrastructure/deployment-waves.yaml", "service_ownership" => "config/contracts/service-ownership.yaml",
+    "event_contracts" => "config/contracts/event-contracts.yaml", "dependency_map" => "config/contracts/dependency-map.yaml",
+    "public_api_contracts" => "config/contracts/public-api-contracts.yaml", "ci_topology" => "config/contracts/ci-topology.yaml",
+    "runtime_efficiency" => "config/contracts/runtime-efficiency.yaml", "observability_topology" => "config/contracts/observability-topology.yaml"
+  }.freeze
+
   class ContractLoadError < StandardError; end
 
   module_function
@@ -115,14 +147,50 @@ module ArchitectureValidator
 
   def load_machine_contracts(root, lock)
     declared = expect_mapping(lock["machine_contracts"], "architecture.lock.yaml machine_contracts")
-    declared.each_with_object({}) do |(key, path), contracts|
+    contracts = declared.each_with_object({}) do |(key, path), loaded|
       unless key.is_a?(String) && !key.strip.empty?
         raise ContractLoadError, "architecture.lock.yaml machine_contracts keys must be non-empty strings"
       end
 
       validated_path = machine_contract_path(root, key, path)
       contract = load_yaml(root, validated_path)
-      contracts[key] = [expect_mapping(contract, validated_path), validated_path]
+      loaded[key] = [expect_mapping(contract, validated_path), validated_path]
+    end
+    unless declared == V5_MACHINE_CONTRACTS
+      raise ContractLoadError, "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
+    end
+    contracts
+  end
+
+  def validate_topology_contracts(root, lock)
+    declared = expect_mapping(lock["topology_contracts"], "architecture.lock.yaml topology_contracts")
+    unless declared == V5_TOPOLOGY_CONTRACTS
+      raise ContractLoadError, "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
+    end
+    declared.each do |key, path|
+      label = "architecture.lock.yaml topology_contracts.#{key}"
+      unless key.is_a?(String) && !key.strip.empty?
+        raise ContractLoadError, "architecture.lock.yaml topology_contracts keys must be non-empty strings"
+      end
+      unless path.is_a?(String) && !path.strip.empty? && !Pathname.new(path).absolute?
+        raise ContractLoadError, "#{label} must declare a non-empty relative path"
+      end
+      repository_root = File.expand_path(root)
+      resolved = File.expand_path(path, repository_root)
+      unless resolved.start_with?("#{repository_root}#{File::SEPARATOR}") && File.file?(resolved)
+        raise ContractLoadError, "#{label} declared file does not exist: #{path}"
+      end
+      real_root = File.realpath(repository_root)
+      real_path = File.realpath(resolved)
+      unless real_path.start_with?("#{real_root}#{File::SEPARATOR}")
+        raise ContractLoadError, "#{label} resolves outside the repository: #{path.inspect}"
+      end
+      contents = File.read(real_path)
+      status = contents.match(/^Status:\s*`([^`]*)`\s*$/i)
+      status_value = status && status[1].strip
+      unless status_value&.casecmp?("EXACT")
+        raise ContractLoadError, "#{label} must reference a readable EXACT topology contract: #{path}"
+      end
     end
   end
 
@@ -157,13 +225,79 @@ module ArchitectureValidator
   def validate(root)
     errors = []
     lock = expect_mapping(load_yaml(root, "architecture.lock.yaml"), "architecture.lock.yaml")
+    check_equal(errors, "architecture.lock.yaml status", LOCK_STATUS, lock["status"])
+    validate_topology_contracts(root, lock)
     contracts = load_machine_contracts(root, lock)
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
     events, events_path = required_machine_contract(contracts, "event_contracts")
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
     network, = required_machine_contract(contracts, "network_plan")
     mgmt, = required_machine_contract(contracts, "mgmt_inventory")
+    mgmt_gateways, = required_machine_contract(contracts, "mgmt_access_gateways")
+    mgmt_wireguard, = required_machine_contract(contracts, "mgmt_wireguard_access")
     prod, = required_machine_contract(contracts, "prod_inventory")
+    resilience, resilience_path = required_machine_contract(contracts, "resilience_governance")
+    trust_zones, trust_zones_path = required_machine_contract(contracts, "security_trust_zones")
+    deployment_waves, deployment_waves_path = required_machine_contract(contracts, "deployment_waves")
+    check_equal(errors, "#{deployment_waves_path} status", "exact", deployment_waves["status"])
+
+    mlops_path = lock.dig("topology_contracts", "mlops")
+    mlops_section = File.read(File.join(root, mlops_path)).split("## Locked role mapping", 2).last.to_s.split("\n## ", 2).first
+    mlops_rows = mlops_section.scan(/^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$/)
+    seen_mlops = {}
+    mlops_rows.each do |role, _value|
+      errors << "duplicate subordinate MLOps assignment: #{role}" if seen_mlops.key?(role)
+      seen_mlops[role] = true
+    end
+    subordinate_mlops = mlops_rows.to_h
+    check_equal(errors, "architecture.lock.yaml mlops", V5_MLOPS, lock["mlops"])
+    check_equal(errors, "#{mlops_path} locked role mapping", V5_MLOPS, subordinate_mlops)
+
+    [resilience, trust_zones].zip([resilience_path, trust_zones_path]).each do |contract, path|
+      check_equal(errors, "#{path} status", "exact", contract["status"])
+      check_equal(errors, "#{path} architecture authority", "architecture.lock.yaml", contract["architecture_authority"])
+    end
+    management = expect_mapping(lock["management_plane"], "architecture.lock.yaml management_plane")
+    check_equal(errors, "MGMT inventory provider", management["provider"], mgmt["provider"])
+    check_equal(errors, "MGMT gateway provider", management["provider"], mgmt_gateways["provider"])
+    check_equal(errors, "MGMT WireGuard provider", management["provider"], mgmt_wireguard.dig("gateway", "provider"))
+    check_equal(errors, "MGMT inventory lifecycle", management["lifecycle"], mgmt.dig("lifecycle", "mode"))
+    check_equal(errors, "MGMT gateway lifecycle", management["lifecycle"], mgmt_gateways.dig("lifecycle", "mode"))
+    check_equal(errors, "MGMT WireGuard lifecycle", management["lifecycle"], mgmt_wireguard.dig("gateway", "lifecycle"))
+    check_equal(errors, "MGMT private block", management["private_block"], mgmt["private_block"])
+    %w[forge ci registry gitops].each do |role|
+      check_equal(errors, "MGMT #{role}", management[role], mgmt.dig("platform_services", role))
+    end
+    profile_prefixes = expect_mapping(mgmt["vm_profiles"], "mgmt-inventory.yaml vm_profiles").keys.map { |name| name.split("-", 2).first }.uniq
+    check_equal(errors, "MGMT Kubernetes", [management["kubernetes"]], profile_prefixes)
+    check_equal(errors, "MGMT Terraform/OpenTofu bootstrap", true, management.dig("bootstrap", "terraform_opentofu"))
+    check_equal(errors, "MGMT inventory Terraform/OpenTofu bootstrap", "terraform-opentofu", mgmt.dig("bootstrap", "infrastructure"))
+    check_equal(errors, "MGMT Ansible bootstrap", true, management.dig("bootstrap", "ansible"))
+    check_equal(errors, "MGMT inventory Ansible bootstrap", "ansible", mgmt.dig("bootstrap", "configuration"))
+    check_equal(errors, "MGMT human apply gate", true, management.dig("bootstrap", "requires_human_apply_gate"))
+    check_equal(errors, "MGMT inventory human apply gate", true, mgmt.dig("bootstrap", "human_apply_gate"))
+    check_equal(errors, "MGMT gateway human apply gate", true, mgmt_gateways.dig("implementation", "human_apply_gate"))
+    check_equal(errors, "MGMT WireGuard provider apply gate", "required", mgmt_wireguard.dig("human_gates", "provider_apply"))
+    check_equal(errors, "security trust zones", {
+      "Z0" => "internet-untrusted", "Z1" => "public-edge-dmz", "Z2" => "kubernetes-ingress-service-mesh",
+      "Z3" => "application-workloads", "Z4" => "stateful-data", "Z5" => "permanent-mgmt",
+      "Z6" => "backup-evidence-dfir"
+    }, trust_zones["zones"])
+    check_equal(errors, "security secret handling", {
+      "flow" => "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
+      "forbidden" => %w[git image-layers ci-logs bootstrap-credentials-after-preprod-destroy application-access-to-openbao-admin-credentials]
+    }, trust_zones["secrets"])
+    check_equal(errors, "security egress", {
+      "default" => "deny", "application_path" => "approved-istio-egress-squid",
+      "logging" => "required", "exceptions" => "documented"
+    }, trust_zones["egress"])
+    check_equal(errors, "compromise containment", %w[isolate acquire-evidence destroy rebuild-via-gitops-iac],
+                resilience.dig("compromise", "sequence"))
+    check_equal(errors, "forensic evidence preservation", "forbidden",
+                resilience.dig("evidence", "destroy_required_forensic_evidence"))
+    check_equal(errors, "site recovery sequence",
+                %w[health-evidence quorum-fencing write-authority-decision stateful-promotion-recovery application-routing dns-gslb-change],
+                resilience.dig("site_recovery", "sequence"))
 
     service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
     service_sets = {
@@ -176,6 +310,59 @@ module ArchitectureValidator
     expected_service_count = 19
     service_sets.each { |name, names| check_equal(errors, "19 services in #{name}", canonical_services, names.sort) }
     errors << "architecture must contain exactly 19 services" unless canonical_services.length == expected_service_count
+    deployed_services = deployment_waves.fetch("waves").flat_map do |wave|
+      wave.fetch("components", []) + wave.fetch("parallel_groups", []).flatten + wave.fetch("serial_after_parallel", [])
+    end.select { |component| canonical_services.include?(component) }
+    check_equal(errors, "business services scheduled exactly once in #{File.basename(deployment_waves_path)}",
+                canonical_services, deployed_services.sort)
+    check_equal(errors, "architecture.lock.yaml canonical frontends", V5_FRONTENDS,
+                expect_array(lock.dig("business", "frontends"), "architecture.lock.yaml business.frontends"))
+    scheduled_components = []
+    deployment_positions = {}
+    deployment_waves.fetch("waves").each_with_index do |wave, wave_index|
+      wave.fetch("components", []).each do |component|
+        scheduled_components << component
+        deployment_positions[component] ||= [wave_index, 0]
+      end
+      groups = wave.fetch("parallel_groups", [])
+      groups.each_with_index do |group, group_index|
+        group.each do |component|
+          scheduled_components << component
+          deployment_positions[component] ||= [wave_index, group_index + 1]
+        end
+      end
+      wave.fetch("serial_after_parallel", []).each_with_index do |component, serial_index|
+        scheduled_components << component
+        deployment_positions[component] ||= [wave_index, groups.length + serial_index + 1]
+      end
+    end
+    frontend_waves = deployment_waves.fetch("waves").select { |wave| wave["id"] == "100-frontends" }
+    deployed_frontends = frontend_waves.length == 1 ? frontend_waves.first.fetch("components", []) : []
+    check_equal(errors, "canonical frontends scheduled in 100-frontends in #{File.basename(deployment_waves_path)}",
+                V5_FRONTENDS, deployed_frontends)
+    check_equal(errors, "canonical frontends scheduled exactly once in #{File.basename(deployment_waves_path)}",
+                V5_FRONTENDS, scheduled_components.select { |component| V5_FRONTENDS.include?(component) })
+    dependencies.fetch("services").each do |service, contract|
+      contract.fetch("sync", []).each do |dependency|
+        next unless deployment_positions.key?(service) && deployment_positions.key?(dependency)
+        next if (deployment_positions[service] <=> deployment_positions[dependency]).positive?
+
+        errors << "deployment ordering requires #{service} after synchronous dependency #{dependency}"
+      end
+    end
+    deployed_mlops = scheduled_components.select { |component| DEPLOYABLE_MLOPS.include?(component) }
+    check_equal(errors, "canonical deployable MLOps components scheduled exactly once", DEPLOYABLE_MLOPS, deployed_mlops)
+    {
+      "lakefs" => %w[seaweedfs], "mlflow" => %w[lakefs cloudnativepg],
+      "kserve-vllm" => %w[mlflow harbor tekton rancher-fleet argo-rollouts],
+      "evidently-tekton-batch" => %w[kserve-vllm tekton]
+    }.each do |component, required|
+      required.each do |dependency|
+        ordered = deployment_positions.key?(component) && deployment_positions.key?(dependency) &&
+                  (deployment_positions[component] <=> deployment_positions[dependency]).positive?
+        errors << "deployment ordering requires #{component} after MLOps dependency #{dependency}" unless ordered
+      end
+    end
     %w[checkout fulfillment].each do |required_service|
       service_sets.each do |name, names|
         errors << "#{required_service} service is required in #{name}" unless names.include?(required_service)
@@ -338,6 +525,10 @@ module ArchitectureValidator
       prod_sites.fetch(site, {}).fetch("physical_hosts", {}).length
     end
     check_equal(errors, "PROD total physical hosts", topology.fetch("physical_hosts_total"), total_physical_hosts)
+    canonical_prod_hosts = topology_sites.values.flat_map { |site| site.fetch("physical_hosts") }
+    inventory_prod_hosts = prod_sites.values.flat_map { |site| site.fetch("physical_hosts", {}).keys }
+    errors << "canonical PROD physical hosts must be globally unique across sites" unless canonical_prod_hosts.uniq.length == canonical_prod_hosts.length
+    errors << "inventory PROD physical hosts must be globally unique across sites" unless inventory_prod_hosts.uniq.length == inventory_prod_hosts.length
     {
       "physical_hosts_total" => 6,
       "physical_hosts_per_site" => 3,
@@ -370,6 +561,7 @@ module ArchitectureValidator
         "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
         "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
         "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
+        "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
         "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
         "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
       },

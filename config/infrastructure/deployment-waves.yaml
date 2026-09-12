@@ -9,16 +9,16 @@ waves:
     components: [rke2-control-plane, rke2-workers]
   - id: 20-network-security
     requires: [10-rke2]
-    components: [cilium, hubble, pod-security, kyverno, tetragon]
+    components: [cilium, hubble, pod-security, kyverno, tetragon, spire]
   - id: 30-gitops-identity
     requires: [20-network-security]
-    components: [rancher-fleet, spire, istio]
+    components: [rancher-fleet, argo-rollouts, istio]
   - id: 40-secrets-registry-ci
     requires: [30-gitops-identity]
     components: [openbao, external-secrets, harbor, tekton]
   - id: 50-observability
     requires: [40-secrets-registry-ci]
-    components: [opentelemetry, prometheus, alertmanager, grafana, fluent-bit, data-prepper, opensearch-logs, wazuh]
+    components: [opentelemetry-collector, rotel, vmagent, victoriametrics, victorialogs, clickhouse, hyperdx, mongodb-oss-self-hosted, vmalert, alertmanager, grafana, data-prepper, opensearch-security, wazuh]
   - id: 60-stateful
     requires: [40-secrets-registry-ci, 20-network-security]
     parallel_groups:
@@ -33,11 +33,13 @@ waves:
   - id: 90-commerce
     requires: [80-golden-service]
     parallel_groups:
-      - [catalog, inventory, pricing, tax, search]
-      - [cart, fraud-risk]
-      - [shipping, tracking]
-      - [review, user-profile, notification]
-    serial_after_parallel: [order, payment, returns, billing]
+      - [inventory, tax, shipping, fraud-risk, user-profile, search, notification, order, payment]
+      - [pricing, tracking, fulfillment, review, returns, billing]
+      - [catalog, cart]
+    serial_after_parallel: [checkout]
+  - id: 95-mlops
+    requires: [40-secrets-registry-ci, 60-stateful]
+    serial_after_parallel: [lakefs, mlflow, kserve-vllm, evidently-tekton-batch]
   - id: 100-frontends
     requires: [90-commerce]
     components: [storefront, admin]

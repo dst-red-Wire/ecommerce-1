@@ -1,6 +1,6 @@
 # EVENT CONTRACT MATRIX V2 — EXACT
 
-Status: `EXACT CONTRACT BOUNDARIES`
+Status: `EXACT`
 
 All durable domain events use Kafka + Protobuf + versioned compatibility policy. RabbitMQ is reserved for operational jobs and retries that are not authoritative business event streams.
 

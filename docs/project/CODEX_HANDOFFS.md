@@ -5,8 +5,8 @@ Status: `CHATGPT PREPARED — EXACT CONTRACTS BOUND`
 Codex must always read, in order:
 
 1. `AGENTS.md`
-2. `docs/architecture/BASELINE_V2.md`
-3. `architecture.lock.yaml`
+2. `architecture.lock.yaml` — single canonical architecture authority
+3. `docs/architecture/EXACT_TOPOLOGY_V5.md` — derived index
 4. `docs/project/MASTER_EXECUTION_PLAN.md`
 5. the milestone issue assigned to the work
 6. the exact architecture contracts listed below
@@ -14,7 +14,7 @@ Codex must always read, in order:
 
 ## Mandatory exact architecture contracts
 
-- `docs/architecture/EXACT_TOPOLOGY_V2.md`
+- `docs/architecture/EXACT_TOPOLOGY_V5.md`
 - `docs/architecture/PREPROD_TOPOLOGY_V2.md`
 - `docs/architecture/PROD_TOPOLOGY_V2.md`
 - `docs/architecture/NETWORK_IPAM_CONTRACT.md`
@@ -31,6 +31,8 @@ Codex must always read, in order:
 - `config/infrastructure/network-plan.yaml`
 - `config/infrastructure/storage-plan.yaml`
 - `config/infrastructure/deployment-waves.yaml`
+- `config/contracts/resilience-governance.yaml`
+- `config/contracts/security-trust-zones.yaml`
 - `config/contracts/service-ownership.yaml`
 - `config/contracts/event-contracts.yaml`
 - `config/contracts/dependency-map.yaml`
@@ -50,8 +52,8 @@ Tracker: `#13`.
 Goal: create the minimal repository skeleton and automation entrypoints needed for later milestones without implementing deep business logic.
 
 Required result:
-- exactly 17 backend service directories and two frontends;
-- no checkout service;
+- exactly 19 backend service directories and two frontends;
+- autonomous checkout and fulfillment services;
 - contracts, platform, observability, tests and tools areas;
 - `go.work`, ownership/contribution/security root files;
 - Fleet/Tekton paths, never Flux/Flagger;
@@ -95,6 +97,30 @@ Implement:
 
 Do not hardcode credentials. Do not claim real provider provisioning when credentials/environment are absent. Return `READY FOR REAL PROVISIONING` only after all offline/static validation passes.
 
+## M2.5 prompt — Persistent MGMT Bootstrap
+
+Tracker: `#15`.
+
+Canonical milestone: `M2-5-persistent-mgmt-bootstrap`.
+
+Goal: implement only the persistent management-plane bootstrap described by `architecture.lock.yaml` and its declared MGMT topology and machine contracts. This handoff is governance metadata; it does not grant deployment/apply permission.
+
+Entry gate: M1 PROVEN.
+
+Bounded implementation scope:
+- consume the declared MGMT inventory, network/IPAM, WireGuard access, security-zone, and resilience contracts without duplicating their values;
+- prepare the Terraform/OpenTofu and Ansible bootstrap workflow for the locked persistent MGMT services and human apply gate;
+- keep PREPROD JIT provisioning and all M3 work out of scope;
+- do not invent provider, RTO, RPO, credential, or deployment values.
+
+Evidence required for M2.5 PROVEN:
+- deterministic static validation of every consumed contract and rendered plan/configuration;
+- test evidence for inventory/IPAM consistency, private operator access, secret-safe output, idempotent configuration, and the mandatory human gate before any state-changing apply;
+- an evidence index identifying the reviewed commit and external runtime evidence without committing credentials, state, kubeconfigs, or generated reports;
+- rollback/rebuild instructions demonstrating how the bootstrap can be safely reversed and reproduced.
+
+Exit gate: M2.5 becomes PROVEN only when the bounded outputs and evidence above pass review. That PROVEN state enables M3; neither M1 nor M2 alone enables M3.
+
 ## M4 prompt — Platform Baseline
 
 Tracker: `#17`.
@@ -133,8 +159,8 @@ Goal: prove a real user-facing commerce path through the actual platform without
 Implement in four bounded slices:
 
 A. `Storefront -> Catalog/Product/Search/Pricing/Inventory`
-B. `Cart -> Order -> Tax -> Fraud/Risk -> Payment`
-C. `Shipping -> Tracking -> Returns -> Billing -> Notification`
+B. `Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order -> Payment`
+C. `Fulfillment -> Shipping -> Tracking -> Returns -> Billing -> Notification`
 D. `Review + User Profile`
 
 For each slice:
@@ -177,7 +203,7 @@ Tracker: `#20`.
 Goal: turn the implemented system into a release candidate with evidence.
 
 Execute/generate automation for:
-- unit, race, fuzz, coverage;
+- unit, race, fuzz, coverage with >=80% global coverage and >=90% critical-code coverage;
 - integration/Testcontainers;
 - OpenAPI/gRPC/Kafka contract compatibility;
 - BDD;

@@ -6,9 +6,23 @@ Status: `EXACT`
 
 `dataset -> experiment -> candidate -> deterministic gates -> champion/challenger -> signed OCI artifact -> GitOps promotion -> deployment -> drift monitoring -> rollback/retrain trigger`
 
+## Locked role mapping
+
+- `dataset_versioner`: `lakefs`
+- `object_storage`: `seaweedfs-s3`
+- `metadata_database`: `cloudnativepg-postgresql`
+- `experiments_lineage`: `mlflow`
+- `artifact_registry`: `harbor`
+- `promotion_authority`: `gitea-gitops`
+- `orchestration`: `tekton`
+- `desired_state`: `rancher-fleet`
+- `progressive_delivery`: `argo-rollouts`
+- `runtime`: `kserve-vllm`
+- `drift`: `evidently-tekton-batch`
+
 ## Data and metadata
 
-- Dataset versioning: DVC + Git/Gitea + SeaweedFS S3.
+- Dataset versioning: lakeFS + Git/Gitea + SeaweedFS S3, as selected by `architecture.lock.yaml`. DVC is superseded.
 - MLflow: experiments, metadata, lineage, run/dataset/model relationships and digests.
 - SeaweedFS S3: dataset/object backend with dedicated buckets by environment/finality.
 - Harbor: authoritative OCI registry for Modelcars and signed RAG snapshots.

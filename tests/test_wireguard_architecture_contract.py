@@ -12,7 +12,7 @@ POLICY = ROOT / "config/contracts/mgmt-wireguard-access.yaml"
 ACCESS_GATEWAYS = ROOT / "config/infrastructure/mgmt-access-gateways.yaml"
 DOC = ROOT / "docs/architecture/MGMT_WIREGUARD_ACCESS.md"
 LOCK = ROOT / "architecture.lock.yaml"
-EXACT_INDEX = ROOT / "docs/architecture/EXACT_TOPOLOGY_V2.md"
+EXACT_INDEX = ROOT / "docs/architecture/EXACT_TOPOLOGY_V5.md"
 
 
 class WireGuardArchitectureContractTests(unittest.TestCase):
