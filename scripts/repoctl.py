@@ -594,6 +594,9 @@ def frontend(action: str, scope: str = "") -> int:
     require("gofmt")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
+    templ_version = pinned_versions().get("TEMPL_VERSION")
+    if not templ_version:
+        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run(["gofmt", "-l", *files], capture=True, env=env)
@@ -604,7 +607,11 @@ def frontend(action: str, scope: str = "") -> int:
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
                 generated_root = Path(temp_dir) / "frontend"
                 shutil.copytree(frontend_root, generated_root)
-                run(["go", "run", "github.com/a-h/templ/cmd/templ@v0.3.1020", "generate"], cwd=generated_root, env=env)
+                run(
+                    ["go", "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+                    cwd=generated_root,
+                    env=env,
+                )
                 committed = sorted(frontend_root.rglob("*_templ.go"))
                 generated = sorted(generated_root.rglob("*_templ.go"))
                 relative_committed = [path.relative_to(frontend_root) for path in committed]
@@ -618,12 +625,17 @@ def frontend(action: str, scope: str = "") -> int:
             run(["go", "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
         env = dict(env, CGO_ENABLED="1")
-        for target in targets:
-            run(["go", "test", "-race", f"./apps/{target}"], cwd=frontend_root, env=env)
+        # One module-wide invocation runs shared package tests exactly once as well as
+        # the independently deployable application packages.
+        run(["go", "test", "-race", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
-                run(["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"], cwd=frontend_root, env=env)
+                run(
+                    ["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"],
+                    cwd=frontend_root,
+                    env=env,
+                )
     if action == "check":
         run(["go", "vet", "./..."], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
@@ -634,23 +646,33 @@ def site() -> int:
     """Run both independently deployable Go frontends until interrupted."""
     ensure_developer("go")
     env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
-    processes = [
-        subprocess.Popen(["go", "run", "./apps/storefront"], cwd=ROOT / "frontend", env=env),
-        subprocess.Popen(["go", "run", "./apps/admin"], cwd=ROOT / "frontend", env=env),
-    ]
-    try:
-        while all(process.poll() is None for process in processes):
-            time.sleep(0.2)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.send_signal(signal.SIGTERM)
-        for process in processes:
-            process.wait()
-    failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
-    return failed[0] if failed else 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-site-") as output_dir:
+        binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
+        for target, binary in zip(("storefront", "admin"), binaries, strict=True):
+            run(["go", "build", "-o", str(binary), f"./apps/{target}"], cwd=ROOT / "frontend", env=env)
+        processes = [subprocess.Popen([str(binary)], cwd=ROOT / "frontend", env=env) for binary in binaries]
+        previous_handlers = {}
+
+        def interrupt(_signum, _frame):
+            raise KeyboardInterrupt
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, interrupt)
+        try:
+            while all(process.poll() is None for process in processes):
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+            for process in processes:
+                process.wait()
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+        failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
+        return failed[0] if failed else 0
 
 
 def forbidden_frontend_artifacts() -> None:
@@ -692,7 +714,13 @@ def service_check(service: str) -> int:
     module = ROOT / "services" / service
     if not (module / "go.mod").is_file():
         return fail(f"service module does not exist: services/{service}/go.mod")
-    ensure_developer("go,cgo,sqlc,docker")
+    capabilities = ["go", "cgo"]
+    if (module / "sqlc.yaml").is_file():
+        capabilities.append("sqlc")
+    selected_tests = list(module.rglob("*_test.go"))
+    if any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests):
+        capabilities.append("docker")
+    ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
     env["CGO_ENABLED"] = "1"

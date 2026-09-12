@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -44,6 +45,13 @@ func (a App) Handler() http.Handler {
 	m.HandleFunc("GET /products", a.route)
 	if a.Admin {
 		m.HandleFunc("POST /products/{id}/stock", a.route)
+	} else {
+		m.HandleFunc("GET /catalogue", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/catalog", http.StatusPermanentRedirect)
+		})
+		m.HandleFunc("GET /produit/{slug}", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/products/"+url.PathEscape(r.PathValue("slug")), http.StatusPermanentRedirect)
+		})
 	}
 	m.HandleFunc("GET /orders", a.route)
 	m.HandleFunc("GET /stocks", a.route)
@@ -64,6 +72,7 @@ func asset(contentType, name string) http.HandlerFunc {
 	}
 }
 func (a App) route(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Vary", "HX-Request")
 	p := r.URL.Path
 	if p == "/products/" {
 		http.NotFound(w, r)

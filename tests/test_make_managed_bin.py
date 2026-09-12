@@ -37,9 +37,7 @@ class MakeManagedBinTest(unittest.TestCase):
             stderr=subprocess.STDOUT,
         )
 
-    def _write_version_tool(
-        self, directory: Path, name: str, version: str, log: Path
-    ) -> None:
+    def _write_version_tool(self, directory: Path, name: str, version: str, log: Path) -> None:
         executable = directory / name
         executable.write_text(
             f"#!{sys.executable}\n"
@@ -88,14 +86,50 @@ class MakeManagedBinTest(unittest.TestCase):
             managed_bin.mkdir(parents=True)
             system_bin.mkdir()
             self._write_tool(managed_bin, "ruff", log)
+            self._write_tool(managed_bin, "gofmt", log)
 
             result = self._run_format_check(home, system_bin)
 
             self.assertEqual(0, result.returncode, result.stdout)
             self.assertEqual(
-                ["ruff format --check scripts tests"],
+                ["ruff format --check scripts tests", "gofmt -l frontend"],
                 log.read_text(encoding="utf-8").splitlines(),
             )
+
+    def test_format_check_fails_closed_when_gofmt_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            managed_bin = home / ".local" / "bin"
+            system_bin = root / "system-bin"
+            log = root / "tools.log"
+            managed_bin.mkdir(parents=True)
+            system_bin.mkdir()
+            self._write_tool(managed_bin, "ruff", log)
+
+            result = self._run_format_check(home, system_bin)
+
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("gofmt", result.stdout)
+
+    def test_format_check_preserves_gofmt_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            managed_bin = home / ".local" / "bin"
+            system_bin = root / "system-bin"
+            log = root / "tools.log"
+            managed_bin.mkdir(parents=True)
+            system_bin.mkdir()
+            self._write_tool(managed_bin, "ruff", log)
+            gofmt = managed_bin / "gofmt"
+            gofmt.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(19)\n", encoding="utf-8")
+            gofmt.chmod(0o755)
+
+            result = self._run_format_check(home, system_bin)
+
+            self.assertNotEqual(0, result.returncode, result.stdout)
+            self.assertIn("Error 19", result.stdout)
 
     def test_old_makefile_without_managed_path_cannot_find_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,9 +172,7 @@ class MakeManagedBinTest(unittest.TestCase):
 
     def test_env_check_preserves_compatible_runner_ansible(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home, system_bin, log = self._prepare_ansible_providers(
-                Path(tmp), "1.0.0", self._ansible_version()
-            )
+            home, system_bin, log = self._prepare_ansible_providers(Path(tmp), "1.0.0", self._ansible_version())
 
             result = self._run_env_check(home, system_bin)
 
@@ -153,9 +185,7 @@ class MakeManagedBinTest(unittest.TestCase):
     def test_global_managed_path_prepend_selects_stale_ansible(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            home, system_bin, log = self._prepare_ansible_providers(
-                root, "1.0.0", self._ansible_version()
-            )
+            home, system_bin, log = self._prepare_ansible_providers(root, "1.0.0", self._ansible_version())
             mutated_makefile = root / "Makefile"
             source = MAKEFILE.read_text(encoding="utf-8")
             targeted = "format format-check: export PATH := $(MANAGED_BIN):$(PATH)\n\n"
@@ -174,9 +204,7 @@ class MakeManagedBinTest(unittest.TestCase):
 
     def test_env_check_rejects_stale_managed_and_runner_ansible(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home, system_bin, log = self._prepare_ansible_providers(
-                Path(tmp), "1.0.0", "1.0.0"
-            )
+            home, system_bin, log = self._prepare_ansible_providers(Path(tmp), "1.0.0", "1.0.0")
 
             result = self._run_env_check(home, system_bin)
 
@@ -186,9 +214,7 @@ class MakeManagedBinTest(unittest.TestCase):
 
     @staticmethod
     def _ansible_version() -> str:
-        for line in (ROOT / "config/toolchain/versions.env").read_text(
-            encoding="utf-8"
-        ).splitlines():
+        for line in (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8").splitlines():
             if line.startswith("ANSIBLE_CORE_VERSION="):
                 return line.partition("=")[2]
         raise AssertionError("ANSIBLE_CORE_VERSION is missing")

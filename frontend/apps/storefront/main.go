@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -12,5 +13,10 @@ func main() {
 	if addr == "" {
 		addr = ":8080"
 	}
-	log.Fatal(http.ListenAndServe(addr, web.App{Name: "Storefront", Admin: false}.Handler()))
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           web.App{Name: "Storefront", Admin: false}.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	log.Fatal(server.ListenAndServe())
 }

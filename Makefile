@@ -47,7 +47,7 @@ format: ## Format Python and Go frontend sources
 
 format-check: ## Check Ruff and Go formatting without mutation
 	@ruff format --check scripts tests
-	@test -z "$$(gofmt -l frontend)"
+	@output="$$(gofmt -l frontend)" || exit $$?; test -z "$$output" || { printf '%s\n' "$$output"; exit 1; }
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
