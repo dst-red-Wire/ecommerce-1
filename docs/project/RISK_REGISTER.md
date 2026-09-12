@@ -4,7 +4,7 @@ Status: `ACTIVE`
 
 | ID | Risk | Impact | Likelihood | Owner | Mitigation / control | Trigger for escalation | Current status |
 |---|---|---|---|---|---|---|---|
-| R-001 | Historical docs reintroduce FluxCD/Flagger/MinIO CE/Loki/Splunk | High | Medium | ChatGPT | BASELINE_V2 + architecture.lock + AGENTS precedence; CI deny checks in M1 | active default appears in new code | CONTROLLED |
+| R-001 | Historical docs reintroduce FluxCD/Flagger/MinIO CE/Loki/Splunk | High | Medium | ChatGPT | architecture.lock.yaml authority; CI deny checks in M1 | active default appears in new code | CONTROLLED |
 | R-002 | Codex asked to choose architecture rather than implement | High | Medium | ChatGPT | milestone issues + CODEX_HANDOFFS + change-control stop rule | Codex reports contradictory/missing structural decision | CONTROLLED |
 | R-003 | Provider capability/hardware differs from design | High | Medium | Work + ChatGPT | W1 vendor due diligence; PREPROD certification on final/equivalent hardware | provider cannot supply required network/disk/host profile | OPEN |
 | R-004 | Versions/charts incompatible at implementation time | High | Medium | Codex | version lock/BOM during M1-M4; compatibility tests in PREPROD | dependency conflict or unsupported version | OPEN |

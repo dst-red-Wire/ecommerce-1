@@ -1,5 +1,7 @@
 # Observability topology v1
 
+Status: `EXACT`
+
 This document explains the exact machine contract in `config/contracts/observability-topology.yaml`.
 The YAML contract is authoritative when prose and machine-readable state disagree.
 

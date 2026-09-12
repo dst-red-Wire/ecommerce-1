@@ -34,7 +34,7 @@ Controls:
 
 ### Z3 — Application workloads
 
-17 Go services + Storefront/Admin workloads.
+19 Go services + Storefront/Admin workloads.
 
 Controls:
 - Pod Security `restricted`;

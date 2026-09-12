@@ -1,4 +1,4 @@
-version: 2
+version: 5
 status: locked-for-build
 project: ecommerce
 
@@ -78,6 +78,9 @@ stateful:
   search: opensearch
   object_storage: seaweedfs-s3
 
+dns:
+  critical_ttl_seconds: 60
+
 observability:
   telemetry: opentelemetry
   application_gateway: rotel
@@ -88,12 +91,26 @@ observability:
   infrastructure_logs: victorialogs
   application_observability_storage: clickhouse
   application_observability_ui: hyperdx
+  hyperdx_metadata_store: mongodb-oss-self-hosted
   alerts: vmalert
   notifications: alertmanager
   dashboards: grafana
   security_pipeline: data-prepper
   security_logs: opensearch
   security: wazuh
+
+mlops:
+  dataset_versioner: lakefs
+  object_storage: seaweedfs-s3
+  metadata_database: cloudnativepg-postgresql
+  experiments_lineage: mlflow
+  artifact_registry: harbor
+  promotion_authority: gitea-gitops
+  orchestration: tekton
+  desired_state: rancher-fleet
+  progressive_delivery: argo-rollouts
+  runtime: kserve-vllm
+  drift: evidently-tekton-batch
 
 supply_chain:
   scanner: trivy
@@ -103,7 +120,7 @@ supply_chain:
   forbid_latest: true
 
 topology_contracts:
-  exact_index: docs/architecture/EXACT_TOPOLOGY_V2.md
+  exact_index: docs/architecture/EXACT_TOPOLOGY_V5.md
   preprod: docs/architecture/PREPROD_TOPOLOGY_V2.md
   prod: docs/architecture/PROD_TOPOLOGY_V2.md
   network_ipam: docs/architecture/NETWORK_IPAM_CONTRACT.md
@@ -119,6 +136,8 @@ topology_contracts:
   observability: docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md
 
 machine_contracts:
+  resilience_governance: config/contracts/resilience-governance.yaml
+  security_trust_zones: config/contracts/security-trust-zones.yaml
   review_policy: config/contracts/review-policy.yaml
   mgmt_inventory: config/infrastructure/mgmt-inventory.yaml
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
@@ -158,6 +177,7 @@ prod_certified_topology:
         - b-host-03
 
 superseded:
+  dvc-dataset-versioner: lakefs
   nextjs-frontend-runtime: go-templ-htmx
   fluxcd: rancher-fleet
   flagger: argo-rollouts
@@ -176,6 +196,7 @@ build_milestones:
   - M0-architecture-sync
   - M1-monorepo-bootstrap
   - M2-golden-service-product
+  - M2-5-persistent-mgmt-bootstrap
   - M3-preprod-infrastructure
   - M4-platform-baseline
   - M5-commerce-vertical-slice
@@ -183,3 +204,17 @@ build_milestones:
   - M7-qualification
   - M8-preprod-certification
   - M9-prod-ab
+
+# Prerequisites keyed by the canonical milestone names above.
+milestone_dependencies:
+  M0-architecture-sync: []
+  M1-monorepo-bootstrap: [M0-architecture-sync]
+  M2-golden-service-product: [M1-monorepo-bootstrap]
+  M2-5-persistent-mgmt-bootstrap: [M1-monorepo-bootstrap]
+  M3-preprod-infrastructure: [M2-5-persistent-mgmt-bootstrap]
+  M4-platform-baseline: [M3-preprod-infrastructure]
+  M5-commerce-vertical-slice: [M2-golden-service-product, M4-platform-baseline]
+  M6-full-application: [M5-commerce-vertical-slice]
+  M7-qualification: [M6-full-application]
+  M8-preprod-certification: [M7-qualification]
+  M9-prod-ab: [M8-preprod-certification]

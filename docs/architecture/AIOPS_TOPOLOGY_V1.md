@@ -19,7 +19,7 @@ Status: `EXACT`
 - Prometheus metrics
 - OpenTelemetry traces/metrics
 - Wazuh security signals
-- OpenSearch Logs
+- VictoriaLogs infrastructure logs and Rotel/ClickHouse/HyperDX application observability
 - Kubernetes events
 - Fleet desired/observed state
 

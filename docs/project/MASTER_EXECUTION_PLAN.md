@@ -2,7 +2,7 @@
 
 Status: `CHATGPT PM BASELINE — TECHNICAL INPUTS COMPLETE`
 
-This document is the delivery source of truth for project sequencing. It does not replace architecture ADRs, `docs/architecture/BASELINE_V2.md`, `architecture.lock.yaml`, release governance or resilience governance.
+This document is the delivery source of truth for project sequencing. It does not replace the single canonical architecture authority `architecture.lock.yaml`, subordinate architecture ADRs, release governance or resilience governance.
 
 Technical-readiness status and blocker taxonomy: `docs/project/TECHNICAL_READINESS.md`.
 
@@ -33,10 +33,11 @@ Only these statuses are allowed:
 
 | Milestone | Primary owner | Objective | Entry gate | Exit gate | Current status |
 |---|---|---|---|---|---|
-| M0 Architecture Sync | ChatGPT | lock canonical V2 baseline and remove architecture collisions | validated project decisions | baseline, lock, agent rules and merged sync PR | DONE |
+| M0 Architecture Sync | ChatGPT | lock `architecture.lock.yaml` as the canonical V5 authority and remove architecture collisions | validated project decisions | V5 lock, derived index, agent rules and merged sync PR | DONE |
 | M1 Monorepo Bootstrap | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | READY FOR CODEX |
 | M2 Golden Service Product | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | BLOCKED by M1 |
-| M3 PREPROD Infrastructure | Codex | provision reproducible JIT infrastructure foundation | M1 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M1 |
+| M2.5 Persistent MGMT Bootstrap | Codex | bootstrap the persistent management plane required before PREPROD | M1 PROVEN | persistent MGMT bootstrap PROVEN under the canonical architecture contracts | BLOCKED by M1 |
+| M3 PREPROD Infrastructure | Codex | provision reproducible JIT infrastructure foundation | M2.5 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M2.5 |
 | M4 Platform Baseline | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | BLOCKED by M3 |
 | M5 Commerce Vertical Slice | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | BLOCKED by M2/M4 |
 | M6 Full Application | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | BLOCKED by M5 |
@@ -46,13 +47,13 @@ Only these statuses are allowed:
 
 ## 4. Critical path
 
-`M0 -> M1 -> M2`
+`M0 -> M1`
 
-After M1 is PROVEN, M2 and M3 may proceed in parallel. M3's architecture/topology/network/storage specifications are already merged; only the M1 dependency and real provider inputs gate execution/deployment.
+After M1 is PROVEN, M2 and M2.5 may proceed in parallel. M3's architecture/topology/network/storage specifications are already merged, but M3 cannot start until M2.5 is PROVEN.
 
 Then:
 
-`M3 -> M4`
+`M2.5 -> M3 -> M4`
 
 M5 requires both the golden service pattern and platform baseline:
 
@@ -101,6 +102,12 @@ No deep service implementation. Build structure and checks only.
 Canonical tracker: GitHub issue `#14`.
 
 Product is the reference pattern. Do not clone product business logic into other services.
+
+### M2.5 — Persistent MGMT Bootstrap
+
+Canonical tracker: GitHub issue `#15`.
+
+Bootstrap the persistent management plane from the canonical V5 contracts. M2.5 must be PROVEN before M3 starts.
 
 ### M3 — PREPROD Infrastructure
 

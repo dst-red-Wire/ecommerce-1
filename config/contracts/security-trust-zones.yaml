@@ -1,0 +1,32 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+# Zone detail remains in the referenced document; identities retain their owners.
+source: docs/architecture/SECURITY_TRUST_ZONES.md
+zones:
+  Z0: internet-untrusted
+  Z1: public-edge-dmz
+  Z2: kubernetes-ingress-service-mesh
+  Z3: application-workloads
+  Z4: stateful-data
+  Z5: permanent-mgmt
+  Z6: backup-evidence-dfir
+application_services_source: architecture.lock.yaml#business.services
+human_iam:
+  customers_realm: customers
+  workforce_realm: workforce
+  privileged_authentication: hardware-backed-webauthn-passkeys
+  customer_tokens_for_mgmt: forbidden
+workload_identity:
+  trust_domains: [PREPROD, PROD-A, PROD-B]
+  cross_environment: deny-by-default
+  federation_requires: architecture-security-review
+secrets:
+  flow: openbao-eso-kubernetes-secret-runtime-mount-where-applicable
+  forbidden: [git, image-layers, ci-logs, bootstrap-credentials-after-preprod-destroy, application-access-to-openbao-admin-credentials]
+egress:
+  default: deny
+  application_path: approved-istio-egress-squid
+  logging: required
+  exceptions: documented
+mgmt_access_source: config/contracts/mgmt-wireguard-access.yaml

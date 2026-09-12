@@ -9,8 +9,8 @@ Tu es l'agent d'implémentation chargé de créer le bootstrap minimal du monore
 Lire avant toute modification :
 
 1. `/AGENTS.md`
-2. `/docs/architecture/BASELINE_V2.md`
-3. `/architecture.lock.yaml`
+2. `/architecture.lock.yaml`
+3. `/docs/architecture/EXACT_TOPOLOGY_V5.md`, index dérivé du verrou
 4. les ADR présents sous `/docs/adr/` lorsqu'ils existent
 
 En cas de contradiction, arrêter la partie concernée et signaler précisément le conflit. Ne jamais choisir silencieusement une troisième architecture.
@@ -183,11 +183,11 @@ Active choices:
 Do not introduce as active defaults:
 
 ```text
-FluxCD
-Flagger
-MinIO Community Edition / MinIO Operator
-Loki as logging baseline
-Splunk as SIEM baseline
+Superseded: FluxCD
+Superseded: Flagger
+Superseded: MinIO Community Edition / MinIO Operator
+Superseded: Loki as logging baseline
+Superseded: Splunk as SIEM baseline
 ```
 
 Historical documents may mention them only as superseded choices.
@@ -199,10 +199,14 @@ Créer la structure :
 ```text
 observability/
   otel/
-  prometheus/
+  rotel/
+  vmagent/
+  victoriametrics/
+  victorialogs/
   alertmanager/
   grafana/
-  fluent-bit/
+  clickhouse/
+  hyperdx/
   data-prepper/
   opensearch/
   wazuh/
@@ -248,7 +252,7 @@ docs/
   dr/
 ```
 
-Ne pas remplacer `BASELINE_V2.md`.
+Ne pas remplacer `architecture.lock.yaml`.
 
 Créer un template ADR si absent.
 

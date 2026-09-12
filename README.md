@@ -151,10 +151,11 @@ Les cibles Make restent des façades courtes : elles appellent `scripts/repoctl.
 
 ## Observabilité
 
-- OpenTelemetry Collector.
-- Prometheus + Alertmanager + Grafana.
-- Fluent Bit + Data Prepper + OpenSearch Logs.
-- Wazuh pour la sécurité et l'audit.
+- OpenTelemetry Collector pour la collecte.
+- vmagent + VictoriaMetrics pour les métriques; Prometheus reste un protocole/format compatible.
+- OpenTelemetry Collector -> VictoriaLogs pour les journaux d'infrastructure.
+- Rotel -> ClickHouse -> HyperDX pour la télémétrie et les journaux applicatifs; les métadonnées HyperDX utilisent `mongodb-oss-self-hosted`.
+- Data Prepper + OpenSearch + Wazuh uniquement pour la sécurité et l'audit.
 - Archives DFIR immuables selon la politique de résilience.
 
 ## QA
@@ -223,9 +224,9 @@ Les répertoires de plateforme supplémentaires apparaissent uniquement lorsqu�
 Priorité :
 
 1. règles système et sécurité ;
-2. ADR et Skills spécialisés validés ;
-3. `docs/architecture/BASELINE_V2.md` ;
-4. `architecture.lock.yaml` ;
+2. `architecture.lock.yaml`, seule autorité canonique de l’architecture ;
+3. index `docs/architecture/EXACT_TOPOLOGY_V5.md`, dérivé du verrou ;
+4. ADR et documentation spécialisés, subordonnés au verrou pour l’architecture ;
 5. specs et issues d'implémentation ;
 6. anciens prompts/PDF uniquement comme historique.
 
@@ -253,4 +254,4 @@ La création initiale du monorepo est gouvernée par :
 instruction/dev/PROMPT_IA_00_BOOTSTRAP_MONOREPO.md
 ```
 
-Ce prompt doit rester synchronisé avec la baseline V2 avant toute exécution Codex.
+Ce prompt doit rester synchronisé avec `architecture.lock.yaml`, l’autorité canonique V5, et son index dérivé `docs/architecture/EXACT_TOPOLOGY_V5.md` avant toute exécution Codex.

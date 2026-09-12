@@ -41,11 +41,63 @@ class ObservabilityTopologyTest < Minitest::Test
     end
   end
 
+  def test_deployment_wave_rejects_superseded_roles_and_missing_v5_components
+    with_contract_copy do |root|
+      path = File.join(root, "config/infrastructure/deployment-waves.yaml")
+      original = File.read(path)
+      %w[fluent-bit prometheus opensearch-logs].each do |component|
+        data = YAML.safe_load(original, aliases: false)
+        wave = data["waves"].find { |entry| entry["id"] == "50-observability" }
+        wave["components"] << component
+        File.write(path, YAML.dump(data))
+        assert ObservabilityTopologyValidator.validate(root).any? { |error| error.include?("superseded general") }, component
+      end
+      %w[vmagent victoriametrics victorialogs].each do |component|
+        data = YAML.safe_load(original, aliases: false)
+        wave = data["waves"].find { |entry| entry["id"] == "50-observability" }
+        wave["components"].delete(component)
+        File.write(path, YAML.dump(data))
+        assert ObservabilityTopologyValidator.validate(root).any? { |error| error.include?(component) }, component
+      end
+      File.write(path, original)
+      assert_empty ObservabilityTopologyValidator.validate(root)
+    end
+  end
+
+  def test_deployment_wave_requires_one_exact_observability_wave
+    with_contract_copy do |root|
+      path = File.join(root, "config/infrastructure/deployment-waves.yaml")
+      original = File.read(path)
+      data = YAML.safe_load(original, aliases: false)
+      wave = data["waves"].find { |entry| entry["id"] == "50-observability" }
+
+      data["waves"].delete(wave)
+      File.write(path, YAML.dump(data))
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "deployment wave 50-observability must occur exactly once"
+
+      data = YAML.safe_load(original, aliases: false)
+      data["waves"] << wave.merge("components" => ["prometheus"])
+      File.write(path, YAML.dump(data))
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "deployment wave 50-observability must occur exactly once"
+
+      data = YAML.safe_load(original, aliases: false)
+      data["waves"] << wave.dup
+      File.write(path, YAML.dump(data))
+      assert_includes ObservabilityTopologyValidator.validate(root),
+                      "deployment wave 50-observability must occur exactly once"
+
+      File.write(path, original)
+      assert_empty ObservabilityTopologyValidator.validate(root)
+    end
+  end
+
   private
 
   def with_contract_copy
     Dir.mktmpdir("observability-topology") do |root|
-      %w[architecture.lock.yaml config/contracts/observability-topology.yaml].each do |relative|
+      %w[architecture.lock.yaml config/contracts/observability-topology.yaml config/infrastructure/deployment-waves.yaml].each do |relative|
         target = File.join(root, relative)
         FileUtils.mkdir_p(File.dirname(target))
         FileUtils.cp(File.join(ROOT, relative), target)

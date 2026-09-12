@@ -10,7 +10,7 @@ You are supporting the E-COMMERCE delivery program as a business/research/eviden
 
 For vendor/hardware/network work, always read the current exact contracts first:
 
-- `docs/architecture/EXACT_TOPOLOGY_V2.md`
+- `docs/architecture/EXACT_TOPOLOGY_V5.md`
 - `docs/architecture/PREPROD_TOPOLOGY_V2.md`
 - `docs/architecture/PROD_TOPOLOGY_V2.md`
 - `docs/architecture/NETWORK_IPAM_CONTRACT.md`

@@ -277,6 +277,8 @@ def runtime_efficiency_check() -> int:
 
 
 def governance() -> int:
+    run([sys.executable, "scripts/architecture_authority.py"])
+    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
     run(["ruby", "scripts/validate-architecture.rb"])
     run(["ruby", "scripts/validate-observability.rb"])

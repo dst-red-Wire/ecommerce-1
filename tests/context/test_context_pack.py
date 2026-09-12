@@ -76,6 +76,28 @@ class RoutingTests(unittest.TestCase):
         with mock.patch.object(MOD, "yq_json", return_value=cfg):
             self.assertEqual(MOD.route("fix local helper", ["scripts/harmless-local-helper.py"]), "L0")
 
+    def test_governed_mlops_and_aiops_tasks_route_l2_without_overrouting(self):
+        cfg = {
+            "levels": {
+                "L2": {"task_keywords": ["mlops", "aiops", "architecture"]},
+                "L1": {"task_keywords": ["service"]},
+            }
+        }
+        with mock.patch.object(MOD, "yq_json", return_value=cfg):
+            self.assertEqual("L2", MOD.route("Implement the locked MLOps platform", []))
+            self.assertEqual("L2", MOD.route("Implement the governed AIOps topology", []))
+            self.assertEqual("L0", MOD.route("fix lightweight local helper", []))
+
+    def test_router_declares_mlops_aiops_and_their_l2_contracts(self):
+        text = (ROOT / "config/context/router.yaml").read_text(encoding="utf-8")
+        for required in (
+            "      - mlops", "      - aiops", "    - architecture.lock.yaml",
+            "    - docs/architecture/EXACT_TOPOLOGY_V5.md",
+            "    - config/infrastructure/deployment-waves.yaml",
+            "    - docs/architecture/MLOPS_TOPOLOGY_V1.md",
+        ):
+            self.assertIn(required, text)
+
     def test_detects_service_from_task(self):
         with mock.patch.object(MOD, "yq_json", return_value=["inventory", "product"]):
             self.assertIn("inventory", MOD.detect_services("fix inventory reservation", []))

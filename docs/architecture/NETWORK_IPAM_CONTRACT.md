@@ -1,6 +1,6 @@
 # NETWORK / IPAM CONTRACT V2 - EXACT
 
-Status: `EXACT CONFIG CONTRACT`
+Status: `EXACT`
 
 This contract explains the address-allocation invariants consumed by IaC. `config/infrastructure/network-plan.yaml` is the sole machine-canonical source for every CIDR, fixed private address and dynamic pool. Values shown here are a review-oriented presentation of that YAML and must not be edited independently. Public provider-assigned addresses are injected at runtime and are never recorded as address values in either contract.
 
