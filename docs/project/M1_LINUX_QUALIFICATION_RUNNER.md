@@ -19,6 +19,7 @@ provider console (or another authenticated, out-of-band channel), then verify an
 one ED25519 candidate key before Ansible is allowed to connect:
 
 ```text
+set -euo pipefail
 export QUALIFICATION_HOST=qualification.example.invalid
 export QUALIFICATION_HOST_FINGERPRINT=SHA256:replace-with-out-of-band-value
 
@@ -32,12 +33,14 @@ test "$candidate_fingerprint" = "$QUALIFICATION_HOST_FINGERPRINT"
 
 mkdir -p ~/.ssh
 chmod 0700 ~/.ssh
-staged_known_hosts="$(mktemp ~/.ssh/known_hosts.XXXXXX)"
-if test -f ~/.ssh/known_hosts; then cat ~/.ssh/known_hosts > "$staged_known_hosts"; fi
-cat "$candidate_key" >> "$staged_known_hosts"
+export QUALIFICATION_KNOWN_HOSTS="$HOME/.ssh/qualification_known_hosts"
+staged_known_hosts="$(mktemp ~/.ssh/qualification_known_hosts.XXXXXX)"
+cat "$candidate_key" > "$staged_known_hosts"
 chmod 0600 "$staged_known_hosts"
-mv "$staged_known_hosts" ~/.ssh/known_hosts
-ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml
+mv "$staged_known_hosts" "$QUALIFICATION_KNOWN_HOSTS"
+ANSIBLE_HOST_KEY_CHECKING=True \
+  ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes" \
+  ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml
 ```
 
 Never trust an unverified `ssh-keyscan` result: obtain the host-key fingerprint through the
@@ -62,7 +65,8 @@ the runner clones normally and then detaches at the immutable object:
 ```text
 # This must exactly match qualification_user in /secure/path/qualification.ini.
 export QUALIFICATION_USER=ubuntu
-ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" 'bash -se' <<'QUALIFICATION_RUNNER'
+ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
+  "$QUALIFICATION_USER@$QUALIFICATION_HOST" 'bash -se' <<'QUALIFICATION_RUNNER'
 set -euo pipefail
 whoami
 hostname

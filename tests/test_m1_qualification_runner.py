@@ -55,12 +55,15 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         raise AssertionError("qualification checkout uses a mutable branch tip")
 
     trust_markers = (
+        "set -euo pipefail",
         "QUALIFICATION_HOST_FINGERPRINT=SHA256:",
         'ssh-keyscan -H -t ed25519 -- "$QUALIFICATION_HOST" > "$candidate_key"',
         'ssh-keygen -lf "$candidate_key" -E sha256',
         'test "$candidate_fingerprint" = "$QUALIFICATION_HOST_FINGERPRINT"',
-        'cat "$candidate_key" >> "$staged_known_hosts"',
-        'mv "$staged_known_hosts" ~/.ssh/known_hosts',
+        'cat "$candidate_key" > "$staged_known_hosts"',
+        'mv "$staged_known_hosts" "$QUALIFICATION_KNOWN_HOSTS"',
+        "ANSIBLE_HOST_KEY_CHECKING=True",
+        "UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS",
     )
     trust_positions = []
     for marker in trust_markers:
@@ -72,8 +75,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         raise AssertionError("candidate host key is enrolled before fingerprint equality")
 
     remote_start = runbook.find(
-        'ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" '
-        "'bash -se' <<'QUALIFICATION_RUNNER'"
+        'ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes'
     )
     remote_end = runbook.find("\nQUALIFICATION_RUNNER", remote_start + 1)
     if remote_start < 0 or remote_end < 0:
@@ -168,9 +170,19 @@ class QualificationRunnerContractTest(unittest.TestCase):
     def test_mutation_remove_remote_execution_context(self):
         self.assert_mutation_rejected(
             runbook=self.runbook.replace(
-                'ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" '
-                "'bash -se' <<'QUALIFICATION_RUNNER'",
-                "bash -se <<'QUALIFICATION_RUNNER'",
+                'ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes',
+                "bash -se",
+            )
+        )
+
+    def test_mutation_remove_controller_fail_closed_mode(self):
+        self.assert_mutation_rejected(runbook=self.runbook.replace("set -euo pipefail", "set -uo pipefail", 1))
+
+    def test_mutation_reuse_general_known_hosts(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace(
+                'cat "$candidate_key" > "$staged_known_hosts"',
+                'cat ~/.ssh/known_hosts "$candidate_key" > "$staged_known_hosts"',
             )
         )
 
