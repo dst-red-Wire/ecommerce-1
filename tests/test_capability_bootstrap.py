@@ -96,6 +96,15 @@ def contract(items):
 
 
 class CapabilityGraphTest(unittest.TestCase):
+    def test_qualification_virtualenv_is_ignored(self):
+        ignored = subprocess.run(
+            ["git", "check-ignore", ".venv/qualification/pyvenv.cfg"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(0, ignored.returncode, ignored.stderr)
+
     def test_graph_is_acyclic_and_topologically_sorted(self):
         graph = MOD.Graph([{"name": "kind", "requires": ["docker"]}, {"name": "docker", "requires": []}])
         self.assertLess(graph.order().index("docker"), graph.order().index("kind"))
@@ -123,13 +132,14 @@ class CapabilityAuditTest(unittest.TestCase):
                 "justification": "host-owned test capability",
             }
         ]
-        auditor = self.auditor(items, {"sysctl": (0, "0\n")}, present={"sysctl"})
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "0\n", ""))
+        auditor = MOD.Auditor(contract(items), runner=runner, which=lambda _command: "/bin/sysctl")
 
         static = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="static")
+        runner.assert_not_called()
         runtime = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="runtime")
 
         self.assertEqual("SKIP", static["container-network-forwarding"].state)
-        self.assertIn("expected output 1; got 0", static["container-network-forwarding"].detail)
         self.assertEqual("BLOCKED", runtime["container-network-forwarding"].state)
 
     def runner(self, outcomes):

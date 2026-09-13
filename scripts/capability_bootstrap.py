@@ -449,6 +449,9 @@ class Auditor:
         results: dict[str, Result] = {}
         for name in self.graph.order():
             item = self.graph.items[name]
+            if profile == "static" and item["requirement"] == "optional-runtime":
+                results[name] = Result("SKIP", "optional runtime capability not required by static profile")
+                continue
             platform_failure = self.platform_result(os_name, arch, item)
             if platform_failure:
                 results[name] = platform_failure
@@ -473,11 +476,6 @@ class Auditor:
                 results[command] = platform_failure or (
                     Result("PASS", "ready") if self.which(command) else Result("FAIL", "tool absent")
                 )
-        if profile == "static":
-            for name, item in self.graph.items.items():
-                result = results[name]
-                if item["requirement"] == "optional-runtime" and result.state != "PASS":
-                    results[name] = Result("SKIP", f"environmental: {result.state.lower()} - {result.detail}")
         return results
 
 

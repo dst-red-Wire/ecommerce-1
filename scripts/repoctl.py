@@ -512,7 +512,7 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
     if generate or contract_changed:
-        result = api_generate("go")
+        result = api_generate("go", check=True)
         if result:
             return result
     print("PASS OpenAPI and cross-registry contract checks completed")

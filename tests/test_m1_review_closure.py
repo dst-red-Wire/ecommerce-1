@@ -21,7 +21,7 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_contract_generation_propagates_codegen_failure(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         contracts = source[source.index("def contracts(") : source.index("def repository_shell_paths(")]
-        self.assertIn('result = api_generate("go")', contracts)
+        self.assertIn('result = api_generate("go", check=True)', contracts)
         self.assertIn("if result:\n            return result", contracts)
         self.assertNotIn('api_generate("all")', contracts)
 
@@ -32,7 +32,7 @@ class M1ReviewClosureTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "api_generate", return_value=23) as generate,
         ):
             self.assertEqual(23, REPOCTL.contracts(generate=True))
-        generate.assert_called_once_with("go")
+        generate.assert_called_once_with("go", check=True)
 
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
