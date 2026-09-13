@@ -63,7 +63,7 @@ def validate_contract(files: dict[str, str]) -> None:
         'ipv4_enabled = false',
         'ipv4_enabled = true',
         'qualification_gateway_user',
-        'ProxyJump=${module.hcloud_qualification.gateway_user}@',
+        'ProxyCommand=\\"ssh',
         'StrictHostKeyChecking=yes',
         'ForwardAgent=no',
         'ClearAllForwardings=yes',
@@ -110,6 +110,8 @@ def validate_contract(files: dict[str, str]) -> None:
             raise AssertionError(f"fresh bootstrap endpoint not allowlisted: {domain}")
     if "http_access deny all" not in squid_policy:
         raise AssertionError("Squid must default deny")
+    if not re.search(r"^acl allowed_domains dstdomain -n(?:\s|{)", squid_policy, re.MULTILINE):
+        raise AssertionError("Squid destination-domain ACL must disable reverse DNS with -n")
     if "http_access allow all" in squid_policy or re.search(
         r"http_access allow (?:CONNECT|runner CONNECT)", squid_policy
     ):
@@ -119,11 +121,25 @@ def validate_contract(files: dict[str, str]) -> None:
     inventory_output = outputs.split('output "qualification_inventory_host_line"', 1)[1].split(
         'output "qualification_gateway_inventory_host_line"', 1
     )[0]
-    if "${module.hcloud_qualification.gateway_user}@" not in inventory_output:
-        raise AssertionError("ProxyJump user must equal the cloud-init gateway user")
-    for ssh_option in ("StrictHostKeyChecking=yes", "ForwardAgent=no", "ClearAllForwardings=yes"):
-        if ssh_option not in inventory_output:
-            raise AssertionError(f"inventory weakens SSH: {ssh_option}")
+    gateway_proxy = (
+        '-o ProxyCommand=\\"ssh '
+        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
+        '-o StrictHostKeyChecking=yes '
+        '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
+        '-o ForwardAgent=no -o ClearAllForwardings=yes '
+        '-l ${module.hcloud_qualification.gateway_user} -W %h:%p '
+        '${module.hcloud_qualification.gateway_ipv4}\\"'
+    )
+    if gateway_proxy not in inventory_output:
+        raise AssertionError("inventory gateway hop is not bound to its dedicated trust policy")
+    runner_trust = (
+        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
+        '-o StrictHostKeyChecking=yes '
+        '-o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} '
+        '-o ForwardAgent=no -o ClearAllForwardings=yes'
+    )
+    if runner_trust not in inventory_output:
+        raise AssertionError("inventory runner hop is not bound to its dedicated trust policy")
     runbook = files["runbook"]
     for trust_marker in (
         "QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:",
@@ -138,11 +154,22 @@ def validate_contract(files: dict[str, str]) -> None:
     if final_proof_start < 0 or final_proof_end < 0:
         raise AssertionError("final qualification proof lacks an exact SSH invocation")
     final_proof = runbook[final_proof_start:final_proof_end]
+    gateway_proxy = (
+        '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
+        '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST '
+        '-o ForwardAgent=no -o ClearAllForwardings=yes '
+        '-l $GATEWAY_USER -W %h:%p $GATEWAY_HOST"'
+    )
+    runner_trust = (
+        '-o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\\n'
+        '  -o StrictHostKeyChecking=yes \\\n'
+        '  -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \\\n'
+        '  -o ForwardAgent=no \\\n'
+        '  -o ClearAllForwardings=yes'
+    )
     for marker in (
-        '-o StrictHostKeyChecking=yes',
-        '-o ForwardAgent=no',
-        '-o ClearAllForwardings=yes',
-        '-o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}"',
+        runner_trust,
+        gateway_proxy,
         '"${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}"',
         "whoami", "hostname", "uname -a", "docker version", "docker info",
         "sysctl -n net.ipv4.ip_forward", "git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f",
@@ -202,7 +229,11 @@ class QualificationTerraformContractTest(unittest.TestCase):
 
     def test_security_and_runtime_mutations_are_rejected(self):
         mutations = (
-            ("environment/outputs.tf", "${module.hcloud_qualification.gateway_user}@", "other-user@"),
+            (
+                "environment/outputs.tf",
+                "-l ${module.hcloud_qualification.gateway_user}",
+                "-l other-user",
+            ),
             ("module/gateway-cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [apt-get install squid]"),
             ("ansible/proxy_tasks", "Acquire::http::Proxy", "Removed::http::Proxy"),
             (
@@ -217,6 +248,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 "- removed.invalid",
             ),
             ("ansible/squid_policy", "http_access deny all", "http_access allow all"),
+            ("ansible/squid_policy", "acl allowed_domains dstdomain -n", "acl allowed_domains dstdomain"),
             ("ansible/squid_policy", "http_access allow runner allowed_domains", "http_access allow CONNECT"),
             ("module/main.tf", "ipv4_enabled = false", "ipv4_enabled = true"),
             (
@@ -238,13 +270,35 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ("environment/outputs.tf", "StrictHostKeyChecking=yes", "StrictHostKeyChecking=no"),
             ("runbook", 'QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:', "GATEWAY_SCAN_IS_TRUSTED="),
             ("runbook", 'QUALIFICATION_RUNNER_FINGERPRINT=SHA256:', "RUNNER_SCAN_IS_TRUSTED="),
-            ("runbook", '-o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}"', "-o ProxyCommand=none"),
+            ("runbook", '-o ProxyCommand="ssh ', '-o ProxyCommand="false '),
+            (
+                "runbook",
+                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS',
+                '-o ProxyCommand="ssh',
+            ),
+            (
+                "runbook",
+                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes',
+                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=no',
+            ),
+            (
+                "runbook",
+                '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST',
+                '-o StrictHostKeyChecking=yes',
+            ),
+            (
+                "runbook",
+                '-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no',
+                '-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=yes',
+            ),
             (
                 "runbook",
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
-                + "\n  -o StrictHostKeyChecking=yes",
+                + "\n  -o StrictHostKeyChecking=yes \\"
+                + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
-                + "\n  -o StrictHostKeyChecking=no",
+                + "\n  -o StrictHostKeyChecking=no \\"
+                + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
             ),
         )
         for mutation in mutations:

@@ -4,7 +4,7 @@ acl runner src {{ qualification_runner_private_ip }}/32
 acl SSL_ports port 443
 acl Safe_ports port 80 443
 acl CONNECT method CONNECT
-acl allowed_domains dstdomain{% for domain in qualification_squid_allowed_domains %} {{ domain }}{% endfor %}
+acl allowed_domains dstdomain -n{% for domain in qualification_squid_allowed_domains %} {{ domain }}{% endfor %}
 http_access deny !runner
 http_access deny CONNECT !SSL_ports
 http_access deny !Safe_ports

@@ -74,6 +74,7 @@ ssh-keygen -H -f "$gateway_key"
 mv "$gateway_key" "$staged_known_hosts"
 
 ssh -o UserKnownHostsFile="$staged_known_hosts" -o StrictHostKeyChecking=yes \
+  -o HostKeyAlias="$QUALIFICATION_GATEWAY_HOST" \
   -o ForwardAgent=no -o ClearAllForwardings=yes \
   "$QUALIFICATION_GATEWAY_USER@$QUALIFICATION_GATEWAY_HOST" \
   "ssh-keyscan -t ed25519 '$QUALIFICATION_RUNNER_HOST'" > "$runner_key"
@@ -106,9 +107,10 @@ export QUALIFICATION_USER=replace-from-qualification_user
 ssh \
   -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \
   -o StrictHostKeyChecking=yes \
+  -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \
   -o ForwardAgent=no \
   -o ClearAllForwardings=yes \
-  -o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}" \
+  -o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no -o ClearAllForwardings=yes -l $GATEWAY_USER -W %h:%p $GATEWAY_HOST" \
   "${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}" \
   'bash -se' <<'QUALIFICATION_RUNNER'
 set -euo pipefail
@@ -143,9 +145,10 @@ BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci
 QUALIFICATION_RUNNER
 ```
 
-This command deliberately supplies no `HostKeyAlias`: the enrolled gateway
-identity is its public address and the enrolled runner identity is its private
-address, exactly matching the two SSH destinations used by `ProxyJump`.
+The explicit `ProxyCommand` binds the gateway connection to the same dedicated
+known-hosts file and strict policy as the outer runner connection. Each hop
+also names its exact enrolled address through `HostKeyAlias`; neither hop can
+fall back to the controller's default known-hosts files or agent forwarding.
 
 The inventory must contain groups `qualification_gateways` and
 `qualification_runners`, populated from the two Terraform inventory outputs.

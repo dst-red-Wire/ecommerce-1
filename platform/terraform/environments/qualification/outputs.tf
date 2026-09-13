@@ -9,7 +9,7 @@ output "qualification_image_identity" { value = module.hcloud_qualification.imag
 
 output "qualification_inventory_host_line" {
   description = "Non-secret ProxyJump inventory handoff for canonical qualification-runner.yml."
-  value       = "qualification ansible_host=${module.hcloud_qualification.runner_private_ip} ansible_user=${module.hcloud_qualification.user} qualification_user=${module.hcloud_qualification.user} qualification_proxy_url=http://${module.hcloud_qualification.gateway_private_ip}:3128 qualification_proxy_no_proxy=localhost,127.0.0.1,${module.hcloud_qualification.runner_private_ip},${module.hcloud_qualification.gateway_private_ip} ansible_ssh_common_args='-o ProxyJump=${module.hcloud_qualification.gateway_user}@${module.hcloud_qualification.gateway_ipv4} -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ClearAllForwardings=yes'"
+  value       = "qualification ansible_host=${module.hcloud_qualification.runner_private_ip} ansible_user=${module.hcloud_qualification.user} qualification_user=${module.hcloud_qualification.user} qualification_proxy_url=http://${module.hcloud_qualification.gateway_private_ip}:3128 qualification_proxy_no_proxy=localhost,127.0.0.1,${module.hcloud_qualification.runner_private_ip},${module.hcloud_qualification.gateway_private_ip} ansible_ssh_common_args='-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} -o ForwardAgent=no -o ClearAllForwardings=yes -o ProxyCommand=\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} -o ForwardAgent=no -o ClearAllForwardings=yes -l ${module.hcloud_qualification.gateway_user} -W %h:%p ${module.hcloud_qualification.gateway_ipv4}\"'"
 }
 
 output "qualification_gateway_inventory_host_line" {
@@ -23,7 +23,7 @@ output "qualification_proxyjump" {
 
 output "qualification_ansible_ssh_args" {
   description = "Strict two-hop SSH arguments; the operator must first create and export the verified dedicated known-hosts path."
-  value       = "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o ProxyJump=${module.hcloud_qualification.gateway_user}@${module.hcloud_qualification.gateway_ipv4} -o ForwardAgent=no -o ClearAllForwardings=yes"
+  value       = "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} -o ForwardAgent=no -o ClearAllForwardings=yes -o ProxyCommand=\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} -o ForwardAgent=no -o ClearAllForwardings=yes -l ${module.hcloud_qualification.gateway_user} -W %h:%p ${module.hcloud_qualification.gateway_ipv4}\""
 }
 
 output "qualification_proxy_environment" {
