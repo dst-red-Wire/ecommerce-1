@@ -1,0 +1,75 @@
+---
+- name: Require the supported immutable host contract
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.system == "Linux"
+      - ansible_facts.distribution == "Ubuntu"
+      - ansible_facts.distribution_version == qualification_ubuntu_release
+      - qualification_user is defined
+      - qualification_user | length > 0
+      - qualification_user != "root"
+    fail_msg: >-
+      Qualification requires Ubuntu {{ qualification_ubuntu_release }} and an
+      explicit non-root qualification_user.
+
+- name: Install exact qualification host packages
+  ansible.builtin.apt:
+    name: "{{ qualification_packages }}"
+    state: present
+    update_cache: true
+    allow_downgrade: false
+
+- name: Prevent silent qualification package drift
+  ansible.builtin.dpkg_selections:
+    name: "{{ item.split('=')[0] }}"
+    selection: hold
+  loop: "{{ qualification_packages }}"
+
+- name: Persist container network forwarding
+  ansible.builtin.copy:
+    dest: "{{ qualification_sysctl_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+    content: "net.ipv4.ip_forward=1\n"
+  notify: Load qualification network forwarding
+
+- name: Enable and start Docker Engine
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Grant the qualification user Docker socket access
+  ansible.builtin.user:
+    name: "{{ qualification_user }}"
+    groups: docker
+    append: true
+
+- name: Apply persistent network configuration before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify persistent IPv4 forwarding value
+  ansible.builtin.command:
+    argv: [sysctl, -n, net.ipv4.ip_forward]
+  register: qualification_ip_forward
+  changed_when: false
+  failed_when: qualification_ip_forward.stdout != "1"
+
+- name: Verify Docker client and server as qualification user without sudo
+  ansible.builtin.command:
+    argv: [docker, version]
+  become: true
+  become_user: "{{ qualification_user }}"
+  register: qualification_docker_version
+  changed_when: false
+  failed_when: >-
+    qualification_docker_version.rc != 0 or
+    'Server:' not in qualification_docker_version.stdout
+
+- name: Verify Docker daemon information as qualification user without sudo
+  ansible.builtin.command:
+    argv: [docker, info]
+  become: true
+  become_user: "{{ qualification_user }}"
+  changed_when: false
