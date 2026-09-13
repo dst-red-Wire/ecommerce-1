@@ -1,0 +1,86 @@
+---
+- name: Provision the temporary M1 Linux qualification runner
+  hosts: qualification_runners
+  become: true
+  gather_facts: true
+  roles:
+    - role: qualification_runner_host
+  post_tasks:
+    - name: Detect a previously consumed qualification runner
+      ansible.builtin.stat:
+        path: "{{ qualification_consumed_marker }}"
+      register: qualification_consumed
+
+    - name: Detect a pre-existing qualification checkout
+      ansible.builtin.stat:
+        path: "{{ qualification_repository_path }}/.git"
+      register: qualification_checkout
+
+    - name: Require a fresh never-used qualification runner
+      ansible.builtin.assert:
+        that:
+          - not qualification_consumed.stat.exists
+          - not qualification_checkout.stat.exists
+        fail_msg: >-
+          This runner is consumed or already contains a checkout. Destroy it and
+          provision a fresh runner; retries and runner reuse are forbidden.
+
+    - name: Mark this runner consumed before PR-owned code executes
+      ansible.builtin.copy:
+        dest: "{{ qualification_consumed_marker }}"
+        owner: root
+        group: root
+        mode: "0400"
+        force: false
+        content: "single qualification attempt only; destroy this host after execution\n"
+
+    - name: Clone the qualification repository when absent
+      ansible.builtin.git:
+        repo: "{{ qualification_repository_url }}"
+        dest: "{{ qualification_repository_path }}"
+        update: false
+      become_user: "{{ qualification_user }}"
+
+    - name: Fetch the exact qualification head and base objects
+      ansible.builtin.command:
+        argv: [git, fetch, origin, "{{ qualification_pr_head }}", "{{ qualification_pr_base }}"]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Read the current qualification checkout
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      register: qualification_current_head
+      changed_when: false
+
+    - name: Check out the exact qualification head detached
+      ansible.builtin.command:
+        argv: [git, checkout, --detach, "{{ qualification_pr_head }}"]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      when: qualification_current_head.stdout != qualification_pr_head
+      changed_when: true
+
+    - name: Reconcile the hash-locked qualification seed
+      ansible.builtin.command:
+        argv: [make, seed]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Reconcile the repository qualification toolchain
+      ansible.builtin.command:
+        argv: [make, bootstrap]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Verify the reconciled repository qualification toolchain
+      ansible.builtin.command:
+        argv: [make, env-check]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
