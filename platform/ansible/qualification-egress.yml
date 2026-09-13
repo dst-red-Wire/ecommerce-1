@@ -1,0 +1,14 @@
+---
+- name: Reconcile the trusted M1 qualification gateway
+  hosts: qualification_gateways
+  become: true
+  gather_facts: true
+  roles:
+    - role: qualification_gateway
+
+- name: Reconcile the M1 qualification runner proxy client
+  hosts: qualification_runners
+  become: true
+  gather_facts: true
+  roles:
+    - role: qualification_proxy_client

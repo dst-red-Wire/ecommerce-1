@@ -39,36 +39,8 @@ variable "qualification_network_cidr" {
   type        = string
   default     = "10.248.0.0/24"
   validation {
-    condition     = can(cidrhost(var.qualification_network_cidr, 0)) && startswith(var.qualification_network_cidr, "10.248.")
-    error_message = "qualification_network_cidr must use the reserved qualification-only 10.248.0.0/16 range."
-  }
-}
-
-variable "qualification_subnet_cidr" {
-  description = "Cloud subnet contained by the dedicated qualification network."
-  type        = string
-  default     = "10.248.0.0/24"
-  validation {
-    condition     = can(cidrhost(var.qualification_subnet_cidr, 0)) && startswith(var.qualification_subnet_cidr, "10.248.")
-    error_message = "qualification_subnet_cidr must use the reserved qualification-only 10.248.0.0/16 range."
-  }
-}
-
-variable "qualification_gateway_private_ip" {
-  type    = string
-  default = "10.248.0.2"
-  validation {
-    condition     = can(cidrhost("${var.qualification_gateway_private_ip}/32", 0)) && startswith(var.qualification_gateway_private_ip, "10.248.")
-    error_message = "qualification_gateway_private_ip must be in the qualification-only range."
-  }
-}
-
-variable "qualification_runner_private_ip" {
-  type    = string
-  default = "10.248.0.3"
-  validation {
-    condition     = can(cidrhost("${var.qualification_runner_private_ip}/32", 0)) && startswith(var.qualification_runner_private_ip, "10.248.")
-    error_message = "qualification_runner_private_ip must be in the qualification-only range."
+    condition     = can(cidrhost(var.qualification_network_cidr, 3)) && startswith(var.qualification_network_cidr, "10.248.")
+    error_message = "qualification_network_cidr must provide distinct gateway/runner addresses in the reserved qualification-only 10.248.0.0/16 range."
   }
 }
 
@@ -119,5 +91,15 @@ variable "qualification_user" {
   validation {
     condition     = can(regex("^[a-z_][a-z0-9_-]{0,30}$", var.qualification_user)) && var.qualification_user != "root"
     error_message = "qualification_user must be a valid non-root Linux account name."
+  }
+}
+
+variable "qualification_gateway_user" {
+  description = "Explicit cloud-init-created account used for gateway administration and ProxyJump."
+  type        = string
+  default     = "qualification-gateway"
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_-]{0,30}$", var.qualification_gateway_user)) && var.qualification_gateway_user != "root"
+    error_message = "qualification_gateway_user must be a valid non-root Linux account name."
   }
 }

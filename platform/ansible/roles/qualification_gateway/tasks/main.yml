@@ -1,0 +1,97 @@
+---
+- name: Require the supported immutable gateway host contract
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.system == "Linux"
+      - ansible_facts.distribution == "Ubuntu"
+      - ansible_facts.distribution_version == qualification_ubuntu_release
+      - ansible_facts.architecture == qualification_architecture
+      - qualification_gateway_user is defined
+      - qualification_runner_private_ip is defined
+
+- name: Configure the immutable Ubuntu archive snapshot
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/ubuntu-qualification-snapshot.sources
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: https://snapshot.ubuntu.com/ubuntu/{{ qualification_ubuntu_snapshot }}
+      Suites: {{ qualification_ubuntu_codename }} {{ qualification_ubuntu_codename }}-updates {{ qualification_ubuntu_codename }}-security
+      Components: main universe
+      Architectures: amd64
+      Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+- name: Find mutable Ubuntu package sources
+  ansible.builtin.find:
+    paths: /etc/apt/sources.list.d
+    patterns: ["*.list", "*.sources"]
+    excludes: ubuntu-qualification-snapshot.sources
+    file_type: file
+  register: qualification_gateway_mutable_sources
+
+- name: Remove mutable Ubuntu package sources
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ qualification_gateway_mutable_sources.files }}"
+
+- name: Remove the legacy mutable Ubuntu package source
+  ansible.builtin.file:
+    path: /etc/apt/sources.list
+    state: absent
+
+- name: Install the exact Squid package
+  ansible.builtin.apt:
+    name: "{{ qualification_squid_package }}"
+    state: present
+    update_cache: true
+    allow_downgrade: true
+
+- name: Hold the exact Squid package
+  ansible.builtin.dpkg_selections:
+    name: squid
+    selection: hold
+
+- name: Reconcile Squid directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /etc/squid, owner: root, group: root, mode: "0755" }
+    - { path: /var/log/squid, owner: proxy, group: proxy, mode: "0750" }
+
+- name: Reconcile the default-deny Squid policy
+  ansible.builtin.template:
+    src: squid.conf.j2
+    dest: /etc/squid/squid.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: /usr/sbin/squid -k parse -f %s
+  notify: Restart qualification Squid
+
+- name: Enable and start Squid
+  ansible.builtin.systemd_service:
+    name: squid
+    enabled: true
+    state: started
+
+- name: Apply Squid policy changes before verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify the installed Squid package version
+  ansible.builtin.command:
+    argv: [dpkg-query, --show, "--showformat=${Version}", squid]
+  register: qualification_installed_squid
+  changed_when: false
+  failed_when: qualification_installed_squid.stdout != qualification_squid_version
+
+- name: Verify Squid is active
+  ansible.builtin.command:
+    argv: [systemctl, is-active, --quiet, squid]
+  changed_when: false

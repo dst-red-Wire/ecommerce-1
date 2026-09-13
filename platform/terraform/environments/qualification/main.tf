@@ -8,10 +8,6 @@ module "hcloud_qualification" {
   ssh_key_id         = var.qualification_ssh_key_id
   ssh_allowed_cidrs  = var.qualification_ssh_allowed_cidrs
   qualification_user = var.qualification_user
+  gateway_user       = var.qualification_gateway_user
   network_cidr       = var.qualification_network_cidr
-  subnet_cidr        = var.qualification_subnet_cidr
-  gateway_private_ip = var.qualification_gateway_private_ip
-  runner_private_ip  = var.qualification_runner_private_ip
-  squid_version      = var.qualification_squid_version
-  ubuntu_snapshot    = var.qualification_ubuntu_snapshot
 }

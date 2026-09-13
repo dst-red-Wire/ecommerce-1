@@ -55,12 +55,20 @@ variable "qualification_user" {
     error_message = "qualification_user must be a valid non-root Linux account name."
   }
 }
+variable "gateway_user" {
+  type = string
+  validation {
+    condition     = can(regex("^[a-z_][a-z0-9_-]{0,30}$", var.gateway_user)) && var.gateway_user != "root"
+    error_message = "gateway_user must be a valid non-root Linux account name."
+  }
+}
 variable "network_cidr" { type = string }
-variable "subnet_cidr" { type = string }
-variable "gateway_private_ip" { type = string }
-variable "runner_private_ip" { type = string }
-variable "squid_version" { type = string }
-variable "ubuntu_snapshot" { type = string }
+
+locals {
+  subnet_cidr        = var.network_cidr
+  gateway_private_ip = cidrhost(var.network_cidr, 2)
+  runner_private_ip  = cidrhost(var.network_cidr, 3)
+}
 
 data "hcloud_image" "qualification" {
   name              = var.image
@@ -79,6 +87,10 @@ data "hcloud_ssh_key" "qualification" {
   id = var.ssh_key_id
 }
 
+data "hcloud_location" "qualification" {
+  name = var.location
+}
+
 resource "hcloud_network" "qualification" {
   name     = "ecommerce-m1-qualification"
   ip_range = var.network_cidr
@@ -87,8 +99,8 @@ resource "hcloud_network" "qualification" {
 resource "hcloud_network_subnet" "qualification" {
   network_id   = hcloud_network.qualification.id
   type         = "cloud"
-  network_zone = "eu-central"
-  ip_range     = var.subnet_cidr
+  network_zone = data.hcloud_location.qualification.network_zone
+  ip_range     = local.subnet_cidr
 }
 
 resource "hcloud_firewall" "runner" {
@@ -97,14 +109,14 @@ resource "hcloud_firewall" "runner" {
     direction = "in"
     protocol = "tcp"
     port = "22"
-    source_ips = ["${var.gateway_private_ip}/32"]
+    source_ips = ["${local.gateway_private_ip}/32"]
     description = "SSH through the dedicated qualification bastion only"
   }
   rule {
     direction = "out"
     protocol = "tcp"
     port = "3128"
-    destination_ips = ["${var.gateway_private_ip}/32"]
+    destination_ips = ["${local.gateway_private_ip}/32"]
     description = "Proxy-only application egress"
   }
 }
@@ -122,14 +134,14 @@ resource "hcloud_firewall" "gateway" {
     direction = "in"
     protocol = "tcp"
     port = "3128"
-    source_ips = ["${var.runner_private_ip}/32"]
+    source_ips = ["${local.runner_private_ip}/32"]
     description = "Squid from the isolated runner only"
   }
   rule {
     direction = "out"
     protocol = "tcp"
     port = "22"
-    destination_ips = ["${var.runner_private_ip}/32"]
+    destination_ips = ["${local.runner_private_ip}/32"]
     description = "Bastion SSH to the isolated runner"
   }
   rule {
@@ -170,10 +182,8 @@ resource "hcloud_server" "gateway" {
   ssh_keys = [data.hcloud_ssh_key.qualification.id]
   firewall_ids = [hcloud_firewall.gateway.id]
   user_data = templatefile("${path.module}/gateway-cloud-init.yaml.tftpl", {
-    squid_version = var.squid_version
-    ubuntu_snapshot = var.ubuntu_snapshot
-    gateway_private_ip = var.gateway_private_ip
-    runner_private_ip = var.runner_private_ip
+    gateway_user   = var.gateway_user
+    ssh_public_key = data.hcloud_ssh_key.qualification.public_key
   })
   public_net {
     ipv4_enabled = true
@@ -185,7 +195,7 @@ resource "hcloud_server" "gateway" {
 resource "hcloud_server_network" "gateway" {
   server_id = hcloud_server.gateway.id
   network_id = hcloud_network.qualification.id
-  ip = var.gateway_private_ip
+  ip = local.gateway_private_ip
   depends_on = [hcloud_network_subnet.qualification]
 }
 
@@ -220,7 +230,7 @@ resource "hcloud_server" "runner" {
 resource "hcloud_server_network" "runner" {
   server_id = hcloud_server.runner.id
   network_id = hcloud_network.qualification.id
-  ip = var.runner_private_ip
+  ip = local.runner_private_ip
   depends_on = [hcloud_network_subnet.qualification]
 }
 
@@ -228,16 +238,22 @@ output "server_id" {
   value = hcloud_server.runner.id
 }
 output "runner_private_ip" {
-  value = var.runner_private_ip
+  value = local.runner_private_ip
 }
 output "gateway_ipv4" {
   value = hcloud_server.gateway.ipv4_address
 }
 output "gateway_private_ip" {
-  value = var.gateway_private_ip
+  value = local.gateway_private_ip
 }
 output "user" {
   value = var.qualification_user
+}
+output "gateway_user" {
+  value = var.gateway_user
+}
+output "network_zone" {
+  value = data.hcloud_location.qualification.network_zone
 }
 output "image_identity" {
   value = { id = data.hcloud_image.qualification.id, name = data.hcloud_image.qualification.name, os_flavor = data.hcloud_image.qualification.os_flavor, os_version = data.hcloud_image.qualification.os_version, architecture = data.hcloud_image.qualification.architecture }
