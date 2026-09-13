@@ -14,6 +14,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "docker.io",
         "build-essential",
         "git",
+        "gh",
         "make",
         "python3",
         "python3-venv",

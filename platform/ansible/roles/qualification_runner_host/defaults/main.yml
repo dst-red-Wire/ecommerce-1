@@ -10,6 +10,7 @@ qualification_packages:
   - "docker.io=27.5.1-0ubuntu3~24.04.1"
   - "build-essential=12.10ubuntu1"
   - "git=1:2.43.0-1ubuntu7.2"
+  - "gh=2.45.0-1ubuntu0.2"
   - "make=4.3-4.1build2"
   - "python3=3.12.3-0ubuntu2"
   - "python3-venv=3.12.3-0ubuntu2"
