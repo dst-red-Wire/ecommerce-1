@@ -76,6 +76,7 @@ def validate_contract(files: dict[str, str]) -> None:
         'ipv4_enabled = true',
         'qualification_gateway_user',
         'ProxyCommand=\\"ssh',
+        'KnownHostsCommand=none',
         'StrictHostKeyChecking=yes',
         'ForwardAgent=no',
         'ClearAllForwardings=yes',
@@ -137,6 +138,7 @@ def validate_contract(files: dict[str, str]) -> None:
         '-o ProxyCommand=\\"ssh '
         '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
         '-o GlobalKnownHostsFile=/dev/null '
+        '-o KnownHostsCommand=none '
         '-o StrictHostKeyChecking=yes '
         '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
         '-o ForwardAgent=no -o ClearAllForwardings=yes '
@@ -148,6 +150,7 @@ def validate_contract(files: dict[str, str]) -> None:
     runner_trust = (
         '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
         '-o GlobalKnownHostsFile=/dev/null '
+        '-o KnownHostsCommand=none '
         '-o StrictHostKeyChecking=yes '
         '-o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} '
         '-o ForwardAgent=no -o ClearAllForwardings=yes'
@@ -160,6 +163,7 @@ def validate_contract(files: dict[str, str]) -> None:
     gateway_trust = (
         '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
         '-o GlobalKnownHostsFile=/dev/null '
+        '-o KnownHostsCommand=none '
         '-o StrictHostKeyChecking=yes '
         '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
         '-o ForwardAgent=no -o ClearAllForwardings=yes'
@@ -185,6 +189,7 @@ def validate_contract(files: dict[str, str]) -> None:
     enrollment_gateway_trust = (
         'ssh -o UserKnownHostsFile="$staged_known_hosts" '
         '-o GlobalKnownHostsFile=/dev/null \\\n'
+        '  -o KnownHostsCommand=none \\\n'
         '  -o StrictHostKeyChecking=yes \\\n'
         '  -o HostKeyAlias="$QUALIFICATION_GATEWAY_HOST" \\\n'
         '  -o ForwardAgent=no -o ClearAllForwardings=yes'
@@ -193,7 +198,7 @@ def validate_contract(files: dict[str, str]) -> None:
         raise AssertionError("gateway enrollment is not isolated from global SSH trust")
     if (
         'ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
-        '-o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes '
+        '-o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes '
         '-o ForwardAgent=no -o ClearAllForwardings=yes"'
     ) not in runbook:
         raise AssertionError("qualification Ansible SSH args permit global trust fallback")
@@ -205,6 +210,7 @@ def validate_contract(files: dict[str, str]) -> None:
     gateway_proxy = (
         '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
         '-o GlobalKnownHostsFile=/dev/null '
+        '-o KnownHostsCommand=none '
         '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST '
         '-o ForwardAgent=no -o ClearAllForwardings=yes '
         '-l $GATEWAY_USER -W %h:%p $GATEWAY_HOST"'
@@ -212,6 +218,7 @@ def validate_contract(files: dict[str, str]) -> None:
     runner_trust = (
         '-o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\\n'
         '  -o GlobalKnownHostsFile=/dev/null \\\n'
+        '  -o KnownHostsCommand=none \\\n'
         '  -o StrictHostKeyChecking=yes \\\n'
         '  -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \\\n'
         '  -o ForwardAgent=no \\\n'
@@ -320,7 +327,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ("environment/outputs.tf", "StrictHostKeyChecking=yes", "StrictHostKeyChecking=no"),
             (
                 "environment/outputs.tf",
-                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
+                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
                 '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
             ),
             (
@@ -360,10 +367,12 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 "runbook",
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
                 + "\n  -o GlobalKnownHostsFile=/dev/null \\"
+                + "\n  -o KnownHostsCommand=none \\"
                 + "\n  -o StrictHostKeyChecking=yes \\"
                 + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
                 + "\n  -o GlobalKnownHostsFile=/dev/null \\"
+                + "\n  -o KnownHostsCommand=none \\"
                 + "\n  -o StrictHostKeyChecking=no \\"
                 + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
             ),
@@ -375,15 +384,29 @@ class QualificationTerraformContractTest(unittest.TestCase):
     def test_standalone_ansible_ssh_args_trust_mutations_are_rejected(self):
         outputs = self.files["environment/outputs.tf"]
         block = terraform_output_block(outputs, "qualification_ansible_ssh_args")
-        for marker in (
-            "GlobalKnownHostsFile=/dev/null",
-            "StrictHostKeyChecking=yes",
+        proxy_boundary = '-o ProxyCommand=\\"ssh '
+        runner_hop, gateway_hop = block.split(proxy_boundary, 1)
+        for hop, marker in (
+            ("runner", "GlobalKnownHostsFile=/dev/null"),
+            ("runner", "KnownHostsCommand=none"),
+            ("runner", "StrictHostKeyChecking=yes"),
+            ("gateway", "GlobalKnownHostsFile=/dev/null"),
+            ("gateway", "KnownHostsCommand=none"),
+            ("gateway", "StrictHostKeyChecking=yes"),
         ):
-            with self.subTest(marker=marker):
-                self.assertIn(marker, block)
+            with self.subTest(hop=hop, marker=marker):
+                segment = runner_hop if hop == "runner" else gateway_hop
+                self.assertEqual(
+                    segment.count(marker), 1, f"{hop} mutation fixture must be exact"
+                )
+                mutated_segment = segment.replace(marker, "", 1)
+                if hop == "runner":
+                    mutated_block = mutated_segment + proxy_boundary + gateway_hop
+                else:
+                    mutated_block = runner_hop + proxy_boundary + mutated_segment
                 mutated = dict(self.files)
                 mutated["environment/outputs.tf"] = outputs.replace(
-                    block, block.replace(marker, "", 1), 1
+                    block, mutated_block, 1
                 )
                 with self.assertRaises(AssertionError):
                     validate_contract(mutated)
