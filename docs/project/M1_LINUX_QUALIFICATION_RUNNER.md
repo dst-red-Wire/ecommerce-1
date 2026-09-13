@@ -25,7 +25,8 @@ export QUALIFICATION_HOST_FINGERPRINT=SHA256:replace-with-out-of-band-value
 
 candidate_key="$(mktemp)"
 trap 'rm -f "$candidate_key" "${staged_known_hosts:-}"' EXIT
-ssh-keyscan -H -t ed25519 -- "$QUALIFICATION_HOST" > "$candidate_key"
+case "$QUALIFICATION_HOST" in -*) exit 1 ;; esac
+ssh-keyscan -H -t ed25519 "$QUALIFICATION_HOST" > "$candidate_key"
 test "$(wc -l < "$candidate_key")" -eq 1
 test "$(awk '{print $2}' "$candidate_key")" = ssh-ed25519
 candidate_fingerprint="$(ssh-keygen -lf "$candidate_key" -E sha256 | awk '{print $2}')"

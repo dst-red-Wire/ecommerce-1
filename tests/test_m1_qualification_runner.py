@@ -58,7 +58,8 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     trust_markers = (
         "set -euo pipefail",
         "QUALIFICATION_HOST_FINGERPRINT=SHA256:",
-        'ssh-keyscan -H -t ed25519 -- "$QUALIFICATION_HOST" > "$candidate_key"',
+        'case "$QUALIFICATION_HOST" in -*) exit 1 ;; esac',
+        'ssh-keyscan -H -t ed25519 "$QUALIFICATION_HOST" > "$candidate_key"',
         'ssh-keygen -lf "$candidate_key" -E sha256',
         'test "$candidate_fingerprint" = "$QUALIFICATION_HOST_FINGERPRINT"',
         'cat "$candidate_key" > "$staged_known_hosts"',
