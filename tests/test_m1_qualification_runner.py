@@ -36,6 +36,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "enabled: true",
         "ansible.builtin.getent",
         "Remove mutable Ubuntu package sources",
+        "allow_downgrade: true",
     )
     combined = defaults + tasks
     for marker in required:
@@ -81,6 +82,16 @@ class QualificationRunnerContractTest(unittest.TestCase):
             tasks=self.tasks.replace("'Server:' not in qualification_docker_version.stdout", "false")
         )
 
+    def test_newer_preinstalled_package_can_reconcile_to_exact_snapshot_pin(self):
+        self.assertIn("allow_downgrade: true", self.tasks)
+        self.assertIn('name: "{{ qualification_packages }}"', self.tasks)
+        self.assertTrue(all("=" in package for package in self._declared_packages()))
+
+    def test_mutation_disallow_pinned_snapshot_downgrade(self):
+        self.assert_mutation_rejected(
+            tasks=self.tasks.replace("allow_downgrade: true", "allow_downgrade: false")
+        )
+
     def test_mutation_remove_non_root_docker_info_verification(self):
         start = self.tasks.index("- name: Verify Docker daemon information")
         self.assert_mutation_rejected(tasks=self.tasks[:start])
@@ -101,6 +112,13 @@ class QualificationRunnerContractTest(unittest.TestCase):
         self.assert_mutation_rejected(
             runbook=self.runbook.replace(f"git checkout --detach {sha}", "git checkout milestone/m1-monorepo-bootstrap")
         )
+
+    def _declared_packages(self):
+        return [
+            line.strip()[3:-1]
+            for line in self.defaults.splitlines()
+            if line.strip().startswith('- "')
+        ]
 
 
 if __name__ == "__main__":

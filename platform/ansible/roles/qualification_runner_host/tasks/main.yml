@@ -55,7 +55,7 @@
     name: "{{ qualification_packages }}"
     state: present
     update_cache: true
-    allow_downgrade: false
+    allow_downgrade: true
 
 - name: Prevent silent qualification package drift
   ansible.builtin.dpkg_selections:
