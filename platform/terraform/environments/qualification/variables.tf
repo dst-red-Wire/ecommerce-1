@@ -39,8 +39,8 @@ variable "qualification_ssh_allowed_cidrs" {
   type        = list(string)
   validation {
     condition = length(var.qualification_ssh_allowed_cidrs) > 0 && alltrue([
-      for cidr in var.qualification_ssh_allowed_cidrs : can(cidrhost(cidr, 0))
-    ]) && !contains(var.qualification_ssh_allowed_cidrs, "0.0.0.0/0") && !contains(var.qualification_ssh_allowed_cidrs, "::/0")
+      for cidr in var.qualification_ssh_allowed_cidrs : can(cidrhost(cidr, 0)) && !endswith(cidr, "/0")
+    ])
     error_message = "qualification_ssh_allowed_cidrs must be non-empty, valid, and restricted."
   }
 }

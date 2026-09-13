@@ -1,6 +1,6 @@
 check "restricted_ssh_sources" {
   assert {
-    condition     = !contains(var.qualification_ssh_allowed_cidrs, "0.0.0.0/0") && !contains(var.qualification_ssh_allowed_cidrs, "::/0")
+    condition     = alltrue([for cidr in var.qualification_ssh_allowed_cidrs : !endswith(cidr, "/0")])
     error_message = "Qualification SSH must remain restricted to trusted controller CIDRs."
   }
 }

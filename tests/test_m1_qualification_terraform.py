@@ -1,3 +1,5 @@
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -27,8 +29,7 @@ def validate_contract(files: dict[str, str]) -> None:
         'variable "qualification_server_type"',
         'variable "qualification_ssh_key_id"',
         'variable "qualification_ssh_allowed_cidrs"',
-        '!contains(var.qualification_ssh_allowed_cidrs, "0.0.0.0/0")',
-        '!contains(var.qualification_ssh_allowed_cidrs, "::/0")',
+        'for cidr in var.qualification_ssh_allowed_cidrs : can(cidrhost(cidr, 0)) && !endswith(cidr, "/0")',
         'name: ${qualification_user}',
         'sudo: ["ALL=(ALL) NOPASSWD:ALL"]',
         'ssh_authorized_keys:',
@@ -38,10 +39,10 @@ def validate_contract(files: dict[str, str]) -> None:
     for marker in required:
         if marker not in combined:
             raise AssertionError(f"missing qualification Terraform contract: {marker}")
-    cidr_guard = '!contains(var.qualification_ssh_allowed_cidrs, "0.0.0.0/0")'
+    cidr_guard = '!endswith(cidr, "/0")'
     if cidr_guard not in files["environment/variables.tf"]:
         raise AssertionError("environment SSH CIDR validation is missing")
-    if '!contains(var.ssh_allowed_cidrs, "0.0.0.0/0")' not in files["module/main.tf"]:
+    if '!endswith(cidr, "/0")' not in files["module/main.tf"]:
         raise AssertionError("module SSH CIDR validation is missing")
     forbidden = (
         'provisioner "local-exec"', 'provisioner "remote-exec"',
@@ -84,7 +85,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
         mutations = (
             ("module/main.tf", 'startswith(data.hcloud_image.qualification.os_version, "24.04")', 'data.hcloud_image.qualification.os_flavor == "rocky"'),
             ("module/cloud-init.yaml.tftpl", "name: ${qualification_user}", "name: root"),
-            ("environment/variables.tf", '!contains(var.qualification_ssh_allowed_cidrs, "0.0.0.0/0")', "true"),
+            ("environment/variables.tf", '!endswith(cidr, "/0")', "true"),
             ("module/main.tf", 'resource "hcloud_server" "qualification"', 'provisioner "remote-exec" {}\nresource "hcloud_server" "qualification"'),
             ("module/main.tf", 'resource "hcloud_server" "qualification"', 'provisioner "local-exec" {}\nresource "hcloud_server" "qualification"'),
             ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [docker install]"),
@@ -99,11 +100,16 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 self.assert_mutation_rejected(*mutation)
 
     def test_canonical_runner_is_unchanged_from_base(self):
-        import subprocess
+        base = os.environ.get("BASE", "")
+        self.assertRegex(base, r"^[0-9a-f]{40}$", "BASE must be the authenticated full lowercase Git SHA")
+        exists = subprocess.run(
+            ["git", "cat-file", "-e", f"{base}^{{commit}}"], cwd=ROOT
+        )
+        self.assertEqual(0, exists.returncode, "the exact BASE commit must exist")
         for path in RUNNER_PATHS:
             rel = path.relative_to(ROOT)
             result = subprocess.run(
-                ["git", "diff", "--quiet", "origin/main", "--", str(rel)], cwd=ROOT
+                ["git", "diff", "--quiet", base, "--", str(rel)], cwd=ROOT
             )
             self.assertEqual(0, result.returncode, f"canonical #78 path changed: {rel}")
 

@@ -53,11 +53,11 @@ variable "ssh_allowed_cidrs" {
   validation {
     condition = (
       length(var.ssh_allowed_cidrs) > 0 &&
-      alltrue([for cidr in var.ssh_allowed_cidrs : can(cidrhost(cidr, 0))]) &&
-      !contains(var.ssh_allowed_cidrs, "0.0.0.0/0") &&
-      !contains(var.ssh_allowed_cidrs, "::/0")
+      alltrue([
+        for cidr in var.ssh_allowed_cidrs : can(cidrhost(cidr, 0)) && !endswith(cidr, "/0")
+      ])
     )
-    error_message = "ssh_allowed_cidrs must contain valid trusted CIDRs and must not contain 0.0.0.0/0 or ::/0."
+    error_message = "ssh_allowed_cidrs must contain valid trusted CIDRs and must not contain an IPv4 or IPv6 zero-prefix network."
   }
 }
 
