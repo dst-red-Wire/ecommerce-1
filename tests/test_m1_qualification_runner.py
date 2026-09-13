@@ -54,6 +54,49 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     if "git checkout milestone/" in runbook or "git checkout infra/" in runbook:
         raise AssertionError("qualification checkout uses a mutable branch tip")
 
+    trust_markers = (
+        "QUALIFICATION_HOST_FINGERPRINT=SHA256:",
+        'ssh-keyscan -H -t ed25519 -- "$QUALIFICATION_HOST" > "$candidate_key"',
+        'ssh-keygen -lf "$candidate_key" -E sha256',
+        'test "$candidate_fingerprint" = "$QUALIFICATION_HOST_FINGERPRINT"',
+        'cat "$candidate_key" >> "$staged_known_hosts"',
+        'mv "$staged_known_hosts" ~/.ssh/known_hosts',
+    )
+    trust_positions = []
+    for marker in trust_markers:
+        position = runbook.find(marker)
+        if position < 0:
+            raise AssertionError(f"missing SSH trust-chain marker: {marker}")
+        trust_positions.append(position)
+    if trust_positions != sorted(trust_positions):
+        raise AssertionError("candidate host key is enrolled before fingerprint equality")
+
+    remote_start = runbook.find(
+        'ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" '
+        "'bash -se' <<'QUALIFICATION_RUNNER'"
+    )
+    remote_end = runbook.find("\nQUALIFICATION_RUNNER", remote_start + 1)
+    if remote_start < 0 or remote_end < 0:
+        raise AssertionError("qualification commands lack an explicit verified SSH context")
+    remote_sequence = runbook[remote_start:remote_end]
+    for command in (
+        "whoami",
+        "hostname",
+        "uname -a",
+        "docker version",
+        "docker info",
+        "sysctl -n net.ipv4.ip_forward",
+        "git rev-parse HEAD",
+        "git status --porcelain=v1",
+        "make seed",
+        "make bootstrap",
+        "make env-check",
+        "$HOME/.local/bin/go test -race -tags=integration",
+        "make ci",
+    ):
+        if command not in remote_sequence:
+            raise AssertionError(f"qualification command is not explicitly remote: {command}")
+
 
 class QualificationRunnerContractTest(unittest.TestCase):
     @classmethod
@@ -111,6 +154,23 @@ class QualificationRunnerContractTest(unittest.TestCase):
         sha = "58e10fdb7122f9f3302e3fc5534b07021f7cc37f"
         self.assert_mutation_rejected(
             runbook=self.runbook.replace(f"git checkout --detach {sha}", "git checkout milestone/m1-monorepo-bootstrap")
+        )
+
+    def test_mutation_remove_ssh_fingerprint_comparison(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace(
+                'test "$candidate_fingerprint" = "$QUALIFICATION_HOST_FINGERPRINT"',
+                'echo "$candidate_fingerprint"',
+            )
+        )
+
+    def test_mutation_remove_remote_execution_context(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace(
+                'ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" '
+                "'bash -se' <<'QUALIFICATION_RUNNER'",
+                "bash -se <<'QUALIFICATION_RUNNER'",
+            )
         )
 
     def _declared_packages(self):
