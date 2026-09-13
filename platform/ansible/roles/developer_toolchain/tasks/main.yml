@@ -414,6 +414,8 @@
   ansible.builtin.command:
     argv: ["{{ local_bin }}/corepack", pnpm, install, --no-frozen-lockfile]
     chdir: "{{ local_share }}/nx"
+  environment:
+    NODE_USE_ENV_PROXY: "1"
   when: nx_manifest.changed or nx_pnpm_policy.changed or not nx_binary.stat.exists
   changed_when: true
   tags: [toolchain, agent_tools]

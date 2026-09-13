@@ -1,4 +1,10 @@
-PYTHON := python3
+QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
+QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
+QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
+PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),python3)
+ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
+export PATH := $(QUALIFICATION_BIN):$(PATH)
+endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
@@ -6,13 +12,24 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help bootstrap env-check ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
-bootstrap: ## Reconcile capabilities independently in dependency order
-	@$(PYTHON) scripts/capability_bootstrap.py bootstrap
+seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
+	@$(PYTHON) scripts/capability_bootstrap.py seed
+
+bootstrap: seed ## Reconcile required static capabilities independently in dependency order
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
+
+bootstrap-runtime: seed ## Reconcile and require optional external runtime capabilities
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile runtime
 
 env-check: ## Audit capabilities without changing the workstation
-	@$(PYTHON) scripts/capability_bootstrap.py env-check
+	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile static
+
+env-check-runtime: ## Audit and require optional external runtime capabilities
+	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help

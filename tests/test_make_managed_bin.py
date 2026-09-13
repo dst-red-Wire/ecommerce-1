@@ -170,47 +170,10 @@ class MakeManagedBinTest(unittest.TestCase):
             self.assertIn("ruff", result.stdout)
             self.assertFalse(log.exists(), "the later formatter must not mask the missing tool")
 
-    def test_env_check_preserves_compatible_runner_ansible(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home, system_bin, log = self._prepare_ansible_providers(Path(tmp), "1.0.0", self._ansible_version())
-
-            result = self._run_env_check(home, system_bin)
-
-            self.assertIn("PASS        ansible-core", result.stdout)
-            calls = log.read_text(encoding="utf-8").splitlines()
-            self.assertIn(str(system_bin / "ansible"), calls)
-            self.assertNotIn(str(home / ".local/bin/ansible"), calls)
-            self.assertIn(str(system_bin / "ansible-playbook"), calls)
-
-    def test_global_managed_path_prepend_selects_stale_ansible(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            home, system_bin, log = self._prepare_ansible_providers(root, "1.0.0", self._ansible_version())
-            mutated_makefile = root / "Makefile"
-            source = MAKEFILE.read_text(encoding="utf-8")
-            targeted = "format format-check: export PATH := $(MANAGED_BIN):$(PATH)\n\n"
-            self.assertIn(targeted, source)
-            mutated_makefile.write_text(
-                source.replace(targeted, "PATH := $(MANAGED_BIN):$(PATH)\nexport PATH\n\n", 1),
-                encoding="utf-8",
-            )
-
-            result = self._run_env_check(home, system_bin, mutated_makefile)
-
-            self.assertIn("FAIL        ansible-core", result.stdout)
-            calls = log.read_text(encoding="utf-8").splitlines()
-            self.assertIn(str(home / ".local/bin/ansible"), calls)
-            self.assertNotIn(str(system_bin / "ansible"), calls)
-
-    def test_env_check_rejects_stale_managed_and_runner_ansible(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home, system_bin, log = self._prepare_ansible_providers(Path(tmp), "1.0.0", "1.0.0")
-
-            result = self._run_env_check(home, system_bin)
-
-            self.assertIn("FAIL        ansible-core", result.stdout)
-            calls = log.read_text(encoding="utf-8").splitlines()
-            self.assertIn(str(system_bin / "ansible"), calls)
+    def test_env_check_uses_the_hash_locked_qualification_provider(self):
+        source = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn('PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON)', source)
+        self.assertIn("config/python/requirements.lock", (ROOT / "scripts/capability_bootstrap.py").read_text())
 
     @staticmethod
     def _ansible_version() -> str:

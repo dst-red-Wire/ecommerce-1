@@ -21,6 +21,9 @@ CONTRACT = ROOT / "config/toolchain/capabilities.json"
 VERSIONS = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
+REQUIREMENTS = {"required-static", "optional-runtime"}
+SEED_LOCK = ROOT / "config/python/requirements.lock"
+SEED_VENV = ROOT / ".venv/qualification"
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
@@ -57,6 +60,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     """
     versions = versions or load_versions()
     graph = Graph(contract["capabilities"])
+    for name, item in graph.items.items():
+        if item.get("requirement") not in REQUIREMENTS:
+            raise ValueError(f"{name}: invalid or missing requirement")
     quality_names = ("ruff", "oxfmt", "oxlint")
     quality_items = [graph.items[name] for name in quality_names if name in graph.items]
     if len(quality_items) == len(quality_names):
@@ -389,6 +395,9 @@ class Auditor:
                 last = Result(
                     "BLOCKED" if item.get("external_failure") else "FAIL", detail or f"exit {proc.returncode}"
                 )
+            elif item.get("expected_output") is not None and detail != str(item["expected_output"]):
+                state = "BLOCKED" if item.get("external_failure") else "FAIL"
+                last = Result(state, f"expected output {item['expected_output']}; got {detail or 'empty'}")
             elif expected and self.installed_version(
                 detail, item.get("version_parser", "first_semver")
             ) != expected.removeprefix("v"):
@@ -434,7 +443,9 @@ class Auditor:
             return Result("BLOCKED", detail or f"provision exit {proc.returncode}")
         return self.check(item, item["name"])
 
-    def run(self, *, bootstrap: bool, os_name: str, arch: str) -> dict[str, Result]:
+    def run(self, *, bootstrap: bool, os_name: str, arch: str, profile: str = "static") -> dict[str, Result]:
+        if profile not in {"static", "runtime"}:
+            raise ValueError(f"unknown capability profile: {profile}")
         results: dict[str, Result] = {}
         for name in self.graph.order():
             item = self.graph.items[name]
@@ -462,24 +473,62 @@ class Auditor:
                 results[command] = platform_failure or (
                     Result("PASS", "ready") if self.which(command) else Result("FAIL", "tool absent")
                 )
+        if profile == "static":
+            for name, item in self.graph.items.items():
+                result = results[name]
+                if item["requirement"] == "optional-runtime" and result.state != "PASS":
+                    results[name] = Result("SKIP", f"environmental: {result.state.lower()} - {result.detail}")
         return results
+
+
+def seed_environment() -> int:
+    versions = load_versions()
+    lock = SEED_LOCK.read_text(encoding="utf-8").lower()
+    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+        expected = versions[key]
+        if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
+            raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
+    python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file():
+        subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
+    subprocess.run(
+        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
+        check=True,
+    )
+    ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
+    proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
+    if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
+        raise RuntimeError("seed Ansible version verification failed")
+    print(
+        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
+    )
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("bootstrap", "env-check"))
+    parser.add_argument("mode", choices=("seed", "bootstrap", "env-check"))
     parser.add_argument("--contract", type=Path, default=CONTRACT)
     parser.add_argument("--os")
     parser.add_argument("--arch")
+    parser.add_argument("--profile", choices=("static", "runtime"), default="static")
     args = parser.parse_args(argv)
+    if args.mode == "seed":
+        return seed_environment()
     contract = load_contract(args.contract)
     auditor = Auditor(contract)
     os_name, arch, context = normalized_platform(args.os, args.arch)
     print(f"PLATFORM os={os_name} arch={arch} context={context}")
-    results = auditor.run(bootstrap=args.mode == "bootstrap", os_name=os_name, arch=arch)
+    results = auditor.run(bootstrap=args.mode == "bootstrap", os_name=os_name, arch=arch, profile=args.profile)
     for name, result in results.items():
         print(f"{result.state:<11} {name:<25} {result.detail}")
-    return 0 if all(result.state == "PASS" for result in results.values()) else 1
+    required = {
+        name
+        for name, item in auditor.graph.items.items()
+        if args.profile == "runtime" or item["requirement"] == "required-static"
+    }
+    required.update(primitive["command"] for primitive in contract.get("platform_primitives", []))
+    return 0 if all(results[name].state == "PASS" for name in required) else 1
 
 
 if __name__ == "__main__":

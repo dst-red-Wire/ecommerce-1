@@ -83,6 +83,7 @@ def contract(items):
     for item in items:
         item = dict(item)
         item.setdefault("classification", "conditional")
+        item.setdefault("requirement", "required-static")
         normalized.append(item)
     commands = [item["command"] for item in normalized if item.get("command")]
     return {
@@ -109,6 +110,28 @@ class CapabilityGraphTest(unittest.TestCase):
 
 
 class CapabilityAuditTest(unittest.TestCase):
+    def test_static_profile_skips_external_network_capability_failure(self):
+        items = [
+            {
+                "name": "container-network-forwarding",
+                "requires": [],
+                "probe": ["sysctl", "-n", "net.ipv4.ip_forward"],
+                "expected_output": "1",
+                "external_failure": True,
+                "classification": "platform-provided",
+                "requirement": "optional-runtime",
+                "justification": "host-owned test capability",
+            }
+        ]
+        auditor = self.auditor(items, {"sysctl": (0, "0\n")}, present={"sysctl"})
+
+        static = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="static")
+        runtime = auditor.run(bootstrap=False, os_name="linux", arch="amd64", profile="runtime")
+
+        self.assertEqual("SKIP", static["container-network-forwarding"].state)
+        self.assertIn("expected output 1; got 0", static["container-network-forwarding"].detail)
+        self.assertEqual("BLOCKED", runtime["container-network-forwarding"].state)
+
     def runner(self, outcomes):
         def run(argv):
             rc, output = outcomes.get(argv[0], (0, "1.0"))
@@ -782,6 +805,11 @@ class CapabilityAuditTest(unittest.TestCase):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         self.assertIn('checksum: "sha256:{{ yq_sha256 }}"', tasks)
         self.assertIn('dest: "{{ local_bin }}/yq"', tasks)
+
+    def test_node_tooling_honors_ephemeral_runner_proxy_environment(self):
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        install = tasks.split("- name: Install isolated pinned Nx dependency", 1)[1].split("\n- name:", 1)[0]
+        self.assertIn('NODE_USE_ENV_PROXY: "1"', install)
 
     def test_ansible_entrypoints_are_bound_to_validated_core_provider(self):
         versions = MOD.load_versions()
