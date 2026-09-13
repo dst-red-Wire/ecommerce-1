@@ -55,12 +55,27 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_tests_cover_shared_packages_once(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('["go", "test", "-race", "./..."]', frontend)
-        self.assertNotIn('["go", "test", "-race", f"./apps/{target}"]', frontend)
+        self.assertIn('[str(go), "test", "-race", "./..."]', frontend)
+        self.assertNotIn('[str(go), "test", "-race", f"./apps/{target}"]', frontend)
+
+    def test_frontend_executes_the_managed_go_pair_it_validates(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        state = source[source.index("def developer_state_ready(") : source.index("def canonical_services(")]
+        frontend = source[source.index("def frontend(") : source.index("def site(")]
+        self.assertIn('managed_bin = Path.home() / ".local" / "bin"', state)
+        self.assertIn('go = managed_bin / "go"', frontend)
+        self.assertIn('env.pop("GOROOT", None)', frontend)
+        self.assertIn('[str(go), "test"', frontend)
+        self.assertNotIn('["go", "test"', frontend)
 
     def test_service_capabilities_follow_selected_workload(self):
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        for service, expected in (("cart", "go,cgo"), ("product", "go,cgo,sqlc,docker")):
+
+        def successful_run(command, **_kwargs):
+            stdout = "1\n" if command[0] == "sysctl" else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        for service, expected in (("cart", "go,cgo"), ("product", "go,cgo,sqlc")):
             with (
                 self.subTest(service=service),
                 mock.patch.object(REPOCTL, "canonical_services", return_value=[service]),
@@ -71,7 +86,8 @@ class M1ReviewClosureTests(unittest.TestCase):
                     "ruby_yaml",
                     return_value={"sql": [{"gen": {"go": {"out": "internal/infrastructure/postgres/sqlcgen"}}}]},
                 ),
-                mock.patch.object(REPOCTL, "run", return_value=completed),
+                mock.patch.object(REPOCTL, "run", side_effect=successful_run),
+                mock.patch.object(REPOCTL.shutil, "which", return_value="/bin/docker"),
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))
                 ensure.assert_called_once_with(expected)

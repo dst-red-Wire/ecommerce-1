@@ -24,8 +24,24 @@ templ layout(data page) {
 			</nav>
 			<main id="content">
 				<h1>{ data.Title }</h1>
-				<div class="card">{ data.Body }</div>
+				@pageContent(data)
 			</main>
 		</body>
 	</html>
+}
+
+templ pageContent(data page) {
+	<div class="card">
+		<p>{ data.Body }</p>
+		if !data.Admin && data.Title == "Catalog" {
+			<a href="/products/m1-demo">View M1 demonstration product</a>
+		}
+		if !data.Admin && data.Title == "Product" {
+			<form method="post" action="/cart/items" hx-post="/cart/items" hx-target="#cart-count" hx-swap="outerHTML">
+				<input type="hidden" name="product_id" value="m1-demo"/>
+				<button type="submit">Add to cart</button>
+			</form>
+			<aside id="cart-count" aria-live="polite">0 items</aside>
+		}
+	</div>
 }

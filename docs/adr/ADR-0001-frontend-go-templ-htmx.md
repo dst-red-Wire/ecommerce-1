@@ -10,7 +10,7 @@ Storefront and Admin previously used Next.js/React/Node.js. M1 completes the app
 
 Keep `frontend/apps/storefront` and `frontend/apps/admin`. Both are distinct deployable applications in the single Go module `frontend/go.mod`, included by the root `go.work`.
 
-The target production frontend runtime is Go + templ + HTMX. HTMX and CSS are vendored static assets embedded into the Go applications. Node.js tooling is prohibited from the active repository.
+The target production frontend runtime is Go + templ + HTMX. HTMX and CSS are vendored static assets embedded into the Go applications. Node.js is prohibited from application and business runtimes; repository-only accelerators and tooling may remain when governed by repository contracts.
 
 ## Consequences
 

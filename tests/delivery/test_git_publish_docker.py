@@ -15,8 +15,8 @@ class DockerPublishBoundaryTest(unittest.TestCase):
 
     def test_service_gate_requests_docker_only_for_container_tests(self):
         self.assertIn('capabilities = ["go", "cgo"]', CONTROLLER)
-        self.assertIn('if any("testcontainers" in path.read_text', CONTROLLER)
-        self.assertIn('capabilities.append("docker")', CONTROLLER)
+        self.assertIn("needs_containers = any", CONTROLLER)
+        self.assertIn("PLATFORM NOT CAPABLE: container integration", CONTROLLER)
         self.assertNotIn("ensure-docker-daemon.sh", CONTROLLER)
 
 

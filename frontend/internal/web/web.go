@@ -102,7 +102,9 @@ func (a App) route(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		fmt.Fprintf(w, `<section class="card"><h2>%s</h2><p>%s</p></section>`, template.HTMLEscapeString(title), template.HTMLEscapeString(body))
+		fmt.Fprintf(w, `<section><h2>%s</h2>`, template.HTMLEscapeString(title))
+		_ = pageContent(page{title, a.Name, body, a.Admin}).Render(r.Context(), w)
+		_, _ = fmt.Fprint(w, `</section>`)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

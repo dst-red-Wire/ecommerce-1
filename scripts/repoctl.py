@@ -227,8 +227,9 @@ def developer_state_ready(tags: str) -> bool:
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
     if "go" in wanted or "cgo" in wanted:
-        go = shutil.which("go")
-        gofmt = shutil.which("gofmt")
+        managed_bin = Path.home() / ".local" / "bin"
+        go = str(managed_bin / "go") if (managed_bin / "go").is_file() else None
+        gofmt = str(managed_bin / "gofmt") if (managed_bin / "gofmt").is_file() else None
         if not go or not gofmt:
             return False
         got = run([go, "version"], check=False, capture=True)
@@ -594,8 +595,14 @@ def frontend(action: str, scope: str = "") -> int:
     ensure_developer("go,cgo")
     managed_bin = Path.home() / ".local/bin"
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
-    require("go")
-    require("gofmt")
+    # A version manager may export a GOROOT for a different system Go. The
+    # repository-managed binary must discover and execute its own toolchain.
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    go = managed_bin / "go"
+    gofmt = managed_bin / "gofmt"
+    if not go.is_file() or not gofmt.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
@@ -603,7 +610,7 @@ def frontend(action: str, scope: str = "") -> int:
         raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
-        formatted = run(["gofmt", "-l", *files], capture=True, env=env)
+        formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
         if formatted.stdout.strip():
             return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
         forbidden_frontend_artifacts()
@@ -612,7 +619,7 @@ def frontend(action: str, scope: str = "") -> int:
                 generated_root = Path(temp_dir) / "frontend"
                 shutil.copytree(frontend_root, generated_root)
                 run(
-                    ["go", "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
                     cwd=generated_root,
                     env=env,
                 )
@@ -626,22 +633,22 @@ def frontend(action: str, scope: str = "") -> int:
                     if (frontend_root / relative).read_bytes() != (generated_root / relative).read_bytes():
                         return fail(f"frontend templ generated code is stale: {relative}")
         if action == "lint":
-            run(["go", "vet", "./..."], cwd=frontend_root, env=env)
+            run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
         env = dict(env, CGO_ENABLED="1")
         # One module-wide invocation runs shared package tests exactly once as well as
         # the independently deployable application packages.
-        run(["go", "test", "-race", "./..."], cwd=frontend_root, env=env)
+        run([str(go), "test", "-race", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
                 run(
-                    ["go", "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"],
+                    [str(go), "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"],
                     cwd=frontend_root,
                     env=env,
                 )
     if action == "check":
-        run(["go", "vet", "./..."], cwd=frontend_root, env=env)
+        run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
 
@@ -747,11 +754,12 @@ def service_check(service: str) -> int:
     if (module / "sqlc.yaml").is_file():
         capabilities.append("sqlc")
     selected_tests = list(module.rglob("*_test.go"))
-    if any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests):
-        capabilities.append("docker")
+    needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
     if (module / "sqlc.yaml").is_file():
         cfg = ruby_yaml(str(module / "sqlc.yaml"))
@@ -773,14 +781,24 @@ def service_check(service: str) -> int:
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
+    run(["go", "vet", "./..."], cwd=module, env=env)
+    run(["go", "build", "./..."], cwd=module, env=env)
+    if needs_containers:
+        docker = shutil.which("docker")
+        forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
+        docker_ready = bool(docker) and run([docker, "info"], check=False, capture=True).returncode == 0
+        if not docker_ready or forwarding.returncode or forwarding.stdout.strip() != "1":
+            return fail(
+                "PLATFORM NOT CAPABLE: container integration requires Docker user/daemon access "
+                "and net.ipv4.ip_forward=1",
+                2,
+            )
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
         run(
             ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
             cwd=module,
             env=env,
         )
-    run(["go", "vet", "./..."], cwd=module, env=env)
-    run(["go", "build", "./..."], cwd=module, env=env)
     print(f"PASS {service} service checks completed")
     return 0
 
