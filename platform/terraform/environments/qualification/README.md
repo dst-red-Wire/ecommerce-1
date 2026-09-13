@@ -38,7 +38,8 @@ while apt negotiates package access:
 | `get.helm.sh` | developer toolchain | pinned Helm archive |
 | `releases.hashicorp.com` | developer toolchain | pinned Terraform archive |
 | `dl.k8s.io` | developer toolchain | pinned kubectl binary |
-| `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | Docker/Testcontainers | registry authentication, manifests, layers, and PostgreSQL image |
+| `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | Docker/Testcontainers | registry authentication, manifests, and legacy layer delivery |
+| `docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com` | Docker Hub image layer delivery | mandatory PostgreSQL Testcontainers image pull over HTTPS (TCP 443) |
 
 ## Trusted two-hop SSH enrollment and provisioning
 
@@ -90,6 +91,61 @@ export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o Str
 ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-egress.yml
 ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml
 ```
+
+Only after both independently verified keys have been enrolled above, run the
+final Product and repository proof on the private runner through the verified
+gateway. Populate these values from `qualification_gateway_ipv4`,
+`qualification_gateway_user`, `qualification_runner_private_ipv4`, and
+`qualification_user`; use the same dedicated known-hosts file enrolled above:
+
+```text
+export GATEWAY_HOST="$QUALIFICATION_GATEWAY_HOST"
+export GATEWAY_USER="$QUALIFICATION_GATEWAY_USER"
+export RUNNER_PRIVATE_HOST="$QUALIFICATION_RUNNER_HOST"
+export QUALIFICATION_USER=replace-from-qualification_user
+ssh \
+  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \
+  -o StrictHostKeyChecking=yes \
+  -o ForwardAgent=no \
+  -o ClearAllForwardings=yes \
+  -o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}" \
+  "${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}" \
+  'bash -se' <<'QUALIFICATION_RUNNER'
+set -euo pipefail
+whoami
+hostname
+uname -a
+docker version
+docker info
+sysctl -n net.ipv4.ip_forward
+
+cd "$HOME/ecommerce-1"
+git fetch origin \
+  58e10fdb7122f9f3302e3fc5534b07021f7cc37f \
+  45433013f97a94a8acf94c51a913ff071e6f74b2
+git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+worktree_status="$(git status --porcelain=v1)"
+printf '%s' "$worktree_status"
+test -z "$worktree_status"
+make seed
+make bootstrap
+make env-check
+test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+post_bootstrap_status="$(git status --porcelain=v1)"
+printf '%s' "$post_bootstrap_status"
+test -z "$post_bootstrap_status"
+test "$(sysctl -n net.ipv4.ip_forward)" = "1"
+cd services/product
+$HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1
+cd ../..
+BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci
+QUALIFICATION_RUNNER
+```
+
+This command deliberately supplies no `HostKeyAlias`: the enrolled gateway
+identity is its public address and the enrolled runner identity is its private
+address, exactly matching the two SSH destinations used by `ProxyJump`.
 
 The inventory must contain groups `qualification_gateways` and
 `qualification_runners`, populated from the two Terraform inventory outputs.

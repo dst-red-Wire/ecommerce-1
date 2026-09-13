@@ -103,6 +103,7 @@ def validate_contract(files: dict[str, str]) -> None:
         "go.dev", "dl.google.com", "storage.googleapis.com", "nodejs.org",
         "registry.npmjs.org", "get.helm.sh", "releases.hashicorp.com", "dl.k8s.io",
         "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com",
+        "docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com",
     )
     for domain in required_domains:
         if f"- {domain}" not in files["ansible/gateway_defaults"]:
@@ -132,6 +133,25 @@ def validate_contract(files: dict[str, str]) -> None:
     ):
         if trust_marker not in runbook:
             raise AssertionError(f"two-hop trust procedure is incomplete: {trust_marker}")
+    final_proof_start = runbook.find('ssh \\\n  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS"')
+    final_proof_end = runbook.find("\nQUALIFICATION_RUNNER", final_proof_start)
+    if final_proof_start < 0 or final_proof_end < 0:
+        raise AssertionError("final qualification proof lacks an exact SSH invocation")
+    final_proof = runbook[final_proof_start:final_proof_end]
+    for marker in (
+        '-o StrictHostKeyChecking=yes',
+        '-o ForwardAgent=no',
+        '-o ClearAllForwardings=yes',
+        '-o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}"',
+        '"${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}"',
+        "whoami", "hostname", "uname -a", "docker version", "docker info",
+        "sysctl -n net.ipv4.ip_forward", "git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f",
+        "make seed", "make bootstrap", "make env-check", "git status --porcelain=v1",
+        "$HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1",
+        "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci",
+    ):
+        if marker not in final_proof:
+            raise AssertionError(f"final private-runner proof is incomplete: {marker}")
     if 'variable "qualification_subnet_cidr"' in combined or "var.subnet_cidr" in main:
         raise AssertionError("redundant topology inputs are forbidden")
     if 'network_zone = "eu-central"' in main:
@@ -191,6 +211,11 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 "/tmp/proxy.conf",
             ),
             ("ansible/gateway_defaults", "- nodejs.org", "- removed.invalid"),
+            (
+                "ansible/gateway_defaults",
+                "- docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com",
+                "- removed.invalid",
+            ),
             ("ansible/squid_policy", "http_access deny all", "http_access allow all"),
             ("ansible/squid_policy", "http_access allow runner allowed_domains", "http_access allow CONNECT"),
             ("module/main.tf", "ipv4_enabled = false", "ipv4_enabled = true"),
@@ -213,6 +238,14 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ("environment/outputs.tf", "StrictHostKeyChecking=yes", "StrictHostKeyChecking=no"),
             ("runbook", 'QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:', "GATEWAY_SCAN_IS_TRUSTED="),
             ("runbook", 'QUALIFICATION_RUNNER_FINGERPRINT=SHA256:', "RUNNER_SCAN_IS_TRUSTED="),
+            ("runbook", '-o ProxyJump="${GATEWAY_USER}@${GATEWAY_HOST}"', "-o ProxyCommand=none"),
+            (
+                "runbook",
+                '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
+                + "\n  -o StrictHostKeyChecking=yes",
+                '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
+                + "\n  -o StrictHostKeyChecking=no",
+            ),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
@@ -225,12 +258,18 @@ class QualificationTerraformContractTest(unittest.TestCase):
             self.assertTrue(cidr.endswith("/0"))
 
     def test_base_resolution_modes(self):
-        expected = subprocess.check_output(["git", "rev-parse", "origin/main"], cwd=ROOT, text=True).strip()
-        self.assertIsNone(resolve_base(""))
-        self.assertEqual(expected, resolve_base("origin/main"))
-        self.assertEqual(expected, resolve_base(expected))
-        with self.assertRaises(AssertionError):
-            resolve_base("not-a-real-base-ref")
+        expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        test_ref = "refs/heads/test-m1-base-ref"
+        subprocess.run(["git", "update-ref", "-d", test_ref], cwd=ROOT, check=True)
+        try:
+            subprocess.run(["git", "update-ref", test_ref, expected], cwd=ROOT, check=True)
+            self.assertIsNone(resolve_base(""))
+            self.assertEqual(expected, resolve_base(test_ref))
+            self.assertEqual(expected, resolve_base(expected))
+            with self.assertRaises(AssertionError):
+                resolve_base("not-a-real-base-ref")
+        finally:
+            subprocess.run(["git", "update-ref", "-d", test_ref], cwd=ROOT, check=True)
 
     def test_canonical_runner_is_unchanged_from_base(self):
         base = resolve_base(os.environ.get("BASE", ""))

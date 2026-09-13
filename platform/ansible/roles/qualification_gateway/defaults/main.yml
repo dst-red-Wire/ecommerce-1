@@ -33,3 +33,5 @@ qualification_squid_allowed_domains:
   - registry-1.docker.io
   - auth.docker.io
   - production.cloudflare.docker.com
+  # Docker Hub's R2-backed layer delivery endpoint required by postgres Testcontainers.
+  - docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com
