@@ -123,6 +123,44 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         if command not in remote_sequence:
             raise AssertionError(f"qualification command is not explicitly remote: {command}")
 
+    single_use_markers = (
+        "Require a fresh never-used qualification runner",
+        "not qualification_consumed.stat.exists",
+        "retries and runner reuse are forbidden",
+        "Mark this runner consumed before PR-owned code executes",
+        "one qualification attempt",
+        "destroy the VM",
+    )
+    for marker in single_use_markers:
+        if marker not in combined + runbook:
+            raise AssertionError(f"missing single-use runner contract: {marker}")
+
+    credential_markers = (
+        "no cloud instance role",
+        "managed-identity or metadata-service credentials",
+        "no mounted provider secrets",
+        "no CI/controller credentials copied onto it",
+        "no access to internal credential-bearing services",
+        "isolated, least-egress qualification network",
+    )
+    normalized_runbook = " ".join(runbook.split())
+    for marker in credential_markers:
+        if marker not in normalized_runbook:
+            raise AssertionError(f"missing credential-isolation contract: {marker}")
+
+    product_start = remote_sequence.find("cd services/product")
+    post_bootstrap = remote_sequence.find("make env-check")
+    final_head = remote_sequence.find(
+        'test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f',
+        post_bootstrap,
+    )
+    final_clean = remote_sequence.find('test -z "$post_bootstrap_status"', post_bootstrap)
+    final_forwarding = remote_sequence.find(
+        'test "$(sysctl -n net.ipv4.ip_forward)" = "1"', post_bootstrap
+    )
+    if not (post_bootstrap < final_head < final_clean < final_forwarding < product_start):
+        raise AssertionError("post-bootstrap fail-closed checks do not immediately precede Product")
+
 
 class QualificationRunnerContractTest(unittest.TestCase):
     @classmethod
@@ -222,6 +260,35 @@ class QualificationRunnerContractTest(unittest.TestCase):
     def test_mutation_allow_dirty_remote_checkout(self):
         self.assert_mutation_rejected(
             runbook=self.runbook.replace('test -z "$worktree_status"', 'echo "$worktree_status"')
+        )
+
+    def test_mutation_accept_reusable_tainted_runner(self):
+        self.assert_mutation_rejected(
+            playbook=self.playbook.replace("not qualification_consumed.stat.exists", "qualification_consumed.stat.exists")
+        )
+
+    def test_mutation_remove_post_bootstrap_worktree_check(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace('test -z "$post_bootstrap_status"', 'echo "$post_bootstrap_status"')
+        )
+
+    def test_mutation_remove_post_bootstrap_exact_head_check(self):
+        marker = 'test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f'
+        position = self.runbook.index(marker, self.runbook.index("make env-check"))
+        mutated = self.runbook[:position] + "git rev-parse HEAD" + self.runbook[position + len(marker):]
+        self.assert_mutation_rejected(runbook=mutated)
+
+    def test_mutation_replace_final_ip_forward_assertion_with_print(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace(
+                'test "$(sysctl -n net.ipv4.ip_forward)" = "1"',
+                "sysctl -n net.ipv4.ip_forward",
+            )
+        )
+
+    def test_mutation_remove_credential_isolation_requirement(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace("no cloud instance role", "ordinary cloud host")
         )
 
     def _declared_packages(self):

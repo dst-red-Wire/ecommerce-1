@@ -6,20 +6,33 @@
   roles:
     - role: qualification_runner_host
   post_tasks:
-    - name: Inspect an existing qualification checkout
+    - name: Detect a previously consumed qualification runner
+      ansible.builtin.stat:
+        path: "{{ qualification_consumed_marker }}"
+      register: qualification_consumed
+
+    - name: Detect a pre-existing qualification checkout
       ansible.builtin.stat:
         path: "{{ qualification_repository_path }}/.git"
       register: qualification_checkout
 
-    - name: Reject a dirty existing qualification checkout
-      ansible.builtin.command:
-        argv: [git, status, --porcelain=v1]
-        chdir: "{{ qualification_repository_path }}"
-      become_user: "{{ qualification_user }}"
-      register: qualification_existing_status
-      changed_when: false
-      failed_when: qualification_existing_status.stdout | length > 0
-      when: qualification_checkout.stat.exists
+    - name: Require a fresh never-used qualification runner
+      ansible.builtin.assert:
+        that:
+          - not qualification_consumed.stat.exists
+          - not qualification_checkout.stat.exists
+        fail_msg: >-
+          This runner is consumed or already contains a checkout. Destroy it and
+          provision a fresh runner; retries and runner reuse are forbidden.
+
+    - name: Mark this runner consumed before PR-owned code executes
+      ansible.builtin.copy:
+        dest: "{{ qualification_consumed_marker }}"
+        owner: root
+        group: root
+        mode: "0400"
+        force: false
+        content: "single qualification attempt only; destroy this host after execution\n"
 
     - name: Clone the qualification repository when absent
       ansible.builtin.git:

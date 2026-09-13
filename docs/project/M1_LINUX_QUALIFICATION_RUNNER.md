@@ -10,7 +10,9 @@ playbook reconciles both on the runner before proof execution.
 
 ## Provision a clean host
 
-Supply a clean Ubuntu 24.04 x86_64 VM with systemd, SSH/root escalation, the image's base
+One runner instance is valid for exactly one qualification attempt. Supply a fresh,
+never-used Ubuntu 24.04 x86_64 VM on which no PR-owned code has previously executed, with
+systemd, SSH/root escalation, the image's base
 Python 3 interpreter (required for Ansible fact gathering), outbound access to the Ubuntu
 snapshot service, and an existing regular non-root qualification account with non-interactive
 sudo (the repository bootstrap reconciles OS packages through Ansible). Copy
@@ -19,6 +21,21 @@ the example address, and invoke the playbook from a trusted controller with the 
 pinned Ansible Core. Set the host name and canonical SHA256 fingerprint obtained from the
 provider console (or another authenticated, out-of-band channel), then verify and enroll exactly
 one ED25519 candidate key before Ansible is allowed to connect:
+
+Because PR-owned code receives passwordless sudo and Docker-root-equivalent access, execution
+taints the entire host, not merely the Git worktree. A clean `git status` cannot establish safe
+reuse: hooks, Git configuration, Docker state, root-owned state, and caches may have changed.
+The playbook rejects an existing checkout or consumed marker and marks the instance consumed
+before PR-owned bootstrap begins. Regardless of success or failure, retain external evidence,
+then destroy the VM. A retry requires a newly provisioned runner instance; never scrub or reuse
+the old instance.
+
+The disposable host must have no cloud instance role; no AWS-, GCP-, Azure-, Hetzner-, or other
+managed-identity or metadata-service credentials; no mounted provider secrets; and no
+CI/controller credentials copied onto it. It must have no access to internal credential-bearing
+services. Place it on an isolated, least-egress qualification network that permits only the
+public package, source, and container endpoints required by this proof. These are host/network
+admission requirements, not properties entrusted to untrusted PR code.
 
 ```text
 set -euo pipefail
@@ -96,6 +113,13 @@ test -z "$worktree_status"
 make seed
 make bootstrap
 make env-check
+# Bootstrap is PR-owned and must not change either the qualified commit or worktree.
+test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+post_bootstrap_status="$(git status --porcelain=v1)"
+printf '%s' "$post_bootstrap_status"
+test -z "$post_bootstrap_status"
+# Final fail-closed host capability proof immediately precedes Product integration.
+test "$(sysctl -n net.ipv4.ip_forward)" = "1"
 cd services/product
 $HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1
 cd ../..
