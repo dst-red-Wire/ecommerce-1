@@ -73,7 +73,8 @@ test "$(ssh-keygen -lf "$gateway_key" -E sha256 | awk '{print $2}')" = "$QUALIFI
 ssh-keygen -H -f "$gateway_key"
 mv "$gateway_key" "$staged_known_hosts"
 
-ssh -o UserKnownHostsFile="$staged_known_hosts" -o StrictHostKeyChecking=yes \
+ssh -o UserKnownHostsFile="$staged_known_hosts" -o GlobalKnownHostsFile=/dev/null \
+  -o StrictHostKeyChecking=yes \
   -o HostKeyAlias="$QUALIFICATION_GATEWAY_HOST" \
   -o ForwardAgent=no -o ClearAllForwardings=yes \
   "$QUALIFICATION_GATEWAY_USER@$QUALIFICATION_GATEWAY_HOST" \
@@ -88,7 +89,7 @@ chmod 0600 "$staged_known_hosts"
 mv "$staged_known_hosts" "$QUALIFICATION_KNOWN_HOSTS"
 
 export ANSIBLE_HOST_KEY_CHECKING=True
-export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ClearAllForwardings=yes"
+export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ClearAllForwardings=yes"
 ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-egress.yml
 ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml
 ```
@@ -106,11 +107,12 @@ export RUNNER_PRIVATE_HOST="$QUALIFICATION_RUNNER_HOST"
 export QUALIFICATION_USER=replace-from-qualification_user
 ssh \
   -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \
+  -o GlobalKnownHostsFile=/dev/null \
   -o StrictHostKeyChecking=yes \
   -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \
   -o ForwardAgent=no \
   -o ClearAllForwardings=yes \
-  -o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no -o ClearAllForwardings=yes -l $GATEWAY_USER -W %h:%p $GATEWAY_HOST" \
+  -o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no -o ClearAllForwardings=yes -l $GATEWAY_USER -W %h:%p $GATEWAY_HOST" \
   "${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}" \
   'bash -se' <<'QUALIFICATION_RUNNER'
 set -euo pipefail
@@ -147,8 +149,9 @@ QUALIFICATION_RUNNER
 
 The explicit `ProxyCommand` binds the gateway connection to the same dedicated
 known-hosts file and strict policy as the outer runner connection. Each hop
-also names its exact enrolled address through `HostKeyAlias`; neither hop can
-fall back to the controller's default known-hosts files or agent forwarding.
+also sets `GlobalKnownHostsFile=/dev/null` and names its exact enrolled address
+through `HostKeyAlias`; the dedicated qualification file is therefore the only
+host-key trust source, with no global-store fallback or agent forwarding.
 
 The inventory must contain groups `qualification_gateways` and
 `qualification_runners`, populated from the two Terraform inventory outputs.

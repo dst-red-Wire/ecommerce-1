@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import unittest
+import uuid
 from pathlib import Path
 
 
@@ -124,6 +125,7 @@ def validate_contract(files: dict[str, str]) -> None:
     gateway_proxy = (
         '-o ProxyCommand=\\"ssh '
         '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
+        '-o GlobalKnownHostsFile=/dev/null '
         '-o StrictHostKeyChecking=yes '
         '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
         '-o ForwardAgent=no -o ClearAllForwardings=yes '
@@ -134,12 +136,25 @@ def validate_contract(files: dict[str, str]) -> None:
         raise AssertionError("inventory gateway hop is not bound to its dedicated trust policy")
     runner_trust = (
         '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
+        '-o GlobalKnownHostsFile=/dev/null '
         '-o StrictHostKeyChecking=yes '
         '-o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} '
         '-o ForwardAgent=no -o ClearAllForwardings=yes'
     )
     if runner_trust not in inventory_output:
         raise AssertionError("inventory runner hop is not bound to its dedicated trust policy")
+    gateway_inventory_output = outputs.split(
+        'output "qualification_gateway_inventory_host_line"', 1
+    )[1].split('output "qualification_proxyjump"', 1)[0]
+    gateway_trust = (
+        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
+        '-o GlobalKnownHostsFile=/dev/null '
+        '-o StrictHostKeyChecking=yes '
+        '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
+        '-o ForwardAgent=no -o ClearAllForwardings=yes'
+    )
+    if gateway_trust not in gateway_inventory_output:
+        raise AssertionError("inventory gateway connection permits alternate SSH trust")
     runbook = files["runbook"]
     for trust_marker in (
         "QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:",
@@ -149,6 +164,21 @@ def validate_contract(files: dict[str, str]) -> None:
     ):
         if trust_marker not in runbook:
             raise AssertionError(f"two-hop trust procedure is incomplete: {trust_marker}")
+    enrollment_gateway_trust = (
+        'ssh -o UserKnownHostsFile="$staged_known_hosts" '
+        '-o GlobalKnownHostsFile=/dev/null \\\n'
+        '  -o StrictHostKeyChecking=yes \\\n'
+        '  -o HostKeyAlias="$QUALIFICATION_GATEWAY_HOST" \\\n'
+        '  -o ForwardAgent=no -o ClearAllForwardings=yes'
+    )
+    if enrollment_gateway_trust not in runbook:
+        raise AssertionError("gateway enrollment is not isolated from global SSH trust")
+    if (
+        'ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
+        '-o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes '
+        '-o ForwardAgent=no -o ClearAllForwardings=yes"'
+    ) not in runbook:
+        raise AssertionError("qualification Ansible SSH args permit global trust fallback")
     final_proof_start = runbook.find('ssh \\\n  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS"')
     final_proof_end = runbook.find("\nQUALIFICATION_RUNNER", final_proof_start)
     if final_proof_start < 0 or final_proof_end < 0:
@@ -156,12 +186,14 @@ def validate_contract(files: dict[str, str]) -> None:
     final_proof = runbook[final_proof_start:final_proof_end]
     gateway_proxy = (
         '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
+        '-o GlobalKnownHostsFile=/dev/null '
         '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST '
         '-o ForwardAgent=no -o ClearAllForwardings=yes '
         '-l $GATEWAY_USER -W %h:%p $GATEWAY_HOST"'
     )
     runner_trust = (
         '-o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\\n'
+        '  -o GlobalKnownHostsFile=/dev/null \\\n'
         '  -o StrictHostKeyChecking=yes \\\n'
         '  -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \\\n'
         '  -o ForwardAgent=no \\\n'
@@ -268,9 +300,24 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 "runner_private_ip = cidrhost(var.network_cidr, 2)",
             ),
             ("environment/outputs.tf", "StrictHostKeyChecking=yes", "StrictHostKeyChecking=no"),
+            (
+                "environment/outputs.tf",
+                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
+                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
+            ),
+            (
+                "environment/outputs.tf",
+                '-o ProxyCommand=\\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null',
+                '-o ProxyCommand=\\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS}',
+            ),
             ("runbook", 'QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:', "GATEWAY_SCAN_IS_TRUSTED="),
             ("runbook", 'QUALIFICATION_RUNNER_FINGERPRINT=SHA256:', "RUNNER_SCAN_IS_TRUSTED="),
             ("runbook", '-o ProxyCommand="ssh ', '-o ProxyCommand="false '),
+            (
+                "runbook",
+                'ssh -o UserKnownHostsFile="$staged_known_hosts" -o GlobalKnownHostsFile=/dev/null',
+                'ssh -o UserKnownHostsFile="$staged_known_hosts"',
+            ),
             (
                 "runbook",
                 '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS',
@@ -278,8 +325,8 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ),
             (
                 "runbook",
-                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=yes',
-                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o StrictHostKeyChecking=no',
+                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o GlobalKnownHostsFile=/dev/null',
+                '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS',
             ),
             (
                 "runbook",
@@ -294,9 +341,11 @@ class QualificationTerraformContractTest(unittest.TestCase):
             (
                 "runbook",
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
+                + "\n  -o GlobalKnownHostsFile=/dev/null \\"
                 + "\n  -o StrictHostKeyChecking=yes \\"
                 + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
                 '  -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\'
+                + "\n  -o GlobalKnownHostsFile=/dev/null \\"
                 + "\n  -o StrictHostKeyChecking=no \\"
                 + '\n  -o HostKeyAlias="$RUNNER_PRIVATE_HOST"',
             ),
@@ -313,8 +362,17 @@ class QualificationTerraformContractTest(unittest.TestCase):
 
     def test_base_resolution_modes(self):
         expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-        test_ref = "refs/heads/test-m1-base-ref"
-        subprocess.run(["git", "update-ref", "-d", test_ref], cwd=ROOT, check=True)
+        developer_ref = "refs/heads/test-m1-base-ref"
+        developer_ref_before = subprocess.run(
+            ["git", "rev-parse", "--verify", developer_ref],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        test_ref = f"refs/m1-tests/base-{uuid.uuid4().hex}"
+        self.assertTrue(test_ref.startswith("refs/m1-tests/base-"))
+        self.assertFalse(test_ref.startswith("refs/heads/"))
+        self.assertNotEqual(developer_ref, test_ref)
         try:
             subprocess.run(["git", "update-ref", test_ref, expected], cwd=ROOT, check=True)
             self.assertIsNone(resolve_base(""))
@@ -324,6 +382,17 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 resolve_base("not-a-real-base-ref")
         finally:
             subprocess.run(["git", "update-ref", "-d", test_ref], cwd=ROOT, check=True)
+        self.assertNotEqual(0, subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", test_ref], cwd=ROOT
+        ).returncode)
+        developer_ref_after = subprocess.run(
+            ["git", "rev-parse", "--verify", developer_ref],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(developer_ref_before.returncode, developer_ref_after.returncode)
+        self.assertEqual(developer_ref_before.stdout, developer_ref_after.stdout)
 
     def test_canonical_runner_is_unchanged_from_base(self):
         base = resolve_base(os.environ.get("BASE", ""))
