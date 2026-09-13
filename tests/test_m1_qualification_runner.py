@@ -88,6 +88,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "sysctl -n net.ipv4.ip_forward",
         "git rev-parse HEAD",
         "git status --porcelain=v1",
+        'test -z "$worktree_status"',
         "make seed",
         "make bootstrap",
         "make env-check",
@@ -171,6 +172,11 @@ class QualificationRunnerContractTest(unittest.TestCase):
                 "'bash -se' <<'QUALIFICATION_RUNNER'",
                 "bash -se <<'QUALIFICATION_RUNNER'",
             )
+        )
+
+    def test_mutation_allow_dirty_remote_checkout(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace('test -z "$worktree_status"', 'echo "$worktree_status"')
         )
 
     def _declared_packages(self):

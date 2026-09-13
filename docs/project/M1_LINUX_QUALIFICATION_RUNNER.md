@@ -60,7 +60,8 @@ inside the quoted heredoc runs on that exact runner, not on the controller. For 
 the runner clones normally and then detaches at the immutable object:
 
 ```text
-export QUALIFICATION_USER=qualification
+# This must exactly match qualification_user in /secure/path/qualification.ini.
+export QUALIFICATION_USER=ubuntu
 ssh -o StrictHostKeyChecking=yes "$QUALIFICATION_USER@$QUALIFICATION_HOST" 'bash -se' <<'QUALIFICATION_RUNNER'
 set -euo pipefail
 whoami
@@ -77,7 +78,9 @@ cd "$HOME/ecommerce-1"
 git fetch origin 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
 git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
 git rev-parse HEAD
-git status --porcelain=v1
+worktree_status="$(git status --porcelain=v1)"
+printf '%s' "$worktree_status"
+test -z "$worktree_status"
 make seed
 make bootstrap
 make env-check
