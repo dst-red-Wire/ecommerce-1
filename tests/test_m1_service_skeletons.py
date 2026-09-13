@@ -17,9 +17,7 @@ class M1ServiceSkeletonTests(unittest.TestCase):
                 self.assertTrue((service / "go.mod").is_file())
                 self.assertTrue((service / "migrations").is_dir())
                 self.assertTrue((service / "tests").is_dir())
-                self.assertTrue(
-                    (service / "Containerfile").is_file() or (service / "Dockerfile").is_file()
-                )
+                self.assertTrue((service / "Containerfile").is_file() or (service / "Dockerfile").is_file())
 
 
 if __name__ == "__main__":

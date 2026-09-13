@@ -20,9 +20,12 @@ class ArchitectureAuthorityTest(unittest.TestCase):
 
     def test_active_superseded_statements(self):
         for statement in (
-            "Exactly 17 services.", "17 Go services + Storefront/Admin workloads.",
-            "exactly 17 backend service directories", "No checkout service.",
-            "PROD frontend target: Next.js.", "ATS -> Storefront Next.js",
+            "Exactly 17 services.",
+            "17 Go services + Storefront/Admin workloads.",
+            "exactly 17 backend service directories",
+            "No checkout service.",
+            "PROD frontend target: Next.js.",
+            "ATS -> Storefront Next.js",
             "Dataset versioning: DVC + Git + SeaweedFS S3.",
             "BASELINE_V2.md is the canonical architecture authority.",
             "Active exact index: EXACT_TOPOLOGY_V2.md.",
@@ -30,35 +33,42 @@ class ArchitectureAuthorityTest(unittest.TestCase):
             "DVC is the active dataset versioner; lakeFS was rejected.",
             "Exactly 17 services; the historical diagram is attached.",
             "BASELINE_V2.md is canonical; the prior plan is superseded.",
-            "Use the canonical V2 baseline.", "Synchronize with baseline V2.",
+            "Use the canonical V2 baseline.",
+            "Synchronize with baseline V2.",
             "M0 locks the V2 canonical baseline.",
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
 
     def test_historical_context_does_not_exempt_later_active_claim(self):
-        self.assertEqual([], authority.documentation_errors(
-            "DVC is superseded by lakeFS.\nNext.js is the migration source.\n"
-            "Historical: exactly 17 services."
-        ))
-        self.assertTrue(authority.documentation_errors(
-            "Historical: DVC was used.\nDataset versioning: DVC."
-        ))
+        self.assertEqual(
+            [],
+            authority.documentation_errors(
+                "DVC is superseded by lakeFS.\nNext.js is the migration source.\nHistorical: exactly 17 services."
+            ),
+        )
+        self.assertTrue(authority.documentation_errors("Historical: DVC was used.\nDataset versioning: DVC."))
         self.assertEqual([], authority.documentation_errors("DVC has been superseded by lakeFS."))
         self.assertEqual([], authority.documentation_errors("Historical: the V2 baseline preceded the V5 lock."))
 
     def test_dvc_removal_and_lakefs_migration_directives(self):
         for statement in (
-            "Remove DVC from the bootstrap.", "Migrate DVC datasets to lakeFS.",
-            "Replace DVC with lakeFS.", "Remove remaining DVC configuration.",
-            "DVC is superseded by lakeFS.", "DVC remains historical only.",
+            "Remove DVC from the bootstrap.",
+            "Migrate DVC datasets to lakeFS.",
+            "Replace DVC with lakeFS.",
+            "Remove remaining DVC configuration.",
+            "DVC is superseded by lakeFS.",
+            "DVC remains historical only.",
         ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
         for statement in (
-            "Use DVC for dataset versioning.", "Dataset versioner: DVC.",
-            "Deploy DVC for MLOps datasets.", "DVC is the default dataset versioner.",
-            "Migrate DVC datasets.", "Replace DVC with another versioner.",
+            "Use DVC for dataset versioning.",
+            "Dataset versioner: DVC.",
+            "Deploy DVC for MLOps datasets.",
+            "DVC is the default dataset versioner.",
+            "Migrate DVC datasets.",
+            "Replace DVC with another versioner.",
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
@@ -66,46 +76,66 @@ class ArchitectureAuthorityTest(unittest.TestCase):
         self.assertEqual([], authority.documentation_errors("Remove DVC and use lakeFS as the dataset versioner."))
 
     def test_active_superseded_platform_defaults_are_rejected(self):
-        for statement in ("GitOps CD: FluxCD.", "Progressive delivery: Flagger.", "MinIO is the object store.",
-                          "Use MinIO Community Edition as the object store.",
-                          "Object storage default: MinIO Community Edition.",
-                          "Logging baseline: Loki.", "SIEM: Splunk.",
-                          "General logging pipeline: Fluent Bit."):
+        for statement in (
+            "GitOps CD: FluxCD.",
+            "Progressive delivery: Flagger.",
+            "MinIO is the object store.",
+            "Use MinIO Community Edition as the object store.",
+            "Object storage default: MinIO Community Edition.",
+            "Logging baseline: Loki.",
+            "SIEM: Splunk.",
+            "General logging pipeline: Fluent Bit.",
+        ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
 
     def test_direct_superseded_role_assignments_are_rejected(self):
         for statement in (
-            "FluxCD is the CD controller.", "Flagger is the rollout controller.",
-            "Loki is the infrastructure log store.", "MinIO is the S3 backend.",
-            "Splunk is the SIEM.", "Fluent Bit is the general log shipper.",
+            "FluxCD is the CD controller.",
+            "Flagger is the rollout controller.",
+            "Loki is the infrastructure log store.",
+            "MinIO is the S3 backend.",
+            "Splunk is the SIEM.",
+            "Fluent Bit is the general log shipper.",
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
 
         for statement in (
-            "FluxCD is superseded by Rancher Fleet.", "Flagger is replaced by Argo Rollouts.",
-            "Loki is historical only.", "MinIO is not the S3 backend; SeaweedFS is.",
-            "Remove MinIO and use SeaweedFS.", "Migrate DVC datasets to lakeFS.",
+            "FluxCD is superseded by Rancher Fleet.",
+            "Flagger is replaced by Argo Rollouts.",
+            "Loki is historical only.",
+            "MinIO is not the S3 backend; SeaweedFS is.",
+            "Remove MinIO and use SeaweedFS.",
+            "Migrate DVC datasets to lakeFS.",
         ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
     def test_superseded_ownership_verbs_are_rejected(self):
-        for statement in ("MinIO provides the S3 backend.", "FluxCD owns GitOps delivery.",
-                          "Loki stores infrastructure logs.", "Flagger powers progressive delivery."):
+        for statement in (
+            "MinIO provides the S3 backend.",
+            "FluxCD owns GitOps delivery.",
+            "Loki stores infrastructure logs.",
+            "Flagger powers progressive delivery.",
+        ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
-        for statement in ("Historical: MinIO provided the S3 backend.",
-                          "Superseded: Loki was the infrastructure log store."):
+        for statement in (
+            "Historical: MinIO provided the S3 backend.",
+            "Superseded: Loki was the infrastructure log store.",
+        ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
     def test_reversed_superseded_role_assignments_are_rejected(self):
         for statement in (
-            "The S3 backend is MinIO.", "The object store is MinIO Community Edition.",
-            "The infrastructure log store is Loki.", "The GitOps controller is FluxCD.",
-            "The rollout controller is Flagger.", "The SIEM is Splunk.",
+            "The S3 backend is MinIO.",
+            "The object store is MinIO Community Edition.",
+            "The infrastructure log store is Loki.",
+            "The GitOps controller is FluxCD.",
+            "The rollout controller is Flagger.",
+            "The SIEM is Splunk.",
         ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
@@ -125,9 +155,12 @@ graph LR
 ```
 """
         self.assertTrue(authority.documentation_errors(diagram))
-        self.assertEqual([], authority.documentation_errors(diagram.replace(
-            "## Deployment topology", "## Historical deployment topology", 1
-        )))
+        self.assertEqual(
+            [],
+            authority.documentation_errors(
+                diagram.replace("## Deployment topology", "## Historical deployment topology", 1)
+            ),
+        )
         self.assertEqual([], authority.documentation_errors("Superseded:\n" + diagram.split("\n", 1)[1]))
         self.assertTrue(authority.documentation_errors("Historical: prior notes.\n\n" + diagram))
 
@@ -149,55 +182,79 @@ graph LR
                 self.assertEqual([], authority.documentation_errors(statement))
 
     def test_retirement_is_scoped_to_the_superseded_component(self):
-        for statement in ("FluxCD, not Fleet, is the GitOps CD default.",
-                          "MinIO, not SeaweedFS, is the object store.",
-                          "Fluent Bit, not VictoriaLogs, is the general logging baseline.",
-                          "FluxCD is superseded, and Flagger is the active progressive delivery controller.",
-                          "FluxCD is superseded, but use MinIO Community Edition as object storage.",
-                          "MinIO is superseded, but Fluent Bit is the general logging pipeline.",
-                          "Flagger is retired; FluxCD is the GitOps CD default.",
-                          "Loki is superseded, but Splunk is the SIEM baseline."):
+        for statement in (
+            "FluxCD, not Fleet, is the GitOps CD default.",
+            "MinIO, not SeaweedFS, is the object store.",
+            "Fluent Bit, not VictoriaLogs, is the general logging baseline.",
+            "FluxCD is superseded, and Flagger is the active progressive delivery controller.",
+            "FluxCD is superseded, but use MinIO Community Edition as object storage.",
+            "MinIO is superseded, but Fluent Bit is the general logging pipeline.",
+            "Flagger is retired; FluxCD is the GitOps CD default.",
+            "Loki is superseded, but Splunk is the SIEM baseline.",
+        ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
-        for statement in ("FluxCD is superseded by Fleet.", "FluxCD is not the active GitOps controller.",
-                          "Do not use FluxCD; use Fleet.", "Fluent Bit is not used for general logging.",
-                          "MinIO CE has been superseded by SeaweedFS.",
-                          "FluxCD is superseded and Flagger is superseded.",
-                          "FluxCD and Flagger are both superseded.",
-                          "Do not use FluxCD or Flagger.",
-                          "MinIO Community Edition is superseded by SeaweedFS.",
-                          "Loki and Splunk remain historical references only."):
+        for statement in (
+            "FluxCD is superseded by Fleet.",
+            "FluxCD is not the active GitOps controller.",
+            "Do not use FluxCD; use Fleet.",
+            "Fluent Bit is not used for general logging.",
+            "MinIO CE has been superseded by SeaweedFS.",
+            "FluxCD is superseded and Flagger is superseded.",
+            "FluxCD and Flagger are both superseded.",
+            "Do not use FluxCD or Flagger.",
+            "MinIO Community Edition is superseded by SeaweedFS.",
+            "Loki and Splunk remain historical references only.",
+        ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
 
     def test_nextjs_active_directives_and_migration_context(self):
-        for statement in ("Use Next.js for the Storefront.", "Deploy Next.js for the admin frontend.",
-                          "Frontend framework: Next.js.", "Admin frontend uses Next.js.",
-                          "Storefront is built with Next.js.", "Next.js is the production frontend framework."):
+        for statement in (
+            "Use Next.js for the Storefront.",
+            "Deploy Next.js for the admin frontend.",
+            "Frontend framework: Next.js.",
+            "Admin frontend uses Next.js.",
+            "Storefront is built with Next.js.",
+            "Next.js is the production frontend framework.",
+        ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
-        for statement in ("Next.js is the migration source only.", "Migrate from Next.js to Go/templ/HTMX.",
-                          "Legacy Next.js frontend remains only for migration reference.",
-                          "Next.js is superseded as the PROD frontend target."):
+        for statement in (
+            "Next.js is the migration source only.",
+            "Migrate from Next.js to Go/templ/HTMX.",
+            "Legacy Next.js frontend remains only for migration reference.",
+            "Next.js is superseded as the PROD frontend target.",
+        ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
         self.assertTrue(authority.documentation_errors("The frontend currently uses Next.js as its target runtime."))
-        self.assertEqual([], authority.documentation_errors("Next.js is only the migration source; target runtime is Go."))
+        self.assertEqual(
+            [], authority.documentation_errors("Next.js is only the migration source; target runtime is Go.")
+        )
 
     def test_topology_assertions_and_operational_subsets(self):
-        for statement in ("The topology consists of 17 backend services.", "The architecture includes 17 services.",
-                          "The platform has 17 Go services.", "There are 17 Go services in the architecture.",
-                          "Our backend consists of 17 services."):
+        for statement in (
+            "The topology consists of 17 backend services.",
+            "The architecture includes 17 services.",
+            "The platform has 17 Go services.",
+            "There are 17 Go services in the architecture.",
+            "Our backend consists of 17 services.",
+        ):
             with self.subTest(statement=statement):
                 self.assertTrue(authority.documentation_errors(statement))
-        for statement in ("17 services were affected by the incident.",
-                          "17 services have completed migration so far.", "tests passed for 17 services.",
-                          "17 services currently have generated clients.", "17 of 19 services are healthy."):
+        for statement in (
+            "17 services were affected by the incident.",
+            "17 services have completed migration so far.",
+            "tests passed for 17 services.",
+            "17 services currently have generated clients.",
+            "17 of 19 services are healthy.",
+        ):
             with self.subTest(statement=statement):
                 self.assertEqual([], authority.documentation_errors(statement))
-        self.assertTrue(authority.documentation_errors(
-            "The canonical architecture is complete with exactly 17 backend services."
-        ))
+        self.assertTrue(
+            authority.documentation_errors("The canonical architecture is complete with exactly 17 backend services.")
+        )
         self.assertEqual([], authority.documentation_errors("17 of 19 backend services are currently deployed."))
 
     def test_prod_hosts_are_globally_unique_across_sites(self):
@@ -215,8 +272,10 @@ graph LR
             root = self.copy_repository(directory)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original = handoff.read_text()
-            for relative in ("config/contracts/resilience-governance.yaml",
-                             "config/contracts/security-trust-zones.yaml"):
+            for relative in (
+                "config/contracts/resilience-governance.yaml",
+                "config/contracts/security-trust-zones.yaml",
+            ):
                 with self.subTest(relative=relative):
                     handoff.write_text(original.replace(f"- `{relative}`\n", "", 1))
                     self.assertTrue(any(relative in error for error in authority.validate(root)))
@@ -242,10 +301,14 @@ graph LR
             "version": ("version: 5", "version: 2"),
             "index": ("docs/architecture/EXACT_TOPOLOGY_V5.md", "docs/architecture/EXACT_TOPOLOGY_V2.md"),
             "dataset": ("dataset_versioner: lakefs", "dataset_versioner: dvc"),
-            "dag": ("M3-preprod-infrastructure: [M2-5-persistent-mgmt-bootstrap]",
-                    "M3-preprod-infrastructure: [M2-golden-service-product]"),
-            "contract": ("resilience_governance: config/contracts/resilience-governance.yaml",
-                         "removed_resilience: config/contracts/resilience-governance.yaml"),
+            "dag": (
+                "M3-preprod-infrastructure: [M2-5-persistent-mgmt-bootstrap]",
+                "M3-preprod-infrastructure: [M2-golden-service-product]",
+            ),
+            "contract": (
+                "resilience_governance: config/contracts/resilience-governance.yaml",
+                "removed_resilience: config/contracts/resilience-governance.yaml",
+            ),
             "dns_ttl": ("critical_ttl_seconds: 60", "critical_ttl_seconds: 120"),
             "status": ("status: locked-for-build", "status: draft"),
         }
@@ -266,8 +329,7 @@ graph LR
             original_lock, original_index = lock.read_text(), index.read_text()
             lock.write_text(original_lock.replace("    rendering: templ", "    rendering: react", 1))
             index.write_text(original_index.replace("- `rendering`: `templ`", "- `rendering`: `react`", 1))
-            self.assertIn("business.frontend_runtime must match the approved V5 mapping",
-                          authority.validate(root))
+            self.assertIn("business.frontend_runtime must match the approved V5 mapping", authority.validate(root))
             lock.write_text(original_lock)
             index.write_text(original_index)
             self.assertEqual([], authority.validate(root))
@@ -284,48 +346,107 @@ graph LR
             mutations = (
                 (lock_path, originals[lock_path] + "\nci: github-actions\n", "root keys"),
                 (lock_path, originals[lock_path].replace("project: ecommerce\n", "", 1), "root keys"),
-                (lock_path, originals[lock_path].replace("  fluxcd: rancher-fleet", "  fluxcd: fluxcd", 1),
-                 "complete approved V5 registry"),
-                (lock_path, originals[lock_path].replace(
-                    "  fluxcd: rancher-fleet", "  fluxcd: rancher-fleet\n  legacy-gitops: fluxcd", 1),
-                 "complete approved V5 registry"),
-                (lock_path, originals[lock_path].replace(
-                    "  dataset_versioner: lakefs",
-                    "  dataset_versioner: lakefs\n  dataset_versioner: lakefs", 1),
-                 "duplicate YAML mapping key"),
-                (index_path, originals[index_path].replace(
-                    "- `dataset_versioner`: `lakefs`",
-                    "- `dataset_versioner`: `lakefs`\n- `feature_store`: `feast`", 1), "mlops role assignments"),
-                (index_path, originals[index_path].replace(
-                    "- `dataset_versioner`: `lakefs`",
-                    "- `dataset_versioner`: `lakefs`\n- `dataset_versioner`: `lakefs`", 1),
-                 "duplicate derived index assignment"),
-                (index_path, originals[index_path].replace(
-                    "- `metrics`: `victoriametrics`",
-                    "- `metrics`: `victoriametrics`\n- `retention_store`: `thanos`", 1),
-                 "observability role assignments"),
-                (index_path, originals[index_path].replace(
-                    "- `metrics`: `victoriametrics`",
-                    "- `metrics`: `victoriametrics`\n- `metrics`: `victoriametrics`", 1),
-                 "duplicate derived index assignment"),
-                (waves_path, originals[waves_path].replace(
-                    "rules:\n", "  - id: 97-legacy-gitops\n    requires: [95-mlops]\n    components: [fluxcd]\nrules:\n", 1),
-                 "complete approved V5 schedule"),
-                (waves_path, originals[waves_path].replace(
-                    "  - id: 10-rke2", "  - id: 00-underlay\n    requires: []\n    components: [network]\n  - id: 10-rke2", 1),
-                 "complete approved V5 schedule"),
-                (waves_path, originals[waves_path].replace(
-                    "components: [rke2-control-plane, rke2-workers]",
-                    "components: [rke2-control-plane, rke2-workers, legacy-node]", 1),
-                 "complete approved V5 schedule"),
-                (index_path, originals[index_path].replace(
-                    "- PROD-A `10.241.0.0/16`",
-                    "- PROD-A `10.241.0.0/16`\n- PROD-A `10.241.0.0/16`", 1),
-                 "duplicate derived index assignment"),
-                (dag_path, originals[dag_path] + "\n" + next(
-                    line for line in originals[dag_path].splitlines()
-                    if line.startswith("Machine wave `50-observability`")
-                ) + "\n", "exactly mirror machine wave 50-observability"),
+                (
+                    lock_path,
+                    originals[lock_path].replace("  fluxcd: rancher-fleet", "  fluxcd: fluxcd", 1),
+                    "complete approved V5 registry",
+                ),
+                (
+                    lock_path,
+                    originals[lock_path].replace(
+                        "  fluxcd: rancher-fleet", "  fluxcd: rancher-fleet\n  legacy-gitops: fluxcd", 1
+                    ),
+                    "complete approved V5 registry",
+                ),
+                (
+                    lock_path,
+                    originals[lock_path].replace(
+                        "  dataset_versioner: lakefs", "  dataset_versioner: lakefs\n  dataset_versioner: lakefs", 1
+                    ),
+                    "duplicate YAML mapping key",
+                ),
+                (
+                    index_path,
+                    originals[index_path].replace(
+                        "- `dataset_versioner`: `lakefs`",
+                        "- `dataset_versioner`: `lakefs`\n- `feature_store`: `feast`",
+                        1,
+                    ),
+                    "mlops role assignments",
+                ),
+                (
+                    index_path,
+                    originals[index_path].replace(
+                        "- `dataset_versioner`: `lakefs`",
+                        "- `dataset_versioner`: `lakefs`\n- `dataset_versioner`: `lakefs`",
+                        1,
+                    ),
+                    "duplicate derived index assignment",
+                ),
+                (
+                    index_path,
+                    originals[index_path].replace(
+                        "- `metrics`: `victoriametrics`",
+                        "- `metrics`: `victoriametrics`\n- `retention_store`: `thanos`",
+                        1,
+                    ),
+                    "observability role assignments",
+                ),
+                (
+                    index_path,
+                    originals[index_path].replace(
+                        "- `metrics`: `victoriametrics`",
+                        "- `metrics`: `victoriametrics`\n- `metrics`: `victoriametrics`",
+                        1,
+                    ),
+                    "duplicate derived index assignment",
+                ),
+                (
+                    waves_path,
+                    originals[waves_path].replace(
+                        "rules:\n",
+                        "  - id: 97-legacy-gitops\n    requires: [95-mlops]\n    components: [fluxcd]\nrules:\n",
+                        1,
+                    ),
+                    "complete approved V5 schedule",
+                ),
+                (
+                    waves_path,
+                    originals[waves_path].replace(
+                        "  - id: 10-rke2",
+                        "  - id: 00-underlay\n    requires: []\n    components: [network]\n  - id: 10-rke2",
+                        1,
+                    ),
+                    "complete approved V5 schedule",
+                ),
+                (
+                    waves_path,
+                    originals[waves_path].replace(
+                        "components: [rke2-control-plane, rke2-workers]",
+                        "components: [rke2-control-plane, rke2-workers, legacy-node]",
+                        1,
+                    ),
+                    "complete approved V5 schedule",
+                ),
+                (
+                    index_path,
+                    originals[index_path].replace(
+                        "- PROD-A `10.241.0.0/16`", "- PROD-A `10.241.0.0/16`\n- PROD-A `10.241.0.0/16`", 1
+                    ),
+                    "duplicate derived index assignment",
+                ),
+                (
+                    dag_path,
+                    originals[dag_path]
+                    + "\n"
+                    + next(
+                        line
+                        for line in originals[dag_path].splitlines()
+                        if line.startswith("Machine wave `50-observability`")
+                    )
+                    + "\n",
+                    "exactly mirror machine wave 50-observability",
+                ),
             )
             for path, mutation, expected in mutations:
                 with self.subTest(path=path.relative_to(root), expected=expected):
@@ -337,14 +458,25 @@ graph LR
     def test_governed_lock_sections_reject_unknown_missing_and_wrong_types(self):
         mutations = (
             ("  forbidden_services: []", "  forbidden_services: []\n  shadow_services: []", "business keys"),
-            ("  runtime_security: tetragon", "  runtime_security: tetragon\n  legacy_ci: github-actions", "platform keys"),
+            (
+                "  runtime_security: tetragon",
+                "  runtime_security: tetragon\n  legacy_ci: github-actions",
+                "platform keys",
+            ),
             ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
             ("  gitops: rancher-fleet\n  bootstrap:", "  bootstrap:", "management_plane keys"),
-            ("    migration_source: nextjs-react-node", "    migration_source: nextjs-react-node\n    package_manager: npm",
-             "business.frontend_runtime keys"),
-            ("stateful:\n  database: cloudnativepg-postgresql\n  events: strimzi-kafka-kraft\n"
-             "  jobs: rabbitmq-quorum-queues\n  cache: redis-cluster\n  search: opensearch\n"
-             "  object_storage: seaweedfs-s3", "stateful: []", "stateful must be a mapping"),
+            (
+                "    migration_source: nextjs-react-node",
+                "    migration_source: nextjs-react-node\n    package_manager: npm",
+                "business.frontend_runtime keys",
+            ),
+            (
+                "stateful:\n  database: cloudnativepg-postgresql\n  events: strimzi-kafka-kraft\n"
+                "  jobs: rabbitmq-quorum-queues\n  cache: redis-cluster\n  search: opensearch\n"
+                "  object_storage: seaweedfs-s3",
+                "stateful: []",
+                "stateful must be a mapping",
+            ),
             ("  M9-prod-ab: [M8-preprod-certification]", "", "milestone_dependencies keys"),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -384,19 +516,34 @@ graph LR
 
     def test_prod_certified_topology_has_an_exact_nested_schema(self):
         mutations = (
-            ("  physical_hosts_total: 6", "  physical_hosts_total: 6\n  physical_hosts_per_site_override: 5",
-             "prod_certified_topology keys"),
+            (
+                "  physical_hosts_total: 6",
+                "  physical_hosts_total: 6\n  physical_hosts_per_site_override: 5",
+                "prod_certified_topology keys",
+            ),
             ("  sites:\n", "  sites:\n    unknown_site_policy: active\n", "prod_certified_topology.sites keys"),
-            ("    prod-a:\n", "    prod-a:\n      unknown_directive: true\n",
-             "prod_certified_topology.sites.prod-a keys"),
-            ("    prod-b:\n", "    prod-b:\n      unknown_directive: true\n",
-             "prod_certified_topology.sites.prod-b keys"),
-            ("    prod-b:\n      private_block: 10.242.0.0/16\n      physical_hosts:\n"
-             "        - b-host-01\n        - b-host-02\n        - b-host-03\n",
-             "", "prod_certified_topology.sites keys"),
+            (
+                "    prod-a:\n",
+                "    prod-a:\n      unknown_directive: true\n",
+                "prod_certified_topology.sites.prod-a keys",
+            ),
+            (
+                "    prod-b:\n",
+                "    prod-b:\n      unknown_directive: true\n",
+                "prod_certified_topology.sites.prod-b keys",
+            ),
+            (
+                "    prod-b:\n      private_block: 10.242.0.0/16\n      physical_hosts:\n"
+                "        - b-host-01\n        - b-host-02\n        - b-host-03\n",
+                "",
+                "prod_certified_topology.sites keys",
+            ),
             ("  physical_hosts_total: 6\n", "", "prod_certified_topology keys"),
-            ("  physical_hosts_total: 6", "  physical_hosts_total: six",
-             "prod_certified_topology.physical_hosts_total must be an integer"),
+            (
+                "  physical_hosts_total: 6",
+                "  physical_hosts_total: six",
+                "prod_certified_topology.physical_hosts_total must be an integer",
+            ),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -417,11 +564,16 @@ graph LR
             index_path = root / "docs/architecture/EXACT_TOPOLOGY_V5.md"
             original_lock = lock_path.read_text()
             original_index = index_path.read_text()
-            for before, after in (("dataset_versioner: lakefs", "dataset_versioner: pachyderm"),
-                                  ("runtime: kserve-vllm", "runtime: mlflow")):
+            for before, after in (
+                ("dataset_versioner: lakefs", "dataset_versioner: pachyderm"),
+                ("runtime: kserve-vllm", "runtime: mlflow"),
+            ):
                 lock_path.write_text(original_lock.replace(before, after, 1))
-                index_path.write_text(original_index.replace(
-                    f"- `{before.replace(': ', '`: `')}`", f"- `{after.replace(': ', '`: `')}`", 1))
+                index_path.write_text(
+                    original_index.replace(
+                        f"- `{before.replace(': ', '`: `')}`", f"- `{after.replace(': ', '`: `')}`", 1
+                    )
+                )
                 self.assertTrue(any("complete approved V5 mapping" in error for error in authority.validate(root)))
                 lock_path.write_text(original_lock)
                 index_path.write_text(original_index)
@@ -433,21 +585,28 @@ graph LR
             lock_path = root / "architecture.lock.yaml"
             original_lock = lock_path.read_text()
             for mutation in ("    - admin\n", "    - storefront\n", "    - admin\n    - portal\n"):
-                lock_path.write_text(original_lock.replace("    - admin\n", mutation, 1) if "portal" in mutation
-                                     else original_lock.replace(mutation, "", 1))
+                lock_path.write_text(
+                    original_lock.replace("    - admin\n", mutation, 1)
+                    if "portal" in mutation
+                    else original_lock.replace(mutation, "", 1)
+                )
                 self.assertTrue(any("frontends" in error for error in authority.validate(root)))
                 lock_path.write_text(original_lock)
             waves = root / "config/infrastructure/deployment-waves.yaml"
             original_waves = waves.read_text()
             waves.write_text(original_waves.replace("components: [storefront, admin]", "components: [storefront]"))
             self.assertTrue(any("frontend" in error for error in authority.validate(root)))
-            waves.write_text(original_waves.replace("components: [storefront, admin]",
-                                                    "components: [storefront, admin, portal]"))
+            waves.write_text(
+                original_waves.replace("components: [storefront, admin]", "components: [storefront, admin, portal]")
+            )
             self.assertTrue(any("frontend" in error for error in authority.validate(root)))
             for frontend in ("storefront", "admin"):
-                waves.write_text(original_waves.replace(
-                    "components: [network, dns-prerequisites, time-sync, image-mirrors]",
-                    f"components: [network, dns-prerequisites, time-sync, image-mirrors, {frontend}]"))
+                waves.write_text(
+                    original_waves.replace(
+                        "components: [network, dns-prerequisites, time-sync, image-mirrors]",
+                        f"components: [network, dns-prerequisites, time-sync, image-mirrors, {frontend}]",
+                    )
+                )
                 self.assertTrue(any("frontend" in error for error in authority.validate(root)))
             waves.write_text(original_waves)
             self.assertEqual([], authority.validate(root))
@@ -493,7 +652,9 @@ graph LR
             agents.write_text(original)
             plan = root / "docs/project/MASTER_EXECUTION_PLAN.md"
             original_plan = plan.read_text()
-            plan.write_text(original_plan.replace("M2.5 PROVEN; exact infrastructure", "M1 PROVEN; exact infrastructure"))
+            plan.write_text(
+                original_plan.replace("M2.5 PROVEN; exact infrastructure", "M1 PROVEN; exact infrastructure")
+            )
             self.assertTrue(any("gate M3" in error for error in authority.validate(root)))
 
     def test_readiness_and_m25_handoff_mutations_are_rejected(self):
@@ -507,7 +668,13 @@ graph LR
                 readiness.write_text(original)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original_handoff = handoff.read_text()
-            for required in ("## M2.5 prompt", "Tracker: `#15`", "Entry gate: M1 PROVEN", "Evidence required for M2.5 PROVEN", "That PROVEN state enables M3"):
+            for required in (
+                "## M2.5 prompt",
+                "Tracker: `#15`",
+                "Entry gate: M1 PROVEN",
+                "Evidence required for M2.5 PROVEN",
+                "That PROVEN state enables M3",
+            ):
                 handoff.write_text(original_handoff.replace(required, "removed", 1))
                 self.assertTrue(any("executable M2.5" in error for error in authority.validate(root)))
                 handoff.write_text(original_handoff)
@@ -516,8 +683,12 @@ graph LR
     def test_declared_topology_contract_deletions_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
-            for relative in ("docs/architecture/PROD_TOPOLOGY_V2.md", "docs/architecture/DEPLOYMENT_DAG.md",
-                             "docs/architecture/SECURITY_TRUST_ZONES.md", "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md"):
+            for relative in (
+                "docs/architecture/PROD_TOPOLOGY_V2.md",
+                "docs/architecture/DEPLOYMENT_DAG.md",
+                "docs/architecture/SECURITY_TRUST_ZONES.md",
+                "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md",
+            ):
                 path = root / relative
                 original = path.read_text()
                 path.unlink()
@@ -530,16 +701,19 @@ graph LR
             root = self.copy_repository(directory)
             lock_path = root / "architecture.lock.yaml"
             original_lock = lock_path.read_text()
-            for key, relative in (("prod", "docs/architecture/PROD_TOPOLOGY_V2.md"),
-                                  ("mlops", "docs/architecture/MLOPS_TOPOLOGY_V1.md")):
+            for key, relative in (
+                ("prod", "docs/architecture/PROD_TOPOLOGY_V2.md"),
+                ("mlops", "docs/architecture/MLOPS_TOPOLOGY_V1.md"),
+            ):
                 with self.subTest(key=key):
                     mutated = re.sub(rf"^  {key}: .*\n", "", original_lock, count=1, flags=re.M)
                     lock_path.write_text(mutated)
                     path = root / relative
                     contents = path.read_text()
                     path.unlink()
-                    self.assertTrue(any("complete approved V5 role/path registry" in error
-                                        for error in authority.validate(root)))
+                    self.assertTrue(
+                        any("complete approved V5 role/path registry" in error for error in authority.validate(root))
+                    )
                     path.write_text(contents)
                     lock_path.write_text(original_lock)
             self.assertEqual([], authority.validate(root))
@@ -565,8 +739,12 @@ graph LR
             lock_path = root / "architecture.lock.yaml"
             original = lock_path.read_text()
             for first, second in (("preprod", "prod"), ("mlops", "observability")):
-                mutated = re.sub(rf"(^  {first}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[second]}", original, flags=re.M)
-                mutated = re.sub(rf"(^  {second}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[first]}", mutated, flags=re.M)
+                mutated = re.sub(
+                    rf"(^  {first}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[second]}", original, flags=re.M
+                )
+                mutated = re.sub(
+                    rf"(^  {second}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[first]}", mutated, flags=re.M
+                )
                 lock_path.write_text(mutated)
                 self.assertTrue(any("topology_contracts must match" in error for error in authority.validate(root)))
                 lock_path.write_text(original)
@@ -580,10 +758,14 @@ graph LR
             root = self.copy_repository(directory)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original = handoff.read_text()
-            flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
-            for before, after in ((flow, flow.replace(" -> Tax", " -> Order -> Tax")),
-                                  (flow, flow.replace(" -> Fraud/Risk", " -> Order -> Fraud/Risk")),
-                                  ("Fulfillment -> Shipping", "Shipping")):
+            flow = (
+                "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
+            )
+            for before, after in (
+                (flow, flow.replace(" -> Tax", " -> Order -> Tax")),
+                (flow, flow.replace(" -> Fraud/Risk", " -> Order -> Fraud/Risk")),
+                ("Fulfillment -> Shipping", "Shipping"),
+            ):
                 handoff.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("M5 must preserve" in error for error in authority.validate(root)))
                 handoff.write_text(original)
@@ -594,8 +776,10 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "config/infrastructure/deployment-waves.yaml"
             original = path.read_text()
-            for before, after in (("notification, order, payment", "notification, payment"),
-                                  ("tracking, fulfillment, review", "tracking, unknown-service, review")):
+            for before, after in (
+                ("notification, order, payment", "notification, payment"),
+                ("tracking, fulfillment, review", "tracking, unknown-service, review"),
+            ):
                 path.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("deployment waves" in error for error in authority.validate(root)))
                 path.write_text(original)
@@ -606,27 +790,41 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "config/infrastructure/deployment-waves.yaml"
             original = path.read_text()
-            for before, after in (("      - [catalog, cart]\n    serial_after_parallel: [checkout]",
-                                   "      - [catalog, cart, checkout]\n    serial_after_parallel: []"),
-                                  ("shipping, fraud-risk", "fraud-risk")):
+            for before, after in (
+                (
+                    "      - [catalog, cart]\n    serial_after_parallel: [checkout]",
+                    "      - [catalog, cart, checkout]\n    serial_after_parallel: []",
+                ),
+                ("shipping, fraud-risk", "fraud-risk"),
+            ):
                 path.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("deployment" in error for error in authority.validate(root)))
                 path.write_text(original)
-            path.write_text(original.replace("shipping, fraud-risk", "fraud-risk", 1).replace(
-                "tracking, fulfillment", "tracking, fulfillment, shipping", 1))
-            self.assertTrue(any("fulfillment after synchronous dependency shipping" in error
-                                for error in authority.validate(root)))
+            path.write_text(
+                original.replace("shipping, fraud-risk", "fraud-risk", 1).replace(
+                    "tracking, fulfillment", "tracking, fulfillment, shipping", 1
+                )
+            )
+            self.assertTrue(
+                any("fulfillment after synchronous dependency shipping" in error for error in authority.validate(root))
+            )
             path.write_text(original)
             for component in authority.DEPLOYABLE_MLOPS:
                 path.write_text(original.replace(f", {component}", "", 1).replace(f"[{component}, ", "[", 1))
                 self.assertTrue(any("MLOps" in error for error in authority.validate(root)))
                 path.write_text(original)
-            path.write_text(original.replace("components: [network, dns-prerequisites, time-sync, image-mirrors]",
-                                             "components: [network, dns-prerequisites, time-sync, image-mirrors, lakefs]")
-                                 .replace("serial_after_parallel: [lakefs, mlflow, kserve-vllm, evidently-tekton-batch]",
-                                          "serial_after_parallel: [mlflow, kserve-vllm, evidently-tekton-batch]"))
-            self.assertTrue(any("lakefs after MLOps dependency seaweedfs" in error
-                                for error in authority.validate(root)))
+            path.write_text(
+                original.replace(
+                    "components: [network, dns-prerequisites, time-sync, image-mirrors]",
+                    "components: [network, dns-prerequisites, time-sync, image-mirrors, lakefs]",
+                ).replace(
+                    "serial_after_parallel: [lakefs, mlflow, kserve-vllm, evidently-tekton-batch]",
+                    "serial_after_parallel: [mlflow, kserve-vllm, evidently-tekton-batch]",
+                )
+            )
+            self.assertTrue(
+                any("lakefs after MLOps dependency seaweedfs" in error for error in authority.validate(root))
+            )
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
@@ -635,10 +833,10 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "config/infrastructure/deployment-waves.yaml"
             original = path.read_text()
-            path.write_text(original.replace("requires: [100-frontends, 95-mlops]",
-                                             "requires: [100-frontends]", 1))
-            self.assertIn("deployment qualification must depend on both frontend and MLOps completion",
-                          authority.validate(root))
+            path.write_text(original.replace("requires: [100-frontends, 95-mlops]", "requires: [100-frontends]", 1))
+            self.assertIn(
+                "deployment qualification must depend on both frontend and MLOps completion", authority.validate(root)
+            )
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
@@ -648,8 +846,9 @@ graph LR
             path = root / "docs/project/CODEX_HANDOFFS.md"
             original = path.read_text()
             path.write_text(original.replace(" -> Argo Rollouts", "", 1))
-            self.assertIn("CODEX_HANDOFFS.md M4 order must match the approved platform schedule",
-                          authority.validate(root))
+            self.assertIn(
+                "CODEX_HANDOFFS.md M4 order must match the approved platform schedule", authority.validate(root)
+            )
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
@@ -658,8 +857,11 @@ graph LR
             ("config/contracts/security-trust-zones.yaml", "  Z6: backup-evidence-dfir\n", ""),
             ("config/contracts/security-trust-zones.yaml", "  default: deny", "  default: allow"),
             ("config/contracts/security-trust-zones.yaml", "image-layers, ci-logs", "image-layers, ci-output"),
-            ("config/contracts/resilience-governance.yaml", "  destroy_required_forensic_evidence: forbidden",
-             "  destroy_required_forensic_evidence: allowed"),
+            (
+                "config/contracts/resilience-governance.yaml",
+                "  destroy_required_forensic_evidence: forbidden",
+                "  destroy_required_forensic_evidence: allowed",
+            ),
             ("config/contracts/resilience-governance.yaml", "    - dns-gslb-change", ""),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -677,10 +879,14 @@ graph LR
     def test_security_source_is_cross_checked_against_machine_contract(self):
         mutations = (
             ("Default deny", "Default allow"),
-            ("no customer token is accepted for MGMT administrative APIs",
-             "customer tokens are accepted for MGMT administrative APIs"),
-            ("Cross-environment workload identity is denied by default",
-             "Cross-environment workload identity is allowed by default"),
+            (
+                "no customer token is accepted for MGMT administrative APIs",
+                "customer tokens are accepted for MGMT administrative APIs",
+            ),
+            (
+                "Cross-environment workload identity is denied by default",
+                "Cross-environment workload identity is allowed by default",
+            ),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -699,18 +905,28 @@ graph LR
             root = self.copy_repository(directory)
             agents = root / "AGENTS.md"
             original = agents.read_text()
-            agents.write_text(original.replace("- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs.",
-                                               "- General logging pipeline: Fluent Bit + Data Prepper + OpenSearch."))
+            agents.write_text(
+                original.replace(
+                    "- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs.",
+                    "- General logging pipeline: Fluent Bit + Data Prepper + OpenSearch.",
+                )
+            )
             self.assertTrue(any("general logging" in error for error in authority.validate(root)))
             agents.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_exact_observability_source_mutations_are_rejected(self):
         mutations = (
-            ("docs/architecture/PREPROD_TOPOLOGY_V2.md", "OpenTelemetry Collector where the role requires host or infrastructure telemetry",
-             "Fluent Bit where the role requires host or general logging"),
-            ("docs/architecture/AIOPS_TOPOLOGY_V1.md", "VictoriaLogs infrastructure logs and Rotel/ClickHouse/HyperDX application observability",
-             "OpenSearch Logs as the general observability source"),
+            (
+                "docs/architecture/PREPROD_TOPOLOGY_V2.md",
+                "OpenTelemetry Collector where the role requires host or infrastructure telemetry",
+                "Fluent Bit where the role requires host or general logging",
+            ),
+            (
+                "docs/architecture/AIOPS_TOPOLOGY_V1.md",
+                "VictoriaLogs infrastructure logs and Rotel/ClickHouse/HyperDX application observability",
+                "OpenSearch Logs as the general observability source",
+            ),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -744,14 +960,19 @@ graph LR
 
     def test_derived_role_assignment_mutations_are_rejected(self):
         mutations = (
-            (("- `ci`: `tekton`", "- `ci`: `harbor`"),
-             ("- `registry`: `harbor`", "- `registry`: `tekton`")),
-            (("- `desired_state`: `rancher-fleet`", "- `desired_state`: `argo-rollouts`"),
-             ("- `progressive_delivery`: `argo-rollouts`", "- `progressive_delivery`: `rancher-fleet`")),
-            (("- `dataset_versioner`: `lakefs`", "- `dataset_versioner`: `mlflow`"),
-             ("- `experiments_lineage`: `mlflow`", "- `experiments_lineage`: `lakefs`")),
-            (("- `artifact_registry`: `harbor`", "- `artifact_registry`: `tekton`"),
-             ("- `orchestration`: `tekton`", "- `orchestration`: `harbor`")),
+            (("- `ci`: `tekton`", "- `ci`: `harbor`"), ("- `registry`: `harbor`", "- `registry`: `tekton`")),
+            (
+                ("- `desired_state`: `rancher-fleet`", "- `desired_state`: `argo-rollouts`"),
+                ("- `progressive_delivery`: `argo-rollouts`", "- `progressive_delivery`: `rancher-fleet`"),
+            ),
+            (
+                ("- `dataset_versioner`: `lakefs`", "- `dataset_versioner`: `mlflow`"),
+                ("- `experiments_lineage`: `mlflow`", "- `experiments_lineage`: `lakefs`"),
+            ),
+            (
+                ("- `artifact_registry`: `harbor`", "- `artifact_registry`: `tekton`"),
+                ("- `orchestration`: `tekton`", "- `orchestration`: `harbor`"),
+            ),
             (("- `runtime_nodejs`: `false`", "- `runtime_nodejs`: `true`"),),
             (("- `module_file`: `frontend/go.mod`", "- `module_file`: `frontend/node.mod`"),),
             (("- `migration_source`: `nextjs-react-node`", "- `migration_source`: `go-templ-htmx`"),),
@@ -787,7 +1008,8 @@ graph LR
             original = path.read_text()
             mutations = (
                 original.replace("PROD-A `10.241.0.0/16`", "PROD-A `10.242.0.0/16`").replace(
-                    "PROD-B `10.242.0.0/16`", "PROD-B `10.241.0.0/16`"),
+                    "PROD-B `10.242.0.0/16`", "PROD-B `10.241.0.0/16`"
+                ),
                 original.replace("permanent MGMT `10.243.0.0/16`", "permanent MGMT `10.241.0.0/16`"),
                 original.replace("PROD-B `10.242.0.0/16`", "PROD-B `10.243.0.0/16`"),
                 original.replace("PROD-B `10.242.0.0/16`", "PROD-B `10.241.0.0/16`"),
@@ -810,8 +1032,9 @@ graph LR
             for duplicate in ("- PROD-A `192.0.2.0/24`", marker):
                 with self.subTest(duplicate=duplicate):
                     path.write_text(original.replace(marker, f"{duplicate}\n{marker}", 1))
-                    self.assertIn("duplicate derived index assignment: network.private_blocks.PROD-A",
-                                  authority.validate(root))
+                    self.assertIn(
+                        "duplicate derived index assignment: network.private_blocks.PROD-A", authority.validate(root)
+                    )
                     path.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
@@ -840,22 +1063,31 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "docs/architecture/DEPLOYMENT_DAG.md"
             original = path.read_text()
-            for component, wave_id in (("rotel", "50-observability"), ("clickhouse", "50-observability"),
-                                       ("hyperdx", "50-observability"),
-                                       ("mongodb-oss-self-hosted", "50-observability"),
-                                       ("vmalert", "50-observability"),
-                                       ("argo-rollouts", "30-gitops-identity")):
+            for component, wave_id in (
+                ("rotel", "50-observability"),
+                ("clickhouse", "50-observability"),
+                ("hyperdx", "50-observability"),
+                ("mongodb-oss-self-hosted", "50-observability"),
+                ("vmalert", "50-observability"),
+                ("argo-rollouts", "30-gitops-identity"),
+            ):
                 marker = f"`{component}`"
-                line = next(line for line in original.splitlines()
-                            if line.startswith(f"Machine wave `{wave_id}` scheduled components:"))
+                line = next(
+                    line
+                    for line in original.splitlines()
+                    if line.startswith(f"Machine wave `{wave_id}` scheduled components:")
+                )
                 path.write_text(original.replace(line, line.replace(marker, "", 1), 1))
-                self.assertIn(f"DEPLOYMENT_DAG.md must exactly mirror machine wave {wave_id}",
-                              authority.validate(root))
-            line = next(line for line in original.splitlines()
-                        if line.startswith("Machine wave `50-observability` scheduled components:"))
+                self.assertIn(f"DEPLOYMENT_DAG.md must exactly mirror machine wave {wave_id}", authority.validate(root))
+            line = next(
+                line
+                for line in original.splitlines()
+                if line.startswith("Machine wave `50-observability` scheduled components:")
+            )
             path.write_text(original.replace(line, f"{line}, `prometheus-server`", 1))
-            self.assertIn("DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability",
-                          authority.validate(root))
+            self.assertIn(
+                "DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability", authority.validate(root)
+            )
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
@@ -864,14 +1096,17 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "docs/architecture/DEPLOYMENT_DAG.md"
             original = path.read_text()
-            canonical = next(line for line in original.splitlines()
-                             if line.startswith("Machine wave `50-observability` scheduled components:"))
-            for duplicate in (canonical,
-                              "Machine wave `50-observability` scheduled components: `prometheus-server`"):
+            canonical = next(
+                line
+                for line in original.splitlines()
+                if line.startswith("Machine wave `50-observability` scheduled components:")
+            )
+            for duplicate in (canonical, "Machine wave `50-observability` scheduled components: `prometheus-server`"):
                 with self.subTest(duplicate=duplicate):
                     path.write_text(f"{original}\n{duplicate}\n")
-                    self.assertIn("DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability",
-                                  authority.validate(root))
+                    self.assertIn(
+                        "DEPLOYMENT_DAG.md must exactly mirror machine wave 50-observability", authority.validate(root)
+                    )
                     path.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
@@ -880,21 +1115,24 @@ graph LR
             root = self.copy_repository(directory)
             path = root / "docs/architecture/DEPLOYMENT_DAG.md"
             original = path.read_text()
-            wave20 = next(line for line in original.splitlines()
-                          if line.startswith("Machine wave `20-network-security`"))
-            wave30 = next(line for line in original.splitlines()
-                          if line.startswith("Machine wave `30-gitops-identity`"))
+            wave20 = next(
+                line for line in original.splitlines() if line.startswith("Machine wave `20-network-security`")
+            )
+            wave30 = next(
+                line for line in original.splitlines() if line.startswith("Machine wave `30-gitops-identity`")
+            )
             mutations = (
                 original.replace(wave30, f"{wave30}, `spire`", 1),
-                original.replace(f"{wave20}\n\nGate W3:",
-                                 f"Gate W3:", 1).replace(
-                                     "## Wave 4 — GitOps/secrets/mesh control",
-                                     f"## Wave 4 — GitOps/secrets/mesh control\n\n{wave20}", 1),
+                original.replace(f"{wave20}\n\nGate W3:", f"Gate W3:", 1).replace(
+                    "## Wave 4 — GitOps/secrets/mesh control", f"## Wave 4 — GitOps/secrets/mesh control\n\n{wave20}", 1
+                ),
             )
             for mutation in mutations:
                 path.write_text(mutation)
-                self.assertIn("SPIRE must be scheduled exactly once before Gate W3 verifies SPIFFE issuance",
-                              authority.validate(root))
+                self.assertIn(
+                    "SPIRE must be scheduled exactly once before Gate W3 verifies SPIFFE issuance",
+                    authority.validate(root),
+                )
                 path.write_text(original)
                 self.assertEqual([], authority.validate(root))
 
@@ -922,18 +1160,20 @@ graph LR
             for before, after in mutations:
                 with self.subTest(mutation=after):
                     index.write_text(original.replace(before, after, 1))
-                    self.assertTrue(any("duplicate derived index assignment" in error
-                                        for error in authority.validate(root)))
+                    self.assertTrue(
+                        any("duplicate derived index assignment" in error for error in authority.validate(root))
+                    )
                     index.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
     def test_observability_role_mutations_are_rejected(self):
         mutations = (
             ("- `application_gateway`: `rotel`", "- `application_gateway`: `opentelemetry-collector`"),
-            ("- `application_observability_storage`: `clickhouse`",
-             "- `application_observability_storage`: `victorialogs`"),
-            ("- `hyperdx_metadata_store`: `mongodb-oss-self-hosted`",
-             "- `hyperdx_metadata_store`: `postgresql`"),
+            (
+                "- `application_observability_storage`: `clickhouse`",
+                "- `application_observability_storage`: `victorialogs`",
+            ),
+            ("- `hyperdx_metadata_store`: `mongodb-oss-self-hosted`", "- `hyperdx_metadata_store`: `postgresql`"),
         )
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
@@ -980,10 +1220,12 @@ graph LR
             root = self.copy_repository(directory)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original = handoff.read_text()
-            for before, after in ((">=80% global coverage", ""),
-                                  (">=80% global coverage", "79% global coverage"),
-                                  (">=90% critical-code coverage", ""),
-                                  (">=90% critical-code coverage", "89% critical-code coverage")):
+            for before, after in (
+                (">=80% global coverage", ""),
+                (">=80% global coverage", "79% global coverage"),
+                (">=90% critical-code coverage", ""),
+                (">=90% critical-code coverage", "89% critical-code coverage"),
+            ):
                 with self.subTest(mutation=f"{before} -> {after}"):
                     handoff.write_text(original.replace(before, after, 1))
                     self.assertTrue(any("coverage" in error for error in authority.validate(root)))

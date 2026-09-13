@@ -13,8 +13,10 @@ class DockerPublishBoundaryTest(unittest.TestCase):
         self.assertIn("powershell.exe", PLAYBOOK)
         self.assertIn("retries: 30", PLAYBOOK)
 
-    def test_service_gate_requests_ansible_docker_capability(self):
-        self.assertIn('ensure_developer("go,cgo,sqlc,docker")', CONTROLLER)
+    def test_service_gate_requests_docker_only_for_container_tests(self):
+        self.assertIn('capabilities = ["go", "cgo"]', CONTROLLER)
+        self.assertIn('if any("testcontainers" in path.read_text', CONTROLLER)
+        self.assertIn('capabilities.append("docker")', CONTROLLER)
         self.assertNotIn("ensure-docker-daemon.sh", CONTROLLER)
 
 
