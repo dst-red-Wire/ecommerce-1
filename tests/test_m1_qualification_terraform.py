@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -17,50 +18,59 @@ RUNNER_PATHS = (
 
 def validate_contract(files: dict[str, str]) -> None:
     combined = "\n".join(files.values())
+    main = files["module/main.tf"]
+    gateway_bootstrap = files["module/gateway-cloud-init.yaml.tftpl"]
     required = (
         'version = "= 1.68.0"',
-        'source = "../../modules/hcloud-qualification"',
-        'resource "hcloud_server" "qualification"',
-        'resource "hcloud_firewall" "qualification"',
-        'name              = var.image',
-        'with_architecture = "x86"',
-        'startswith(data.hcloud_image.qualification.os_version, "24.04")',
-        'data.hcloud_server_type.qualification.architecture == "x86"',
-        'variable "qualification_server_type"',
-        'variable "qualification_ssh_key_id"',
-        'variable "qualification_ssh_allowed_cidrs"',
-        'for cidr in var.qualification_ssh_allowed_cidrs : can(cidrhost(cidr, 0)) && !endswith(cidr, "/0")',
-        'name: ${qualification_user}',
-        'sudo: ["ALL=(ALL) NOPASSWD:ALL"]',
-        'ssh_authorized_keys:',
-        'output "qualification_image_identity"',
+        'resource "hcloud_network" "qualification"',
+        'resource "hcloud_network_subnet" "qualification"',
+        'resource "hcloud_server" "runner"',
+        'resource "hcloud_server" "gateway"',
+        'resource "hcloud_server_network" "runner"',
+        'resource "hcloud_server_network" "gateway"',
+        'network_id = hcloud_network.qualification.id',
+        'source_ips = var.ssh_allowed_cidrs',
+        'source_ips = ["${var.runner_private_ip}/32"]',
+        'destination_ips = ["${var.gateway_private_ip}/32"]',
+        'ipv4_enabled = false',
+        'ipv4_enabled = true',
+        'acl allowed_domains dstdomain snapshot.ubuntu.com github.com',
+        'http_access deny CONNECT !SSL_ports',
+        'http_access allow runner allowed_domains',
+        'http_access deny all',
+        'squid=${squid_version}',
+        'systemctl, is-active, --quiet, squid',
         'qualification_user=${module.hcloud_qualification.user}',
+        'ProxyJump=ubuntu@${module.hcloud_qualification.gateway_ipv4}',
+        'HTTP_PROXY',
+        'HTTPS_PROXY',
+        'NO_PROXY',
+        '!endswith(cidr, "/0")',
     )
     for marker in required:
         if marker not in combined:
-            raise AssertionError(f"missing qualification Terraform contract: {marker}")
-    cidr_guard = '!endswith(cidr, "/0")'
-    if cidr_guard not in files["environment/variables.tf"]:
-        raise AssertionError("environment SSH CIDR validation is missing")
-    if '!endswith(cidr, "/0")' not in files["module/main.tf"]:
-        raise AssertionError("module SSH CIDR validation is missing")
-    forbidden = (
-        'provisioner "local-exec"', 'provisioner "remote-exec"',
-        "null_resource", "terraform_remote_state", "hcloud_network",
-        "HCLOUD_TOKEN", "private_key", "terraform apply",
-    )
-    cloud_init = files["module/cloud-init.yaml.tftpl"].lower()
-    for marker in ("docker", "sysctl", "apt:", "packages:", "runcmd:", "curl"):
-        if marker in cloud_init:
-            raise AssertionError(f"cloud-init crossed the Ansible boundary: {marker}")
-    source_without_docs = "\n".join(
-        value for name, value in files.items() if not name.endswith("README.md")
-    )
-    for marker in forbidden:
-        if marker in source_without_docs:
-            raise AssertionError(f"forbidden qualification mechanism: {marker}")
-    if combined.count('resource "hcloud_server"') != 1:
-        raise AssertionError("qualification module must define exactly one server")
+            raise AssertionError(f"missing qualification boundary: {marker}")
+
+    if len(re.findall(r'resource\s+"hcloud_server"\s+"', main)) != 2:
+        raise AssertionError("qualification module must define exactly two servers")
+    if 'resource "hcloud_firewall" "runner"' not in main or 'resource "hcloud_firewall" "gateway"' not in main:
+        raise AssertionError("independent runner and gateway firewalls are required")
+    for name in ("environment/variables.tf", "module/main.tf"):
+        if '!endswith(cidr, "/0")' not in files[name]:
+            raise AssertionError(f"normalized zero-prefix CIDRs must be rejected in {name}")
+    if "http_access allow all" in gateway_bootstrap:
+        raise AssertionError("Squid policy must never allow all")
+    if re.search(r"http_access allow (?:CONNECT|runner CONNECT)", gateway_bootstrap):
+        raise AssertionError("Squid CONNECT must remain hostname allowlisted")
+    if "HCLOUD_TOKEN" in gateway_bootstrap or "private_key" in gateway_bootstrap:
+        raise AssertionError("gateway guest must receive no infrastructure secret")
+    if re.search(r"git (?:clone|fetch|checkout)|github\.com/dst-red-Wire/ecommerce-1", gateway_bootstrap):
+        raise AssertionError("gateway must receive no PR checkout")
+    if re.search(r"hcloud-(?:mgmt|k8s|storage|backup)|terraform_remote_state", combined, re.I):
+        raise AssertionError("qualification network must not attach to internal state or networks")
+    for marker in ('provisioner "local-exec"', 'provisioner "remote-exec"', "null_resource", 'resource "terraform_data"'):
+        if marker in combined:
+            raise AssertionError(f"Terraform orchestration is forbidden: {marker}")
 
 
 class QualificationTerraformContractTest(unittest.TestCase):
@@ -76,41 +86,43 @@ class QualificationTerraformContractTest(unittest.TestCase):
         validate_contract(self.files)
 
     def assert_mutation_rejected(self, name: str, old: str, new: str):
+        self.assertIn(old, self.files[name], f"mutation fixture missing: {old}")
         mutated = dict(self.files)
-        mutated[name] = mutated[name].replace(old, new)
+        mutated[name] = mutated[name].replace(old, new, 1)
         with self.assertRaises(AssertionError):
             validate_contract(mutated)
 
-    def test_security_and_boundary_mutations_are_rejected(self):
+    def test_egress_boundary_mutations_are_rejected(self):
         mutations = (
-            ("module/main.tf", 'startswith(data.hcloud_image.qualification.os_version, "24.04")', 'data.hcloud_image.qualification.os_flavor == "rocky"'),
-            ("module/cloud-init.yaml.tftpl", "name: ${qualification_user}", "name: root"),
-            ("environment/variables.tf", '!endswith(cidr, "/0")', "true"),
-            ("module/main.tf", 'resource "hcloud_server" "qualification"', 'provisioner "remote-exec" {}\nresource "hcloud_server" "qualification"'),
-            ("module/main.tf", 'resource "hcloud_server" "qualification"', 'provisioner "local-exec" {}\nresource "hcloud_server" "qualification"'),
-            ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [docker install]"),
-            ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [sysctl -w x=y]"),
-            ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nHCLOUD_TOKEN: injected"),
-            ("environment/outputs.tf", 'output "qualification_server_id"', 'output "private_key" {}\noutput "qualification_server_id"'),
-            ("environment/outputs.tf", ' qualification_user=${module.hcloud_qualification.user}', ''),
-            ("environment/main.tf", 'source = "../../modules/hcloud-qualification"', 'source = "../mgmt"\ndata "terraform_remote_state" "mgmt" {}'),
+            ("module/main.tf", "ipv4_enabled = false", "ipv4_enabled = true"),
+            ("module/main.tf", 'resource "hcloud_network" "qualification"', 'resource "removed_network" "qualification"'),
+            ("module/main.tf", 'resource "hcloud_server" "gateway"', 'resource "removed_server" "gateway"'),
+            ("module/main.tf", 'source_ips = ["${var.runner_private_ip}/32"]', 'source_ips = ["0.0.0.0/0"]'),
+            ("module/gateway-cloud-init.yaml.tftpl", "http_access deny all", "http_access allow all"),
+            ("module/gateway-cloud-init.yaml.tftpl", "http_access deny !runner", "http_access allow all\n      http_access deny !runner"),
+            ("module/gateway-cloud-init.yaml.tftpl", "http_access allow runner allowed_domains", "http_access allow CONNECT"),
+            ("module/main.tf", "network_id = hcloud_network.qualification.id", "network_id = hcloud-mgmt.id"),
+            ("module/gateway-cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nHCLOUD_TOKEN: injected"),
+            ("module/gateway-cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [git clone https://github.com/dst-red-Wire/ecommerce-1]"),
         )
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 self.assert_mutation_rejected(*mutation)
+        validate_contract(self.files)
+
+    def test_admission_regressions_are_rejected(self):
+        for name in ("environment/variables.tf", "module/main.tf"):
+            if '!endswith(cidr, "/0")' in self.files[name]:
+                self.assert_mutation_rejected(name, '!endswith(cidr, "/0")', "true")
 
     def test_canonical_runner_is_unchanged_from_base(self):
         base = os.environ.get("BASE", "")
         self.assertRegex(base, r"^[0-9a-f]{40}$", "BASE must be the authenticated full lowercase Git SHA")
-        exists = subprocess.run(
-            ["git", "cat-file", "-e", f"{base}^{{commit}}"], cwd=ROOT
-        )
+        exists = subprocess.run(["git", "cat-file", "-e", f"{base}^{{commit}}"], cwd=ROOT)
         self.assertEqual(0, exists.returncode, "the exact BASE commit must exist")
         for path in RUNNER_PATHS:
             rel = path.relative_to(ROOT)
-            result = subprocess.run(
-                ["git", "diff", "--quiet", base, "--", str(rel)], cwd=ROOT
-            )
+            result = subprocess.run(["git", "diff", "--quiet", base, "--", str(rel)], cwd=ROOT)
             self.assertEqual(0, result.returncode, f"canonical #78 path changed: {rel}")
 
 

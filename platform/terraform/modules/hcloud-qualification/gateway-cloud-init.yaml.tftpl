@@ -1,0 +1,39 @@
+#cloud-config
+apt:
+  preserve_sources_list: false
+  sources_list: |
+    deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/${ubuntu_snapshot} noble main universe
+    deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/${ubuntu_snapshot} noble-updates main universe
+    deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://snapshot.ubuntu.com/ubuntu/${ubuntu_snapshot} noble-security main universe
+write_files:
+  - path: /etc/squid/squid.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      # Versioned M1 qualification policy: explicit destinations, default deny.
+      http_port 3128
+      acl runner src ${runner_private_ip}/32
+      acl SSL_ports port 443
+      acl Safe_ports port 80 443
+      acl CONNECT method CONNECT
+      acl allowed_domains dstdomain snapshot.ubuntu.com github.com api.github.com objects.githubusercontent.com release-assets.githubusercontent.com proxy.golang.org sum.golang.org storage.googleapis.com registry-1.docker.io auth.docker.io production.cloudflare.docker.com
+      http_access deny !runner
+      http_access deny CONNECT !SSL_ports
+      http_access deny !Safe_ports
+      http_access allow runner allowed_domains
+      http_access deny all
+      access_log stdio:/var/log/squid/access.log squid
+      cache_log /var/log/squid/cache.log
+      forwarded_for delete
+      via off
+runcmd:
+  - [apt-get, update]
+  - [apt-get, install, --yes, --no-install-recommends, "squid=${squid_version}"]
+  - [apt-mark, hold, squid]
+  - [squid, -k, parse]
+  - [systemctl, enable, --now, squid]
+  - [dpkg-query, --show, "--showformat=$${Version}\n", squid]
+  - [systemctl, is-active, --quiet, squid]
+
+# The gateway receives no repository checkout, provider/controller credential,
+# or PR code. Squid resolves names; the runner firewall permits no direct DNS.
