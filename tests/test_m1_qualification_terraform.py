@@ -18,6 +18,17 @@ RUNNER_PATHS = (
 )
 
 
+def terraform_output_block(source: str, name: str) -> str:
+    match = re.search(
+        rf'^output "{re.escape(name)}"\s*\{{.*?(?=^output "|\Z)',
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    if match is None:
+        raise AssertionError(f"missing Terraform output block: {name}")
+    return match.group(0)
+
+
 def resolve_base(value: str) -> str | None:
     if not value:
         return None
@@ -155,6 +166,13 @@ def validate_contract(files: dict[str, str]) -> None:
     )
     if gateway_trust not in gateway_inventory_output:
         raise AssertionError("inventory gateway connection permits alternate SSH trust")
+    ansible_ssh_args_output = terraform_output_block(
+        outputs, "qualification_ansible_ssh_args"
+    )
+    if runner_trust not in ansible_ssh_args_output:
+        raise AssertionError("standalone Ansible runner hop permits alternate SSH trust")
+    if gateway_proxy not in ansible_ssh_args_output:
+        raise AssertionError("standalone Ansible gateway hop permits alternate SSH trust")
     runbook = files["runbook"]
     for trust_marker in (
         "QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:",
@@ -353,6 +371,22 @@ class QualificationTerraformContractTest(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 self.assert_mutation_rejected(*mutation)
+
+    def test_standalone_ansible_ssh_args_trust_mutations_are_rejected(self):
+        outputs = self.files["environment/outputs.tf"]
+        block = terraform_output_block(outputs, "qualification_ansible_ssh_args")
+        for marker in (
+            "GlobalKnownHostsFile=/dev/null",
+            "StrictHostKeyChecking=yes",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, block)
+                mutated = dict(self.files)
+                mutated["environment/outputs.tf"] = outputs.replace(
+                    block, block.replace(marker, "", 1), 1
+                )
+                with self.assertRaises(AssertionError):
+                    validate_contract(mutated)
 
     def test_zero_prefix_and_provisioner_mutations_are_rejected(self):
         for name in ("environment/variables.tf", "module/main.tf"):
