@@ -33,6 +33,7 @@ def validate_contract(files: dict[str, str]) -> None:
         'sudo: ["ALL=(ALL) NOPASSWD:ALL"]',
         'ssh_authorized_keys:',
         'output "qualification_image_identity"',
+        'qualification_user=${module.hcloud_qualification.user}',
     )
     for marker in required:
         if marker not in combined:
@@ -90,6 +91,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nruncmd: [sysctl -w x=y]"),
             ("module/cloud-init.yaml.tftpl", "#cloud-config", "#cloud-config\nHCLOUD_TOKEN: injected"),
             ("environment/outputs.tf", 'output "qualification_server_id"', 'output "private_key" {}\noutput "qualification_server_id"'),
+            ("environment/outputs.tf", ' qualification_user=${module.hcloud_qualification.user}', ''),
             ("environment/main.tf", 'source = "../../modules/hcloud-qualification"', 'source = "../mgmt"\ndata "terraform_remote_state" "mgmt" {}'),
         )
         for mutation in mutations:
