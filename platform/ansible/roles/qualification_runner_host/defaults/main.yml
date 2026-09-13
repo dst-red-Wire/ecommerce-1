@@ -9,10 +9,18 @@ qualification_ubuntu_snapshot: "20250601T000000Z"
 qualification_packages:
   - "docker.io=27.5.1-0ubuntu3~24.04.1"
   - "build-essential=12.10ubuntu1"
+  - "curl=8.5.0-2ubuntu10.6"
+  - "diffutils=1:3.10-1build1"
   - "git=1:2.43.0-1ubuntu7.2"
   - "gh=2.45.0-1ubuntu0.2"
   - "make=4.3-4.1build2"
   - "python3=3.12.3-0ubuntu2"
   - "python3-venv=3.12.3-0ubuntu2"
   - "ruby=1:3.2~ubuntu1"
+  - "tar=1.35+dfsg-3build1"
+  - "unzip=6.0-28ubuntu4.1"
 qualification_sysctl_file: /etc/sysctl.d/60-ecommerce-m1-qualification.conf
+qualification_repository_url: https://github.com/dst-red-Wire/ecommerce-1.git
+qualification_repository_path: "/home/{{ qualification_user }}/ecommerce-1"
+qualification_pr_head: 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+qualification_pr_base: 45433013f97a94a8acf94c51a913ff071e6f74b2

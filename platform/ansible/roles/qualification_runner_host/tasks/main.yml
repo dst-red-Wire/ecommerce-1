@@ -8,10 +8,32 @@
       - ansible_facts.architecture == qualification_architecture
       - qualification_user is defined
       - qualification_user | length > 0
-      - qualification_user != "root"
     fail_msg: >-
       Qualification requires Ubuntu {{ qualification_ubuntu_release }} on
       {{ qualification_architecture }} and an explicit non-root qualification_user.
+
+- name: Look up the pre-existing qualification account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ qualification_user }}"
+    fail_key: true
+
+- name: Require a regular interactive qualification account
+  ansible.builtin.assert:
+    that:
+      - getent_passwd[qualification_user][1] | int >= 1000
+      - getent_passwd[qualification_user][1] | int < 60000
+      - getent_passwd[qualification_user][4] == '/home/' + qualification_user
+      - getent_passwd[qualification_user][5] is match('^/(bin|usr/bin)/(bash|sh|zsh)$')
+    fail_msg: >-
+      qualification_user must be a pre-existing Ubuntu regular account (UID
+      1000-59999) with /home/<user> and an interactive shell.
+
+- name: Require non-interactive escalation for repository bootstrap
+  ansible.builtin.command:
+    argv: [sudo, --non-interactive, "true"]
+  become_user: "{{ qualification_user }}"
+  changed_when: false
 
 - name: Configure the immutable Ubuntu archive snapshot
   ansible.builtin.copy:
@@ -78,12 +100,6 @@
     enabled: true
     state: started
 
-- name: Look up the pre-existing qualification account
-  ansible.builtin.getent:
-    database: passwd
-    key: "{{ qualification_user }}"
-    fail_key: true
-
 - name: Grant the qualification user Docker socket access
   ansible.builtin.user:
     name: "{{ qualification_user }}"
@@ -92,6 +108,18 @@
 
 - name: Apply persistent network configuration before verification
   ansible.builtin.meta: flush_handlers
+
+- name: Read live IPv4 forwarding state before reconciliation
+  ansible.builtin.command:
+    argv: [sysctl, -n, net.ipv4.ip_forward]
+  register: qualification_ip_forward_before
+  changed_when: false
+
+- name: Reconcile live IPv4 forwarding state
+  ansible.builtin.command:
+    argv: [sysctl, -w, net.ipv4.ip_forward=1]
+  when: qualification_ip_forward_before.stdout != "1"
+  changed_when: true
 
 - name: Verify persistent IPv4 forwarding value
   ansible.builtin.command:

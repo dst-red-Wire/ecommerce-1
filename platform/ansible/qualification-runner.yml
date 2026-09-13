@@ -5,4 +5,69 @@
   gather_facts: true
   roles:
     - role: qualification_runner_host
+  post_tasks:
+    - name: Inspect an existing qualification checkout
+      ansible.builtin.stat:
+        path: "{{ qualification_repository_path }}/.git"
+      register: qualification_checkout
 
+    - name: Reject a dirty existing qualification checkout
+      ansible.builtin.command:
+        argv: [git, status, --porcelain=v1]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      register: qualification_existing_status
+      changed_when: false
+      failed_when: qualification_existing_status.stdout | length > 0
+      when: qualification_checkout.stat.exists
+
+    - name: Clone the qualification repository when absent
+      ansible.builtin.git:
+        repo: "{{ qualification_repository_url }}"
+        dest: "{{ qualification_repository_path }}"
+        update: false
+      become_user: "{{ qualification_user }}"
+
+    - name: Fetch the exact qualification head and base objects
+      ansible.builtin.command:
+        argv: [git, fetch, origin, "{{ qualification_pr_head }}", "{{ qualification_pr_base }}"]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Read the current qualification checkout
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      register: qualification_current_head
+      changed_when: false
+
+    - name: Check out the exact qualification head detached
+      ansible.builtin.command:
+        argv: [git, checkout, --detach, "{{ qualification_pr_head }}"]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      when: qualification_current_head.stdout != qualification_pr_head
+      changed_when: true
+
+    - name: Reconcile the hash-locked qualification seed
+      ansible.builtin.command:
+        argv: [make, seed]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Reconcile the repository qualification toolchain
+      ansible.builtin.command:
+        argv: [make, bootstrap]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false
+
+    - name: Verify the reconciled repository qualification toolchain
+      ansible.builtin.command:
+        argv: [make, env-check]
+        chdir: "{{ qualification_repository_path }}"
+      become_user: "{{ qualification_user }}"
+      changed_when: false

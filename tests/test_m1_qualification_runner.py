@@ -13,12 +13,16 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     for package in (
         "docker.io",
         "build-essential",
+        "curl",
+        "diffutils",
         "git",
         "gh",
         "make",
         "python3",
         "python3-venv",
         "ruby",
+        "tar",
+        "unzip",
     ):
         if f'- "{package}=' not in defaults:
             raise AssertionError(f"missing exact host package: {package}")
@@ -38,8 +42,11 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "ansible.builtin.getent",
         "Remove mutable Ubuntu package sources",
         "allow_downgrade: true",
+        "UID\n      1000-59999",
+        'argv: [sudo, --non-interactive, "true"]',
+        "argv: [sysctl, -w, net.ipv4.ip_forward=1]",
     )
-    combined = defaults + tasks
+    combined = defaults + tasks + playbook
     for marker in required:
         if marker not in combined:
             raise AssertionError(f"missing qualification contract marker: {marker}")
@@ -50,6 +57,16 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         if future_platform in lowered_playbook:
             raise AssertionError(f"M4 resource entered M1 scope: {future_platform}")
     immutable_sha = "58e10fdb7122f9f3302e3fc5534b07021f7cc37f"
+    base_sha = "45433013f97a94a8acf94c51a913ff071e6f74b2"
+    for marker in (
+        f"qualification_pr_head: {immutable_sha}",
+        f"qualification_pr_base: {base_sha}",
+        "Fetch the exact qualification head and base objects",
+        "Reconcile the hash-locked qualification seed",
+        "Reconcile the repository qualification toolchain",
+    ):
+        if marker not in combined:
+            raise AssertionError(f"Ansible does not own runner reconciliation: {marker}")
     if f"git checkout --detach {immutable_sha}" not in runbook:
         raise AssertionError("qualification checkout is not pinned to the audited SHA")
     if "git checkout milestone/" in runbook or "git checkout infra/" in runbook:
@@ -66,6 +83,9 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         'mv "$staged_known_hosts" "$QUALIFICATION_KNOWN_HOSTS"',
         "ANSIBLE_HOST_KEY_CHECKING=True",
         "UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS",
+        "HostKeyAlias=$QUALIFICATION_HOST",
+        "ForwardAgent=no",
+        "ClearAllForwardings=yes",
     )
     trust_positions = []
     for marker in trust_markers:
@@ -91,13 +111,14 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "docker info",
         "sysctl -n net.ipv4.ip_forward",
         "git rev-parse HEAD",
+        "45433013f97a94a8acf94c51a913ff071e6f74b2",
         "git status --porcelain=v1",
         'test -z "$worktree_status"',
         "make seed",
         "make bootstrap",
         "make env-check",
         "$HOME/.local/bin/go test -race -tags=integration",
-        "make ci",
+        "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci",
     ):
         if command not in remote_sequence:
             raise AssertionError(f"qualification command is not explicitly remote: {command}")
@@ -179,6 +200,16 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_remove_controller_fail_closed_mode(self):
         self.assert_mutation_rejected(runbook=self.runbook.replace("set -euo pipefail", "set -uo pipefail", 1))
+
+    def test_mutation_allow_forwarded_ssh_agent(self):
+        self.assert_mutation_rejected(runbook=self.runbook.replace("ForwardAgent=no", "ForwardAgent=yes"))
+
+    def test_mutation_use_default_ci_base(self):
+        self.assert_mutation_rejected(
+            runbook=self.runbook.replace(
+                "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci", "make ci"
+            )
+        )
 
     def test_mutation_reuse_general_known_hosts(self):
         self.assert_mutation_rejected(
