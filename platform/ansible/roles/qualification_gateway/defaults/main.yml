@@ -1,0 +1,37 @@
+---
+qualification_ubuntu_release: "24.04"
+qualification_ubuntu_codename: noble
+qualification_architecture: x86_64
+qualification_ubuntu_snapshot: "20250601T000000Z"
+qualification_squid_version: "6.6-1ubuntu3.2"
+qualification_squid_package: "squid={{ qualification_squid_version }}"
+qualification_squid_allowed_domains:
+  # Ubuntu apt package provenance used by both gateway and runner.
+  - snapshot.ubuntu.com
+  # Repository clone, API operations, and pinned GitHub release redirects/assets.
+  - github.com
+  - api.github.com
+  - objects.githubusercontent.com
+  - release-assets.githubusercontent.com
+  # Hash-locked Python seed packages.
+  - pypi.org
+  - files.pythonhosted.org
+  # Go modules/checksums and official Go archive.
+  - proxy.golang.org
+  - sum.golang.org
+  - go.dev
+  - dl.google.com
+  - storage.googleapis.com
+  # Official Node archive and npm packages used by frontend bootstrap.
+  - nodejs.org
+  - registry.npmjs.org
+  # Repository-managed Helm, Terraform, and kubectl archives.
+  - get.helm.sh
+  - releases.hashicorp.com
+  - dl.k8s.io
+  # Docker Hub authentication, manifests, and image layers (including postgres).
+  - registry-1.docker.io
+  - auth.docker.io
+  - production.cloudflare.docker.com
+  # Docker Hub's R2-backed layer delivery endpoint required by postgres Testcontainers.
+  - docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com

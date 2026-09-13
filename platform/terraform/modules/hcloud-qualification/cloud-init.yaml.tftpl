@@ -1,0 +1,13 @@
+#cloud-config
+users:
+  - default
+  - name: ${qualification_user}
+    gecos: M1 qualification runner
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# Terraform owns only the pre-Ansible account and SSH bootstrap. The canonical
+# qualification_runner_host Ansible role owns all subsequent host configuration.

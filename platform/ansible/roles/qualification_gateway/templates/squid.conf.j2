@@ -1,0 +1,16 @@
+# M1 qualification policy: audited explicit destinations and default deny.
+http_port 3128
+acl runner src {{ qualification_runner_private_ip }}/32
+acl SSL_ports port 443
+acl Safe_ports port 80 443
+acl CONNECT method CONNECT
+acl allowed_domains dstdomain -n{% for domain in qualification_squid_allowed_domains %} {{ domain }}{% endfor %}
+http_access deny !runner
+http_access deny CONNECT !SSL_ports
+http_access deny !Safe_ports
+http_access allow runner allowed_domains
+http_access deny all
+access_log stdio:/var/log/squid/access.log squid
+cache_log /var/log/squid/cache.log
+forwarded_for delete
+via off
