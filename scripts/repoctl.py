@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -62,6 +64,52 @@ PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
+
+GITHUB_API = "https://api.github.com"
+CODEX_REVIEW_AUTHOR = "chatgpt-codex-connector"
+
+
+class GitHubAPIError(RuntimeError):
+    """A sanitized, observation-only GitHub API failure."""
+
+
+class GitHubReader:
+    """Small GET-only GitHub REST reader; deliberately has no mutation method."""
+
+    def __init__(self, token: str | None = None, opener=urllib.request.urlopen):
+        self.token = token
+        self.opener = opener
+
+    def get(self, path: str):
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "dst-red-Wire-ecommerce-1-repoctl",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = urllib.request.Request(f"{GITHUB_API}{path}", headers=headers, method="GET")
+        try:
+            with self.opener(request) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise GitHubAPIError(f"GitHub API authentication/authorization failed (HTTP {exc.code})") from None
+            raise GitHubAPIError(f"GitHub API request failed (HTTP {exc.code})") from None
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            raise GitHubAPIError(f"GitHub API request failed ({type(exc).__name__})") from None
+
+    def pages(self, path: str, *, max_pages: int = 100) -> list[dict]:
+        items: list[dict] = []
+        separator = "&" if "?" in path else "?"
+        for page in range(1, max_pages + 1):
+            payload = self.get(f"{path}{separator}per_page=100&page={page}")
+            if not isinstance(payload, list):
+                raise GitHubAPIError("GitHub API collection response was not a list")
+            items.extend(payload)
+            if len(payload) < 100:
+                return items
+        raise GitHubAPIError(f"GitHub API pagination exceeded {max_pages} pages")
 
 
 class MissingRunnerPrerequisite(RuntimeError):
@@ -1898,6 +1946,137 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
+def _event_order(item: dict) -> tuple[str, int]:
+    return (str(item.get("submitted_at") or item.get("created_at") or ""), int(item.get("id") or 0))
+
+
+def _codex_author(item: dict) -> bool:
+    login = str(item.get("user", {}).get("login", "")).removesuffix("[bot]")
+    return login == CODEX_REVIEW_AUTHOR
+
+
+def _reviewed_sha(item: dict) -> str:
+    commit_id = str(item.get("commit_id") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{7,40}", commit_id):
+        return commit_id
+    match = re.search(r"Reviewed commit:\*\*\s*`([0-9a-fA-F]{7,40})`", str(item.get("body") or ""))
+    return match.group(1).lower() if match else ""
+
+
+def _request_kind(body: str) -> str | None:
+    """Match only a command at the start of a trimmed, non-quoted comment."""
+    text = body.strip()
+    if re.match(r"^@codex\s+security\s+review(?:\s|$)", text, re.IGNORECASE):
+        return "security"
+    if re.match(r"^@codex\s+review(?:\s|$)", text, re.IGNORECASE):
+        return "code"
+    return None
+
+
+def codex_review_states(reviews: list[dict], comments: list[dict], expected_sha: str) -> tuple[str, str]:
+    events = list(reviews) + list(comments)
+    states = []
+    for kind, marker in (("code", "Codex Review"), ("security", "Codex Security Review")):
+        completed = [
+            item
+            for item in events
+            if _codex_author(item) and marker in str(item.get("body") or "") and _reviewed_sha(item)
+        ]
+        latest = max(completed, key=_event_order) if completed else None
+        requests = [item for item in comments if _request_kind(str(item.get("body") or "")) == kind]
+        latest_request = max(requests, key=_event_order) if requests else None
+        if latest and expected_sha.startswith(_reviewed_sha(latest)):
+            state = "COMPLETED"
+        elif latest_request and (not latest or _event_order(latest_request) > _event_order(latest)):
+            state = "REQUESTED_OR_RUNNING"
+        elif latest:
+            state = "STALE_SHA"
+        elif latest_request:
+            state = "REQUESTED_OR_RUNNING"
+        else:
+            state = "NOT_REQUESTED"
+        states.append(state)
+    return states[0], states[1]
+
+
+def wait_reviews_command(
+    repo: str,
+    pr: int,
+    expected_sha: str,
+    interval: float,
+    max_attempts: int,
+    json_mode: bool,
+    *,
+    reader: GitHubReader | None = None,
+    sleeper=time.sleep,
+) -> int:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
+        return fail("INVALID_INPUT: --repo must be OWNER/REPO", 4)
+    if pr <= 0 or interval <= 0 or max_attempts <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or ""):
+        return fail(
+            "INVALID_INPUT: PR, interval and max-attempts must be positive; SHA must be exactly 40 hex characters",
+            4,
+        )
+    expected_sha = expected_sha.lower()
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    api = reader or GitHubReader(token)
+    result = {
+        "repo": repo,
+        "pr": pr,
+        "expected_sha": expected_sha,
+        "live_sha": "",
+        "attempt": 0,
+        "code_review": "NOT_REQUESTED",
+        "security_review": "NOT_REQUESTED",
+        "result": "TIMEOUT",
+    }
+    try:
+        for attempt in range(1, max_attempts + 1):
+            result["attempt"] = attempt
+            metadata = api.get(f"/repos/{repo}/pulls/{pr}")
+            live_sha = str(metadata.get("head", {}).get("sha", "")).lower()
+            result["live_sha"] = live_sha
+            if live_sha != expected_sha:
+                result["result"] = "HEAD_MOVED"
+                if json_mode:
+                    print(json.dumps(result, sort_keys=True))
+                else:
+                    print(f"HEAD_MOVED\nexpected_sha={expected_sha}\nlive_sha={live_sha}")
+                return 2
+            reviews = api.pages(f"/repos/{repo}/pulls/{pr}/reviews")
+            comments = api.pages(f"/repos/{repo}/issues/{pr}/comments")
+            code, security = codex_review_states(reviews, comments, expected_sha)
+            result.update(code_review=code, security_review=security)
+            progress = f"attempt={attempt} code={code} security={security} sha={expected_sha[:10]}"
+            print(progress, file=sys.stderr if json_mode else sys.stdout)
+            if code == security == "COMPLETED":
+                result["result"] = "REVIEWS_COMPLETE"
+                if json_mode:
+                    print(json.dumps(result, sort_keys=True))
+                else:
+                    print(f"REVIEWS_COMPLETE\nsame_sha=YES\nsha={expected_sha}")
+                return 0
+            if attempt < max_attempts:
+                sleeper(interval)
+    except GitHubAPIError as exc:
+        result["result"] = "API_FAILURE"
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+            print(str(exc), file=sys.stderr)
+        else:
+            print(f"API_FAILURE\n{exc}")
+        return 5
+    result["result"] = "TIMEOUT"
+    if json_mode:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(
+            f"TIMEOUT\ncode={result['code_review']}\nsecurity={result['security_review']}\n"
+            f"expected_sha={expected_sha}\nAutomatic retrigger: FORBIDDEN"
+        )
+    return 3
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1992,6 +2171,22 @@ def main() -> int:
     ec = sub.add_parser("evidence-compare")
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
+    wr = sub.add_parser(
+        "wait-reviews",
+        description="Observe GET-only Codex code and security reviews for one exact PR head SHA.",
+        epilog=(
+            "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
+            "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
+            "header; public repositories support unauthenticated access. Exit codes: 0 REVIEWS_COMPLETE, "
+            "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
+        ),
+    )
+    wr.add_argument("--repo", required=True, help="GitHub OWNER/REPO")
+    wr.add_argument("--pr", required=True, type=int, help="positive pull request number")
+    wr.add_argument("--sha", required=True, help="immutable full 40-character PR head SHA")
+    wr.add_argument("--interval", type=float, default=75, help="poll interval in seconds (default: 75)")
+    wr.add_argument("--max-attempts", type=int, default=40, help="bounded attempts (default: 40)")
+    wr.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
     args = p.parse_args()
     try:
         if args.cmd == "governance":
@@ -2075,6 +2270,8 @@ def main() -> int:
             return evidence_fetch_command(args.sha)
         if args.cmd == "evidence-compare":
             return evidence_compare_command(args.full, args.incremental)
+        if args.cmd == "wait-reviews":
+            return wait_reviews_command(args.repo, args.pr, args.sha, args.interval, args.max_attempts, args.json)
         if args.cmd == "precommit":
             return precommit()
         if args.cmd == "prepush":
@@ -2084,6 +2281,8 @@ def main() -> int:
         return 1
     except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc), 1)
+    except KeyboardInterrupt:
+        return fail("wait interrupted; no review request was made", 130)
     return 2
 
 
