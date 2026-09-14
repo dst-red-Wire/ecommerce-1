@@ -242,6 +242,38 @@ class WaitReviewsTests(unittest.TestCase):
                 self.assertEqual("INVALID_INPUT", json.loads(completed.stdout)["result"])
                 self.assertNotIn("usage:", completed.stderr.lower())
 
+    def test_long_option_abbreviations_are_rejected(self):
+        json_cases = (("--r", "bad"), ("--sh", "bad"), ("--int", "1"), ("--max-a", "2"))
+        for arguments in json_cases:
+            with self.subTest(arguments=arguments):
+                code, out, err = self.invoke_cli("--json", *arguments)
+                self.assertEqual(4, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertIn("unrecognized arguments:", err)
+                self.assertNotIn("usage:", err.lower())
+                self.assertNotIn("Traceback", out + err)
+
+        code, out, err = self.invoke_cli("--j", "--repo", "bad")
+        self.assertEqual(4, code)
+        self.assertEqual("", out)
+        self.assertIn("INVALID_INPUT", err)
+        self.assertIn("unrecognized arguments:", err)
+        self.assertNotIn("usage:", err.lower())
+        self.assertNotIn("Traceback", err)
+
+    def test_exact_long_options_continue_to_parse(self):
+        arguments = (
+            "--json", "--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--sha", SHA,
+            "--interval", "1", "--max-attempts", "1",
+        )
+        with mock.patch.object(REPOCTL, "wait_reviews_with_signals", return_value=0) as wait_reviews:
+            code, out, err = self.invoke_cli(*arguments)
+        self.assertEqual(0, code)
+        self.assertEqual("", out)
+        self.assertEqual("", err)
+        wait_reviews.assert_called_once_with("dst-red-Wire/ecommerce-1", "77", SHA, "1", "1", True)
+
     def test_non_finite_intervals_are_invalid(self):
         for interval in ("nan", "+nan", "-nan", "inf", "+inf", "-inf", "Infinity"):
             with self.subTest(interval=interval):
