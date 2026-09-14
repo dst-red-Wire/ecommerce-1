@@ -80,6 +80,10 @@ MAX_WAIT_REVIEWS_INTERVAL_SECONDS = 3600
 class GitHubAPIError(RuntimeError):
     """A sanitized, observation-only GitHub API failure."""
 
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 def _validate_github_token(token: str | None) -> None:
     """Reject values that cannot safely cross the stdlib HTTP header boundary."""
@@ -114,8 +118,10 @@ class GitHubReader:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
-                raise GitHubAPIError(f"GitHub API authentication/authorization failed (HTTP {exc.code})") from None
-            raise GitHubAPIError(f"GitHub API request failed (HTTP {exc.code})") from None
+                raise GitHubAPIError(
+                    f"GitHub API authentication/authorization failed (HTTP {exc.code})", status=exc.code
+                ) from None
+            raise GitHubAPIError(f"GitHub API request failed (HTTP {exc.code})", status=exc.code) from None
         except (
             urllib.error.URLError,
             OSError,
@@ -2053,21 +2059,12 @@ def _summary_cell_text(value: str) -> str:
     return re.sub(r"^[^A-Za-z0-9]+", "", value).strip()
 
 
-def _classify_summary_code(item: dict, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
-    """Return CODE evidence anchored by full metadata in the same summary."""
+def _classify_summary_code(item: dict) -> tuple[str, str]:
+    """Return a CODE-owned abbreviated ref from one canonical completed row."""
     if not _codex_author(item):
         return "OTHER", ""
     raw_body = item.get("body")
     if not isinstance(raw_body, str) or raw_body.splitlines().count(REVIEW_SUMMARY_MARKER) != 1:
-        return "OTHER", ""
-    metadata = _security_metadata(raw_body, expected_repo, expected_pr)
-    if (
-        metadata is None
-        or "repository" not in metadata
-        or metadata["repository"] != expected_repo
-        or "pullRequestNumber" not in metadata
-        or metadata["pullRequestNumber"] != expected_pr
-    ):
         return "OTHER", ""
     rows = _summary_table_rows(raw_body)
     if rows is None:
@@ -2078,11 +2075,10 @@ def _classify_summary_code(item: dict, expected_repo: str, expected_pr: int | No
     display_sha_match = re.fullmatch(r"`([0-9a-fA-F]+)`", code_rows[0][2])
     if not display_sha_match:
         return "OTHER", ""
-    full_sha = _full_sha(metadata["headSha"])
     display_sha = display_sha_match.group(1).lower()
-    if len(display_sha) > 40 or len(display_sha) < 7 or not full_sha.startswith(display_sha):
+    if len(display_sha) > 40 or len(display_sha) < 7:
         return "OTHER", ""
-    return "CODE", full_sha
+    return "CODE_REF", display_sha
 
 
 def _classify_review_event(item: dict, source: str, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
@@ -2120,11 +2116,27 @@ def _request_kind(body: str) -> str | None:
 
 
 def codex_review_states(
-    reviews: list[dict], comments: list[dict], expected_sha: str, expected_repo: str = "", expected_pr: int | None = None
+    reviews: list[dict],
+    comments: list[dict],
+    expected_sha: str,
+    expected_repo: str = "",
+    expected_pr: int | None = None,
+    resolve_code_ref=None,
 ) -> tuple[str, str]:
     events = [(_classify_review_event(item, "review", expected_repo, expected_pr), item) for item in reviews]
     events += [(_classify_review_event(item, "comment", expected_repo, expected_pr), item) for item in comments]
-    events += [(_classify_summary_code(item, expected_repo, expected_pr), item) for item in comments]
+    # A canonical review submission already owns an exact CODE commit_id and
+    # takes precedence. Summary refs are resolved only when that evidence is
+    # absent; SECURITY metadata is never consulted to expand a CODE ref.
+    exact_code_submission = any(evidence == ("CODE", expected_sha) for evidence, _ in events)
+    if not exact_code_submission and resolve_code_ref is not None:
+        for item in comments:
+            evidence = _classify_summary_code(item)
+            if evidence[0] != "CODE_REF":
+                continue
+            resolved_sha = _full_sha(resolve_code_ref(evidence[1]))
+            if resolved_sha:
+                events.append((("CODE", resolved_sha), item))
     states = []
     for kind in ("code", "security"):
         classified_kind = kind.upper()
@@ -2198,6 +2210,21 @@ def wait_reviews_command(
     try:
         _validate_github_token(token)
         api = reader or GitHubReader(token)
+        resolved_code_refs: dict[str, str] = {}
+
+        def resolve_code_ref(commit_ref: str) -> str:
+            if commit_ref not in resolved_code_refs:
+                try:
+                    payload = api.get(f"/repos/{repo}/commits/{commit_ref}")
+                except GitHubAPIError as exc:
+                    # GitHub reports missing and ambiguous commit refs as 404
+                    # and 422 respectively. Neither is authoritative identity.
+                    if exc.status not in (404, 422):
+                        raise
+                    payload = {}
+                resolved_code_refs[commit_ref] = _full_sha(payload.get("sha") if isinstance(payload, dict) else "")
+            return resolved_code_refs[commit_ref]
+
         for attempt in range(1, max_attempts + 1):
             result["attempt"] = attempt
             metadata = api.get(f"/repos/{repo}/pulls/{pr}")
@@ -2212,7 +2239,9 @@ def wait_reviews_command(
                 return 2
             reviews = api.pages(f"/repos/{repo}/pulls/{pr}/reviews")
             comments = api.pages(f"/repos/{repo}/issues/{pr}/comments")
-            code, security = codex_review_states(reviews, comments, expected_sha, repo, pr)
+            code, security = codex_review_states(
+                reviews, comments, expected_sha, repo, pr, resolve_code_ref=resolve_code_ref
+            )
             result.update(code_review=code, security_review=security)
             progress = f"attempt={attempt} code={code} security={security} sha={expected_sha[:10]}"
             print(progress, file=sys.stderr if json_mode else sys.stdout)
