@@ -54,8 +54,7 @@ class AgentEfficiencyContractTest(unittest.TestCase):
             "OASDIFF_SHA256_LINUX_AMD64_TARGZ=e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
             versions,
         )
-        self.assertIn("oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz", tasks)
-        self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
+        self.assertIn('"{{ repo_root }}/scripts/repository_tools.py", oasdiff', tasks)
 
     def test_isolated_nx_has_exact_fail_closed_build_approval(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
