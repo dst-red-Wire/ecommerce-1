@@ -23,4 +23,13 @@ class RuntimeEfficiencyTest < Minitest::Test
     assert_equal "fixed-exact-contract", policy.dig("node_capacity", "prod")
     assert_equal "existing-gate-only", policy.dig("node_capacity", "preprod_perf_burst")
   end
+
+  def test_tekton_parallelism_stays_measurement_gated
+    policy = YAML.safe_load(File.read(File.join(ROOT, "config/contracts/tekton-trigger-runtime.yaml")))
+    budget = policy.fetch("execution_budget")
+    assert_equal true, budget.fetch("bounded_parallelism_required")
+    assert_equal "management-plane-runtime-config", budget.fetch("values_source")
+    assert_equal true, budget.fetch("performance_evidence_required_before_tuning")
+    assert_equal true, budget.fetch("hardcoded_concurrency_without_measurement_forbidden")
+  end
 end
