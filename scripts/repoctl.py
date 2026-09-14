@@ -1979,8 +1979,15 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
-def _event_order(item: dict) -> tuple[str, int]:
-    return (str(item.get("submitted_at") or item.get("created_at") or ""), int(item.get("id") or 0))
+def _event_order(item: Mapping) -> tuple[str, int]:
+    """Return an ordering key without trusting API-controlled numeric values."""
+    return (str(item.get("submitted_at") or item.get("created_at") or ""), _validated_event_id(item.get("id")))
+
+
+def _validated_event_id(value: object) -> int:
+    if isinstance(value, bool) or not (isinstance(value, int) or isinstance(value, str) and value.isdecimal()):
+        raise GitHubAPIError("GitHub event has invalid event id")
+    return int(value)
 
 
 def _codex_author(item: dict) -> bool:
@@ -2026,9 +2033,15 @@ def _validated_review_collection(payload: object, name: str) -> list[Mapping]:
     for item in payload:
         if not isinstance(item, Mapping):
             raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
-        user = item.get("user")
-        if not isinstance(user, Mapping) or not isinstance(user.get("login"), str):
+        if "user" not in item:
             raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        user = item.get("user")
+        if user is not None and (not isinstance(user, Mapping) or not isinstance(user.get("login"), str)):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        try:
+            _validated_event_id(item.get("id"))
+        except GitHubAPIError:
+            raise GitHubAPIError(f"GitHub {name} collection has invalid event id") from None
     return payload
 
 
@@ -2643,8 +2656,6 @@ def main(raw_argv: list[str] | None = None) -> int:
         return 1
     except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc), 1)
-    except KeyboardInterrupt:
-        return fail("wait interrupted; no review request was made", 130)
     return 2
 
 

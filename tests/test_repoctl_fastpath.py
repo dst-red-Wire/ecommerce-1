@@ -13,6 +13,10 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_non_wait_interrupt_is_not_mislabeled_as_wait_reviews(self):
+        with mock.patch.object(MOD, "test_all", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            MOD.main(["test"])
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))

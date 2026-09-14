@@ -747,7 +747,6 @@ class WaitReviewsTests(unittest.TestCase):
             "invalid",
             123,
             {},
-            {"user": None},
             {"user": []},
             {"user": {}},
             {"user": {"login": 123}},
@@ -785,7 +784,7 @@ class WaitReviewsTests(unittest.TestCase):
 
     def test_malformed_users_are_rejected_before_valid_history_is_processed(self):
         malformed = []
-        for user in (None, {}, "deleted-user", {"login": None}, {"login": 123}):
+        for user in ({}, "deleted-user", {"login": None}, {"login": 123}):
             item = review("code", SHA)
             item["user"] = user
             malformed.append(item)
@@ -793,6 +792,47 @@ class WaitReviewsTests(unittest.TestCase):
             with self.subTest(user=item["user"]):
                 with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "invalid member shape"):
                     REPOCTL.codex_review_states([review("code", SHA, 30), item], [], SHA)
+
+    def test_deleted_review_author_is_ignored_before_real_codex_completion(self):
+        deleted = review("code", SHA, 10)
+        deleted["user"] = None
+        reader = FakeReader(reviews=[deleted, review("code", SHA, 20)], comments=[review("security")])
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(0, code)
+        self.assertEqual("REVIEWS_COMPLETE", json.loads(out)["result"])
+        self.assertNotIn("Traceback", out + err)
+
+    def test_deleted_comment_author_is_ignored(self):
+        deleted = request("code")
+        deleted["user"] = None
+        reader = FakeReader(reviews=[review("code")], comments=[deleted, review("security")])
+        code, out, _ = self.invoke(reader, json_mode=True)
+        self.assertEqual(0, code)
+        self.assertEqual("REVIEWS_COMPLETE", json.loads(out)["result"])
+
+    def test_event_id_shape_failures_are_sanitized(self):
+        for event_id in ("not-a-number", None, [], {}, True):
+            item = review("code")
+            item["id"] = event_id
+            reader = FakeReader(reviews=[review("code", event_id=19), item], comments=[])
+            with self.subTest(event_id=event_id):
+                code, out, err = self.invoke(reader, json_mode=True)
+                self.assertEqual(5, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("API_FAILURE", json.loads(out)["result"])
+                self.assertIn("invalid event id", err)
+                self.assertNotIn("Traceback", out + err)
+                self.assertNotIn("ValueError", out + err)
+                self.assertNotIn("TypeError", out + err)
+                self.assertNotIn(repr(event_id), out + err)
+
+    def test_integer_and_decimal_string_event_ids_are_supported(self):
+        numeric_string = review("code")
+        numeric_string["id"] = "20"
+        self.assertEqual(
+            ("COMPLETED", "COMPLETED"),
+            REPOCTL.codex_review_states([numeric_string], [review("security")], SHA),
+        )
 
     def test_command_matching_is_bounded(self):
         self.assertEqual("code", REPOCTL._request_kind("  @codex review please  "))
