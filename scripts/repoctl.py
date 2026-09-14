@@ -2019,6 +2019,29 @@ def _validated_pull_head_sha(payload: object) -> str:
     return sha.lower()
 
 
+def _validated_review_collection(payload: object, name: str) -> list[Mapping]:
+    """Decode a GitHub reviews/comments collection before event processing."""
+    if not isinstance(payload, list):
+        raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        user = item.get("user")
+        if not isinstance(user, Mapping) or not isinstance(user.get("login"), str):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+    return payload
+
+
+def _validated_resolved_code_sha(value: object, announced_prefix: str) -> str:
+    """Validate a resolved CODE identity while allowing unresolved refs to fail closed."""
+    resolved_sha = _full_sha(value)
+    if value and not resolved_sha:
+        raise GitHubAPIError("GitHub CODE commit resolution has invalid shape")
+    if resolved_sha and not resolved_sha.startswith(announced_prefix):
+        raise GitHubAPIError("GitHub CODE commit resolution contradicted its announced prefix")
+    return resolved_sha
+
+
 def _first_nonempty_line(body: object) -> str:
     """Return the first meaningful line without searching later body prose."""
     if not isinstance(body, str):
@@ -2137,6 +2160,8 @@ def codex_review_states(
     expected_pr: int | None = None,
     resolve_code_ref=None,
 ) -> tuple[str, str]:
+    reviews = _validated_review_collection(reviews, "reviews")
+    comments = _validated_review_collection(comments, "comments")
     events = [(_classify_review_event(item, "review", expected_repo, expected_pr), item) for item in reviews]
     events += [(_classify_review_event(item, "comment", expected_repo, expected_pr), item) for item in comments]
     # A canonical review submission already owns an exact CODE commit_id and
@@ -2148,7 +2173,7 @@ def codex_review_states(
             evidence = _classify_summary_code(item)
             if evidence[0] != "CODE_REF":
                 continue
-            resolved_sha = _full_sha(resolve_code_ref(evidence[1]))
+            resolved_sha = _validated_resolved_code_sha(resolve_code_ref(evidence[1]), evidence[1])
             if resolved_sha:
                 events.append((("CODE", resolved_sha), item))
     states = []
@@ -2236,7 +2261,12 @@ def wait_reviews_command(
                     if exc.status not in (404, 422):
                         raise
                     payload = {}
-                resolved_code_refs[commit_ref] = _full_sha(payload.get("sha") if isinstance(payload, dict) else "")
+                if payload:
+                    if not isinstance(payload, Mapping):
+                        raise GitHubAPIError("GitHub CODE commit resolution has invalid shape")
+                resolved_code_refs[commit_ref] = _validated_resolved_code_sha(
+                    payload.get("sha") if isinstance(payload, Mapping) else "", commit_ref
+                )
             return resolved_code_refs[commit_ref]
 
         for attempt in range(1, max_attempts + 1):
@@ -2251,8 +2281,12 @@ def wait_reviews_command(
                 else:
                     print(f"HEAD_MOVED\nexpected_sha={expected_sha}\nlive_sha={live_sha}")
                 return 2
-            reviews = api.pages(f"/repos/{repo}/pulls/{pr}/reviews")
-            comments = api.pages(f"/repos/{repo}/issues/{pr}/comments")
+            reviews = _validated_review_collection(
+                api.pages(f"/repos/{repo}/pulls/{pr}/reviews"), "reviews"
+            )
+            comments = _validated_review_collection(
+                api.pages(f"/repos/{repo}/issues/{pr}/comments"), "comments"
+            )
             code, security = codex_review_states(
                 reviews, comments, expected_sha, repo, pr, resolve_code_ref=resolve_code_ref
             )

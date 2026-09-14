@@ -538,6 +538,38 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("REVIEWS_COMPLETE", out)
 
+    def test_summary_code_resolution_requires_announced_prefix(self):
+        announced = "abcdef0"
+        matching = announced + "1" * 33
+        contradictory = "1234567" + "2" * 33
+        item = summary(sha=matching, short_sha=announced)
+        self.assertEqual(
+            "COMPLETED",
+            REPOCTL.codex_review_states(
+                [], [item], matching, "dst-red-Wire/ecommerce-1", 77,
+                resolve_code_ref=lambda _ref: matching,
+            )[0],
+        )
+        # Mutation proof: removing the startswith check would make this
+        # contradictory resolver result count as a completed CODE review.
+        with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "contradicted its announced prefix"):
+            REPOCTL.codex_review_states(
+                [], [item], contradictory, "dst-red-Wire/ecommerce-1", 77,
+                resolve_code_ref=lambda _ref: contradictory,
+            )
+
+    def test_contradictory_summary_resolution_is_sanitized_api_failure(self):
+        announced = SHA[:7]
+        item = summary(short_sha=announced)
+        reader = FakeReader(comments=[item], commits={announced: STALE})
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(5, code)
+        self.assertEqual(1, len(out.strip().splitlines()))
+        self.assertEqual("API_FAILURE", json.loads(out)["result"])
+        self.assertIn("contradicted its announced prefix", err)
+        self.assertNotIn("Traceback", out + err)
+        self.assertNotIn(repr(reader.comments), out + err)
+
     def test_summary_code_and_security_own_independent_full_sha_evidence(self):
         old_code = "aaaaaaaa" + "1" * 32
         new_security = "aaaaaaaa" + "2" * 32
@@ -708,16 +740,59 @@ class WaitReviewsTests(unittest.TestCase):
         newer = request("code", 20, "2026-01-01T00:02:00Z")
         self.assertEqual("COMPLETED", REPOCTL.codex_review_states([exact], [newer], SHA)[0])
 
-    def test_malformed_users_are_ignored_without_hiding_valid_history(self):
+    def test_malformed_collection_members_are_sanitized_api_failures(self):
+        malformed = [
+            None,
+            [],
+            "invalid",
+            123,
+            {},
+            {"user": None},
+            {"user": []},
+            {"user": {}},
+            {"user": {"login": 123}},
+        ]
+        for collection in ("reviews", "comments"):
+            for member in malformed:
+                valid = review("code") if collection == "reviews" else request("code")
+                reader = FakeReader(
+                    reviews=[valid, member] if collection == "reviews" else [review("code")],
+                    comments=[valid, member] if collection == "comments" else [],
+                )
+                with self.subTest(collection=collection, member_type=type(member).__name__, member=member):
+                    code, out, err = self.invoke(reader, json_mode=True)
+                    self.assertEqual(5, code)
+                    self.assertEqual(1, len(out.strip().splitlines()))
+                    self.assertEqual("API_FAILURE", json.loads(out)["result"])
+                    self.assertIn(f"GitHub {collection} collection has invalid member shape", err)
+                    self.assertNotIn("Traceback", out + err)
+                    self.assertNotIn("AttributeError", out + err)
+                    self.assertNotIn(repr(member), out + err)
+                    self.assertFalse(any("/commits/" in path for _, path in reader.calls))
+
+    def test_valid_and_empty_event_collections_remain_supported(self):
+        self.assertEqual(("NOT_REQUESTED", "NOT_REQUESTED"), REPOCTL.codex_review_states([], [], SHA))
+        self.assertEqual(
+            ("COMPLETED", "COMPLETED"),
+            REPOCTL.codex_review_states([review("code")], [review("security")], SHA),
+        )
+
+    def test_collection_validation_guards_event_get_access(self):
+        # Mutation proof: bypassing centralized member validation exposes the
+        # formerly unsafe item.get() path as an AttributeError.
+        with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "invalid member shape"):
+            REPOCTL.codex_review_states([review("code"), None], [], SHA)
+
+    def test_malformed_users_are_rejected_before_valid_history_is_processed(self):
         malformed = []
         for user in (None, {}, "deleted-user", {"login": None}, {"login": 123}):
             item = review("code", SHA)
             item["user"] = user
             malformed.append(item)
-        valid = review("code", SHA, 30)
-        comment = review("security", SHA)
-        comment["user"] = None
-        self.assertEqual(("COMPLETED", "NOT_REQUESTED"), REPOCTL.codex_review_states(malformed + [valid], [comment], SHA))
+        for item in malformed:
+            with self.subTest(user=item["user"]):
+                with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "invalid member shape"):
+                    REPOCTL.codex_review_states([review("code", SHA, 30), item], [], SHA)
 
     def test_command_matching_is_bounded(self):
         self.assertEqual("code", REPOCTL._request_kind("  @codex review please  "))
@@ -813,12 +888,13 @@ class WaitReviewsTests(unittest.TestCase):
     def test_reviews_and_comments_paginate(self):
         for collection in ("reviews", "comments"):
             calls = []
+            member = {"user": {"login": "owner"}}
 
             def opener(req, timeout):
                 calls.append(req)
                 self.assertEqual(REPOCTL.GITHUB_HTTP_TIMEOUT_SECONDS, timeout)
                 page = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)["page"][0]
-                return Response([{}] * 100 if page == "1" else [{}])
+                return Response([member] * 100 if page == "1" else [member])
 
             reader = REPOCTL.GitHubReader(opener=opener)
             items = reader.pages(f"/repos/o/r/{collection}")
