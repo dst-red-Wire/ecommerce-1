@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -221,13 +222,14 @@ def developer_state_ready(tags: str) -> bool:
         corepack = shutil.which("corepack")
         if not node or not corepack:
             return False
-        expected_node = (ROOT / "frontend" / ".node-version").read_text(encoding="utf-8").strip()
+        expected_node = pins.get("NODE_VERSION", "")
         got = run([node, "--version"], check=False, capture=True)
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
     if "go" in wanted or "cgo" in wanted:
-        go = shutil.which("go")
-        gofmt = shutil.which("gofmt")
+        managed_bin = Path.home() / ".local" / "bin"
+        go = str(managed_bin / "go") if (managed_bin / "go").is_file() else None
+        gofmt = str(managed_bin / "gofmt") if (managed_bin / "gofmt").is_file() else None
         if not go or not gofmt:
             return False
         got = run([go, "version"], check=False, capture=True)
@@ -392,9 +394,9 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     return service_doc
 
 
-def api_generate(target: str = "all", service: str = "", check: bool = False) -> int:
-    if target not in {"all", "go", "ts"}:
-        return fail("api-generate target must be all, go, or ts")
+def api_generate(target: str = "go", service: str = "", check: bool = False) -> int:
+    if target != "go":
+        return fail("api-generate target must be go; Node.js application bindings are forbidden")
     registry = ruby_yaml("config/contracts/public-api-contracts.yaml")
     contracts = registry.get("contracts", {})
     common_entry = registry.get("common_components")
@@ -414,7 +416,7 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
         with tempfile.TemporaryDirectory(prefix=f"ecommerce-{name}-openapi-") as temp_dir:
             bundled_spec = Path(temp_dir) / f"{name}.bundled.json"
             bundled_spec.write_text(json.dumps(bundled_doc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            if target in {"all", "go"}:
+            if target == "go":
                 require("oapi-codegen")
                 require("gofmt")
                 module = ROOT / "services" / name
@@ -424,48 +426,21 @@ def api_generate(target: str = "all", service: str = "", check: bool = False) ->
                 else:
                     if not (module / "go.mod").is_file():
                         return fail(f"api-generate implemented service lacks go.mod: services/{name}/go.mod")
-                    out_dir.mkdir(parents=True, exist_ok=True)
                     generated = out_dir / "openapi.gen.go"
+                    candidate = Path(temp_dir) / f"{name}.openapi.gen.go" if check else generated
+                    if not check:
+                        out_dir.mkdir(parents=True, exist_ok=True)
                     config_path = Path(temp_dir) / f"{name}.oapi-codegen.yaml"
                     config_path.write_text(
-                        f"package: generated\noutput: {generated}\ngenerate:\n  models: true\n  std-http-server: true\n  strict-server: true\n",
+                        f"package: generated\noutput: {candidate}\ngenerate:\n  models: true\n  std-http-server: true\n  strict-server: true\n",
                         encoding="utf-8",
                     )
                     # Run from the owning Go module so oapi-codegen can resolve the
                     # module/runtime context instead of warning from repository root.
                     run(["oapi-codegen", "--config", str(config_path), str(bundled_spec)], cwd=module)
-                    run(["gofmt", "-w", str(generated)], cwd=module)
-            if target in {"all", "ts"}:
-                require("corepack")
-                require("oxfmt")
-                out_dir = ROOT / "frontend" / "packages" / "api-client" / "src" / "generated"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                generated = out_dir / f"{name}.ts"
-                p = run(
-                    ["corepack", "pnpm", "--dir", "frontend", "exec", "openapi-typescript", str(bundled_spec)],
-                    capture=True,
-                )
-                candidate = Path(temp_dir) / f"{name}.generated.ts"
-                candidate.write_text(p.stdout, encoding="utf-8")
-                run(
-                    [
-                        "oxfmt",
-                        "--config",
-                        str(ROOT / "frontend" / ".oxfmtrc.json"),
-                        "--write",
-                        str(candidate),
-                    ],
-                    cwd=ROOT / "frontend",
-                )
-                canonical = candidate.read_text(encoding="utf-8")
-                if check:
-                    if not generated.is_file():
-                        return fail(f"generated TypeScript API client is missing: {generated.relative_to(ROOT)}", 1)
-                    current = generated.read_text(encoding="utf-8")
-                    if current != canonical:
-                        return fail(f"generated TypeScript API client is stale: {generated.relative_to(ROOT)}", 1)
-                else:
-                    generated.write_text(canonical, encoding="utf-8")
+                    run(["gofmt", "-w", str(candidate)], cwd=module)
+                    if check and (not generated.is_file() or candidate.read_bytes() != generated.read_bytes()):
+                        return fail(f"generated API binding is stale: {generated.relative_to(ROOT)}")
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -537,7 +512,9 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
     if generate or contract_changed:
-        api_generate("all")
+        result = api_generate("go", check=True)
+        if result:
+            return result
     print("PASS OpenAPI and cross-registry contract checks completed")
     return 0
 
@@ -608,51 +585,139 @@ def documentation_policy() -> int:
     return 0
 
 
-def frontend(action: str, scope: str) -> int:
+def frontend(action: str, scope: str = "") -> int:
+    # Accept both `repoctl frontend storefront` and the compatibility form
+    # `repoctl frontend check storefront` used by existing Tekton tasks.
+    if not scope:
+        scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
-        return fail("frontend usage: action={check|lint|test|build} scope={all|storefront|admin}")
-    ensure_developer("node,quality_tools")
-    require("node")
-    require("corepack")
-    require("oxlint")
-    package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
-    pm = package.get("packageManager", "")
-    if not pm.startswith("pnpm@"):
-        return fail(f"frontend packageManager must pin pnpm, got {pm!r}")
-    expected = pm.split("@", 1)[1]
-    actual = output(["corepack", "pnpm", "--version"], cwd=ROOT / "frontend").strip()
-    if actual != expected:
-        return fail(f"pnpm version mismatch: expected {expected}, got {actual}")
-    run(["corepack", "pnpm", "install", "--frozen-lockfile", "--prefer-offline"], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if api_generate("ts", check=True):
-            return 1
-
-    def pnpm(*args: str) -> None:
-        run(["corepack", "pnpm", *args], cwd=ROOT / "frontend")
-
+        return fail("frontend usage: frontend <storefront|admin|all>")
+    ensure_developer("go,cgo")
+    managed_bin = Path.home() / ".local/bin"
+    env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
+    # A version manager may export a GOROOT for a different system Go. The
+    # repository-managed binary must discover and execute its own toolchain.
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    go = managed_bin / "go"
+    gofmt = managed_bin / "gofmt"
+    if not go.is_file() or not gofmt.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    targets = ["storefront", "admin"] if scope == "all" else [scope]
+    frontend_root = ROOT / "frontend"
+    templ_version = pinned_versions().get("TEMPL_VERSION")
+    if not templ_version:
+        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
     if action in {"check", "lint"}:
-        lint_paths = ["apps", "packages"] if scope == "all" else [f"apps/{scope}", "packages/ui", "packages/api-client"]
-        run(["oxlint", *lint_paths], cwd=ROOT / "frontend")
-    if action in {"check", "test", "build"}:
-        if scope == "all":
-            pnpm("run", "typecheck")
-        else:
-            pnpm("--filter", "@noma/ui", "typecheck")
-            pnpm("--filter", "@noma/api-client", "typecheck")
-            pnpm("--filter", f"@noma/{scope}", "typecheck")
+        files = sorted(str(path) for path in frontend_root.rglob("*.go"))
+        formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
+        if formatted.stdout.strip():
+            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        forbidden_frontend_artifacts()
+        if action == "check":
+            with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
+                generated_root = Path(temp_dir) / "frontend"
+                shutil.copytree(frontend_root, generated_root)
+                run(
+                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+                    cwd=generated_root,
+                    env=env,
+                )
+                committed = sorted(frontend_root.rglob("*_templ.go"))
+                generated = sorted(generated_root.rglob("*_templ.go"))
+                relative_committed = [path.relative_to(frontend_root) for path in committed]
+                relative_generated = [path.relative_to(generated_root) for path in generated]
+                if relative_committed != relative_generated:
+                    return fail("frontend templ generated file set is stale")
+                for relative in relative_committed:
+                    if (frontend_root / relative).read_bytes() != (generated_root / relative).read_bytes():
+                        return fail(f"frontend templ generated code is stale: {relative}")
+        if action == "lint":
+            run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
-        if scope == "all":
-            pnpm("run", "test")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "test")
+        env = dict(env, CGO_ENABLED="1")
+        # One module-wide invocation runs shared package tests exactly once as well as
+        # the independently deployable application packages.
+        run([str(go), "test", "-race", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
-        if scope == "all":
-            pnpm("run", "build")
-        else:
-            pnpm("--filter", f"@noma/{scope}", "build")
+        with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
+            for target in targets:
+                run(
+                    [str(go), "build", "-o", str(Path(output_dir) / target), f"./apps/{target}"],
+                    cwd=frontend_root,
+                    env=env,
+                )
+    if action == "check":
+        run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
+
+
+def site() -> int:
+    """Run both independently deployable Go frontends until interrupted."""
+    ensure_developer("go")
+    env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-site-") as output_dir:
+        binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
+        for target, binary in zip(("storefront", "admin"), binaries, strict=True):
+            run(["go", "build", "-o", str(binary), f"./apps/{target}"], cwd=ROOT / "frontend", env=env)
+        addresses = (
+            os.environ.get("STOREFRONT_HTTP_ADDR", ":8080"),
+            os.environ.get("ADMIN_HTTP_ADDR", ":8081"),
+        )
+        processes = [
+            subprocess.Popen(
+                [str(binary)],
+                cwd=ROOT / "frontend",
+                env=dict(env, HTTP_ADDR=address),
+            )
+            for binary, address in zip(binaries, addresses, strict=True)
+        ]
+        previous_handlers = {}
+
+        def interrupt(_signum, _frame):
+            raise KeyboardInterrupt
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, interrupt)
+        try:
+            while all(process.poll() is None for process in processes):
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+            for process in processes:
+                process.wait()
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
+        failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
+        return failed[0] if failed else 0
+
+
+def forbidden_frontend_artifacts() -> None:
+    forbidden_names = {
+        "package.json",
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "yarn.lock",
+        ".node-version",
+        ".nvmrc",
+        "next.config.js",
+        "next.config.ts",
+        "playwright.config.ts",
+        "turbo.json",
+        "pnpm-workspace.yaml",
+    }
+    forbidden_suffixes = {".ts", ".tsx"}
+    paths = set(git("ls-files").splitlines()) | set(git("ls-files", "--others", "--exclude-standard").splitlines())
+    violations = sorted(
+        path for path in paths if Path(path).name in forbidden_names or Path(path).suffix in forbidden_suffixes
+    )
+    if violations:
+        raise RuntimeError("forbidden Node.js frontend artifacts: " + ", ".join(violations))
 
 
 def ensure_developer(tags: str) -> None:
@@ -685,9 +750,16 @@ def service_check(service: str) -> int:
     module = ROOT / "services" / service
     if not (module / "go.mod").is_file():
         return fail(f"service module does not exist: services/{service}/go.mod")
-    ensure_developer("go,cgo,sqlc,docker")
+    capabilities = ["go", "cgo"]
+    if (module / "sqlc.yaml").is_file():
+        capabilities.append("sqlc")
+    selected_tests = list(module.rglob("*_test.go"))
+    needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
+    ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
     if (module / "sqlc.yaml").is_file():
         cfg = ruby_yaml(str(module / "sqlc.yaml"))
@@ -709,14 +781,24 @@ def service_check(service: str) -> int:
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
+    run(["go", "vet", "./..."], cwd=module, env=env)
+    run(["go", "build", "./..."], cwd=module, env=env)
+    if needs_containers:
+        docker = shutil.which("docker")
+        forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
+        docker_ready = bool(docker) and run([docker, "info"], check=False, capture=True).returncode == 0
+        if not docker_ready or forwarding.returncode or forwarding.stdout.strip() != "1":
+            return fail(
+                "PLATFORM NOT CAPABLE: container integration requires Docker user/daemon access "
+                "and net.ipv4.ip_forward=1",
+                2,
+            )
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
         run(
             ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
             cwd=module,
             env=env,
         )
-    run(["go", "vet", "./..."], cwd=module, env=env)
-    run(["go", "build", "./..."], cwd=module, env=env)
     print(f"PASS {service} service checks completed")
     return 0
 
@@ -816,8 +898,10 @@ def lint_all() -> int:
     if python_files:
         require("ruff")
         run(["ruff", "check", *python_files])
-    if (ROOT / "frontend" / "package.json").is_file():
-        frontend("lint", "all")
+    if (ROOT / "frontend" / "go.mod").is_file():
+        result = frontend("lint", "all")
+        if result:
+            return result
     print("PASS lint checks completed")
     return 0
 
@@ -830,7 +914,7 @@ def test_all() -> int:
             ensure_developer("go")
             run(["go", "test", "./..."], cwd=module)
             run(["go", "vet", "./..."], cwd=module)
-    if (ROOT / "frontend" / "package.json").is_file():
+    if (ROOT / "frontend" / "go.mod").is_file():
         frontend("test", "all")
     print("PASS test checks completed")
     return 0
@@ -1831,6 +1915,7 @@ def main() -> int:
         "git-sync",
         "precommit",
         "prepush",
+        "site",
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
@@ -1839,7 +1924,7 @@ def main() -> int:
     c.add_argument("--generate", action="store_true")
     f = sub.add_parser("frontend")
     f.add_argument("action")
-    f.add_argument("scope")
+    f.add_argument("scope", nargs="?", default="")
     s = sub.add_parser("service")
     s.add_argument("service")
     a = sub.add_parser("affected")
@@ -1857,12 +1942,9 @@ def main() -> int:
     ctx = sub.add_parser("context")
     ctx.add_argument("task", nargs="?", default="")
     gen = sub.add_parser("api-generate")
-    gen.add_argument("--target", default="all")
+    gen.add_argument("--target", default="go")
     gen.add_argument("--service", default="")
     gen.add_argument("--check", action="store_true")
-    mock = sub.add_parser("api-mock")
-    mock.add_argument("--service", default="product")
-    mock.add_argument("--port", type=int, default=4010)
     nx = sub.add_parser("nx-graph")
     sg = sub.add_parser("service-new")
     sg.add_argument("--service", required=True)
@@ -1934,6 +2016,8 @@ def main() -> int:
             return system_check()
         if args.cmd == "frontend":
             return frontend(args.action, args.scope)
+        if args.cmd == "site":
+            return site()
         if args.cmd == "service":
             return service_check(args.service)
         if args.cmd == "affected":
@@ -1947,39 +2031,9 @@ def main() -> int:
         if args.cmd == "failure-context":
             return failure_context(args.gate, args.component)
         if args.cmd == "context":
-            return run(
-                [sys.executable, "scripts/context-pack.py", "--task", args.task], check=False
-            ).returncode
+            return run([sys.executable, "scripts/context-pack.py", "--task", args.task], check=False).returncode
         if args.cmd == "api-generate":
             return api_generate(args.target, args.service, args.check)
-        if args.cmd == "api-mock":
-            spec = (
-                ruby_yaml("config/contracts/public-api-contracts.yaml")
-                .get("contracts", {})
-                .get(args.service, {})
-                .get("path")
-            )
-            if not spec:
-                return fail(f"api-mock service not registered: {args.service}")
-            env = os.environ.copy()
-            env["SCARF_ANALYTICS"] = "false"
-            return run(
-                [
-                    "corepack",
-                    "pnpm",
-                    "exec",
-                    "prism",
-                    "mock",
-                    f"../{spec}",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(args.port),
-                    "--dynamic",
-                ],
-                cwd=ROOT / "frontend",
-                env=env,
-            ).returncode
         if args.cmd == "nx-graph":
             materialize = run([sys.executable, "scripts/nx-graph.py"], check=False)
             if materialize.returncode:

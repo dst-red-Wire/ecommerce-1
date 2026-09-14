@@ -1,4 +1,10 @@
-PYTHON := python3
+QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
+QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
+QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
+PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),python3)
+ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
+export PATH := $(QUALIFICATION_BIN):$(PATH)
+endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
@@ -6,13 +12,24 @@ export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help bootstrap env-check ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
-bootstrap: ## Reconcile capabilities independently in dependency order
-	@$(PYTHON) scripts/capability_bootstrap.py bootstrap
+seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
+	@$(PYTHON) scripts/capability_bootstrap.py seed
+
+bootstrap: seed ## Reconcile required static capabilities independently in dependency order
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
+
+bootstrap-runtime: seed ## Reconcile and require optional external runtime capabilities
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile runtime
 
 env-check: ## Audit capabilities without changing the workstation
-	@$(PYTHON) scripts/capability_bootstrap.py env-check
+	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile static
+
+env-check-runtime: ## Audit and require optional external runtime capabilities
+	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
@@ -41,13 +58,13 @@ lint: automation ## Lint Go, Python and frontend sources with declared toolchain
 
 format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
-format: ## Format Python and frontend sources with Ruff/Oxfmt
+format: ## Format Python and Go frontend sources
 	@ruff format scripts tests
-	@oxfmt --write frontend/apps frontend/packages frontend/e2e
+	@gofmt -w frontend
 
-format-check: ## Check Ruff/Oxfmt formatting without mutation
+format-check: ## Check Ruff and Go formatting without mutation
 	@ruff format --check scripts tests
-	@oxfmt --check frontend/apps frontend/packages frontend/e2e
+	@output="$$(gofmt -l frontend)" || exit $$?; test -z "$$output" || { printf '%s\n' "$$output"; exit 1; }
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
@@ -158,21 +175,18 @@ nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 bazel-verify: ## Run affected-only verification through pinned Bazel
 	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 
-.PHONY: api-generate api-mock service-new
+.PHONY: api-generate service-new
 
-api-generate: ## Generate Go and TypeScript bindings from registered OpenAPI contracts
-	@$(PYTHON) scripts/repoctl.py api-generate --target all $(if $(SERVICE),--service $(SERVICE),)
-
-api-mock: ## Start Prism mock; use SERVICE=product PORT=4010
-	@$(PYTHON) scripts/repoctl.py api-mock --service "$${SERVICE:-product}" --port "$${PORT:-4010}"
+api-generate: ## Generate Go bindings from registered OpenAPI contracts
+	@$(PYTHON) scripts/repoctl.py api-generate --target go $(if $(SERVICE),--service $(SERVICE),)
 
 service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)
 
 .PHONY: site product-check product-run product-benchmark resource-candidate
 
-site: ## Install pinned frontend dependencies and run Storefront + Admin locally
-	@$(MAKE) -C frontend site
+site: ## Run Storefront and Admin Go frontends locally
+	@$(PYTHON) scripts/repoctl.py site
 
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product

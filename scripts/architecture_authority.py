@@ -10,56 +10,144 @@ INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
 V5_FRONTENDS = ["storefront", "admin"]
 EXPECTED_V5_FRONTEND_RUNTIME = {
-    "language": "go", "module": "frontend", "module_file": "frontend/go.mod",
-    "rendering": "templ", "interactions": "htmx", "runtime_nodejs": False,
+    "language": "go",
+    "module": "frontend",
+    "module_file": "frontend/go.mod",
+    "rendering": "templ",
+    "interactions": "htmx",
+    "runtime_nodejs": False,
     "migration_source": "nextjs-react-node",
 }
-V5_PROD_TOPOLOGY_KEYS = frozenset({
-    "physical_hosts_total", "physical_hosts_per_site", "control_planes_per_site",
-    "workers_per_site", "data_workers_per_site", "general_workers_per_site", "sites",
-})
+V5_PROD_TOPOLOGY_KEYS = frozenset(
+    {
+        "physical_hosts_total",
+        "physical_hosts_per_site",
+        "control_planes_per_site",
+        "workers_per_site",
+        "data_workers_per_site",
+        "general_workers_per_site",
+        "sites",
+    }
+)
 V5_PROD_SITES_KEYS = frozenset({"prod-a", "prod-b"})
 V5_PROD_SITE_KEYS = frozenset({"private_block", "physical_hosts"})
-V5_ROOT_KEYS = frozenset({
-    "version", "status", "project", "business", "platform", "management_plane",
-    "stateful", "dns", "observability", "mlops", "supply_chain",
-    "topology_contracts", "machine_contracts", "prod_certified_topology",
-    "superseded", "build_milestones", "milestone_dependencies",
-})
+V5_ROOT_KEYS = frozenset(
+    {
+        "version",
+        "status",
+        "project",
+        "business",
+        "platform",
+        "management_plane",
+        "stateful",
+        "dns",
+        "observability",
+        "mlops",
+        "supply_chain",
+        "topology_contracts",
+        "machine_contracts",
+        "prod_certified_topology",
+        "superseded",
+        "build_milestones",
+        "milestone_dependencies",
+    }
+)
 V5_SECTION_KEYS = {
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
-    "business.frontend_runtime": frozenset({
-        "language", "module", "module_file", "rendering", "interactions", "runtime_nodejs",
-        "migration_source",
-    }),
-    "platform": frozenset({
-        "kubernetes", "node_os", "cni", "mesh", "gitops", "ci", "progressive_delivery",
-        "registry", "secrets", "external_secrets", "workload_identity", "iam",
-        "runtime_security", "autoscaling",
-    }),
-    "platform.autoscaling": frozenset({
-        "synchronous_pods", "event_driven_pods", "certified_nodes", "preprod_perf_burst",
-    }),
-    "management_plane": frozenset({
-        "provider", "lifecycle", "private_block", "kubernetes", "forge", "ci", "registry",
-        "gitops", "bootstrap",
-    }),
-    "management_plane.bootstrap": frozenset({
-        "terraform_opentofu", "ansible", "requires_human_apply_gate",
-    }),
+    "business.frontend_runtime": frozenset(
+        {
+            "language",
+            "module",
+            "module_file",
+            "rendering",
+            "interactions",
+            "runtime_nodejs",
+            "migration_source",
+        }
+    ),
+    "platform": frozenset(
+        {
+            "kubernetes",
+            "node_os",
+            "cni",
+            "mesh",
+            "gitops",
+            "ci",
+            "progressive_delivery",
+            "registry",
+            "secrets",
+            "external_secrets",
+            "workload_identity",
+            "iam",
+            "runtime_security",
+            "autoscaling",
+        }
+    ),
+    "platform.autoscaling": frozenset(
+        {
+            "synchronous_pods",
+            "event_driven_pods",
+            "certified_nodes",
+            "preprod_perf_burst",
+        }
+    ),
+    "management_plane": frozenset(
+        {
+            "provider",
+            "lifecycle",
+            "private_block",
+            "kubernetes",
+            "forge",
+            "ci",
+            "registry",
+            "gitops",
+            "bootstrap",
+        }
+    ),
+    "management_plane.bootstrap": frozenset(
+        {
+            "terraform_opentofu",
+            "ansible",
+            "requires_human_apply_gate",
+        }
+    ),
     "stateful": frozenset({"database", "events", "jobs", "cache", "search", "object_storage"}),
     "dns": frozenset({"critical_ttl_seconds"}),
-    "observability": frozenset({
-        "telemetry", "application_gateway", "infrastructure_collector", "metrics_protocol",
-        "metrics_scraper", "metrics", "infrastructure_logs", "application_observability_storage",
-        "application_observability_ui", "hyperdx_metadata_store", "alerts", "notifications",
-        "dashboards", "security_pipeline", "security_logs", "security",
-    }),
-    "mlops": frozenset({
-        "dataset_versioner", "object_storage", "metadata_database", "experiments_lineage",
-        "artifact_registry", "promotion_authority", "orchestration", "desired_state",
-        "progressive_delivery", "runtime", "drift",
-    }),
+    "observability": frozenset(
+        {
+            "telemetry",
+            "application_gateway",
+            "infrastructure_collector",
+            "metrics_protocol",
+            "metrics_scraper",
+            "metrics",
+            "infrastructure_logs",
+            "application_observability_storage",
+            "application_observability_ui",
+            "hyperdx_metadata_store",
+            "alerts",
+            "notifications",
+            "dashboards",
+            "security_pipeline",
+            "security_logs",
+            "security",
+        }
+    ),
+    "mlops": frozenset(
+        {
+            "dataset_versioner",
+            "object_storage",
+            "metadata_database",
+            "experiments_lineage",
+            "artifact_registry",
+            "promotion_authority",
+            "orchestration",
+            "desired_state",
+            "progressive_delivery",
+            "runtime",
+            "drift",
+        }
+    ),
     "prod_certified_topology": V5_PROD_TOPOLOGY_KEYS,
     "prod_certified_topology.sites": V5_PROD_SITES_KEYS,
     "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
@@ -67,31 +155,51 @@ V5_SECTION_KEYS = {
 }
 DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = {
-    "dataset_versioner": "lakefs", "object_storage": "seaweedfs-s3",
-    "metadata_database": "cloudnativepg-postgresql", "experiments_lineage": "mlflow",
-    "artifact_registry": "harbor", "promotion_authority": "gitea-gitops",
-    "orchestration": "tekton", "desired_state": "rancher-fleet",
-    "progressive_delivery": "argo-rollouts", "runtime": "kserve-vllm",
+    "dataset_versioner": "lakefs",
+    "object_storage": "seaweedfs-s3",
+    "metadata_database": "cloudnativepg-postgresql",
+    "experiments_lineage": "mlflow",
+    "artifact_registry": "harbor",
+    "promotion_authority": "gitea-gitops",
+    "orchestration": "tekton",
+    "desired_state": "rancher-fleet",
+    "progressive_delivery": "argo-rollouts",
+    "runtime": "kserve-vllm",
     "drift": "evidently-tekton-batch",
 }
 V5_OBSERVABILITY = {
-    "telemetry": "opentelemetry", "application_gateway": "rotel",
-    "infrastructure_collector": "opentelemetry-collector", "metrics_protocol": "prometheus",
-    "metrics_scraper": "vmagent", "metrics": "victoriametrics",
-    "infrastructure_logs": "victorialogs", "application_observability_storage": "clickhouse",
-    "application_observability_ui": "hyperdx", "hyperdx_metadata_store": "mongodb-oss-self-hosted",
-    "alerts": "vmalert", "notifications": "alertmanager", "dashboards": "grafana",
-    "security_pipeline": "data-prepper", "security_logs": "opensearch", "security": "wazuh",
+    "telemetry": "opentelemetry",
+    "application_gateway": "rotel",
+    "infrastructure_collector": "opentelemetry-collector",
+    "metrics_protocol": "prometheus",
+    "metrics_scraper": "vmagent",
+    "metrics": "victoriametrics",
+    "infrastructure_logs": "victorialogs",
+    "application_observability_storage": "clickhouse",
+    "application_observability_ui": "hyperdx",
+    "hyperdx_metadata_store": "mongodb-oss-self-hosted",
+    "alerts": "vmalert",
+    "notifications": "alertmanager",
+    "dashboards": "grafana",
+    "security_pipeline": "data-prepper",
+    "security_logs": "opensearch",
+    "security": "wazuh",
 }
 V5_SUPERSEDED = {
-    "dvc-dataset-versioner": "lakefs", "nextjs-frontend-runtime": "go-templ-htmx",
-    "fluxcd": "rancher-fleet", "flagger": "argo-rollouts", "minio-community": "seaweedfs-s3",
-    "loki": "victorialogs", "prometheus-server-tsdb": "victoriametrics",
+    "dvc-dataset-versioner": "lakefs",
+    "nextjs-frontend-runtime": "go-templ-htmx",
+    "fluxcd": "rancher-fleet",
+    "flagger": "argo-rollouts",
+    "minio-community": "seaweedfs-s3",
+    "loki": "victorialogs",
+    "prometheus-server-tsdb": "victoriametrics",
     "fluent-bit-general-log-shipper": "opentelemetry-collector",
     "opensearch-general-logs": "victorialogs",
-    "data-prepper-general-logs": "security-only-data-prepper", "splunk": "wazuh-opensearch",
+    "data-prepper-general-logs": "security-only-data-prepper",
+    "splunk": "wazuh-opensearch",
     "prod-physical-hosts-per-site-5": "prod-physical-hosts-per-site-3",
-    "rook-ceph-launch-baseline": "no-default-ceph", "woodpecker-ci": "tekton",
+    "rook-ceph-launch-baseline": "no-default-ceph",
+    "woodpecker-ci": "tekton",
 }
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
 V5_TOPOLOGY_CONTRACTS = {
@@ -130,16 +238,25 @@ V5_MACHINE_CONTRACTS = {
     "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
     "observability_topology": "config/contracts/observability-topology.yaml",
 }
-V5_SECTION_KEYS.update({
-    "superseded": frozenset(V5_SUPERSEDED),
-    "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
-    "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
-})
+V5_SECTION_KEYS.update(
+    {
+        "superseded": frozenset(V5_SUPERSEDED),
+        "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
+        "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
+    }
+)
 V5_MILESTONES = [
-    "M0-architecture-sync", "M1-monorepo-bootstrap", "M2-golden-service-product",
-    "M2-5-persistent-mgmt-bootstrap", "M3-preprod-infrastructure", "M4-platform-baseline",
-    "M5-commerce-vertical-slice", "M6-full-application", "M7-qualification",
-    "M8-preprod-certification", "M9-prod-ab",
+    "M0-architecture-sync",
+    "M1-monorepo-bootstrap",
+    "M2-golden-service-product",
+    "M2-5-persistent-mgmt-bootstrap",
+    "M3-preprod-infrastructure",
+    "M4-platform-baseline",
+    "M5-commerce-vertical-slice",
+    "M6-full-application",
+    "M7-qualification",
+    "M8-preprod-certification",
+    "M9-prod-ab",
 ]
 V5_MILESTONE_PREREQUISITES = [[], [0], [1], [1], [3], [4], [2, 5], [6], [7], [8], [9]]
 V5_MILESTONE_DEPENDENCIES = {
@@ -152,79 +269,192 @@ V5_DEPLOYMENT_WAVES = {
     "version": 2,
     "status": "exact",
     "waves": [
-        {"id": "00-underlay", "requires": [],
-         "components": ["network", "dns-prerequisites", "time-sync", "image-mirrors"]},
-        {"id": "10-rke2", "requires": ["00-underlay"],
-         "components": ["rke2-control-plane", "rke2-workers"]},
-        {"id": "20-network-security", "requires": ["10-rke2"],
-         "components": ["cilium", "hubble", "pod-security", "kyverno", "tetragon", "spire"]},
-        {"id": "30-gitops-identity", "requires": ["20-network-security"],
-         "components": ["rancher-fleet", "argo-rollouts", "istio"]},
-        {"id": "40-secrets-registry-ci", "requires": ["30-gitops-identity"],
-         "components": ["openbao", "external-secrets", "harbor", "tekton"]},
-        {"id": "50-observability", "requires": ["40-secrets-registry-ci"],
-         "components": ["opentelemetry-collector", "rotel", "vmagent", "victoriametrics",
-                        "victorialogs", "clickhouse", "hyperdx", "mongodb-oss-self-hosted",
-                        "vmalert", "alertmanager", "grafana", "data-prepper", "opensearch-security", "wazuh"]},
-        {"id": "60-stateful", "requires": ["40-secrets-registry-ci", "20-network-security"],
-         "parallel_groups": [["cloudnativepg", "strimzi-kafka", "rabbitmq", "redis", "seaweedfs"],
-                             ["opensearch-business", "apicurio"]]},
-        {"id": "70-iam-edge", "requires": ["60-stateful", "30-gitops-identity"],
-         "components": ["keycloak", "haproxy", "caddy", "coraza", "kong", "ats",
-                        "istio-gateway", "squid-egress"]},
-        {"id": "80-golden-service", "requires": ["50-observability", "60-stateful", "70-iam-edge"],
-         "components": ["product"]},
-        {"id": "90-commerce", "requires": ["80-golden-service"],
-         "parallel_groups": [["inventory", "tax", "shipping", "fraud-risk", "user-profile", "search",
-                              "notification", "order", "payment"],
-                             ["pricing", "tracking", "fulfillment", "review", "returns", "billing"],
-                             ["catalog", "cart"]], "serial_after_parallel": ["checkout"]},
-        {"id": "95-mlops", "requires": ["40-secrets-registry-ci", "60-stateful"],
-         "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]},
+        {
+            "id": "00-underlay",
+            "requires": [],
+            "components": ["network", "dns-prerequisites", "time-sync", "image-mirrors"],
+        },
+        {"id": "10-rke2", "requires": ["00-underlay"], "components": ["rke2-control-plane", "rke2-workers"]},
+        {
+            "id": "20-network-security",
+            "requires": ["10-rke2"],
+            "components": ["cilium", "hubble", "pod-security", "kyverno", "tetragon", "spire"],
+        },
+        {
+            "id": "30-gitops-identity",
+            "requires": ["20-network-security"],
+            "components": ["rancher-fleet", "argo-rollouts", "istio"],
+        },
+        {
+            "id": "40-secrets-registry-ci",
+            "requires": ["30-gitops-identity"],
+            "components": ["openbao", "external-secrets", "harbor", "tekton"],
+        },
+        {
+            "id": "50-observability",
+            "requires": ["40-secrets-registry-ci"],
+            "components": [
+                "opentelemetry-collector",
+                "rotel",
+                "vmagent",
+                "victoriametrics",
+                "victorialogs",
+                "clickhouse",
+                "hyperdx",
+                "mongodb-oss-self-hosted",
+                "vmalert",
+                "alertmanager",
+                "grafana",
+                "data-prepper",
+                "opensearch-security",
+                "wazuh",
+            ],
+        },
+        {
+            "id": "60-stateful",
+            "requires": ["40-secrets-registry-ci", "20-network-security"],
+            "parallel_groups": [
+                ["cloudnativepg", "strimzi-kafka", "rabbitmq", "redis", "seaweedfs"],
+                ["opensearch-business", "apicurio"],
+            ],
+        },
+        {
+            "id": "70-iam-edge",
+            "requires": ["60-stateful", "30-gitops-identity"],
+            "components": ["keycloak", "haproxy", "caddy", "coraza", "kong", "ats", "istio-gateway", "squid-egress"],
+        },
+        {
+            "id": "80-golden-service",
+            "requires": ["50-observability", "60-stateful", "70-iam-edge"],
+            "components": ["product"],
+        },
+        {
+            "id": "90-commerce",
+            "requires": ["80-golden-service"],
+            "parallel_groups": [
+                [
+                    "inventory",
+                    "tax",
+                    "shipping",
+                    "fraud-risk",
+                    "user-profile",
+                    "search",
+                    "notification",
+                    "order",
+                    "payment",
+                ],
+                ["pricing", "tracking", "fulfillment", "review", "returns", "billing"],
+                ["catalog", "cart"],
+            ],
+            "serial_after_parallel": ["checkout"],
+        },
+        {
+            "id": "95-mlops",
+            "requires": ["40-secrets-registry-ci", "60-stateful"],
+            "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"],
+        },
         {"id": "100-frontends", "requires": ["90-commerce"], "components": ["storefront", "admin"]},
-        {"id": "110-qualification", "requires": ["100-frontends", "95-mlops"],
-         "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"]},
+        {
+            "id": "110-qualification",
+            "requires": ["100-frontends", "95-mlops"],
+            "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"],
+        },
     ],
-    "rules": {"wait_only_on_declared_dependencies": True, "fail_fast_on_blocking_gate": True,
-              "no_perf_before_prior_gates": True, "no_chaos_dr_before_prior_gates": True,
-              "no_prod_promotion_from_test_state": True},
+    "rules": {
+        "wait_only_on_declared_dependencies": True,
+        "fail_fast_on_blocking_gate": True,
+        "no_perf_before_prior_gates": True,
+        "no_chaos_dr_before_prior_gates": True,
+        "no_prod_promotion_from_test_state": True,
+    },
 }
 MIRRORED_WAVES = ("20-network-security", "30-gitops-identity", "50-observability")
 
 EXACT_CONTRACTS = {
     "resilience_governance": {
-        "version": 1, "status": "exact", "architecture_authority": AUTHORITY,
-        "sources": ["docs/architecture/SECURITY_TRUST_ZONES.md", "docs/architecture/DEPLOYMENT_DAG.md",
-                    "docs/architecture/PROD_TOPOLOGY_V2.md", "docs/architecture/MLOPS_TOPOLOGY_V1.md"],
-        "compromise": {"scope": "reproducible-compromised-nodes-and-workloads",
-                       "sequence": ["isolate", "acquire-evidence", "destroy", "rebuild-via-gitops-iac"],
-                       "manual_cleaning_restores_trust": False, "exception": "specialized-forensic-requirement"},
-        "evidence": {"destroy_required_forensic_evidence": "forbidden", "acquisition_may_delay_jit_teardown": True,
-                     "write_identity_separate_from_delete_admin": True, "immutability": "where-policy-requires"},
-        "site_recovery": {"sequence": ["health-evidence", "quorum-fencing", "write-authority-decision",
-                                         "stateful-promotion-recovery", "application-routing", "dns-gslb-change"]},
-        "mlops_recovery": {"promotion": "frozen-during-recovery",
-                           "required_assets": ["postgresql-metadata-backup", "independent-object-backup",
-                                               "harbor-recovery", "tested-restore-procedures"]},
+        "version": 1,
+        "status": "exact",
+        "architecture_authority": AUTHORITY,
+        "sources": [
+            "docs/architecture/SECURITY_TRUST_ZONES.md",
+            "docs/architecture/DEPLOYMENT_DAG.md",
+            "docs/architecture/PROD_TOPOLOGY_V2.md",
+            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+        ],
+        "compromise": {
+            "scope": "reproducible-compromised-nodes-and-workloads",
+            "sequence": ["isolate", "acquire-evidence", "destroy", "rebuild-via-gitops-iac"],
+            "manual_cleaning_restores_trust": False,
+            "exception": "specialized-forensic-requirement",
+        },
+        "evidence": {
+            "destroy_required_forensic_evidence": "forbidden",
+            "acquisition_may_delay_jit_teardown": True,
+            "write_identity_separate_from_delete_admin": True,
+            "immutability": "where-policy-requires",
+        },
+        "site_recovery": {
+            "sequence": [
+                "health-evidence",
+                "quorum-fencing",
+                "write-authority-decision",
+                "stateful-promotion-recovery",
+                "application-routing",
+                "dns-gslb-change",
+            ]
+        },
+        "mlops_recovery": {
+            "promotion": "frozen-during-recovery",
+            "required_assets": [
+                "postgresql-metadata-backup",
+                "independent-object-backup",
+                "harbor-recovery",
+                "tested-restore-procedures",
+            ],
+        },
     },
     "security_trust_zones": {
-        "version": 1, "status": "exact", "architecture_authority": AUTHORITY,
+        "version": 1,
+        "status": "exact",
+        "architecture_authority": AUTHORITY,
         "source": "docs/architecture/SECURITY_TRUST_ZONES.md",
-        "zones": {"Z0": "internet-untrusted", "Z1": "public-edge-dmz",
-                  "Z2": "kubernetes-ingress-service-mesh", "Z3": "application-workloads",
-                  "Z4": "stateful-data", "Z5": "permanent-mgmt", "Z6": "backup-evidence-dfir"},
+        "zones": {
+            "Z0": "internet-untrusted",
+            "Z1": "public-edge-dmz",
+            "Z2": "kubernetes-ingress-service-mesh",
+            "Z3": "application-workloads",
+            "Z4": "stateful-data",
+            "Z5": "permanent-mgmt",
+            "Z6": "backup-evidence-dfir",
+        },
         "application_services_source": "architecture.lock.yaml#business.services",
-        "human_iam": {"customers_realm": "customers", "workforce_realm": "workforce",
-                      "privileged_authentication": "hardware-backed-webauthn-passkeys",
-                      "customer_tokens_for_mgmt": "forbidden"},
-        "workload_identity": {"trust_domains": ["PREPROD", "PROD-A", "PROD-B"],
-                              "cross_environment": "deny-by-default",
-                              "federation_requires": "architecture-security-review"},
-        "secrets": {"flow": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
-                    "forbidden": ["git", "image-layers", "ci-logs", "bootstrap-credentials-after-preprod-destroy",
-                                  "application-access-to-openbao-admin-credentials"]},
-        "egress": {"default": "deny", "application_path": "approved-istio-egress-squid",
-                   "logging": "required", "exceptions": "documented"},
+        "human_iam": {
+            "customers_realm": "customers",
+            "workforce_realm": "workforce",
+            "privileged_authentication": "hardware-backed-webauthn-passkeys",
+            "customer_tokens_for_mgmt": "forbidden",
+        },
+        "workload_identity": {
+            "trust_domains": ["PREPROD", "PROD-A", "PROD-B"],
+            "cross_environment": "deny-by-default",
+            "federation_requires": "architecture-security-review",
+        },
+        "secrets": {
+            "flow": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
+            "forbidden": [
+                "git",
+                "image-layers",
+                "ci-logs",
+                "bootstrap-credentials-after-preprod-destroy",
+                "application-access-to-openbao-admin-credentials",
+            ],
+        },
+        "egress": {
+            "default": "deny",
+            "application_path": "approved-istio-egress-squid",
+            "logging": "required",
+            "exceptions": "documented",
+        },
         "mgmt_access_source": "config/contracts/mgmt-wireguard-access.yaml",
     },
 }
@@ -257,8 +487,11 @@ def validate_exact_keys(name, actual, expected_keys):
     """Validate an exact mapping schema without allowing unknown or missing fields."""
     if name in ("topology_contracts", "machine_contracts"):
         label = name
-        return ([] if isinstance(actual, dict) and set(actual) == set(expected_keys)
-                else [f"{label} must match the complete approved V5 role/path registry"])
+        return (
+            []
+            if isinstance(actual, dict) and set(actual) == set(expected_keys)
+            else [f"{label} must match the complete approved V5 role/path registry"]
+        )
     contract_name = "complete approved V5 registry" if name == "superseded" else "complete approved V5 schema"
     if not isinstance(actual, dict):
         return [f"{name} must be a mapping with the {contract_name}"]
@@ -328,18 +561,21 @@ def component_is_retired(sentence, component):
         rf"(?:CD|GitOps|rollout)\s+controller|(?:infrastructure\s+)?log\s+store|"
         rf"(?:object|S3)\s+(?:store|backend)|SIEM|(?:general\s+)?log\s+shipper))|forbid(?:den)?|superseded|"
         rf"historical|removed|rejected|retired)\b)",
-        sentence, re.I,
+        sentence,
+        re.I,
     )
     coordinated_negation = re.search(
         rf"\b(?:no|never|do\s+not|must\s+not)\s+(?:(?:use|select|deploy)\s+)?"
         rf"(?:(?:{SUPERSEDED_COMPONENT})\b\s*(?:,|/|and|or)\s*)*(?:{component})\b",
-        sentence, re.I,
+        sentence,
+        re.I,
     )
     coordinated_retirement = re.search(
         rf"(?P<components>(?:{SUPERSEDED_COMPONENT})\b(?:\s*(?:,|/|and|or)\s*"
         rf"(?:{SUPERSEDED_COMPONENT})\b)+)\s+(?:are|were|remain(?:ed)?)\s+(?:both\s+)?"
         rf"(?:superseded|historical|removed|rejected|retired)\b",
-        sentence, re.I,
+        sentence,
+        re.I,
     )
     shared_retirement = coordinated_retirement and re.search(
         rf"\b(?:{component})\b", coordinated_retirement.group("components"), re.I
@@ -349,9 +585,9 @@ def component_is_retired(sentence, component):
 
 def is_explicit_historical_clause(sentence, scoped_historical=False):
     """Recognize only local, explicit historical/superseded scope."""
-    return bool(scoped_historical or re.match(
-        r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I
-    ))
+    return bool(
+        scoped_historical or re.match(r"\s*[-#>\s]*(?:historical|superseded|alternatives rejected)\s*:", sentence, re.I)
+    )
 
 
 def is_dvc_retirement_clause(sentence):
@@ -360,20 +596,27 @@ def is_dvc_retirement_clause(sentence):
         re.search(r"\bremove(?:s|d|ing)?\s+(?:remaining\s+)?DVC\b", sentence, re.I)
         or re.search(r"\breplace(?:s|d|ing)?\s+DVC\b[^.!?;]*\bwith\s+lakeFS\b", sentence, re.I)
         or re.search(r"\bmigrat(?:e|es|ed|ing)\s+DVC(?:\s+datasets?)?\b[^.!?;]*\bto\s+lakeFS\b", sentence, re.I)
-        or re.search(r"\bDVC\b\s+(?:(?:is|was|has\s+been|remain(?:s|ed)?)\s+)?"
-                     r"(?:superseded|historical|rejected|forbidden)\b", sentence, re.I)
+        or re.search(
+            r"\bDVC\b\s+(?:(?:is|was|has\s+been|remain(?:s|ed)?)\s+)?"
+            r"(?:superseded|historical|rejected|forbidden)\b",
+            sentence,
+            re.I,
+        )
     )
 
 
 def is_nextjs_active_target_clause(sentence):
     """Detect an explicit active/target assignment before migration exemptions."""
-    return bool(re.search(
-        r"(?:next\.?js\b\s+(?:is|as)\s+(?:the\s+)?target\s+runtime\b|"
-        r"\btarget\s+runtime\b\s*(?:is|:)?\s*next\.?js\b|"
-        r"\bproduction\s+frontend\b[^.!?;]*\b(?:use|uses|is)\b[^.!?;]*next\.?js\b|"
-        r"\bdeploy\s+next\.?js\b|\bfrontend\b[^.!?;]*\b(?:use|uses)\s+next\.?js\b[^.!?;]*\bas\s+(?:its\s+|the\s+)?target\s+runtime\b)",
-        sentence, re.I,
-    ))
+    return bool(
+        re.search(
+            r"(?:next\.?js\b\s+(?:is|as)\s+(?:the\s+)?target\s+runtime\b|"
+            r"\btarget\s+runtime\b\s*(?:is|:)?\s*next\.?js\b|"
+            r"\bproduction\s+frontend\b[^.!?;]*\b(?:use|uses|is)\b[^.!?;]*next\.?js\b|"
+            r"\bdeploy\s+next\.?js\b|\bfrontend\b[^.!?;]*\b(?:use|uses)\s+next\.?js\b[^.!?;]*\bas\s+(?:its\s+|the\s+)?target\s+runtime\b)",
+            sentence,
+            re.I,
+        )
+    )
 
 
 def is_nextjs_migration_source_clause(sentence):
@@ -381,8 +624,14 @@ def is_nextjs_migration_source_clause(sentence):
     return bool(
         re.search(r"next\.?js(?:/React/Node(?:\.js)?)?\s+is\s+(?:only\s+)?the\s+migration\s+source", sentence, re.I)
         or re.search(r"\bmigration\b[^.!?;]*\bnext\.?js\b[^.!?;]*\b(?:to|vers)\s+Go\b", sentence, re.I)
-        or re.search(r"\b(?:migrat(?:e|es|ed|ing)|migration)\b[^.!?;]*\bfrom\s+next\.?js\b[^.!?;]*\bto\s+Go\b", sentence, re.I)
-        or re.search(r"\bnext\.?js\b[^.!?;]*\b(?:remains?|legacy)\b[^.!?;]*\b(?:only|until)\b[^.!?;]*\b(?:migration|Go)\b", sentence, re.I)
+        or re.search(
+            r"\b(?:migrat(?:e|es|ed|ing)|migration)\b[^.!?;]*\bfrom\s+next\.?js\b[^.!?;]*\bto\s+Go\b", sentence, re.I
+        )
+        or re.search(
+            r"\bnext\.?js\b[^.!?;]*\b(?:remains?|legacy)\b[^.!?;]*\b(?:only|until)\b[^.!?;]*\b(?:migration|Go)\b",
+            sentence,
+            re.I,
+        )
         or re.search(r"\bnext\.?js\b[^.!?;]*\b(?:source|legacy)\b[^.!?;]*\btarget\b[^.!?;]*\bGo\b", sentence, re.I)
         or re.search(r"\b(?:currently|actuellement)\s+(?:use|uses|utilise(?:nt)?)\s+next\.?js\b", sentence, re.I)
         or re.search(r"\bactuellement\s+next\.?js\b[^.!?;]*\bcible\s+Go\b", sentence, re.I)
@@ -395,7 +644,9 @@ def is_explicit_topology_claim(sentence):
     explicit_count = re.search(r"\bexactly\s+17\s+(?:(?:go|backend)\s+)*services?\b", sentence, re.I)
     architecture_assignment = (
         re.search(r"\b(?:canonical\s+architecture|architecture|topology|platform)\b", sentence, re.I)
-        and re.search(r"\b(?:exactly|complete|consists?\s+of|there\s+are|has|includes?|defines?|baseline|with)\b", sentence, re.I)
+        and re.search(
+            r"\b(?:exactly|complete|consists?\s+of|there\s+are|has|includes?|defines?|baseline|with)\b", sentence, re.I
+        )
     ) or re.search(r"\b(?:our\s+)?backend\s+(?:consists?\s+of|has|includes?|defines?)\b", sentence, re.I)
     return bool(count and (explicit_count or architecture_assignment))
 
@@ -404,17 +655,27 @@ def is_operational_progress_clause(sentence):
     """Recognize concrete rollout/health subsets, never generic 'complete'."""
     return bool(
         re.search(r"\b17\s+of\s+19\b[^.!?;]*\b(?:deployed|healthy|available|ready)\b", sentence, re.I)
-        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:deployed|healthy|available|ready|affected|unavailable)\b", sentence, re.I)
-        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:have\s+completed|currently\s+have)\b", sentence, re.I)
-        or re.search(r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\bcomplete\b[^.!?;]*\b(?:two|2)\s+remain\b", sentence, re.I)
+        or re.search(
+            r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:deployed|healthy|available|ready|affected|unavailable)\b",
+            sentence,
+            re.I,
+        )
+        or re.search(
+            r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\b(?:have\s+completed|currently\s+have)\b", sentence, re.I
+        )
+        or re.search(
+            r"\b17\s+(?:backend\s+)?services?\b[^.!?;]*\bcomplete\b[^.!?;]*\b(?:two|2)\s+remain\b", sentence, re.I
+        )
     )
 
 
 def find_superseded_role_assignment(sentence):
     """Find either direction of an active component/role assignment."""
-    role = (r"(?:(?:CD|GitOps|rollout)\s+(?:controller|delivery)|progressive\s+delivery|"
-            r"(?:object|S3)\s+(?:store|backend)|infrastructure\s+logs?|(?:infrastructure\s+)?log\s+store|"
-            r"SIEM|(?:general\s+)?log\s+shipper)")
+    role = (
+        r"(?:(?:CD|GitOps|rollout)\s+(?:controller|delivery)|progressive\s+delivery|"
+        r"(?:object|S3)\s+(?:store|backend)|infrastructure\s+logs?|(?:infrastructure\s+)?log\s+store|"
+        r"SIEM|(?:general\s+)?log\s+shipper)"
+    )
     verb = r"(?:is|are|was|were|acts?\s+as|serves?\s+as|provides?|owns?|stores?|backs?|powers?|hosts?|:)"
     component_first = rf"\b(?P<component>{SUPERSEDED_COMPONENT})\b\s+{verb}\s+(?:the\s+)?{role}\b"
     role_first = rf"\b(?:the\s+)?{role}\b\s+{verb}\s+(?:the\s+)?(?P<reverse_component>{SUPERSEDED_COMPONENT})\b"
@@ -443,10 +704,13 @@ def security_source_errors(source, contract):
     """Cross-check the bounded explicit facts rendered by the security source."""
     errors = []
     zone_names = {
-        "internet-untrusted": "Internet / untrusted", "public-edge-dmz": "Public Edge / DMZ",
+        "internet-untrusted": "Internet / untrusted",
+        "public-edge-dmz": "Public Edge / DMZ",
         "kubernetes-ingress-service-mesh": "Kubernetes ingress / service mesh",
-        "application-workloads": "Application workloads", "stateful-data": "Stateful data",
-        "permanent-mgmt": "Permanent MGMT", "backup-evidence-dfir": "Backup / evidence / DFIR",
+        "application-workloads": "Application workloads",
+        "stateful-data": "Stateful data",
+        "permanent-mgmt": "Permanent MGMT",
+        "backup-evidence-dfir": "Backup / evidence / DFIR",
     }
     for zone, identity in contract["zones"].items():
         if not re.search(rf"^###\s+{re.escape(zone)}\s+—\s+{re.escape(zone_names[identity])}\s*$", source, re.M | re.I):
@@ -454,23 +718,44 @@ def security_source_errors(source, contract):
     facts = (
         (contract["human_iam"]["customers_realm"], r"Keycloak\s+`(?P<value>[^`]+)`\s+realm:\s*customer identities"),
         (contract["human_iam"]["workforce_realm"], r"Keycloak\s+`(?P<value>[^`]+)`\s+realm:\s*staff/operators"),
-        (contract["human_iam"]["privileged_authentication"], r"privileged workforce flows require (?P<value>WebAuthn/passkeys backed by hardware keys)"),
-        (contract["human_iam"]["customer_tokens_for_mgmt"], r"(?P<value>no) customer token is accepted for MGMT administrative APIs"),
-        (contract["workload_identity"]["cross_environment"], r"Cross-environment workload identity is (?P<value>denied by default)"),
-        (contract["workload_identity"]["federation_requires"], r"federation requires explicit (?P<value>architecture/security review)"),
-        (contract["secrets"]["flow"], r"`(?P<value>OpenBao -> ESO -> Kubernetes Secret/runtime mount)` where applicable"),
+        (
+            contract["human_iam"]["privileged_authentication"],
+            r"privileged workforce flows require (?P<value>WebAuthn/passkeys backed by hardware keys)",
+        ),
+        (
+            contract["human_iam"]["customer_tokens_for_mgmt"],
+            r"(?P<value>no) customer token is accepted for MGMT administrative APIs",
+        ),
+        (
+            contract["workload_identity"]["cross_environment"],
+            r"Cross-environment workload identity is (?P<value>denied by default)",
+        ),
+        (
+            contract["workload_identity"]["federation_requires"],
+            r"federation requires explicit (?P<value>architecture/security review)",
+        ),
+        (
+            contract["secrets"]["flow"],
+            r"`(?P<value>OpenBao -> ESO -> Kubernetes Secret/runtime mount)` where applicable",
+        ),
         (contract["egress"]["default"], r"## Egress\s+\n\s*(?P<value>Default deny)\."),
-        (contract["egress"]["application_path"], r"application egress uses (?P<value>approved Istio Egress/Squid) path"),
+        (
+            contract["egress"]["application_path"],
+            r"application egress uses (?P<value>approved Istio Egress/Squid) path",
+        ),
         (contract["egress"]["logging"], r"approved Istio Egress/Squid path with (?P<value>logging)"),
         (contract["egress"]["exceptions"], r"logging and (?P<value>documented) exception"),
     )
     normalizations = {
         "WebAuthn/passkeys backed by hardware keys": "hardware-backed-webauthn-passkeys",
-        "no": "forbidden", "denied by default": "deny-by-default",
+        "no": "forbidden",
+        "denied by default": "deny-by-default",
         "architecture/security review": "architecture-security-review",
         "OpenBao -> ESO -> Kubernetes Secret/runtime mount": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
-        "Default deny": "deny", "approved Istio Egress/Squid": "approved-istio-egress-squid",
-        "logging": "required", "documented": "documented",
+        "Default deny": "deny",
+        "approved Istio Egress/Squid": "approved-istio-egress-squid",
+        "logging": "required",
+        "documented": "documented",
     }
     for expected, pattern in facts:
         match = re.search(pattern, source, re.I)
@@ -481,7 +766,9 @@ def security_source_errors(source, contract):
     if trust_domains != contract["workload_identity"]["trust_domains"]:
         errors.append("security source drift: workload trust domains")
     forbidden_patterns = {
-        "git": r"secrets in Git", "image-layers": r"secrets in image layers", "ci-logs": r"secrets in CI logs",
+        "git": r"secrets in Git",
+        "image-layers": r"secrets in image layers",
+        "ci-logs": r"secrets in CI logs",
         "bootstrap-credentials-after-preprod-destroy": r"long-lived bootstrap credentials left active after PREPROD destroy",
         "application-access-to-openbao-admin-credentials": r"application access to OpenBao administrative credentials",
     }
@@ -503,8 +790,7 @@ def documentation_clauses(text):
         heading = re.match(r"\s*(#{1,6})\s+(.*)", line)
         if heading:
             level = len(heading.group(1))
-            section_scopes = [(parent_level, scope) for parent_level, scope in section_scopes
-                              if parent_level < level]
+            section_scopes = [(parent_level, scope) for parent_level, scope in section_scopes if parent_level < level]
             parent_scope = any(scope for _, scope in section_scopes)
             explicit_scope = bool(re.match(rf"\s*{marker}\b", heading.group(2), re.I))
             section_scopes.append((level, parent_scope or explicit_scope))
@@ -558,10 +844,15 @@ def derived_index_errors(index, lock, network_plan):
     require(f"{prod['physical_hosts_per_site']} physical failure domains", "prod physical failure domains")
     if index.count(f"{prod['physical_hosts_per_site']} physical failure domains") != site_count:
         errors.append("derived index drift from architecture.lock.yaml: PROD site failure-domain counts")
-    require(f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers", "PROD control-plane/worker counts")
+    require(
+        f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers", "PROD control-plane/worker counts"
+    )
     if index.count(f"{prod['control_planes_per_site']} CP + {prod['workers_per_site']} workers") != site_count:
         errors.append("derived index drift from architecture.lock.yaml: PROD per-site control-plane/worker counts")
-    require(f"{prod['data_workers_per_site']} data workers + {prod['general_workers_per_site']} general", "PROD worker roles")
+    require(
+        f"{prod['data_workers_per_site']} data workers + {prod['general_workers_per_site']} general",
+        "PROD worker roles",
+    )
     network_section = index.split("## Network", 1)[-1].split("\n## ", 1)[0]
     rendered_blocks = assignments(
         network_section,
@@ -582,7 +873,9 @@ def derived_index_errors(index, lock, network_plan):
     require(f"Exactly {len(services)} backend services", "business.services count")
     service_match = re.search(
         r"^Exactly \d+ backend services, as listed in `architecture\.lock\.yaml` business\.services:\s*\n\n"
-        r"(?P<list>[^\n]+)$", index, re.M
+        r"(?P<list>[^\n]+)$",
+        index,
+        re.M,
     )
     rendered_services = re.findall(r"`([a-z0-9-]+)`", service_match.group("list")) if service_match else []
     if rendered_services != services:
@@ -590,9 +883,7 @@ def derived_index_errors(index, lock, network_plan):
     require("The canonical frontends are exactly `storefront` and `admin`.", "business.frontends")
     frontend = lock["business"]["frontend_runtime"]
     frontend_section = index.split("## Application ownership", 1)[-1].split("\n## ", 1)[0]
-    rendered_frontend = assignments(
-        frontend_section, r"^- `([a-z_]+)`: `([^`]+)`\s*$", "business.frontend_runtime"
-    )
+    rendered_frontend = assignments(frontend_section, r"^- `([a-z_]+)`: `([^`]+)`\s*$", "business.frontend_runtime")
     expected_frontend = {field: str(value).lower() for field, value in frontend.items()}
     if rendered_frontend != expected_frontend:
         errors.append("derived index drift from architecture.lock.yaml: business.frontend_runtime role assignments")
@@ -601,9 +892,7 @@ def derived_index_errors(index, lock, network_plan):
 
     observability = lock["observability"]
     observability_section = index.split("## Observability", 1)[-1].split("\n## ", 1)[0]
-    rendered_observability = assignments(
-        observability_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "observability"
-    )
+    rendered_observability = assignments(observability_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "observability")
     if rendered_observability != observability:
         errors.append("derived index drift from architecture.lock.yaml: observability role assignments")
         for field, value in observability.items():
@@ -611,9 +900,7 @@ def derived_index_errors(index, lock, network_plan):
                 errors.append(f"derived index drift from architecture.lock.yaml: observability.{field}")
 
     mlops_section = index.split("## MLOps", 1)[-1].split("\n## ", 1)[0]
-    rendered_mlops = assignments(
-        mlops_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "mlops"
-    )
+    rendered_mlops = assignments(mlops_section, r"^- `([a-z_]+)`: `([a-z0-9-]+)`\s*$", "mlops")
     if rendered_mlops != lock["mlops"]:
         errors.append("derived index drift from architecture.lock.yaml: mlops role assignments")
 
@@ -643,26 +930,32 @@ def documentation_errors(text):
         # An unrelated mention of migration or rejection cannot exempt a claim.
         historical = is_explicit_historical_clause(sentence, scoped_historical)
         topology_claim = is_explicit_topology_claim(sentence)
-        if (topology_claim
-                or re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I)) and not historical:
+        if (
+            topology_claim
+            or re.search(r"\b17\s+(?:(?:go|backend)\s+)*services?\s*\+|\bno\s+checkout\s+service\b", sentence, re.I)
+        ) and not historical:
             errors.append("superseded service topology: " + sentence.strip())
         if re.search(r"\bdvc\b", sentence, re.I) and not (historical or is_dvc_retirement_clause(sentence)):
             errors.append("DVC must be explicitly historical/superseded: " + sentence.strip())
         if re.search(r"next\.?js", sentence, re.I) and re.search(
-                r"target|cible|prod|runtime|ATS\s*->|\buse\b|\buses\b|deploy|frontend|framework|built\s+with",
-                sentence, re.I):
+            r"target|cible|prod|runtime|ATS\s*->|\buse\b|\buses\b|deploy|frontend|framework|built\s+with",
+            sentence,
+            re.I,
+        ):
             active_target = is_nextjs_active_target_clause(sentence)
             migration = is_nextjs_migration_source_clause(sentence)
             nextjs_retired = re.search(
                 r"next\.?js.{0,30}\b(?:superseded|historical|rejected|forbidden|removed|not\s+(?:the\s+)?(?:target|runtime))\b",
-                sentence, re.I,
+                sentence,
+                re.I,
             )
             if active_target or not (historical or migration or nextjs_retired):
                 errors.append("Next.js must be explicitly a migration source: " + sentence.strip())
         removed_v2_authority = re.search(
             r"BASELINE_V2(?:\.md)?|EXACT_TOPOLOGY_V2(?:\.md)?|"
             r"\b(?:baseline\s+V2|canonical\s+V2(?:\s+(?:architecture\s+)?baseline)?|V2\s+canonical\s+baseline|V2\s+baseline)\b",
-            sentence, re.I,
+            sentence,
+            re.I,
         )
         if removed_v2_authority and not historical:
             errors.append("removed architecture authority/index: " + sentence.strip())
@@ -676,26 +969,56 @@ def documentation_errors(text):
         if in_diagram and re.search(rf"\b(?:{SUPERSEDED_COMPONENT})\b", sentence, re.I) and not historical:
             errors.append("superseded architecture diagram must be explicitly labelled: " + sentence.strip())
         active_role = find_superseded_role_assignment(sentence)
-        if (active_role and not historical
-                and not component_is_retired(sentence, re.escape(superseded_assignment_component(active_role)))):
+        if (
+            active_role
+            and not historical
+            and not component_is_retired(sentence, re.escape(superseded_assignment_component(active_role)))
+        ):
             errors.append("superseded platform role must not be active: " + sentence.strip())
-        if (re.search(r"Fluent Bit", sentence, re.I) and
-                re.search(r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|(?:log\s+)?shipper)", sentence, re.I)
-                and not historical and not component_is_retired(sentence, r"Fluent Bit")):
+        if (
+            re.search(r"Fluent Bit", sentence, re.I)
+            and re.search(
+                r"(?:general|application|infrastructure)?\s*(?:logging|logs|pipeline|(?:log\s+)?shipper)",
+                sentence,
+                re.I,
+            )
+            and not historical
+            and not component_is_retired(sentence, r"Fluent Bit")
+        ):
             errors.append("Fluent Bit general logging is superseded: " + sentence.strip())
-        negated = re.search(r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not|only)\b", sentence, re.I)
-        if (re.search(r"(?:general|application|infrastructure)\s+(?:logging|logs|log pipeline)", sentence, re.I) and
-                re.search(r"Data Prepper|OpenSearch", sentence, re.I) and not (historical or negated)):
+        negated = re.search(
+            r"\b(?:no|not|never|forbid(?:den)?|superseded|historical|removed|rejected|do not|must not|only)\b",
+            sentence,
+            re.I,
+        )
+        if (
+            re.search(r"(?:general|application|infrastructure)\s+(?:logging|logs|log pipeline)", sentence, re.I)
+            and re.search(r"Data Prepper|OpenSearch", sentence, re.I)
+            and not (historical or negated)
+        ):
             errors.append("Data Prepper/OpenSearch general logging role is forbidden: " + sentence.strip())
-        if (re.search(r"OpenSearch\s+Logs|OpenSearch.{0,20}(?:general\s+)?observability\s+source", sentence, re.I)
-                and not re.search(r"security", sentence, re.I) and not historical and not negated):
+        if (
+            re.search(r"OpenSearch\s+Logs|OpenSearch.{0,20}(?:general\s+)?observability\s+source", sentence, re.I)
+            and not re.search(r"security", sentence, re.I)
+            and not historical
+            and not negated
+        ):
             errors.append("OpenSearch general observability storage is superseded: " + sentence.strip())
-        if (re.search(r"Prometheus", sentence, re.I) and
-                re.search(r"(?:primary|main|authoritative)\s+(?:TSDB|metrics (?:store|storage|server))|(?:TSDB|metrics (?:store|storage|server))\s+(?:is|:)\s+Prometheus", sentence, re.I)
-                and not (historical or negated)):
+        if (
+            re.search(r"Prometheus", sentence, re.I)
+            and re.search(
+                r"(?:primary|main|authoritative)\s+(?:TSDB|metrics (?:store|storage|server))|(?:TSDB|metrics (?:store|storage|server))\s+(?:is|:)\s+Prometheus",
+                sentence,
+                re.I,
+            )
+            and not (historical or negated)
+        ):
             errors.append("Prometheus is compatibility-only, not primary metrics storage: " + sentence.strip())
-        if (re.search(r"application (?:telemetry|logs?|observability)(?:\s+and\s+logs?)?\s*(?:use|uses|->|:)\s*VictoriaLogs|VictoriaLogs\s+for\s+(?:both\s+)?(?:infrastructure\s+(?:and|/)\s+)?application", sentence, re.I)
-                and not (historical or negated)):
+        if re.search(
+            r"application (?:telemetry|logs?|observability)(?:\s+and\s+logs?)?\s*(?:use|uses|->|:)\s*VictoriaLogs|VictoriaLogs\s+for\s+(?:both\s+)?(?:infrastructure\s+(?:and|/)\s+)?application",
+            sentence,
+            re.I,
+        ) and not (historical or negated):
             errors.append("application telemetry/logs must use Rotel, ClickHouse, and HyperDX: " + sentence.strip())
         if re.search(r"(?:observability/)?fluent-bit/", sentence, re.I) and not historical:
             errors.append("Fluent Bit bootstrap component is superseded: " + sentence.strip())
@@ -746,8 +1069,10 @@ def validate(root):
         expected = V5_MILESTONES
         dag = V5_MILESTONE_DEPENDENCIES
         actual_dag = lock.get("milestone_dependencies", {})
-        if milestones != expected or set(actual_dag) != set(dag) or any(
-            sorted(actual_dag.get(name, [])) != sorted(parents) for name, parents in dag.items()
+        if (
+            milestones != expected
+            or set(actual_dag) != set(dag)
+            or any(sorted(actual_dag.get(name, [])) != sorted(parents) for name, parents in dag.items())
         ):
             errors.append("milestone dependencies must match the approved V5 DAG")
         for key in ("resilience_governance", "security_trust_zones"):
@@ -772,13 +1097,25 @@ def validate(root):
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
         wireguard = load_yaml(root / lock["machine_contracts"]["mgmt_wireguard_access"])
         management_checks = {
-            "provider": (inventory.get("provider"), gateways.get("provider"), wireguard.get("gateway", {}).get("provider")),
-            "lifecycle": (inventory.get("lifecycle", {}).get("mode"), gateways.get("lifecycle", {}).get("mode"),
-                          wireguard.get("gateway", {}).get("lifecycle")),
+            "provider": (
+                inventory.get("provider"),
+                gateways.get("provider"),
+                wireguard.get("gateway", {}).get("provider"),
+            ),
+            "lifecycle": (
+                inventory.get("lifecycle", {}).get("mode"),
+                gateways.get("lifecycle", {}).get("mode"),
+                wireguard.get("gateway", {}).get("lifecycle"),
+            ),
             "private_block": (inventory.get("private_block"),),
-            "kubernetes": ((management.get("kubernetes") if inventory.get("vm_profiles") and all(
-                name.startswith(f"{management.get('kubernetes')}-") for name in inventory["vm_profiles"]
-            ) else None),),
+            "kubernetes": (
+                (
+                    management.get("kubernetes")
+                    if inventory.get("vm_profiles")
+                    and all(name.startswith(f"{management.get('kubernetes')}-") for name in inventory["vm_profiles"])
+                    else None
+                ),
+            ),
             "forge": (inventory.get("platform_services", {}).get("forge"),),
             "ci": (inventory.get("platform_services", {}).get("ci"),),
             "registry": (inventory.get("platform_services", {}).get("registry"),),
@@ -788,10 +1125,12 @@ def validate(root):
             if any(value != management.get(field) for value in subordinate_values):
                 errors.append(f"management_plane.{field} contradicts subordinate MGMT contracts")
         bootstrap = management.get("bootstrap", {})
-        if (bootstrap.get("terraform_opentofu") is not True
-                or inventory.get("bootstrap", {}).get("infrastructure") != "terraform-opentofu"
-                or bootstrap.get("ansible") is not True
-                or inventory.get("bootstrap", {}).get("configuration") != "ansible"):
+        if (
+            bootstrap.get("terraform_opentofu") is not True
+            or inventory.get("bootstrap", {}).get("infrastructure") != "terraform-opentofu"
+            or bootstrap.get("ansible") is not True
+            or inventory.get("bootstrap", {}).get("configuration") != "ansible"
+        ):
             errors.append("management_plane.bootstrap contradicts the MGMT inventory")
         human_gates = (
             bootstrap.get("requires_human_apply_gate"),
@@ -802,7 +1141,12 @@ def validate(root):
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
         for role, relative in topology_contracts.items():
-            if not isinstance(relative, str) or not relative.strip() or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            if (
+                not isinstance(relative, str)
+                or not relative.strip()
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
                 errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
                 continue
             path = root / relative
@@ -821,7 +1165,10 @@ def validate(root):
         errors.extend(derived_index_errors(index, lock, network_plan))
         for relative in ("AGENTS.md", "README.md"):
             text = (root / relative).read_text()
-            if not re.search(r"architecture.lock.yaml.{0,12}(?:— the single canonical architecture authority|, seule autorité canonique)", text):
+            if not re.search(
+                r"architecture.lock.yaml.{0,12}(?:— the single canonical architecture authority|, seule autorité canonique)",
+                text,
+            ):
                 errors.append(f"{relative} must establish the lock as root authority")
         agents = (root / "AGENTS.md").read_text()
         if "M2.5 -> M3 PREPROD infra" not in agents or "M2 + M4 -> M5 vertical slice" not in agents:
@@ -839,19 +1186,29 @@ def validate(root):
                 errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m5 = m5_match.group(0) if m5_match else ""
-        checkout_flow = "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
+        checkout_flow = (
+            "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
+        )
         if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
             errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
         m4_match = re.search(r"^## M4 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m4 = m4_match.group(0) if m4_match else ""
         m4_order_match = re.search(r"^Order:\s*\n`([^`]+)`\.\s*$", m4, re.M)
         approved_m4_order = [
-            "RKE2", "Cilium/Hubble", "Fleet", "Argo Rollouts", "Kyverno/Pod Security",
-            "SPIRE", "Istio", "OpenBao/ESO", "Harbor", "Tekton",
-            "observability/security logging", "stateful platform",
+            "RKE2",
+            "Cilium/Hubble",
+            "Fleet",
+            "Argo Rollouts",
+            "Kyverno/Pod Security",
+            "SPIRE",
+            "Istio",
+            "OpenBao/ESO",
+            "Harbor",
+            "Tekton",
+            "observability/security logging",
+            "stateful platform",
         ]
-        rendered_m4_order = ([item.strip() for item in m4_order_match.group(1).split("->")]
-                             if m4_order_match else [])
+        rendered_m4_order = [item.strip() for item in m4_order_match.group(1).split("->")] if m4_order_match else []
         if rendered_m4_order != approved_m4_order:
             errors.append("CODEX_HANDOFFS.md M4 order must match the approved platform schedule")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
@@ -866,7 +1223,8 @@ def validate(root):
         prose_wave_declarations = {}
         for match in re.finditer(
             r"^Machine wave `(?P<id>[a-z0-9-]+)` scheduled components: (?P<components>.+)$",
-            deployment_dag, re.M,
+            deployment_dag,
+            re.M,
         ):
             prose_wave_declarations.setdefault(match.group("id"), []).append(match)
         if set(prose_wave_declarations) != set(MIRRORED_WAVES):
@@ -882,18 +1240,22 @@ def validate(root):
         spire_waves = []
         for wave in waves.get("waves", []):
             scheduled_components = list(wave.get("components", []))
-            scheduled_components.extend(
-                component for group in wave.get("parallel_groups", []) for component in group
-            )
+            scheduled_components.extend(component for group in wave.get("parallel_groups", []) for component in group)
             scheduled_components.extend(wave.get("serial_after_parallel", []))
             spire_waves.extend(wave.get("id") for component in scheduled_components if component == "spire")
         spire_prose = [
-            match for matches in prose_wave_declarations.values() for match in matches
+            match
+            for matches in prose_wave_declarations.values()
+            for match in matches
             if "spire" in re.findall(r"`([a-z0-9-]+)`", match.group("components"))
         ]
         gate_w3_position = deployment_dag.find("Gate W3:")
-        if (len(spire_waves) != 1 or len(spire_prose) != 1 or gate_w3_position < 0
-                or spire_prose[0].start() > gate_w3_position):
+        if (
+            len(spire_waves) != 1
+            or len(spire_prose) != 1
+            or gate_w3_position < 0
+            or spire_prose[0].start() > gate_w3_position
+        ):
             errors.append("SPIRE must be scheduled exactly once before Gate W3 verifies SPIFFE issuance")
         deployed = []
         scheduled = []
@@ -910,18 +1272,22 @@ def validate(root):
             for serial_number, component in enumerate(wave.get("serial_after_parallel", []), len(groups) + 1):
                 scheduled.append(component)
                 positions.setdefault(component, (wave_number, serial_number))
-            deployed.extend(component for component in wave.get("components", []) if component in lock["business"]["services"])
+            deployed.extend(
+                component for component in wave.get("components", []) if component in lock["business"]["services"]
+            )
             for group in wave.get("parallel_groups", []):
                 deployed.extend(component for component in group if component in lock["business"]["services"])
-            deployed.extend(component for component in wave.get("serial_after_parallel", [])
-                            if component in lock["business"]["services"])
+            deployed.extend(
+                component
+                for component in wave.get("serial_after_parallel", [])
+                if component in lock["business"]["services"]
+            )
         if len(deployed) != len(set(deployed)) or set(deployed) != set(lock["business"]["services"]):
             errors.append("deployment waves must schedule every canonical business service exactly once")
         frontend_waves = [wave for wave in waves.get("waves", []) if wave.get("id") == "100-frontends"]
         deployed_frontends = frontend_waves[0].get("components", []) if len(frontend_waves) == 1 else []
         scheduled_frontends = [component for component in scheduled if component in V5_FRONTENDS]
-        if (len(frontend_waves) != 1 or deployed_frontends != V5_FRONTENDS
-                or scheduled_frontends != V5_FRONTENDS):
+        if len(frontend_waves) != 1 or deployed_frontends != V5_FRONTENDS or scheduled_frontends != V5_FRONTENDS:
             errors.append("deployment waves must schedule every canonical V5 frontend exactly once")
         dependencies = load_yaml(root / lock["machine_contracts"]["dependency_map"])["services"]
         for service, contract in dependencies.items():
@@ -932,13 +1298,18 @@ def validate(root):
         if mlops_deployed != DEPLOYABLE_MLOPS:
             errors.append("deployment waves must schedule every canonical deployable MLOps component exactly once")
         mlops_dependencies = {
-            "lakefs": ["seaweedfs"], "mlflow": ["lakefs", "cloudnativepg"],
+            "lakefs": ["seaweedfs"],
+            "mlflow": ["lakefs", "cloudnativepg"],
             "kserve-vllm": ["mlflow", "harbor", "tekton", "rancher-fleet", "argo-rollouts"],
             "evidently-tekton-batch": ["kserve-vllm", "tekton"],
         }
         for component, required in mlops_dependencies.items():
             for dependency in required:
-                if component not in positions or dependency not in positions or positions[component] <= positions[dependency]:
+                if (
+                    component not in positions
+                    or dependency not in positions
+                    or positions[component] <= positions[dependency]
+                ):
                     errors.append(f"deployment ordering requires {component} after MLOps dependency {dependency}")
         m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         m7 = m7_match.group(0) if m7_match else ""
@@ -948,17 +1319,25 @@ def validate(root):
             errors.append("CODEX_HANDOFFS.md M7 must require >=90% critical-code coverage")
         handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         handoff = handoff_match.group(0) if handoff_match else ""
-        handoff_requirements = ("## M2.5 prompt", "M2-5-persistent-mgmt-bootstrap", "Entry gate: M1 PROVEN",
-                                "Tracker: `#15`", "Evidence required for M2.5 PROVEN", "Exit gate:",
-                                "That PROVEN state enables M3")
+        handoff_requirements = (
+            "## M2.5 prompt",
+            "M2-5-persistent-mgmt-bootstrap",
+            "Entry gate: M1 PROVEN",
+            "Tracker: `#15`",
+            "Evidence required for M2.5 PROVEN",
+            "Exit gate:",
+            "That PROVEN state enables M3",
+        )
         if any(requirement not in handoff for requirement in handoff_requirements):
             errors.append("CODEX_HANDOFFS.md must define the executable M2.5 entry, evidence, and M3 exit contract")
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]
         canonical_l2_contracts = (
-            INDEX, "config/infrastructure/deployment-waves.yaml",
-            "docs/architecture/AIOPS_TOPOLOGY_V1.md", "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+            INDEX,
+            "config/infrastructure/deployment-waves.yaml",
+            "docs/architecture/AIOPS_TOPOLOGY_V1.md",
+            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
         )
         for relative in canonical_l2_contracts:
             if relative not in l2_canonical:
@@ -976,9 +1355,11 @@ def validate(root):
         errors.append(f"invalid architecture authority contract: {exc}")
 
     # Include new, untracked documents but exclude ignored generated dependencies.
-    paths = subprocess.check_output(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root
-    ).decode().split("\0")
+    paths = (
+        subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=root)
+        .decode()
+        .split("\0")
+    )
     for relative in sorted(set(paths)):
         path = root / relative
         if path.suffix.lower() == ".md" and path.is_file():

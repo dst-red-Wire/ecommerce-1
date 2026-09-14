@@ -19,7 +19,8 @@
       "version_args": [
         "--version"
       ],
-      "classification": "seed-prerequisite"
+      "classification": "seed-prerequisite",
+      "requirement": "required-static"
     },
     {
       "name": "ruby",
@@ -29,7 +30,8 @@
         "--version"
       ],
       "classification": "seed-prerequisite",
-      "justification": "Ruby is the contracted runtime for deterministic governance validators."
+      "justification": "Ruby is the contracted runtime for deterministic governance validators.",
+      "requirement": "required-static"
     },
     {
       "name": "psych",
@@ -42,7 +44,8 @@
         "-e",
         "print Psych::VERSION"
       ],
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "required-static"
     },
     {
       "name": "ansible-core",
@@ -52,7 +55,8 @@
         "--version"
       ],
       "version_key": "ANSIBLE_CORE_VERSION",
-      "classification": "seed-prerequisite"
+      "classification": "seed-prerequisite",
+      "requirement": "required-static"
     },
     {
       "name": "ansible-playbook",
@@ -64,7 +68,8 @@
       "version_args": [
         "--version"
       ],
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "required-static"
     },
     {
       "name": "ansible-galaxy",
@@ -77,7 +82,8 @@
         "--version"
       ],
       "version_key": "ANSIBLE_CORE_VERSION",
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "required-static"
     },
     {
       "name": "ansible-lint",
@@ -93,7 +99,8 @@
         "type": "ansible",
         "tags": "ansible_lint"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "node",
@@ -105,12 +112,13 @@
       "version_args": [
         "--version"
       ],
-      "version_file": "frontend/.node-version",
+      "version_key": "NODE_VERSION",
       "provision": {
         "type": "ansible",
         "tags": "node"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "corepack",
@@ -125,7 +133,8 @@
         "type": "ansible",
         "tags": "node"
       },
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "required-static"
     },
     {
       "name": "pnpm",
@@ -138,7 +147,8 @@
         "pnpm",
         "--version"
       ],
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "required-static"
     },
     {
       "name": "go",
@@ -155,7 +165,8 @@
         "type": "ansible",
         "tags": "go"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "sqlc",
@@ -172,7 +183,8 @@
         "type": "ansible",
         "tags": "sqlc"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "yq",
@@ -189,7 +201,8 @@
         "type": "ansible",
         "tags": "context_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "oasdiff",
@@ -206,7 +219,8 @@
         "type": "ansible",
         "tags": "agent_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "rg",
@@ -223,7 +237,8 @@
         "type": "ansible",
         "tags": "context_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "fd",
@@ -240,7 +255,8 @@
         "type": "ansible",
         "tags": "context_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "ast-grep",
@@ -257,7 +273,8 @@
         "type": "ansible",
         "tags": "context_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "oras",
@@ -274,7 +291,8 @@
         "type": "ansible",
         "tags": "agent_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "bazel",
@@ -291,7 +309,8 @@
         "type": "ansible",
         "tags": "agent_tools"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "nx",
@@ -313,7 +332,8 @@
       "classification": "managed",
       "platforms": [
         "linux/amd64"
-      ]
+      ],
+      "requirement": "required-static"
     },
     {
       "name": "oapi-codegen",
@@ -331,7 +351,8 @@
         "type": "ansible",
         "tags": "oapi_codegen"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "oxlint",
@@ -348,7 +369,8 @@
         "type": "ansible",
         "tags": "oxlint"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "oxfmt",
@@ -365,7 +387,8 @@
         "type": "ansible",
         "tags": "oxfmt"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
     },
     {
       "name": "ruff",
@@ -382,7 +405,22 @@
         "type": "ansible",
         "tags": "ruff"
       },
-      "classification": "managed"
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "container-network-forwarding",
+      "requires": [],
+      "probe": [
+        "sysctl",
+        "-n",
+        "net.ipv4.ip_forward"
+      ],
+      "expected_output": "1",
+      "external_failure": true,
+      "classification": "platform-provided",
+      "requirement": "optional-runtime",
+      "justification": "Host IPv4 forwarding is owned by the runner platform and is required only by networked container integration workloads."
     },
     {
       "name": "docker-client-installed",
@@ -399,7 +437,8 @@
         "tags": "docker_client"
       },
       "classification": "platform-provided",
-      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external."
+      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
+      "requirement": "optional-runtime"
     },
     {
       "name": "docker-user-access",
@@ -411,7 +450,8 @@
         "info"
       ],
       "external_failure": true,
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "optional-runtime"
     },
     {
       "name": "docker-daemon-ready",
@@ -423,7 +463,8 @@
         "info"
       ],
       "external_failure": true,
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "optional-runtime"
     },
     {
       "name": "docker",
@@ -435,7 +476,8 @@
         "info"
       ],
       "external_failure": true,
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "optional-runtime"
     },
     {
       "name": "kubectl",
@@ -457,7 +499,8 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "KUBECTL_SHA256_LINUX_AMD64"
+      "checksum_key": "KUBECTL_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
     },
     {
       "name": "helm",
@@ -480,7 +523,8 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "HELM_SHA256_LINUX_AMD64"
+      "checksum_key": "HELM_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
     },
     {
       "name": "cosign",
@@ -501,7 +545,8 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "COSIGN_SHA256_LINUX_AMD64"
+      "checksum_key": "COSIGN_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
     },
     {
       "name": "terraform",
@@ -535,7 +580,8 @@
           ],
           "version_key": "TERRAFORM_VERSION"
         }
-      ]
+      ],
+      "requirement": "required-static"
     },
     {
       "name": "kustomize",
@@ -556,7 +602,8 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "KUSTOMIZE_SHA256_LINUX_AMD64"
+      "checksum_key": "KUSTOMIZE_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
     },
     {
       "name": "kind",
@@ -579,15 +626,18 @@
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "KIND_SHA256_LINUX_AMD64"
+      "checksum_key": "KIND_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
     },
     {
       "name": "container-tests",
       "requires": [
-        "docker"
+        "docker",
+        "container-network-forwarding"
       ],
       "virtual": true,
-      "classification": "conditional"
+      "classification": "conditional",
+      "requirement": "optional-runtime"
     },
     {
       "name": "gitleaks",
@@ -608,7 +658,8 @@
       ],
       "requires": [],
       "classification": "managed",
-      "checksum_key": "GITLEAKS_SHA256_LINUX_AMD64"
+      "checksum_key": "GITLEAKS_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
     }
   ],
   "provision_owners": {
@@ -697,7 +748,8 @@
       "python3"
     ],
     "env-check": [
-      "python3"
+      "python3",
+      "sysctl"
     ],
     "governance": [
       "python3",
@@ -796,7 +848,8 @@
     "pnpm": "pnpm",
     "docker": "docker",
     "terraform": "terraform",
-    "tofu": "terraform"
+    "tofu": "terraform",
+    "sysctl": "container-network-forwarding"
   },
   "gate_sources": [
     "scripts/repoctl.py",

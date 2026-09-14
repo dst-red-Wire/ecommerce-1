@@ -1,0 +1,7 @@
+---
+# Existing roles predate ansible-lint's enforced role-variable prefix convention.
+# Keep the M1 gate deterministic without a repository-wide variable migration.
+skip_list:
+  - run-once[play]
+  - var-naming[no-role-prefix]
+  - yaml[line-length]

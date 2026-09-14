@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -72,13 +73,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             (repo / "ignored.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
 
-    def test_exact_versions_are_detected_without_ansible(self):
-        pins = {"GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
+    def test_exact_managed_go_pair_is_detected_without_ansible(self):
+        pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
         commands = {
             "node": "/bin/node",
             "corepack": "/bin/corepack",
-            "go": "/bin/go",
-            "gofmt": "/bin/gofmt",
             "cc": "/bin/cc",
             "sqlc": "/bin/sqlc",
             "docker": "/bin/docker",
@@ -90,7 +89,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             if cmd[0] == "/bin/node":
                 return subprocess.CompletedProcess(cmd, 0, "v24.20.0\n", "")
-            if cmd[0] == "/bin/go":
+            if cmd[0].endswith("/.local/bin/go"):
                 return subprocess.CompletedProcess(cmd, 0, "go version go1.26.6 linux/amd64\n", "")
             if cmd[0] == "/bin/sqlc":
                 return subprocess.CompletedProcess(cmd, 0, "v1.31.1\n", "")
@@ -98,12 +97,37 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             raise AssertionError(cmd)
 
-        with (
-            mock.patch.object(MOD, "pinned_versions", return_value=pins),
-            mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
-            mock.patch.object(MOD, "run", side_effect=fake_run),
-        ):
-            self.assertTrue(MOD.developer_state_ready("node,go,cgo,sqlc,docker"))
+        with tempfile.TemporaryDirectory() as home:
+            managed = Path(home) / ".local" / "bin"
+            managed.mkdir(parents=True)
+            for name in ("go", "gofmt"):
+                (managed / name).touch(mode=0o755)
+            with (
+                mock.patch.object(MOD.Path, "home", return_value=Path(home)),
+                mock.patch.object(MOD, "pinned_versions", return_value=pins),
+                mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+            ):
+                self.assertTrue(MOD.developer_state_ready("node,go,cgo,sqlc,docker"))
+
+    def test_stale_managed_go_is_rejected_even_when_system_go_is_correct(self):
+        with tempfile.TemporaryDirectory() as home:
+            managed = Path(home) / ".local" / "bin"
+            managed.mkdir(parents=True)
+            for name in ("go", "gofmt"):
+                (managed / name).touch(mode=0o755)
+
+            def fake_run(command, **_kwargs):
+                self.assertEqual(str(managed / "go"), command[0])
+                return subprocess.CompletedProcess(command, 0, "go version go1.25.0 linux/amd64\n", "")
+
+            with (
+                mock.patch.object(MOD.Path, "home", return_value=Path(home)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"GO_VERSION": "1.26.6"}),
+                mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/go"),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+            ):
+                self.assertFalse(MOD.developer_state_ready("go"))
 
 
 if __name__ == "__main__":

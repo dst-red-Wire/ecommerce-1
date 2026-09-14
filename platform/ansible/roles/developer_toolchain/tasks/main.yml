@@ -414,6 +414,8 @@
   ansible.builtin.command:
     argv: ["{{ local_bin }}/corepack", pnpm, install, --no-frozen-lockfile]
     chdir: "{{ local_share }}/nx"
+  environment:
+    NODE_USE_ENV_PROXY: "1"
   when: nx_manifest.changed or nx_pnpm_policy.changed or not nx_binary.stat.exists
   changed_when: true
   tags: [toolchain, agent_tools]
@@ -441,13 +443,6 @@
     dest: "{{ local_bin }}/nx"
     state: link
     force: true
-  tags: [toolchain, agent_tools]
-
-- name: Install pinned frontend dependencies and accelerators
-  ansible.builtin.command:
-    argv: ["{{ local_bin }}/corepack", pnpm, install, --frozen-lockfile, --prefer-offline]
-    chdir: "{{ repo_root }}/frontend"
-  changed_when: false
   tags: [toolchain, agent_tools]
 
 - name: Define isolated Python CLI pins

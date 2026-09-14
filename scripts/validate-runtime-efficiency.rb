@@ -72,31 +72,40 @@ module RuntimeEfficiencyValidator
     add(errors, policy.dig("service_mesh", "ambient_mode") == "forbidden-until-spire-support-and-lock-change",
         "ambient mode must stay blocked while SPIRE is canonical")
 
-    validate_next_config(errors, root, "frontend/apps/storefront/next.config.ts")
-    validate_next_config(errors, root, "frontend/apps/admin/next.config.ts")
-    validate_product_containerfile(errors, root, policy)
+    validate_go_frontend(errors, root, policy)
+    validate_service_containerfiles(errors, root, policy, lock.fetch("business").fetch("services"))
     errors
   rescue Errno::ENOENT, Psych::Exception => e
     [e.message]
   end
 
-  def validate_next_config(errors, root, relative)
-    content = File.read(File.join(root, relative))
-    add(errors, content.include?('output: "standalone"'), "#{relative} must enable Next.js standalone output")
-    add(errors, content.include?("outputFileTracingRoot"), "#{relative} must trace from the frontend workspace")
+  def validate_go_frontend(errors, root, policy)
+    add(errors, policy.dig("frontend", "production_runtime") == "go-templ-htmx",
+        "frontend production runtime must be go-templ-htmx")
+    add(errors, policy.dig("frontend", "module") == "frontend/go.mod",
+        "frontend module must remain frontend/go.mod")
+    add(errors, policy.dig("frontend", "nodejs") == "forbidden",
+        "Node.js must remain forbidden for the frontend runtime")
+    %w[frontend/go.mod frontend/apps/storefront/main.go frontend/apps/admin/main.go frontend/internal/web/layout.templ].each do |relative|
+      add(errors, File.file?(File.join(root, relative)), "#{relative} must exist for the canonical Go frontend")
+    end
+    add(errors, !File.exist?(File.join(root, "frontend/package.json")),
+        "frontend/package.json must be absent from the Go application runtime")
   end
 
-  def validate_product_containerfile(errors, root, policy)
-    relative = "services/product/Containerfile"
-    content = File.read(File.join(root, relative))
+  def validate_service_containerfiles(errors, root, policy, services)
     builder = policy.fetch("images").fetch("go_builder")
     expected = "#{builder.fetch('image')}:#{builder.fetch('tag')}@#{builder.fetch('digest')}"
-    add(errors, content.include?(expected), "#{relative} must pin the reviewed Go builder digest")
-    add(errors, content.include?("TARGETARCH"), "#{relative} must support target architecture selection")
-    add(errors, content.include?("CGO_ENABLED=0"), "#{relative} must build a static Go binary")
-    add(errors, content.match?(/^FROM scratch$/), "#{relative} runtime must be scratch")
-    add(errors, content.include?("USER 65532:65532"), "#{relative} runtime must be non-root")
-    add(errors, !content.match?(/:latest\b/), "#{relative} must not use mutable latest tags")
+    services.each do |service|
+      relative = "services/#{service}/Containerfile"
+      content = File.read(File.join(root, relative))
+      add(errors, content.include?(expected), "#{relative} must pin the reviewed Go builder digest")
+      add(errors, content.include?("TARGETARCH"), "#{relative} must support target architecture selection")
+      add(errors, content.include?("CGO_ENABLED=0"), "#{relative} must build a static Go binary")
+      add(errors, content.match?(/^FROM scratch$/), "#{relative} runtime must be scratch")
+      add(errors, content.include?("USER 65532:65532"), "#{relative} runtime must be non-root")
+      add(errors, !content.match?(/:latest\b/), "#{relative} must not use mutable latest tags")
+    end
   end
 end
 

@@ -1,6 +1,24 @@
 go 1.25.0
 
 use (
-	./services/product
 	./frontend
+	./services/billing
+	./services/cart
+	./services/catalog
+	./services/checkout
+	./services/fraud-risk
+	./services/fulfillment
+	./services/inventory
+	./services/notification
+	./services/order
+	./services/payment
+	./services/pricing
+	./services/product
+	./services/returns
+	./services/review
+	./services/search
+	./services/shipping
+	./services/tax
+	./services/tracking
+	./services/user-profile
 )

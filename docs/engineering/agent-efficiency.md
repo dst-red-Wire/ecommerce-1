@@ -26,7 +26,7 @@ This split is intentional: starting Ansible for every lint/test would be slower.
 
 ## Generated contracts
 
-`make api-generate` produces versioned Go and TypeScript transport bindings from `config/contracts/public-api-contracts.yaml`. Before generation, `repoctl` deterministically bundles only the registry-declared `common_components` document into each service specification, rewrites those local `$ref`s to internal refs, rejects any undeclared/remote external reference, and runs Go generation from the owning service module so `oapi-codegen` resolves the correct `go.mod`. Canonical source contracts remain split and unchanged. Contract gates regenerate bindings when OpenAPI changes, so exact-SHA verification detects codegen drift. `make api-mock SERVICE=product` starts Prism from the same contract, and `BASE=... make contracts` performs compatibility checks.
+`make api-generate` produces versioned Go transport bindings from `config/contracts/public-api-contracts.yaml`. Before generation, `repoctl` deterministically bundles only the registry-declared `common_components` document into each service specification, rewrites those local `$ref`s to internal refs, rejects any undeclared/remote external reference, and runs Go generation from the owning service module so `oapi-codegen` resolves the correct `go.mod`. Canonical source contracts remain split and unchanged. Contract gates regenerate bindings when OpenAPI changes, so exact-SHA verification detects codegen drift. `BASE=... make contracts` performs compatibility checks.
 
 ## Evidence and delivery
 

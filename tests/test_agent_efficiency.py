@@ -1,4 +1,3 @@
-import json
 import pathlib
 import unittest
 
@@ -12,11 +11,13 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn(".context/evidence/", text)
         self.assertNotIn("- governance: PASS", text)
 
-    def test_frontend_uses_turbo_but_keeps_pnpm(self):
-        package = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
-        self.assertEqual("pnpm@11.24.0", package["packageManager"])
-        self.assertEqual("turbo run typecheck", package["scripts"]["typecheck"])
-        self.assertEqual("2.10.12", package["devDependencies"]["turbo"])
+    def test_frontend_uses_single_go_module_without_node_runtime(self):
+        module = (ROOT / "frontend/go.mod").read_text(encoding="utf-8")
+        workspace = (ROOT / "go.work").read_text(encoding="utf-8")
+        self.assertIn("module github.com/dst-red-Wire/ecommerce-1/frontend", module)
+        self.assertIn("github.com/a-h/templ", module)
+        self.assertIn("./frontend", workspace)
+        self.assertFalse((ROOT / "frontend/package.json").exists())
 
     def test_bazel_and_nx_are_not_tekton_replacements(self):
         topology = (ROOT / "config/contracts/ci-topology.yaml").read_text(encoding="utf-8")
