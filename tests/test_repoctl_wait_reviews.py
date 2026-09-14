@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 import urllib.error
 import urllib.parse
+import socket
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,15 +34,16 @@ def request(kind="code", event_id=10, timestamp="2026-01-01T00:01:00Z"):
 
 
 class FakeReader:
-    def __init__(self, head=SHA, reviews=None, comments=None, error=None):
+    def __init__(self, head=SHA, reviews=None, comments=None, error=None, heads=None):
         self.head, self.reviews, self.comments, self.error = head, reviews or [], comments or [], error
+        self.heads = iter(heads) if heads is not None else None
         self.calls = []
 
     def get(self, path):
         self.calls.append(("GET", path))
         if self.error:
             raise self.error
-        return {"head": {"sha": self.head}}
+        return {"head": {"sha": next(self.heads) if self.heads is not None else self.head}}
 
     def pages(self, path):
         self.calls.append(("GET", path))
@@ -90,6 +92,16 @@ class WaitReviewsTests(unittest.TestCase):
             with self.subTest(values=values):
                 self.assertEqual(4, self.invoke(FakeReader(), **values)[0])
 
+    def test_json_invalid_inputs_emit_one_document(self):
+        for values in ({"repo": "owner"}, {"expected_sha": "abc"}, {"interval": 0}, {"max_attempts": 0}):
+            with self.subTest(values=values):
+                code, out, err = self.invoke(FakeReader(), json_mode=True, **values)
+                self.assertEqual(4, code)
+                document = json.loads(out)
+                self.assertEqual("INVALID_INPUT", document["result"])
+                self.assertEqual(0, document["attempt"])
+                self.assertIn("INVALID_INPUT", err)
+
     def test_head_movement_exits_two_before_collections(self):
         reader = FakeReader(head=STALE)
         code, out, _ = self.invoke(reader)
@@ -117,6 +129,18 @@ class WaitReviewsTests(unittest.TestCase):
         code, out, _ = self.invoke(reader)
         self.assertEqual(0, code)
         self.assertIn("same_sha=YES", out)
+        self.assertEqual(4, len(reader.calls))
+
+    def test_final_head_movement_rejects_collected_reviews(self):
+        reader = FakeReader(heads=[SHA, STALE], reviews=[review("code")], comments=[review("security")])
+        code, out, _ = self.invoke(reader)
+        self.assertEqual(2, code)
+        self.assertIn("HEAD_MOVED", out)
+        self.assertNotIn("REVIEWS_COMPLETE", out)
+
+    def test_final_head_confirmation_allows_success(self):
+        reader = FakeReader(heads=[SHA, SHA], reviews=[review("code")], comments=[review("security")])
+        self.assertEqual(0, self.invoke(reader)[0])
 
     def test_reviews_on_different_shas_never_succeed(self):
         reader = FakeReader(reviews=[review("code")], comments=[review("security", STALE)])
@@ -133,6 +157,27 @@ class WaitReviewsTests(unittest.TestCase):
         stale = review("code", STALE, 20, "2026-01-01T00:02:00Z")
         older = request("code", 10, "2026-01-01T00:01:00Z")
         self.assertEqual("STALE_SHA", REPOCTL.codex_review_states([stale], [older], SHA)[0])
+
+    def test_exact_completion_precedes_newer_other_sha_completion(self):
+        exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
+        newer_stale = review("code", STALE, 20, "2026-01-01T00:02:00Z")
+        self.assertEqual("COMPLETED", REPOCTL.codex_review_states([exact, newer_stale], [], SHA)[0])
+
+    def test_exact_completion_is_not_downgraded_by_later_request(self):
+        exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
+        newer = request("code", 20, "2026-01-01T00:02:00Z")
+        self.assertEqual("COMPLETED", REPOCTL.codex_review_states([exact], [newer], SHA)[0])
+
+    def test_malformed_users_are_ignored_without_hiding_valid_history(self):
+        malformed = []
+        for user in (None, {}, "deleted-user", {"login": None}):
+            item = review("code", SHA)
+            item["user"] = user
+            malformed.append(item)
+        valid = review("code", SHA, 30)
+        comment = review("security", SHA)
+        comment["user"] = None
+        self.assertEqual(("COMPLETED", "NOT_REQUESTED"), REPOCTL.codex_review_states(malformed + [valid], [comment], SHA))
 
     def test_command_matching_is_bounded(self):
         self.assertEqual("code", REPOCTL._request_kind("  @codex review please  "))
@@ -180,6 +225,22 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertEqual(5, code)
         self.assertIn("API_FAILURE", out)
 
+    def test_socket_and_url_timeouts_are_sanitized_api_failures(self):
+        for error in (socket.timeout("secret timeout"), urllib.error.URLError(socket.timeout("secret timeout"))):
+            with self.subTest(error=type(error).__name__):
+                reader = REPOCTL.GitHubReader("token", lambda _req, timeout: (_ for _ in ()).throw(error))
+                code, out, _ = self.invoke(reader)
+                self.assertEqual(5, code)
+                self.assertIn("API_FAILURE", out)
+                self.assertNotIn("secret", out)
+
+    def test_json_timeout_error_is_one_api_failure_document(self):
+        reader = REPOCTL.GitHubReader("token", lambda _req, timeout: (_ for _ in ()).throw(socket.timeout()))
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(5, code)
+        self.assertEqual("API_FAILURE", json.loads(out)["result"])
+        self.assertIn("GitHub API request failed", err)
+
     def test_json_success_is_one_document_and_progress_is_stderr(self):
         reader = FakeReader(reviews=[review("code")], comments=[review("security")])
         code, out, err = self.invoke(reader, json_mode=True)
@@ -204,8 +265,9 @@ class WaitReviewsTests(unittest.TestCase):
         for collection in ("reviews", "comments"):
             calls = []
 
-            def opener(req):
+            def opener(req, timeout):
                 calls.append(req)
+                self.assertEqual(REPOCTL.GITHUB_HTTP_TIMEOUT_SECONDS, timeout)
                 page = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)["page"][0]
                 return Response([{}] * 100 if page == "1" else [{}])
 
@@ -219,8 +281,9 @@ class WaitReviewsTests(unittest.TestCase):
         captured = []
         for token in (None, "highly-secret-token"):
 
-            def opener(req):
+            def opener(req, timeout):
                 captured.append(req)
+                self.assertEqual(REPOCTL.GITHUB_HTTP_TIMEOUT_SECONDS, timeout)
                 return Response({})
 
             REPOCTL.GitHubReader(token, opener).get("/repos/o/r")
@@ -228,8 +291,31 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertEqual("Bearer highly-secret-token", captured[1].get_header("Authorization"))
         error = urllib.error.HTTPError("https://api.github.com/x", 403, "forbidden", {}, None)
         with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "authentication/authorization") as raised:
-            REPOCTL.GitHubReader("highly-secret-token", lambda _req: (_ for _ in ()).throw(error)).get("/x")
+            REPOCTL.GitHubReader("highly-secret-token", lambda _req, timeout: (_ for _ in ()).throw(error)).get("/x")
         self.assertNotIn("highly-secret-token", str(raised.exception))
+
+    def test_unauthenticated_attempt_policy_rejects_unsafe_before_api_call(self):
+        reader = FakeReader()
+        with mock.patch.dict(REPOCTL.os.environ, {}, clear=True):
+            code, _, err = self.invoke(reader, max_attempts=40)
+        self.assertEqual(4, code)
+        self.assertIn("provide GH_TOKEN/GITHUB_TOKEN", err)
+        self.assertEqual([], reader.calls)
+
+    def test_unauthenticated_safe_limit_and_authenticated_defaults(self):
+        with mock.patch.dict(REPOCTL.os.environ, {}, clear=True):
+            self.assertEqual(3, self.invoke(FakeReader(), max_attempts=REPOCTL.GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS)[0])
+        with mock.patch.dict(REPOCTL.os.environ, {"GH_TOKEN": "token"}, clear=True):
+            self.assertEqual(3, self.invoke(FakeReader(), max_attempts=40)[0])
+
+    def test_unauthenticated_reader_budget_is_bounded_with_margin(self):
+        calls = []
+        reader = REPOCTL.GitHubReader(opener=lambda req, timeout: calls.append(req) or Response({}))
+        for _ in range(REPOCTL.GITHUB_UNAUTHENTICATED_REQUEST_BUDGET):
+            reader.get("/x")
+        with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "budget exhausted"):
+            reader.get("/x")
+        self.assertEqual(REPOCTL.GITHUB_UNAUTHENTICATED_REQUEST_BUDGET, len(calls))
 
     def test_reader_has_no_mutating_interface_or_retrigger_payload(self):
         for method in ("post", "put", "patch", "delete"):

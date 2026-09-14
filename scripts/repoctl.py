@@ -67,6 +67,11 @@ CONTEXT = ROOT / ".context"
 
 GITHUB_API = "https://api.github.com"
 CODEX_REVIEW_AUTHOR = "chatgpt-codex-connector"
+GITHUB_HTTP_TIMEOUT_SECONDS = 15
+# Leave 25% of GitHub's documented 60-request/hour unauthenticated allowance
+# unused. This also bounds pagination without weakening authenticated polling.
+GITHUB_UNAUTHENTICATED_REQUEST_BUDGET = 45
+GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS = 10
 
 
 class GitHubAPIError(RuntimeError):
@@ -79,8 +84,12 @@ class GitHubReader:
     def __init__(self, token: str | None = None, opener=urllib.request.urlopen):
         self.token = token
         self.opener = opener
+        self.request_budget = None if token else GITHUB_UNAUTHENTICATED_REQUEST_BUDGET
+        self.request_count = 0
 
     def get(self, path: str):
+        if self.request_budget is not None and self.request_count >= self.request_budget:
+            raise GitHubAPIError("GitHub API unauthenticated request budget exhausted")
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -90,7 +99,8 @@ class GitHubReader:
             headers["Authorization"] = f"Bearer {self.token}"
         request = urllib.request.Request(f"{GITHUB_API}{path}", headers=headers, method="GET")
         try:
-            with self.opener(request) as response:
+            self.request_count += 1
+            with self.opener(request, timeout=GITHUB_HTTP_TIMEOUT_SECONDS) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
@@ -1951,7 +1961,13 @@ def _event_order(item: dict) -> tuple[str, int]:
 
 
 def _codex_author(item: dict) -> bool:
-    login = str(item.get("user", {}).get("login", "")).removesuffix("[bot]")
+    user = item.get("user")
+    if not isinstance(user, dict):
+        return False
+    login_value = user.get("login")
+    if not isinstance(login_value, str):
+        return False
+    login = login_value.removesuffix("[bot]")
     return login == CODEX_REVIEW_AUTHOR
 
 
@@ -1982,10 +1998,13 @@ def codex_review_states(reviews: list[dict], comments: list[dict], expected_sha:
             for item in events
             if _codex_author(item) and marker in str(item.get("body") or "") and _reviewed_sha(item)
         ]
+        exact = [item for item in completed if expected_sha.startswith(_reviewed_sha(item))]
         latest = max(completed, key=_event_order) if completed else None
         requests = [item for item in comments if _request_kind(str(item.get("body") or "")) == kind]
         latest_request = max(requests, key=_event_order) if requests else None
-        if latest and expected_sha.startswith(_reviewed_sha(latest)):
+        # Exact commit identity is authoritative even if a later completion or
+        # request exists; moving away and back does not invalidate that evidence.
+        if exact:
             state = "COMPLETED"
         elif latest_request and (not latest or _event_order(latest_request) > _event_order(latest)):
             state = "REQUESTED_OR_RUNNING"
@@ -2010,26 +2029,39 @@ def wait_reviews_command(
     reader: GitHubReader | None = None,
     sleeper=time.sleep,
 ) -> int:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
-        return fail("INVALID_INPUT: --repo must be OWNER/REPO", 4)
-    if pr <= 0 or interval <= 0 or max_attempts <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or ""):
-        return fail(
-            "INVALID_INPUT: PR, interval and max-attempts must be positive; SHA must be exactly 40 hex characters",
-            4,
-        )
-    expected_sha = expected_sha.lower()
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    api = reader or GitHubReader(token)
     result = {
         "repo": repo,
         "pr": pr,
-        "expected_sha": expected_sha,
-        "live_sha": "",
+        "expected_sha": expected_sha.lower() if isinstance(expected_sha, str) else None,
+        "live_sha": None,
         "attempt": 0,
         "code_review": "NOT_REQUESTED",
         "security_review": "NOT_REQUESTED",
-        "result": "TIMEOUT",
+        "result": "INVALID_INPUT",
     }
+
+    def invalid(message: str) -> int:
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+            print(message, file=sys.stderr)
+            return 4
+        return fail(message, 4)
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
+        return invalid("INVALID_INPUT: --repo must be OWNER/REPO")
+    if pr <= 0 or interval <= 0 or max_attempts <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or ""):
+        return invalid(
+            "INVALID_INPUT: PR, interval and max-attempts must be positive; SHA must be exactly 40 hex characters",
+        )
+    expected_sha = expected_sha.lower()
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token and max_attempts > GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS:
+        return invalid(
+            "INVALID_INPUT: unauthenticated polling permits at most "
+            f"{GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS} attempts; provide GH_TOKEN/GITHUB_TOKEN or lower --max-attempts"
+        )
+    api = reader or GitHubReader(token)
+    result.update(expected_sha=expected_sha, result="TIMEOUT")
     try:
         for attempt in range(1, max_attempts + 1):
             result["attempt"] = attempt
@@ -2050,6 +2082,16 @@ def wait_reviews_command(
             progress = f"attempt={attempt} code={code} security={security} sha={expected_sha[:10]}"
             print(progress, file=sys.stderr if json_mode else sys.stdout)
             if code == security == "COMPLETED":
+                final_metadata = api.get(f"/repos/{repo}/pulls/{pr}")
+                final_live_sha = str(final_metadata.get("head", {}).get("sha", "")).lower()
+                result["live_sha"] = final_live_sha
+                if final_live_sha != expected_sha:
+                    result["result"] = "HEAD_MOVED"
+                    if json_mode:
+                        print(json.dumps(result, sort_keys=True))
+                    else:
+                        print(f"HEAD_MOVED\nexpected_sha={expected_sha}\nlive_sha={final_live_sha}")
+                    return 2
                 result["result"] = "REVIEWS_COMPLETE"
                 if json_mode:
                     print(json.dumps(result, sort_keys=True))
@@ -2198,7 +2240,8 @@ def main() -> int:
         epilog=(
             "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
             "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
-            "header; public repositories support unauthenticated access. Exit codes: 0 REVIEWS_COMPLETE, "
+            "header. Public repositories support unauthenticated access for at most 10 attempts and a guarded "
+            "45-request total budget; the 40-attempt default therefore requires a token. Exit codes: 0 REVIEWS_COMPLETE, "
             "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
         ),
     )
@@ -2206,7 +2249,12 @@ def main() -> int:
     wr.add_argument("--pr", required=True, type=int, help="positive pull request number")
     wr.add_argument("--sha", required=True, help="immutable full 40-character PR head SHA")
     wr.add_argument("--interval", type=float, default=75, help="poll interval in seconds (default: 75)")
-    wr.add_argument("--max-attempts", type=int, default=40, help="bounded attempts (default: 40)")
+    wr.add_argument(
+        "--max-attempts",
+        type=int,
+        default=40,
+        help="bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)",
+    )
     wr.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
     args = p.parse_args()
     try:
