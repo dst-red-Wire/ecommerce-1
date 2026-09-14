@@ -18,14 +18,14 @@ SHA = "a" * 40
 STALE = "b" * 40
 
 
-def review(kind="code", sha=SHA, event_id=20, timestamp="2026-01-01T00:02:00Z"):
+def review(kind="code", sha=SHA, event_id=20, timestamp="2026-01-01T00:02:00Z", body_sha=None):
     marker = "Codex Review" if kind == "code" else "Codex Security Review"
     return {
         "id": event_id,
         "submitted_at": timestamp,
         "commit_id": sha if kind == "code" else None,
         "user": {"login": "chatgpt-codex-connector[bot]"},
-        "body": f"### {marker}\n\n**Reviewed commit:** `{sha[:10]}`",
+        "body": f"### {marker}\n\n**Reviewed commit:** `{body_sha if body_sha is not None else sha}`",
     }
 
 
@@ -146,6 +146,23 @@ class WaitReviewsTests(unittest.TestCase):
                 self.assertIn("INVALID_INPUT", err)
                 self.assertNotIn("usage:", err)
 
+    def test_missing_required_options_use_wait_reviews_contract(self):
+        values = {"--repo": "dst-red-Wire/ecommerce-1", "--pr": "77", "--sha": SHA}
+        for missing in (("--repo",), ("--pr",), ("--sha",), tuple(values)):
+            arguments = [part for option, value in values.items() if option not in missing for part in (option, value)]
+            with self.subTest(missing=missing, json_mode=True):
+                code, out, err = self.invoke_cli(*arguments, "--max-attempts", "1", "--json")
+                self.assertEqual(4, code)
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertNotIn("usage:", err)
+            if len(missing) == 1:
+                with self.subTest(missing=missing, json_mode=False):
+                    code, out, err = self.invoke_cli(*arguments, "--max-attempts", "1")
+                    self.assertEqual(4, code)
+                    self.assertEqual("", out)
+                    self.assertIn("INVALID_INPUT", err)
+                    self.assertNotIn("usage:", err)
+
     def test_non_finite_intervals_are_invalid(self):
         for interval in ("nan", "+nan", "-nan", "inf", "+inf", "-inf", "Infinity"):
             with self.subTest(interval=interval):
@@ -223,6 +240,34 @@ class WaitReviewsTests(unittest.TestCase):
         exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
         newer_stale = review("code", STALE, 20, "2026-01-01T00:02:00Z")
         self.assertEqual("COMPLETED", REPOCTL.codex_review_states([exact, newer_stale], [], SHA)[0])
+
+    def test_only_full_sha_identity_can_complete_a_review(self):
+        for length in (7, 10, 12, 39):
+            with self.subTest(kind="code", length=length):
+                item = review("code", SHA, body_sha=SHA[:length])
+                item["commit_id"] = None
+                self.assertNotEqual("COMPLETED", REPOCTL.codex_review_states([item], [], SHA)[0])
+            with self.subTest(kind="security", length=length):
+                item = review("security", SHA, body_sha=SHA[:length])
+                self.assertNotEqual("COMPLETED", REPOCTL.codex_review_states([], [item], SHA)[1])
+
+    def test_shared_prefix_abbreviation_never_validates_another_sha(self):
+        old_sha = "aaaaaaaaaa" + "b" * 30
+        new_sha = "aaaaaaaaaa" + "c" * 30
+        stale = review("security", old_sha, body_sha=old_sha[:10])
+        self.assertNotEqual("COMPLETED", REPOCTL.codex_review_states([], [stale], new_sha)[1])
+
+    def test_authoritative_commit_id_wins_over_abbreviated_body(self):
+        item = review("code", SHA, body_sha=SHA[:10])
+        self.assertEqual("COMPLETED", REPOCTL.codex_review_states([item], [], SHA)[0])
+
+    def test_completed_security_metadata_supplies_full_sha_identity(self):
+        body = (
+            '<!-- codex-security-review:v1 {"headSha":"' + SHA + '","status":"completed"} -->\n'
+            "### Codex Security Review"
+        )
+        item = {"id": 20, "created_at": "2026-01-01T00:02:00Z", "user": {"login": "chatgpt-codex-connector[bot]"}, "body": body}
+        self.assertEqual("COMPLETED", REPOCTL.codex_review_states([], [item], SHA)[1])
 
     def test_exact_completion_is_not_downgraded_by_later_request(self):
         exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
