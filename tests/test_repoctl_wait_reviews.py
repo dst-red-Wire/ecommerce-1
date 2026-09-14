@@ -58,15 +58,18 @@ def summary(sha=SHA, repo="dst-red-Wire/ecommerce-1", pr=77, code_status="Comple
 
 
 class FakeReader:
-    def __init__(self, head=SHA, reviews=None, comments=None, error=None, heads=None):
+    def __init__(self, head=SHA, reviews=None, comments=None, error=None, heads=None, commits=None):
         self.head, self.reviews, self.comments, self.error = head, reviews or [], comments or [], error
         self.heads = iter(heads) if heads is not None else None
+        self.commits = commits or {}
         self.calls = []
 
     def get(self, path):
         self.calls.append(("GET", path))
         if self.error:
             raise self.error
+        if "/commits/" in path:
+            return {"sha": self.commits.get(path.rsplit("/", 1)[-1], "")}
         return {"head": {"sha": next(self.heads) if self.heads is not None else self.head}}
 
     def pages(self, path):
@@ -468,12 +471,83 @@ class WaitReviewsTests(unittest.TestCase):
         item = summary()
         self.assertEqual(
             ("COMPLETED", "COMPLETED"),
-            REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77),
+            REPOCTL.codex_review_states(
+                [], [item], SHA, "dst-red-Wire/ecommerce-1", 77, resolve_code_ref=lambda ref: SHA
+            ),
         )
-        reader = FakeReader(comments=[item])
+        reader = FakeReader(comments=[item], commits={SHA[:7]: SHA})
         code, out, _ = self.invoke(reader)
         self.assertEqual(0, code)
         self.assertIn("REVIEWS_COMPLETE", out)
+
+    def test_summary_code_and_security_own_independent_full_sha_evidence(self):
+        old_code = "aaaaaaaa" + "1" * 32
+        new_security = "aaaaaaaa" + "2" * 32
+        item = summary(sha=new_security, short_sha="aaaaaaaa")
+        states = REPOCTL.codex_review_states(
+            [], [item], new_security, "dst-red-Wire/ecommerce-1", 77,
+            resolve_code_ref=lambda _ref: old_code,
+        )
+        self.assertEqual(("STALE_SHA", "COMPLETED"), states)
+
+        # Without independent CODE resolution, the exact SECURITY headSha and
+        # matching prefix prove SECURITY only.
+        self.assertEqual(
+            ("NOT_REQUESTED", "COMPLETED"),
+            REPOCTL.codex_review_states([], [item], new_security, "dst-red-Wire/ecommerce-1", 77),
+        )
+
+    def test_ambiguous_summary_code_ref_fails_closed(self):
+        shared_ref = "abcdef0"
+        first = shared_ref + "1" * 33
+        second = shared_ref + "2" * 33
+        self.assertNotEqual(first, second)
+        item = summary(short_sha=shared_ref)
+        states = REPOCTL.codex_review_states(
+            [], [item], SHA, "dst-red-Wire/ecommerce-1", 77, resolve_code_ref=lambda _ref: ""
+        )
+        self.assertEqual(("NOT_REQUESTED", "COMPLETED"), states)
+
+        reader = FakeReader(comments=[item])
+        original_get = reader.get
+
+        def ambiguous_get(path):
+            if "/commits/" in path:
+                reader.calls.append(("GET", path))
+                raise REPOCTL.GitHubAPIError("GitHub API request failed (HTTP 422)", status=422)
+            return original_get(path)
+
+        reader.get = ambiguous_get
+        code, out, _ = self.invoke(reader)
+        self.assertEqual(3, code)
+        self.assertIn("code=NOT_REQUESTED", out)
+
+    def test_code_identity_never_completes_abbreviated_security_identity(self):
+        code = review("code")
+        security = review("security", body_sha=SHA[:10])
+        self.assertEqual(
+            ("COMPLETED", "NOT_REQUESTED"),
+            REPOCTL.codex_review_states([code], [security], SHA, "dst-red-Wire/ecommerce-1", 77),
+        )
+
+    def test_summary_resolution_is_cached_and_budgeted(self):
+        item = summary()
+        reader = FakeReader(comments=[item], commits={SHA[:7]: SHA})
+        code, _, _ = self.invoke(reader, max_attempts=2)
+        self.assertEqual(0, code)
+        resolution_path = f"/repos/dst-red-Wire/ecommerce-1/commits/{SHA[:7]}"
+        self.assertEqual(1, sum(path == resolution_path for _, path in reader.calls))
+        self.assertEqual(5, len(reader.calls))
+
+        stale_security = summary(sha=STALE, short_sha=SHA[:7])
+        reader = FakeReader(comments=[stale_security], commits={SHA[:7]: SHA})
+        with mock.patch.dict(REPOCTL.os.environ, {}, clear=True):
+            code, _, _ = self.invoke(
+                reader, max_attempts=REPOCTL.GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS
+            )
+        self.assertEqual(3, code)
+        self.assertEqual(31, len(reader.calls))
+        self.assertLessEqual(len(reader.calls), REPOCTL.GITHUB_UNAUTHENTICATED_REQUEST_BUDGET)
 
     def test_summary_code_completion_fails_closed_for_spoofing_and_structure(self):
         mutations = []
