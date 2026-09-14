@@ -1988,9 +1988,19 @@ def _codex_author(item: dict) -> bool:
 
 def _reviewed_sha(item: dict) -> str:
     commit_id = str(item.get("commit_id") or "").lower()
-    if re.fullmatch(r"[0-9a-f]{7,40}", commit_id):
+    if re.fullmatch(r"[0-9a-f]{40}", commit_id):
         return commit_id
-    match = re.search(r"Reviewed commit:\*\*\s*`([0-9a-fA-F]{7,40})`", str(item.get("body") or ""))
+    body = str(item.get("body") or "")
+    security_marker = re.search(r"codex-security-review:v1\s+(\{[^\n]*\})", body)
+    if security_marker:
+        try:
+            metadata = json.loads(security_marker.group(1))
+        except json.JSONDecodeError:
+            metadata = {}
+        head_sha = str(metadata.get("headSha") or "").lower()
+        if metadata.get("status") == "completed" and re.fullmatch(r"[0-9a-f]{40}", head_sha):
+            return head_sha
+    match = re.search(r"Reviewed commit:\*\*\s*`([0-9a-fA-F]{40})`", body)
     return match.group(1).lower() if match else ""
 
 
@@ -2013,7 +2023,7 @@ def codex_review_states(reviews: list[dict], comments: list[dict], expected_sha:
             for item in events
             if _codex_author(item) and marker in str(item.get("body") or "") and _reviewed_sha(item)
         ]
-        exact = [item for item in completed if expected_sha.startswith(_reviewed_sha(item))]
+        exact = [item for item in completed if _reviewed_sha(item) == expected_sha]
         latest = max(completed, key=_event_order) if completed else None
         requests = [item for item in comments if _request_kind(str(item.get("body") or "")) == kind]
         latest_request = max(requests, key=_event_order) if requests else None
@@ -2274,9 +2284,9 @@ def main() -> int:
             "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
         ),
     )
-    wr.add_argument("--repo", required=True, help="GitHub OWNER/REPO")
-    wr.add_argument("--pr", required=True, help="positive pull request number")
-    wr.add_argument("--sha", required=True, help="immutable full 40-character PR head SHA")
+    wr.add_argument("--repo", help="GitHub OWNER/REPO")
+    wr.add_argument("--pr", help="positive pull request number")
+    wr.add_argument("--sha", help="immutable full 40-character PR head SHA")
     wr.add_argument("--interval", default="75", help="poll interval in seconds (default: 75)")
     wr.add_argument(
         "--max-attempts",
