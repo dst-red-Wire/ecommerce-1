@@ -8,6 +8,8 @@ from unittest import mock
 import urllib.error
 import urllib.parse
 import socket
+import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,13 +21,19 @@ STALE = "b" * 40
 
 
 def review(kind="code", sha=SHA, event_id=20, timestamp="2026-01-01T00:02:00Z", body_sha=None):
-    marker = "Codex Review" if kind == "code" else "Codex Security Review"
+    marker = "💡 Codex Review" if kind == "code" else "🛡️ Codex Security Review"
+    identity = body_sha if body_sha is not None else sha
+    metadata = (
+        ""
+        if kind == "code"
+        else '<!-- codex-security-review:v1 {"headSha":"' + identity + '","status":"completed"} -->\n'
+    )
     return {
         "id": event_id,
         "submitted_at": timestamp,
         "commit_id": sha if kind == "code" else None,
         "user": {"login": "chatgpt-codex-connector[bot]"},
-        "body": f"### {marker}\n\n**Reviewed commit:** `{body_sha if body_sha is not None else sha}`",
+        "body": f"{metadata}### {marker}\n\n**Reviewed commit:** `{identity}`",
     }
 
 
@@ -163,6 +171,62 @@ class WaitReviewsTests(unittest.TestCase):
                     self.assertIn("INVALID_INPUT", err)
                     self.assertNotIn("usage:", err)
 
+    def test_complete_json_invalid_input_parser_matrix(self):
+        valid = ["--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--sha", SHA, "--max-attempts", "1"]
+        cases = {
+            "missing_repo": ["--pr", "77", "--sha", SHA, "--max-attempts", "1"],
+            "missing_pr": ["--repo", "dst-red-Wire/ecommerce-1", "--sha", SHA, "--max-attempts", "1"],
+            "missing_sha": ["--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--max-attempts", "1"],
+            "repo_without_value": ["--repo"],
+            "pr_without_value": ["--pr"],
+            "sha_without_value": ["--sha"],
+            "interval_without_value": [*valid, "--interval"],
+            "attempts_without_value": [*valid, "--max-attempts"],
+            "malformed_pr": [*valid[:3], "nope", *valid[4:]],
+            "malformed_interval": [*valid, "--interval", "nope"],
+            "malformed_attempts": [*valid[:-1], "nope"],
+            "nan_interval": [*valid, "--interval", "nan"],
+            "inf_interval": [*valid, "--interval", "inf"],
+            "negative_inf_interval": [*valid, "--interval", "-inf"],
+            "bad_repo": ["--repo", "bad repo", *valid[2:]],
+            "short_sha": [*valid[:5], "abc", *valid[6:]],
+            "non_hex_sha": [*valid[:5], "z" * 40, *valid[6:]],
+            "unknown_option": [*valid, "--does-not-exist", "value"],
+            "positional": [*valid, "unexpected"],
+            "duplicate_repo": [*valid, "--repo", "other/repo"],
+            "duplicate_pr": [*valid, "--pr", "78"],
+            "duplicate_sha": [*valid, "--sha", STALE],
+            "duplicate_interval": [*valid, "--interval", "1", "--interval", "2"],
+            "duplicate_attempts": [*valid, "--max-attempts", "2"],
+            "empty_repo": ["--repo=", *valid[2:]],
+            "empty_pr": [valid[0], valid[1], "--pr=", *valid[4:]],
+            "empty_sha": [*valid[:4], "--sha=", *valid[6:]],
+        }
+        for name, arguments in cases.items():
+            with self.subTest(name=name):
+                code, out, err = self.invoke_cli(*arguments, "--json")
+                self.assertEqual(4, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertNotIn("usage:", err.lower())
+                self.assertNotIn("Traceback", out + err)
+
+    def test_real_subprocess_parser_errors_use_json_contract(self):
+        cases = (["--repo"], ["--pr"], ["--sha"], ["--unknown", "foo"], ["unexpected"])
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts/repoctl.py"), "wait-reviews", "--json", *arguments],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(4, completed.returncode)
+                self.assertEqual(1, len(completed.stdout.strip().splitlines()))
+                self.assertEqual("INVALID_INPUT", json.loads(completed.stdout)["result"])
+                self.assertNotIn("usage:", completed.stderr.lower())
+
     def test_non_finite_intervals_are_invalid(self):
         for interval in ("nan", "+nan", "-nan", "inf", "+inf", "-inf", "Infinity"):
             with self.subTest(interval=interval):
@@ -268,6 +332,41 @@ class WaitReviewsTests(unittest.TestCase):
         )
         item = {"id": 20, "created_at": "2026-01-01T00:02:00Z", "user": {"login": "chatgpt-codex-connector[bot]"}, "body": body}
         self.assertEqual("COMPLETED", REPOCTL.codex_review_states([], [item], SHA)[1])
+
+    def test_review_types_are_structurally_distinct_and_mutually_exclusive(self):
+        code = review("code")
+        code["body"] += "\nDiscussion: Codex Security Review and ### 🛡️ Codex Security Review are not evidence."
+        self.assertEqual(("COMPLETED", "NOT_REQUESTED"), REPOCTL.codex_review_states([code], [], SHA))
+
+        security = review("security")
+        self.assertEqual(("NOT_REQUESTED", "COMPLETED"), REPOCTL.codex_review_states([], [security], SHA))
+        evidence = REPOCTL._classify_review_event(code, "review", "dst-red-Wire/ecommerce-1", 77)
+        self.assertEqual("CODE", evidence[0])
+        self.assertNotEqual("SECURITY", evidence[0])
+
+    def test_ambiguous_event_fails_closed(self):
+        ambiguous = review("code")
+        ambiguous["body"] += '\n<!-- codex-security-review:v1 {"headSha":"' + SHA + '","status":"completed"} -->'
+        self.assertEqual(("NOT_REQUESTED", "NOT_REQUESTED"), REPOCTL.codex_review_states([ambiguous], [], SHA))
+
+    def test_security_metadata_rejects_untrusted_or_wrong_identity(self):
+        payloads = (
+            "not-json",
+            '{"headSha":"' + SHA[:39] + '","status":"completed"}',
+            '{"headSha":"' + STALE + '","status":"completed"}',
+            '{"headSha":"' + SHA + '","status":"unknown"}',
+            '{"headSha":"' + SHA + '","status":"completed","repository":"other/repo"}',
+            '{"headSha":"' + SHA + '","status":"completed","pullRequestNumber":78}',
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                item = review("security")
+                item["body"] = f"<!-- codex-security-review:v1 {payload} -->\n### 🛡️ Codex Security Review"
+                states = REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77)
+                self.assertNotEqual("COMPLETED", states[1])
+        duplicate = review("security")
+        duplicate["body"] += '\n<!-- codex-security-review:v1 {"headSha":"' + SHA + '","status":"completed"} -->'
+        self.assertNotEqual("COMPLETED", REPOCTL.codex_review_states([], [duplicate], SHA)[1])
 
     def test_exact_completion_is_not_downgraded_by_later_request(self):
         exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
