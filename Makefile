@@ -1,18 +1,25 @@
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
+ECOMMERCE_TOOL_HOME ?= $(HOME)/.cache/ecommerce-1/qualification
+export ECOMMERCE_TOOL_HOME
+export PIP_CACHE_DIR ?= $(ECOMMERCE_TOOL_HOME)/downloads/pip
+export GOMODCACHE ?= $(ECOMMERCE_TOOL_HOME)/cache/go/mod
+export GOCACHE ?= $(ECOMMERCE_TOOL_HOME)/cache/go/$(shell sed -n 's/^GO_VERSION=//p' config/toolchain/versions.env)/build
+export TF_PLUGIN_CACHE_DIR ?= $(ECOMMERCE_TOOL_HOME)/cache/terraform/providers
 PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),python3)
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
+ANSIBLE_COLLECTIONS_ID := $(shell sha256sum platform/ansible/requirements.yml | cut -d' ' -f1)
+ANSIBLE_COLLECTIONS_PATH := $(ECOMMERCE_TOOL_HOME)/ansible/collections/$(ANSIBLE_COLLECTIONS_ID)
 export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime qualify ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
 	@$(PYTHON) scripts/capability_bootstrap.py seed
@@ -30,6 +37,9 @@ env-check: ## Audit capabilities without changing the workstation
 env-check-runtime: ## Audit and require optional external runtime capabilities
 	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
+
+qualify: bootstrap env-check ## Prepare missing pinned prerequisites once, then qualify the exact worktree
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help

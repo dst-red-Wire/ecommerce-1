@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,9 +57,12 @@ except ModuleNotFoundError as exc:
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
-PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
-# Every Ansible subprocess resolves collections from the project-owned path only.
-# This prevents a user or distro installation from silently changing execution.
+COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "requirements.yml"
+COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest()
+TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
+PROJECT_COLLECTIONS = TOOL_HOME / "ansible" / "collections" / COLLECTIONS_ID
+# Every Ansible subprocess resolves collections from the immutable lock identity only.
+# This prevents another checkout, user or distro installation from changing execution.
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
@@ -592,7 +596,7 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
-    ensure_developer("go,cgo")
+    ensure_developer("go,cgo,templ")
     managed_bin = Path.home() / ".local/bin"
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
@@ -608,6 +612,9 @@ def frontend(action: str, scope: str = "") -> int:
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
         raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+    templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / templ_version / "linux-amd64/templ"
+    if not templ.is_file():
+        raise RuntimeError("validated managed templ provider is unavailable")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
@@ -619,7 +626,7 @@ def frontend(action: str, scope: str = "") -> int:
                 generated_root = Path(temp_dir) / "frontend"
                 shutil.copytree(frontend_root, generated_root)
                 run(
-                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+                    [str(templ), "generate"],
                     cwd=generated_root,
                     env=env,
                 )

@@ -15,9 +15,14 @@
   become: true
   tags: [workstation, bootstrap]
 
+- name: Resolve persistent Ansible collection identity
+  ansible.builtin.set_fact:
+    developer_collections_path: "{{ lookup('ansible.builtin.env', 'ANSIBLE_COLLECTIONS_PATH').split(':')[0] }}"
+  tags: [workstation, bootstrap, ansible_collections]
+
 - name: Create project-owned Ansible collection directory
   ansible.builtin.file:
-    path: "{{ repo_root }}/.ansible/collections"
+    path: "{{ developer_collections_path }}"
     state: directory
     mode: '0755'
   tags: [workstation, bootstrap, ansible_collections]
@@ -30,7 +35,7 @@
 
 - name: Inspect project-owned Ansible collection manifests
   ansible.builtin.stat:
-    path: "{{ repo_root }}/.ansible/collections/ansible_collections/{{ item.name.split('.', 1)[0] }}/{{ item.name.split('.', 1)[1] }}/MANIFEST.json"
+    path: "{{ developer_collections_path }}/ansible_collections/{{ item.name.split('.', 1)[0] }}/{{ item.name.split('.', 1)[1] }}/MANIFEST.json"
   loop: "{{ developer_collection_requirements.collections }}"
   loop_control:
     label: "{{ item.name }}"
@@ -77,13 +82,17 @@
 - name: Reconcile drifted project-owned Ansible collections
   ansible.builtin.command:
     argv:
+      - flock
+      - --timeout
+      - '300'
+      - "{{ developer_collections_path }}.lock"
       - ansible-galaxy
       - collection
       - install
       - --requirements-file
       - "{{ repo_root }}/platform/ansible/requirements.yml"
       - --collections-path
-      - "{{ repo_root }}/.ansible/collections"
+      - "{{ developer_collections_path }}"
       - --force
   when: developer_collection_drift | length > 0
   changed_when: true

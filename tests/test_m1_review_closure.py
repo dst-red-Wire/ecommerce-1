@@ -37,7 +37,7 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('ensure_developer("go,cgo")', frontend)
+        self.assertIn('ensure_developer("go,cgo,templ")', frontend)
         self.assertIn("TemporaryDirectory", frontend)
         self.assertIn("frontend templ generated code is stale", frontend)
 
@@ -50,6 +50,8 @@ class M1ReviewClosureTests(unittest.TestCase):
         self.assertIn("TEMPL_VERSION :=", makefile)
         self.assertIn("templ@v$(TEMPL_VERSION)", makefile)
         self.assertIn('pinned_versions().get("TEMPL_VERSION")', frontend)
+        self.assertIn('[str(templ), "generate"]', frontend)
+        self.assertNotIn('"go", "run"', frontend)
         self.assertNotIn("templ@v0.", makefile + frontend)
 
     def test_frontend_tests_cover_shared_packages_once(self):

@@ -187,6 +187,18 @@
       "requirement": "required-static"
     },
     {
+      "name": "templ",
+      "requires": [],
+      "provision_requires": ["go", "ansible-playbook"],
+      "command": "templ",
+      "identity_path": ".local/share/ecommerce-1/tools/templ/{version}/linux-amd64/templ",
+      "version_args": ["version"],
+      "version_key": "TEMPL_VERSION",
+      "provision": {"type": "ansible", "tags": "templ"},
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
       "name": "yq",
       "requires": [],
       "provision_requires": [
@@ -667,6 +679,7 @@
     "node": "ansible",
     "go": "ansible",
     "sqlc": "ansible",
+    "templ": "ansible",
     "yq": "ansible",
     "oasdiff": "ansible",
     "rg": "ansible",
@@ -764,6 +777,7 @@
       "oasdiff",
       "oapi-codegen",
       "go",
+      "templ",
       "corepack",
       "pnpm",
       "oxfmt"

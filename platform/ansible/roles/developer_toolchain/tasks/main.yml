@@ -120,6 +120,40 @@
   loop: [go, gofmt]
   tags: [toolchain, go]
 
+- name: Create immutable templ identity directory
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
+    state: directory
+    mode: '0755'
+  tags: [toolchain, go, templ]
+
+- name: Probe pinned templ identity
+  ansible.builtin.command:
+    argv: ["{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64/templ", version]
+  register: templ_identity
+  failed_when: false
+  changed_when: false
+  tags: [toolchain, go, templ]
+
+- name: Compile missing or invalid pinned templ identity once
+  ansible.builtin.command:
+    argv:
+      - flock
+      - --timeout
+      - '300'
+      - "{{ local_cache }}/templ-{{ templ_version }}-linux-amd64.lock"
+      - "{{ local_share }}/toolchains/go/{{ go_version }}/go/bin/go"
+      - install
+      - "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"
+  environment:
+    GOBIN: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
+    GOROOT: "{{ local_share }}/toolchains/go/{{ go_version }}/go"
+    GOMODCACHE: "{{ local_cache }}/go/mod"
+    GOCACHE: "{{ local_cache }}/go/{{ go_version }}/linux-amd64/build"
+  when: templ_identity.rc != 0 or templ_version not in templ_identity.stdout
+  changed_when: true
+  tags: [toolchain, go, templ]
+
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:
     url: "https://github.com/sqlc-dev/sqlc/releases/download/v{{ sqlc_version }}/sqlc_{{ sqlc_version }}_linux_amd64.tar.gz"

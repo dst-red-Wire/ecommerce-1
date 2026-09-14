@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -12,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -23,7 +26,7 @@ STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 REQUIREMENTS = {"required-static", "optional-runtime"}
 SEED_LOCK = ROOT / "config/python/requirements.lock"
-SEED_VENV = ROOT / ".venv/qualification"
+LOCAL_SEED_VENV = ROOT / ".venv/qualification"
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
@@ -290,6 +293,13 @@ class Auditor:
                 candidates.append(str(candidate))
         return candidates
 
+    def identity_executable(self, item: dict) -> str | None:
+        template = item.get("identity_path")
+        if not template:
+            return None
+        candidate = Path.home() / template.format(version=self.versions[item["version_key"]])
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
     def resolve(self, command: str) -> str | None:
         candidates = self.resolve_all(command)
         return candidates[0] if candidates else None
@@ -371,7 +381,10 @@ class Auditor:
             ]
         else:
             selected = item.get("resolved_executable")
-            resolved_candidates = [selected] if selected else (self.resolve_all(command) if command else [])
+            identity = self.identity_executable(item)
+            resolved_candidates = (
+                [selected or identity] if selected or identity else (self.resolve_all(command) if command else [])
+            )
         if (command or provider) and not resolved_candidates:
             if provider:
                 detail = f"entry point absent from provider {provider}"
@@ -486,14 +499,75 @@ def seed_environment() -> int:
         expected = versions[key]
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
-    python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file():
-        subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
-        check=True,
-    )
-    ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
+    identity_input = json.dumps(
+        {
+            "python": [platform.python_implementation(), f"{sys.version_info.major}.{sys.version_info.minor}"],
+            "platform": normalized_platform()[:2],
+            "lock_sha256": hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest(),
+            "installer": ["pip", "--require-hashes"],
+        },
+        sort_keys=True,
+    ).encode()
+    identity = hashlib.sha256(identity_input).hexdigest()
+    tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
+    seed_root = tool_home / "python" / identity
+    lock_path = tool_home / "locks" / f"python-{identity}.lock"
+    metadata_path = seed_root / ".ecommerce-tool.json"
+    python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def valid() -> bool:
+        if not python.is_file() or not metadata_path.is_file():
+            return False
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata != {"identity": identity, "input": json.loads(identity_input)}:
+                return False
+            proc = subprocess.run(
+                [str(python), "-c", "import ansible,yaml; print(ansible.__version__, yaml.__version__)"],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            expected_versions = [versions["ANSIBLE_CORE_VERSION"], versions["PYYAML_VERSION"]]
+            return proc.returncode == 0 and proc.stdout.split() == expected_versions
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return False
+
+    with identity_lock(lock_path):
+        if valid():
+            print(f"REUSE qualification seed identity={identity[:16]}")
+        else:
+            print(f"PREPARE qualification seed identity={identity[:16]}")
+            if seed_root.exists():
+                shutil.rmtree(seed_root)
+            seed_root.parent.mkdir(parents=True, exist_ok=True)
+            # Virtual environments contain absolute paths and are therefore built
+            # directly at their immutable final location, never moved into place.
+            subprocess.run([sys.executable, "-m", "venv", str(seed_root)], check=True)
+            subprocess.run(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--require-hashes",
+                    "-r",
+                    str(SEED_LOCK),
+                ],
+                check=True,
+                env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+            )
+            metadata_path.write_text(
+                json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            if not valid():
+                raise RuntimeError("seed environment verification failed after installation")
+        publish_checkout_reference(seed_root)
+    ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
@@ -501,6 +575,50 @@ def seed_environment() -> int:
         f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
+
+
+@contextlib.contextmanager
+def identity_lock(path: Path, timeout: float = 300.0):
+    """Bounded cross-process lock; the caller must recheck after acquisition."""
+    handle = path.open("a+", encoding="utf-8")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError(f"timed out waiting for {path}")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def publish_checkout_reference(seed_root: Path) -> None:
+    """Atomically point this checkout at its compatible immutable seed."""
+    LOCAL_SEED_VENV.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(seed_root, target_is_directory=True)
+    if LOCAL_SEED_VENV.exists() and not LOCAL_SEED_VENV.is_symlink():
+        shutil.rmtree(LOCAL_SEED_VENV)
+    os.replace(temporary, LOCAL_SEED_VENV)
 
 
 def main(argv: list[str] | None = None) -> int:
