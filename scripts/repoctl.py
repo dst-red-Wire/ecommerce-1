@@ -9,6 +9,7 @@ toolchain reconciliation belongs to platform/ansible/developer.yml.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import copy
 import http.client
 import json
@@ -2005,6 +2006,19 @@ def _full_sha(value: object) -> str:
     return candidate if re.fullmatch(r"[0-9a-f]{40}", candidate) else ""
 
 
+def _validated_pull_head_sha(payload: object) -> str:
+    """Decode the exact head identity from GitHub pull metadata."""
+    if not isinstance(payload, Mapping):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    head = payload.get("head")
+    if not isinstance(head, Mapping):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    sha = head.get("sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    return sha.lower()
+
+
 def _first_nonempty_line(body: object) -> str:
     """Return the first meaningful line without searching later body prose."""
     if not isinstance(body, str):
@@ -2228,7 +2242,7 @@ def wait_reviews_command(
         for attempt in range(1, max_attempts + 1):
             result["attempt"] = attempt
             metadata = api.get(f"/repos/{repo}/pulls/{pr}")
-            live_sha = str(metadata.get("head", {}).get("sha", "")).lower()
+            live_sha = _validated_pull_head_sha(metadata)
             result["live_sha"] = live_sha
             if live_sha != expected_sha:
                 result["result"] = "HEAD_MOVED"
@@ -2247,7 +2261,7 @@ def wait_reviews_command(
             print(progress, file=sys.stderr if json_mode else sys.stdout)
             if code == security == "COMPLETED":
                 final_metadata = api.get(f"/repos/{repo}/pulls/{pr}")
-                final_live_sha = str(final_metadata.get("head", {}).get("sha", "")).lower()
+                final_live_sha = _validated_pull_head_sha(final_metadata)
                 result["live_sha"] = final_live_sha
                 if final_live_sha != expected_sha:
                     result["result"] = "HEAD_MOVED"
