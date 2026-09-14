@@ -58,9 +58,12 @@ def summary(sha=SHA, repo="dst-red-Wire/ecommerce-1", pr=77, code_status="Comple
 
 
 class FakeReader:
-    def __init__(self, head=SHA, reviews=None, comments=None, error=None, heads=None, commits=None):
+    def __init__(
+        self, head=SHA, reviews=None, comments=None, error=None, heads=None, commits=None, pull_payloads=None
+    ):
         self.head, self.reviews, self.comments, self.error = head, reviews or [], comments or [], error
         self.heads = iter(heads) if heads is not None else None
+        self.pull_payloads = iter(pull_payloads) if pull_payloads is not None else None
         self.commits = commits or {}
         self.calls = []
 
@@ -70,6 +73,8 @@ class FakeReader:
             raise self.error
         if "/commits/" in path:
             return {"sha": self.commits.get(path.rsplit("/", 1)[-1], "")}
+        if self.pull_payloads is not None:
+            return next(self.pull_payloads)
         return {"head": {"sha": next(self.heads) if self.heads is not None else self.head}}
 
     def pages(self, path):
@@ -326,6 +331,46 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertIn("HEAD_MOVED", out)
         self.assertEqual(1, len(reader.calls))
 
+    def test_pull_metadata_decoder_accepts_exact_full_sha(self):
+        self.assertEqual(SHA, REPOCTL._validated_pull_head_sha({"head": {"sha": SHA.upper()}}))
+
+    def test_pull_metadata_decoder_rejects_malformed_json_shapes(self):
+        malformed = (
+            None,
+            [],
+            "string",
+            123,
+            {},
+            {"head": None},
+            {"head": []},
+            {"head": "main"},
+            {"head": {}},
+            {"head": {"sha": None}},
+            {"head": {"sha": []}},
+            {"head": {"sha": 123}},
+            {"head": {"sha": ""}},
+            {"head": {"sha": "abc"}},
+            {"head": {"sha": "a" * 39}},
+            {"head": {"sha": "g" * 40}},
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "invalid shape"):
+                    REPOCTL._validated_pull_head_sha(payload)
+
+    def test_initial_malformed_pull_metadata_is_structured_api_failure(self):
+        for payload in (None, [], {"head": None}, {"head": {"sha": 123}}):
+            reader = FakeReader(pull_payloads=[payload])
+            with self.subTest(payload=payload):
+                code, out, err = self.invoke(reader, json_mode=True)
+                self.assertEqual(5, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("API_FAILURE", json.loads(out)["result"])
+                self.assertEqual([("GET", "/repos/dst-red-Wire/ecommerce-1/pulls/77")], reader.calls)
+                self.assertIn("GitHub pull metadata has invalid shape", err)
+                self.assertNotIn("Traceback", out + err)
+                self.assertNotIn(repr(payload), out + err)
+
     def test_individual_states(self):
         cases = [
             ([], [], ("NOT_REQUESTED", "NOT_REQUESTED")),
@@ -367,6 +412,19 @@ class WaitReviewsTests(unittest.TestCase):
             ],
             reader.calls,
         )
+
+    def test_final_malformed_pull_metadata_is_api_failure_not_success(self):
+        reader = FakeReader(
+            reviews=[review("code")],
+            comments=[review("security")],
+            pull_payloads=[{"head": {"sha": SHA}}, {"head": None}],
+        )
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(5, code)
+        self.assertEqual(1, len(out.strip().splitlines()))
+        self.assertEqual("API_FAILURE", json.loads(out)["result"])
+        self.assertNotIn("REVIEWS_COMPLETE", out + err)
+        self.assertNotIn("Traceback", out + err)
 
     def test_reviews_on_different_shas_never_succeed(self):
         reader = FakeReader(reviews=[review("code")], comments=[review("security", STALE)])
