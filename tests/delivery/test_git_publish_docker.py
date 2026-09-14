@@ -16,7 +16,9 @@ class DockerPublishBoundaryTest(unittest.TestCase):
     def test_service_gate_requests_docker_only_for_container_tests(self):
         self.assertIn('capabilities = ["go", "cgo"]', CONTROLLER)
         self.assertIn("needs_containers = any", CONTROLLER)
-        self.assertIn("PLATFORM NOT CAPABLE: container integration", CONTROLLER)
+        self.assertIn("PLATFORM NOT CAPABLE: Docker client absent", CONTROLLER)
+        self.assertIn("Docker daemon unavailable or inaccessible", CONTROLLER)
+        self.assertNotIn('sysctl", "-n", "net.ipv4.ip_forward', CONTROLLER)
         self.assertNotIn("ensure-docker-daemon.sh", CONTROLLER)
 
 

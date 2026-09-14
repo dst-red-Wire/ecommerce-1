@@ -290,9 +290,11 @@ graph LR
         root = Path(directory)
         for relative in ("architecture.lock.yaml", "AGENTS.md", "README.md"):
             shutil.copy2(ROOT / relative, root / relative)
-        shutil.copytree(ROOT / "config", root / "config")
-        shutil.copytree(ROOT / "docs", root / "docs")
-        shutil.copytree(ROOT / "instruction", root / "instruction")
+        for relative in ("config", "docs", "instruction"):
+            subprocess.run(
+                ["cp", "--archive", "--reflink=auto", str(ROOT / relative), str(root / relative)],
+                check=True,
+            )
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         return root
 

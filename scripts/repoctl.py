@@ -762,6 +762,28 @@ def service_check(service: str) -> int:
         capabilities.append("sqlc")
     selected_tests = list(module.rglob("*_test.go"))
     needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
+    if needs_containers:
+        docker = shutil.which("docker")
+        if not docker:
+            return fail(
+                "PLATFORM NOT CAPABLE: Docker client absent; run the runtime bootstrap on a compatible runner", 2
+            )
+        context = run([docker, "context", "show"], check=False, capture=True)
+        endpoint = os.environ.get("DOCKER_HOST", "").strip()
+        daemon = run([docker, "info", "--format", "{{json .ServerVersion}}"], check=False, capture=True)
+        if daemon.returncode:
+            detail = " ".join((daemon.stderr or daemon.stdout).strip().split())[:240]
+            return fail(
+                "PLATFORM NOT CAPABLE: Docker daemon unavailable or inaccessible "
+                f"(context={(context.stdout.strip() if context.returncode == 0 else 'unresolved')}, "
+                f"endpoint={'DOCKER_HOST' if endpoint else 'context/default'}): {detail or 'daemon probe failed'}",
+                2,
+            )
+        print(
+            "PASS Docker daemon connection "
+            f"context={(context.stdout.strip() if context.returncode == 0 else 'unresolved')} "
+            f"endpoint={'DOCKER_HOST' if endpoint else 'context/default'}"
+        )
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
@@ -790,16 +812,6 @@ def service_check(service: str) -> int:
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     run(["go", "vet", "./..."], cwd=module, env=env)
     run(["go", "build", "./..."], cwd=module, env=env)
-    if needs_containers:
-        docker = shutil.which("docker")
-        forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
-        docker_ready = bool(docker) and run([docker, "info"], check=False, capture=True).returncode == 0
-        if not docker_ready or forwarding.returncode or forwarding.stdout.strip() != "1":
-            return fail(
-                "PLATFORM NOT CAPABLE: container integration requires Docker user/daemon access "
-                "and net.ipv4.ip_forward=1",
-                2,
-            )
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
         run(
             ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
