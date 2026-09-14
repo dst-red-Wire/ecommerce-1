@@ -1986,22 +1986,54 @@ def _codex_author(item: dict) -> bool:
     return login == CODEX_REVIEW_AUTHOR
 
 
-def _reviewed_sha(item: dict) -> str:
-    commit_id = str(item.get("commit_id") or "").lower()
-    if re.fullmatch(r"[0-9a-f]{40}", commit_id):
-        return commit_id
+CODE_REVIEW_HEADING = "### 💡 Codex Review"
+SECURITY_REVIEW_HEADING = "### 🛡️ Codex Security Review"
+SECURITY_METADATA = re.compile(r"^<!-- codex-security-review:v1 (\{[^\r\n]*\}) -->$", re.MULTILINE)
+
+
+def _full_sha(value: object) -> str:
+    candidate = str(value or "").lower()
+    return candidate if re.fullmatch(r"[0-9a-f]{40}", candidate) else ""
+
+
+def _security_metadata(body: str, expected_repo: str, expected_pr: int | None) -> dict | None:
+    markers = SECURITY_METADATA.findall(body)
+    if len(markers) != 1:
+        return None
+    try:
+        metadata = json.loads(markers[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("status") != "completed" or not _full_sha(metadata.get("headSha")):
+        return None
+    if "repository" in metadata and metadata["repository"] != expected_repo:
+        return None
+    if "pullRequestNumber" in metadata and metadata["pullRequestNumber"] != expected_pr:
+        return None
+    return metadata
+
+
+def _classify_review_event(item: dict, source: str, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
+    """Classify one Codex event before evaluating its completion identity."""
+    if not _codex_author(item):
+        return "OTHER", ""
     body = str(item.get("body") or "")
-    security_marker = re.search(r"codex-security-review:v1\s+(\{[^\n]*\})", body)
-    if security_marker:
-        try:
-            metadata = json.loads(security_marker.group(1))
-        except json.JSONDecodeError:
-            metadata = {}
-        head_sha = str(metadata.get("headSha") or "").lower()
-        if metadata.get("status") == "completed" and re.fullmatch(r"[0-9a-f]{40}", head_sha):
-            return head_sha
-    match = re.search(r"Reviewed commit:\*\*\s*`([0-9a-fA-F]{40})`", body)
-    return match.group(1).lower() if match else ""
+    first_line = body.splitlines()[0].strip() if body.splitlines() else ""
+    code_heading = first_line == CODE_REVIEW_HEADING
+    security_heading = first_line == SECURITY_REVIEW_HEADING
+    metadata = _security_metadata(body, expected_repo, expected_pr)
+    has_security_marker = bool(SECURITY_METADATA.search(body))
+
+    # Mixed type evidence is deliberately ambiguous and therefore proves neither type.
+    if code_heading and (security_heading or has_security_marker):
+        return "OTHER", ""
+    if metadata is not None:
+        return "SECURITY", _full_sha(metadata["headSha"])
+    if source == "review" and security_heading:
+        return "SECURITY", _full_sha(item.get("commit_id"))
+    if source == "review" and code_heading:
+        return "CODE", _full_sha(item.get("commit_id"))
+    return "OTHER", ""
 
 
 def _request_kind(body: str) -> str | None:
@@ -2014,17 +2046,17 @@ def _request_kind(body: str) -> str | None:
     return None
 
 
-def codex_review_states(reviews: list[dict], comments: list[dict], expected_sha: str) -> tuple[str, str]:
-    events = list(reviews) + list(comments)
+def codex_review_states(
+    reviews: list[dict], comments: list[dict], expected_sha: str, expected_repo: str = "", expected_pr: int | None = None
+) -> tuple[str, str]:
+    events = [(_classify_review_event(item, "review", expected_repo, expected_pr), item) for item in reviews]
+    events += [(_classify_review_event(item, "comment", expected_repo, expected_pr), item) for item in comments]
     states = []
-    for kind, marker in (("code", "Codex Review"), ("security", "Codex Security Review")):
-        completed = [
-            item
-            for item in events
-            if _codex_author(item) and marker in str(item.get("body") or "") and _reviewed_sha(item)
-        ]
-        exact = [item for item in completed if _reviewed_sha(item) == expected_sha]
-        latest = max(completed, key=_event_order) if completed else None
+    for kind in ("code", "security"):
+        classified_kind = kind.upper()
+        completed = [(evidence, item) for evidence, item in events if evidence[0] == classified_kind and evidence[1]]
+        exact = [item for evidence, item in completed if evidence[1] == expected_sha]
+        latest = max((item for _, item in completed), key=_event_order) if completed else None
         requests = [item for item in comments if _request_kind(str(item.get("body") or "")) == kind]
         latest_request = max(requests, key=_event_order) if requests else None
         # Exact commit identity is authoritative even if a later completion or
@@ -2054,23 +2086,10 @@ def wait_reviews_command(
     reader: GitHubReader | None = None,
     sleeper=time.sleep,
 ) -> int:
-    result = {
-        "repo": repo,
-        "pr": pr,
-        "expected_sha": expected_sha.lower() if isinstance(expected_sha, str) else None,
-        "live_sha": None,
-        "attempt": 0,
-        "code_review": "NOT_REQUESTED",
-        "security_review": "NOT_REQUESTED",
-        "result": "INVALID_INPUT",
-    }
+    result = _wait_reviews_result(repo, pr, expected_sha)
 
     def invalid(message: str) -> int:
-        if json_mode:
-            print(json.dumps(result, sort_keys=True))
-            print(message, file=sys.stderr)
-            return 4
-        return fail(message, 4)
+        return _render_wait_reviews_invalid(result, message, json_mode)
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return invalid("INVALID_INPUT: --repo must be OWNER/REPO")
@@ -2116,7 +2135,7 @@ def wait_reviews_command(
                 return 2
             reviews = api.pages(f"/repos/{repo}/pulls/{pr}/reviews")
             comments = api.pages(f"/repos/{repo}/issues/{pr}/comments")
-            code, security = codex_review_states(reviews, comments, expected_sha)
+            code, security = codex_review_states(reviews, comments, expected_sha, repo, pr)
             result.update(code_review=code, security_review=security)
             progress = f"attempt={attempt} code={code} security={security} sha={expected_sha[:10]}"
             print(progress, file=sys.stderr if json_mode else sys.stdout)
@@ -2165,6 +2184,27 @@ def wait_reviews_command(
     return 3
 
 
+def _wait_reviews_result(repo: object = None, pr: object = None, expected_sha: object = None) -> dict:
+    return {
+        "repo": repo,
+        "pr": pr,
+        "expected_sha": expected_sha.lower() if isinstance(expected_sha, str) else None,
+        "live_sha": None,
+        "attempt": 0,
+        "code_review": "NOT_REQUESTED",
+        "security_review": "NOT_REQUESTED",
+        "result": "INVALID_INPUT",
+    }
+
+
+def _render_wait_reviews_invalid(result: dict, message: str, json_mode: bool) -> int:
+    if json_mode:
+        print(json.dumps(result, sort_keys=True))
+        print(message, file=sys.stderr)
+        return 4
+    return fail(message, 4)
+
+
 def wait_reviews_with_signals(*args, **kwargs) -> int:
     """Translate SIGTERM into the same clean interruption path as SIGINT."""
     previous = signal.getsignal(signal.SIGTERM)
@@ -2179,7 +2219,64 @@ def wait_reviews_with_signals(*args, **kwargs) -> int:
         signal.signal(signal.SIGTERM, previous)
 
 
-def main() -> int:
+class WaitReviewsArgumentError(Exception):
+    """A token-structure error owned by the wait-reviews result contract."""
+
+
+class WaitReviewsArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise WaitReviewsArgumentError(message)
+
+
+def _wait_reviews_parser() -> WaitReviewsArgumentParser:
+    parser = WaitReviewsArgumentParser(
+        prog="repoctl.py wait-reviews",
+        description="Observe GET-only Codex code and security reviews for one exact PR head SHA.",
+        epilog=(
+            "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
+            "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
+            "header. Public repositories support unauthenticated access for at most 10 attempts and a guarded "
+            "45-request total budget; the 40-attempt default therefore requires a token. Exit codes: 0 REVIEWS_COMPLETE, "
+            "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
+        ),
+    )
+    for option, help_text in (
+        ("--repo", "GitHub OWNER/REPO"),
+        ("--pr", "positive pull request number"),
+        ("--sha", "immutable full 40-character PR head SHA"),
+        ("--interval", "poll interval in seconds (default: 75)"),
+        ("--max-attempts", "bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)"),
+    ):
+        parser.add_argument(option, action="append", help=help_text)
+    parser.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
+    return parser
+
+
+def wait_reviews_main(raw_argv: list[str]) -> int:
+    json_mode = "--json" in raw_argv
+    try:
+        args = _wait_reviews_parser().parse_args(raw_argv)
+    except WaitReviewsArgumentError as exc:
+        return _render_wait_reviews_invalid(
+            _wait_reviews_result(), f"INVALID_INPUT: {exc}", json_mode
+        )
+    values = {}
+    for name, default in (("repo", None), ("pr", None), ("sha", None), ("interval", "75"), ("max_attempts", "40")):
+        supplied = getattr(args, name)
+        if supplied is not None and len(supplied) != 1:
+            return _render_wait_reviews_invalid(
+                _wait_reviews_result(), f"INVALID_INPUT: --{name.replace('_', '-')} may be supplied exactly once", json_mode
+            )
+        values[name] = supplied[0] if supplied else default
+    return wait_reviews_with_signals(
+        values["repo"], values["pr"], values["sha"], values["interval"], values["max_attempts"], json_mode
+    )
+
+
+def main(raw_argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if raw_argv is None else raw_argv)
+    if raw_argv and raw_argv[0] == "wait-reviews":
+        return wait_reviews_main(raw_argv[1:])
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in [
@@ -2294,7 +2391,7 @@ def main() -> int:
         help="bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)",
     )
     wr.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
-    args = p.parse_args()
+    args = p.parse_args(raw_argv)
     try:
         if args.cmd == "governance":
             return governance()
