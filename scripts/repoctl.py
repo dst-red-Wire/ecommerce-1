@@ -74,6 +74,7 @@ GITHUB_HTTP_TIMEOUT_SECONDS = 15
 # unused. This also bounds pagination without weakening authenticated polling.
 GITHUB_UNAUTHENTICATED_REQUEST_BUDGET = 45
 GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS = 10
+MAX_WAIT_REVIEWS_INTERVAL_SECONDS = 3600
 
 
 class GitHubAPIError(RuntimeError):
@@ -1996,6 +1997,13 @@ def _full_sha(value: object) -> str:
     return candidate if re.fullmatch(r"[0-9a-f]{40}", candidate) else ""
 
 
+def _first_nonempty_line(body: object) -> str:
+    """Return the first meaningful line without searching later body prose."""
+    if not isinstance(body, str):
+        return ""
+    return next((line.strip(" \t") for line in body.splitlines() if line.strip()), "")
+
+
 def _security_metadata(body: str, expected_repo: str, expected_pr: int | None) -> dict | None:
     markers = SECURITY_METADATA.findall(body)
     if len(markers) != 1:
@@ -2017,8 +2025,9 @@ def _classify_review_event(item: dict, source: str, expected_repo: str, expected
     """Classify one Codex event before evaluating its completion identity."""
     if not _codex_author(item):
         return "OTHER", ""
-    body = str(item.get("body") or "")
-    first_line = body.splitlines()[0].strip() if body.splitlines() else ""
+    raw_body = item.get("body")
+    body = raw_body if isinstance(raw_body, str) else ""
+    first_line = _first_nonempty_line(raw_body)
     code_heading = first_line == CODE_REVIEW_HEADING
     security_heading = first_line == SECURITY_REVIEW_HEADING
     metadata = _security_metadata(body, expected_repo, expected_pr)
@@ -2089,6 +2098,7 @@ def wait_reviews_command(
     result = _wait_reviews_result(repo, pr, expected_sha)
 
     def invalid(message: str) -> int:
+        result["result"] = "INVALID_INPUT"
         return _render_wait_reviews_invalid(result, message, json_mode)
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
@@ -2104,11 +2114,13 @@ def wait_reviews_command(
         pr <= 0
         or not math.isfinite(interval)
         or interval <= 0
+        or interval > MAX_WAIT_REVIEWS_INTERVAL_SECONDS
         or max_attempts <= 0
         or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or "")
     ):
         return invalid(
-            "INVALID_INPUT: PR, interval and max-attempts must be positive; SHA must be exactly 40 hex characters",
+            "INVALID_INPUT: PR and max-attempts must be positive; interval must be greater than zero and at most "
+            f"{MAX_WAIT_REVIEWS_INTERVAL_SECONDS} seconds; SHA must be exactly 40 hex characters",
         )
     expected_sha = expected_sha.lower()
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -2157,7 +2169,10 @@ def wait_reviews_command(
                     print(f"REVIEWS_COMPLETE\nsame_sha=YES\nsha={expected_sha}")
                 return 0
             if attempt < max_attempts:
-                sleeper(interval)
+                try:
+                    sleeper(interval)
+                except (OverflowError, ValueError):
+                    return invalid("INVALID_INPUT: polling interval cannot be represented safely by this platform")
     except GitHubAPIError as exc:
         result["result"] = "API_FAILURE"
         if json_mode:

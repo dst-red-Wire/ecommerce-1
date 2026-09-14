@@ -235,6 +235,40 @@ class WaitReviewsTests(unittest.TestCase):
                 self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
         self.assertEqual(3, self.invoke(FakeReader(), interval="0.25")[0])
 
+    def test_polling_interval_bound_accepts_operational_values(self):
+        for interval in ("0.25", "75", str(REPOCTL.MAX_WAIT_REVIEWS_INTERVAL_SECONDS)):
+            with self.subTest(interval=interval):
+                self.assertEqual(3, self.invoke(FakeReader(), interval=interval)[0])
+
+    def test_polling_interval_bound_rejects_before_api_or_sleep(self):
+        for interval in (0, -1, REPOCTL.MAX_WAIT_REVIEWS_INTERVAL_SECONDS + 0.01, "1e100"):
+            reader = FakeReader()
+            sleeps = []
+            with self.subTest(interval=interval):
+                code, out, err = self.invoke(reader, interval=interval, json_mode=True, sleeper=sleeps.append)
+                self.assertEqual(4, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertNotIn("Traceback", out + err)
+                self.assertEqual([], reader.calls)
+                self.assertEqual([], sleeps)
+        code, out, err = self.invoke(FakeReader(), interval="1e100")
+        self.assertEqual(4, code)
+        self.assertEqual("", out)
+        self.assertIn("INVALID_INPUT", err)
+        self.assertNotIn("usage:", err.lower())
+
+    def test_sleep_domain_errors_use_invalid_input_contract(self):
+        for error in (OverflowError(), ValueError()):
+            with self.subTest(error=type(error).__name__):
+                code, out, err = self.invoke(
+                    FakeReader(), max_attempts=2, json_mode=True,
+                    sleeper=lambda _seconds, error=error: (_ for _ in ()).throw(error),
+                )
+                self.assertEqual(4, code)
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertNotIn("Traceback", out + err)
+
     def test_head_movement_exits_two_before_collections(self):
         reader = FakeReader(head=STALE)
         code, out, _ = self.invoke(reader)
@@ -343,6 +377,45 @@ class WaitReviewsTests(unittest.TestCase):
         evidence = REPOCTL._classify_review_event(code, "review", "dst-red-Wire/ecommerce-1", 77)
         self.assertEqual("CODE", evidence[0])
         self.assertNotEqual("SECURITY", evidence[0])
+
+    def test_real_codex_review_body_shape_is_code_only(self):
+        bodies = (
+            "\n### 💡 Codex Review\n\nHere are some automated review suggestions...",
+            "\r\n### 💡 Codex Review\r\nHere are some automated review suggestions...",
+            "\n\n\n### 💡 Codex Review\nHere are some automated review suggestions...",
+            "   \n\t\n### 💡 Codex Review\nHere are some automated review suggestions...",
+        )
+        for body in bodies:
+            item = review("code")
+            item["body"] = body
+            with self.subTest(body=repr(body)):
+                self.assertEqual("CODE", REPOCTL._classify_review_event(item, "review", "dst-red-Wire/ecommerce-1", 77)[0])
+                self.assertEqual(("COMPLETED", "NOT_REQUESTED"), REPOCTL.codex_review_states([item], [], SHA))
+
+    def test_first_meaningful_line_remains_an_exact_identity(self):
+        rejected = (
+            "Some prose\n### 💡 Codex Review",
+            "> ### 💡 Codex Review",
+            "discussion of ### 💡 Codex Review",
+            "### 💡 Codex Review extra",
+            "prefix ### 💡 Codex Review",
+        )
+        for body in rejected:
+            item = review("code")
+            item["body"] = body
+            with self.subTest(body=body):
+                self.assertEqual("OTHER", REPOCTL._classify_review_event(item, "review", "", None)[0])
+        for body in (None, 123, {}, "", " \t\n\r\n"):
+            item = review("code")
+            item["body"] = body
+            with self.subTest(body=body):
+                self.assertEqual("OTHER", REPOCTL._classify_review_event(item, "review", "", None)[0])
+
+    def test_real_shaped_code_and_structured_security_complete_together(self):
+        code = review("code")
+        code["body"] = "\n### 💡 Codex Review\n\nHere are some automated review suggestions..."
+        security = review("security")
+        self.assertEqual(("COMPLETED", "COMPLETED"), REPOCTL.codex_review_states([code], [security], SHA))
 
     def test_ambiguous_event_fails_closed(self):
         ambiguous = review("code")
