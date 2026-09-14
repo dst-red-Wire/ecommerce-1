@@ -2312,6 +2312,7 @@ def _wait_reviews_parser() -> WaitReviewsArgumentParser:
     parser = WaitReviewsArgumentParser(
         prog="repoctl.py wait-reviews",
         description="Observe GET-only Codex code and security reviews for one exact PR head SHA.",
+        allow_abbrev=False,
         epilog=(
             "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
             "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
