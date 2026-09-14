@@ -1,0 +1,104 @@
+version: 1
+status: static-ready-for-real-provisioning
+milestone: M2-5-persistent-mgmt-bootstrap
+authority: architecture.lock.yaml
+scope:
+  implementation: static-only
+  runtime_activation: deferred-to-consolidated-cloud-qualification
+  paid_resources_created: 0
+
+rke2:
+  version: v1.37.0+rke2r1
+  os: rocky-linux-9
+  cni: cilium
+  token_source: runtime-secret-input
+  bootstrap_server: cp-01
+  server_endpoint_source: config/infrastructure/mgmt-inventory.yaml#control_planes.cp-01.k8s_ip
+
+state:
+  bootstrap:
+    backend: local
+    location: operator-controlled-encrypted-workstation
+    repository_storage: forbidden
+    purpose: first-provider-provisioning-only
+    human_apply_gate: required
+  persistent:
+    backend: s3-compatible
+    target: seaweedfs-s3
+    availability_dependency: post-bootstrap
+    credentials: runtime-only
+    locking: required
+    migration: human-reviewed-after-backend-is-reachable
+  dependency_direction: bootstrap-state-creates-mgmt-then-migrate-to-persistent
+  circular_dependency: forbidden
+
+platform_bootstrap:
+  activation_owner: M4-platform-baseline
+  order: [rke2, cilium, tetragon, openbao-bootstrap, external-secrets, gitea, harbor, rancher, rancher-fleet, tekton]
+  services:
+    gitea:
+      version: 1.24.6
+      namespace: gitea
+      placement: mgmt-workers
+      persistence: required
+      exposure: Z5-wireguard-only
+      admin_secret_ref: openbao-runtime-reference
+      probes: [readiness, liveness]
+      backup_restore_owner: platform-backup-policy
+    harbor:
+      version: 2.13.2
+      namespace: harbor
+      placement: mgmt-workers
+      persistence: required
+      exposure: Z5-wireguard-only
+      tls_secret_ref: openbao-eso-runtime-reference
+      credentials: runtime-only
+      project_bootstrap_owner: M4-tekton-bootstrap
+      immutable_images: required
+      integration_boundary: tekton-buildkit-push-by-digest
+    tekton:
+      version: 1.4.0
+      namespace: tekton-pipelines
+      purpose: M4-ci-capability-activation
+      pipeline_activation: deferred
+    rancher:
+      version: 2.12.2
+      namespace: cattle-system
+      exposure: Z5-wireguard-only
+    rancher-fleet:
+      version: 0.13.0
+      namespace: cattle-fleet-system
+      gitops_authority: true
+      reconciliation: deferred
+    openbao-bootstrap:
+      version: 2.4.4
+      namespace: openbao
+      initialized_state: forbidden
+      unseal_keys: runtime-only
+      root_token: runtime-only
+      initialization_boundary: human-authorized-M4-ceremony
+      secret_handoff: openbao-to-eso-after-initialization
+    external-secrets:
+      version: 1.1.1
+      namespace: external-secrets
+      dependency: openbao-initialized-and-scoped-auth-created
+    tetragon:
+      version: 1.5.0
+      namespace: kube-system
+      mode: static-foundation-only
+      enforcement_proven: false
+
+cost_inventory:
+  persistent_servers: 7
+  control_planes: 3
+  workers: 3
+  access_gateways: 1
+  networks: 1
+  subnets: 6
+  firewalls: 2
+  volumes: 0
+  load_balancers: 0
+  floating_ips: 0
+  public_ipv4: 1
+  public_ipv6: 1
+  billable_classes: [servers, public-ip-addresses]

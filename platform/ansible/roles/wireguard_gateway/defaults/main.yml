@@ -1,0 +1,4 @@
+---
+wireguard_private_key: ""
+wireguard_peers_json: ""
+wireguard_config_file: /etc/wireguard/wg0.conf

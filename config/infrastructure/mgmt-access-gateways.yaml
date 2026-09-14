@@ -19,6 +19,6 @@ access_gateways:
     kubernetes_member: false
     public_endpoint: provider-runtime-output
 implementation:
-  terraform_wiring: future-pr-after-contract-merge
-  ansible_wiring: future-pr-after-contract-merge
+  terraform_wiring: platform/terraform/modules/hcloud-mgmt
+  ansible_wiring: platform/ansible/roles/wireguard_gateway
   human_apply_gate: true

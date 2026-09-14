@@ -1,6 +1,17 @@
 ---
+- name: Configure controlled MGMT WireGuard access gateway
+  hosts: access_gateways
+  become: true
+  gather_facts: true
+  serial: 1
+  vars:
+    wireguard_private_key: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_PRIVATE_KEY') }}"
+    wireguard_peers_json: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_PEERS_JSON') }}"
+  roles:
+    - wireguard_gateway
+
 - name: Configure MGMT Rocky Linux baseline in parallel
-  hosts: all
+  hosts: rke2_servers:rke2_agents
   become: true
   gather_facts: true
   # Hosts are intentionally independent; no task uses run_once in this play.
@@ -24,6 +35,8 @@
   become: true
   gather_facts: false
   serial: 1
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Configure bootstrap RKE2 server
@@ -37,6 +50,8 @@
   become: true
   gather_facts: false
   serial: 1
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Join one additional control plane at a time
@@ -50,6 +65,8 @@
   # Worker enrolment is safe to schedule independently within rolling batches.
   strategy: free  # noqa: run-once[play]
   serial: '25%'
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Join workers without overloading the control plane

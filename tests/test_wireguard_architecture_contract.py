@@ -87,7 +87,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("provider-runtime-output", gateway["public_endpoint"])
         self.assertTrue(self.gateway_inventory["implementation"]["human_apply_gate"])
         self.assertEqual(
-            "future-pr-after-contract-merge",
+            "platform/terraform/modules/hcloud-mgmt",
             self.gateway_inventory["implementation"]["terraform_wiring"],
         )
 

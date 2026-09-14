@@ -30,3 +30,16 @@ variable "hcloud_server_types" {
     error_message = "Every canonical MGMT vm_profile must have an explicit Hetzner server type mapping."
   }
 }
+
+variable "hcloud_access_server_types" {
+  description = "Explicit provider mapping for canonical access-gateway profiles."
+  type        = map(string)
+
+  validation {
+    condition = alltrue([
+      for profile in keys(local.access_profiles) :
+      contains(keys(var.hcloud_access_server_types), profile)
+    ])
+    error_message = "Every access-gateway profile requires an explicit reviewed server type mapping."
+  }
+}

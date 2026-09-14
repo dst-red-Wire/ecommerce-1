@@ -12,3 +12,13 @@ output "private_networks" {
   description = "Canonical management-plane private network and alias realization."
   value       = module.hcloud_mgmt.private_networks
 }
+
+output "access_gateways" {
+  description = "Provider addresses for the controlled management-access boundary."
+  value       = module.hcloud_mgmt.access_gateways
+}
+
+output "declared_static_inventory" {
+  description = "Contract-derived resource counts; this is not provider plan evidence."
+  value       = module.hcloud_mgmt.declared_static_inventory
+}
