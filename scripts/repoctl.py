@@ -2066,6 +2066,13 @@ def wait_reviews_command(
         else:
             print(f"API_FAILURE\n{exc}")
         return 5
+    except KeyboardInterrupt:
+        result["result"] = "INTERRUPTED"
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print("INTERRUPTED\nAutomatic retrigger: FORBIDDEN")
+        return 130
     result["result"] = "TIMEOUT"
     if json_mode:
         print(json.dumps(result, sort_keys=True))
@@ -2075,6 +2082,20 @@ def wait_reviews_command(
             f"expected_sha={expected_sha}\nAutomatic retrigger: FORBIDDEN"
         )
     return 3
+
+
+def wait_reviews_with_signals(*args, **kwargs) -> int:
+    """Translate SIGTERM into the same clean interruption path as SIGINT."""
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        return wait_reviews_command(*args, **kwargs)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def main() -> int:
@@ -2271,7 +2292,7 @@ def main() -> int:
         if args.cmd == "evidence-compare":
             return evidence_compare_command(args.full, args.incremental)
         if args.cmd == "wait-reviews":
-            return wait_reviews_command(args.repo, args.pr, args.sha, args.interval, args.max_attempts, args.json)
+            return wait_reviews_with_signals(args.repo, args.pr, args.sha, args.interval, args.max_attempts, args.json)
         if args.cmd == "precommit":
             return precommit()
         if args.cmd == "prepush":

@@ -148,6 +148,33 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertIn("Automatic retrigger: FORBIDDEN", out)
         self.assertEqual([1], sleeps)
 
+    def test_interruption_is_clean_and_does_not_retrigger(self):
+        reader = FakeReader()
+        code, out, _ = self.invoke(
+            reader,
+            max_attempts=2,
+            sleeper=lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        self.assertEqual(130, code)
+        self.assertTrue(out.endswith("INTERRUPTED\nAutomatic retrigger: FORBIDDEN\n"))
+        self.assertTrue(all(method == "GET" for method, _ in reader.calls))
+
+    def test_sigterm_uses_interruption_path_and_restores_handler(self):
+        handlers = []
+
+        def fake_signal(signum, handler):
+            handlers.append((signum, handler))
+
+        with (
+            mock.patch.object(REPOCTL.signal, "getsignal", return_value="previous"),
+            mock.patch.object(REPOCTL.signal, "signal", side_effect=fake_signal),
+            mock.patch.object(REPOCTL, "wait_reviews_command", side_effect=KeyboardInterrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            REPOCTL.wait_reviews_with_signals("repo", 1, SHA, 1, 1, False)
+        self.assertEqual(REPOCTL.signal.SIGTERM, handlers[0][0])
+        self.assertEqual((REPOCTL.signal.SIGTERM, "previous"), handlers[-1])
+
     def test_api_error_exits_five(self):
         code, out, _ = self.invoke(FakeReader(error=REPOCTL.GitHubAPIError("safe failure")))
         self.assertEqual(5, code)
