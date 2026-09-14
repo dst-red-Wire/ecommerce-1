@@ -1990,6 +1990,8 @@ def _codex_author(item: dict) -> bool:
 CODE_REVIEW_HEADING = "### 💡 Codex Review"
 SECURITY_REVIEW_HEADING = "### 🛡️ Codex Security Review"
 SECURITY_METADATA = re.compile(r"^<!-- codex-security-review:v1 (\{[^\r\n]*\}) -->$", re.MULTILINE)
+REVIEW_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
+REVIEW_SUMMARY_HEADER = ("Review", "Status", "Commit", "Review trigger")
 
 
 def _full_sha(value: object) -> str:
@@ -2019,6 +2021,68 @@ def _security_metadata(body: str, expected_repo: str, expected_pr: int | None) -
     if "pullRequestNumber" in metadata and metadata["pullRequestNumber"] != expected_pr:
         return None
     return metadata
+
+
+def _summary_table_rows(body: str) -> list[tuple[str, str, str, str]] | None:
+    """Parse the single canonical review-summary table, not surrounding prose."""
+    lines = body.splitlines()
+    tables: list[list[tuple[str, str, str, str]]] = []
+    for index in range(len(lines) - 1):
+        header = tuple(cell.strip() for cell in lines[index].strip().strip("|").split("|"))
+        if header != REVIEW_SUMMARY_HEADER:
+            continue
+        separator = tuple(cell.strip() for cell in lines[index + 1].strip().strip("|").split("|"))
+        if len(separator) != 4 or any(not re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+            return None
+        rows: list[tuple[str, str, str, str]] = []
+        for line in lines[index + 2 :]:
+            if not line.strip().startswith("|"):
+                break
+            cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+            if len(cells) != 4:
+                return None
+            rows.append(cells)
+        tables.append(rows)
+    return tables[0] if len(tables) == 1 else None
+
+
+def _summary_cell_text(value: str) -> str:
+    """Remove only the formatting used by canonical summary cells."""
+    value = re.sub(r"<relative-time\b[^>]*>.*?</relative-time>", "", value).strip()
+    value = value.replace("**", "").strip()
+    return re.sub(r"^[^A-Za-z0-9]+", "", value).strip()
+
+
+def _classify_summary_code(item: dict, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
+    """Return CODE evidence anchored by full metadata in the same summary."""
+    if not _codex_author(item):
+        return "OTHER", ""
+    raw_body = item.get("body")
+    if not isinstance(raw_body, str) or raw_body.splitlines().count(REVIEW_SUMMARY_MARKER) != 1:
+        return "OTHER", ""
+    metadata = _security_metadata(raw_body, expected_repo, expected_pr)
+    if (
+        metadata is None
+        or "repository" not in metadata
+        or metadata["repository"] != expected_repo
+        or "pullRequestNumber" not in metadata
+        or metadata["pullRequestNumber"] != expected_pr
+    ):
+        return "OTHER", ""
+    rows = _summary_table_rows(raw_body)
+    if rows is None:
+        return "OTHER", ""
+    code_rows = [row for row in rows if _summary_cell_text(row[0]) == "Code Review"]
+    if len(code_rows) != 1 or _summary_cell_text(code_rows[0][1]) != "Completed":
+        return "OTHER", ""
+    display_sha_match = re.fullmatch(r"`([0-9a-fA-F]+)`", code_rows[0][2])
+    if not display_sha_match:
+        return "OTHER", ""
+    full_sha = _full_sha(metadata["headSha"])
+    display_sha = display_sha_match.group(1).lower()
+    if len(display_sha) > 40 or len(display_sha) < 7 or not full_sha.startswith(display_sha):
+        return "OTHER", ""
+    return "CODE", full_sha
 
 
 def _classify_review_event(item: dict, source: str, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
@@ -2060,6 +2124,7 @@ def codex_review_states(
 ) -> tuple[str, str]:
     events = [(_classify_review_event(item, "review", expected_repo, expected_pr), item) for item in reviews]
     events += [(_classify_review_event(item, "comment", expected_repo, expected_pr), item) for item in comments]
+    events += [(_classify_summary_code(item, expected_repo, expected_pr), item) for item in comments]
     states = []
     for kind in ("code", "security"):
         classified_kind = kind.upper()

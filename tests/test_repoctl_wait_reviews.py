@@ -42,6 +42,21 @@ def request(kind="code", event_id=10, timestamp="2026-01-01T00:01:00Z"):
     return {"id": event_id, "created_at": timestamp, "user": {"login": "owner"}, "body": command}
 
 
+def summary(sha=SHA, repo="dst-red-Wire/ecommerce-1", pr=77, code_status="Completed", short_sha=None):
+    short_sha = short_sha if short_sha is not None else sha[:7]
+    body = (
+        '<!-- codex-pull-request-review-summary -->\n'
+        '<!-- codex-security-review:v1 {"headSha":"' + sha + '","repository":"' + repo
+        + '","pullRequestNumber":' + str(pr) + ',"status":"completed"} -->\n'
+        "## Codex Review Summary\n\n"
+        "| Review | Status | Commit | Review trigger |\n"
+        "| --- | --- | --- | --- |\n"
+        f"| 📝 **Code Review** | ✅ **{code_status}** | `{short_sha}` | Manual request |\n"
+        f"| 🔒 **Security Review** | ✅ **Completed** | `{sha[:7]}` | Manual request |\n"
+    )
+    return {"id": 30, "created_at": "2026-01-01T00:03:00Z", "user": {"login": "chatgpt-codex-connector"}, "body": body}
+
+
 class FakeReader:
     def __init__(self, head=SHA, reviews=None, comments=None, error=None, heads=None):
         self.head, self.reviews, self.comments, self.error = head, reviews or [], comments or [], error
@@ -416,6 +431,89 @@ class WaitReviewsTests(unittest.TestCase):
         code["body"] = "\n### 💡 Codex Review\n\nHere are some automated review suggestions..."
         security = review("security")
         self.assertEqual(("COMPLETED", "COMPLETED"), REPOCTL.codex_review_states([code], [security], SHA))
+
+    def test_no_submission_canonical_summary_completes_both_reviews(self):
+        item = summary()
+        self.assertEqual(
+            ("COMPLETED", "COMPLETED"),
+            REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77),
+        )
+        reader = FakeReader(comments=[item])
+        code, out, _ = self.invoke(reader)
+        self.assertEqual(0, code)
+        self.assertIn("REVIEWS_COMPLETE", out)
+
+    def test_summary_code_completion_fails_closed_for_spoofing_and_structure(self):
+        mutations = []
+        wrong_author = summary()
+        wrong_author["user"] = {"login": "pull-request-author"}
+        mutations.append(wrong_author)
+        missing_marker = summary()
+        missing_marker["body"] = missing_marker["body"].replace(REPOCTL.REVIEW_SUMMARY_MARKER + "\n", "")
+        mutations.append(missing_marker)
+        prose = summary()
+        prose["body"] = prose["body"].replace(REPOCTL.REVIEW_SUMMARY_MARKER, "Codex Review Summary")
+        mutations.append(prose)
+        duplicate_marker = summary()
+        duplicate_marker["body"] += REPOCTL.REVIEW_SUMMARY_MARKER + "\n"
+        mutations.append(duplicate_marker)
+        missing_row = summary()
+        missing_row["body"] = "\n".join(line for line in missing_row["body"].splitlines() if "Code Review**" not in line)
+        mutations.append(missing_row)
+        duplicate_row = summary()
+        duplicate_row["body"] = duplicate_row["body"].replace(
+            "| 🔒 **Security Review**", "| 📝 **Code Review**"
+        )
+        mutations.append(duplicate_row)
+        ambiguous_table = summary()
+        ambiguous_table["body"] += "\n| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
+        mutations.append(ambiguous_table)
+        for item in mutations:
+            with self.subTest(body=item["body"]):
+                states = REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77)
+                self.assertNotEqual("COMPLETED", states[0])
+
+    def test_summary_code_completion_requires_exact_structured_anchor(self):
+        items = [
+            summary(STALE),
+            summary(repo="other/repo"),
+            summary(pr=78),
+            summary(short_sha="bbbbbbb"),
+            summary(code_status="Running"),
+            summary(code_status="Unknown"),
+        ]
+        for length in (7, 10, 12, 39):
+            items.append(summary(SHA[:length]))
+        items.append(summary("z" * 40))
+        malformed = summary()
+        malformed["body"] = malformed["body"].replace('"headSha":"' + SHA + '"', '"headSha":')
+        items.append(malformed)
+        missing_sha = summary()
+        missing_sha["body"] = missing_sha["body"].replace('"headSha":"' + SHA + '",', "")
+        items.append(missing_sha)
+        missing_repo = summary()
+        missing_repo["body"] = missing_repo["body"].replace('"repository":"dst-red-Wire/ecommerce-1",', "")
+        items.append(missing_repo)
+        missing_pr = summary()
+        missing_pr["body"] = missing_pr["body"].replace('"pullRequestNumber":77,', "")
+        items.append(missing_pr)
+        duplicate_metadata = summary()
+        duplicate_metadata["body"] += '<!-- codex-security-review:v1 {"headSha":"' + STALE + '","status":"completed"} -->\n'
+        items.append(duplicate_metadata)
+        for item in items:
+            with self.subTest(body=item["body"]):
+                self.assertNotEqual(
+                    "COMPLETED",
+                    REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77)[0],
+                )
+
+    def test_running_summary_preserves_request_state(self):
+        self.assertEqual(
+            "REQUESTED_OR_RUNNING",
+            REPOCTL.codex_review_states(
+                [], [request("code"), summary(code_status="Running")], SHA, "dst-red-Wire/ecommerce-1", 77
+            )[0],
+        )
 
     def test_ambiguous_event_fails_closed(self):
         ambiguous = review("code")
