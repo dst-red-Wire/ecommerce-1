@@ -5,7 +5,9 @@
       - rke2_version | length > 0
       - rke2_token | length > 0
       - k8s_ip | length > 0
-    fail_msg: "rke2_version, rke2_token and k8s_ip are required."
+      - rke2_cluster_cidr | length > 0
+      - rke2_service_cidr | length > 0
+    fail_msg: "rke2_version, token, node IP, cluster CIDR and service CIDR are required."
 
 - name: Create RKE2 configuration directory
   ansible.builtin.file:

@@ -87,7 +87,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("provider-runtime-output", gateway["public_endpoint"])
         self.assertTrue(self.gateway_inventory["implementation"]["human_apply_gate"])
         self.assertEqual(
-            "future-pr-after-contract-merge",
+            "platform/terraform/modules/hcloud-mgmt",
             self.gateway_inventory["implementation"]["terraform_wiring"],
         )
 
@@ -138,9 +138,12 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual(
             {
                 "provider_apply": "required",
-                "public_ingress_activation": "required",
+                "bootstrap_public_ssh_activation": "required",
+                "wireguard_public_udp_activation": "required",
                 "routing_change": "required",
                 "peer_or_key_change": "required",
+                "bootstrap_ssh_teardown_confirmation": "required",
+                "openbao_authority_transition": "required",
             },
             self.policy["human_gates"],
         )
@@ -160,6 +163,32 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("forbidden", secrets["operator_peer_private_keys"]["central_storage"])
         self.assertEqual("openbao", secrets["break_glass_private_keys"]["authority"])
         self.assertEqual("separately-controlled", secrets["break_glass_private_keys"]["access"])
+
+    def test_bootstrap_and_steady_phases_are_distinct(self):
+        phases = self.policy["phases"]
+        bootstrap = phases["bootstrap"]
+        steady = phases["steady_state"]
+        self.assertEqual("wg-01-local-host", bootstrap["bootstrap_secret_authority"]["authority"])
+        self.assertEqual("bootstrap-local", bootstrap["bootstrap_secret_authority"]["mode"])
+        self.assertEqual("wg-01-only", bootstrap["bootstrap_transport"]["public_ssh_node"])
+        self.assertEqual("forbidden", steady["persistent_transport"]["public_ssh"])
+        self.assertEqual("openbao", steady["persistent_secret_authority"]["authority"])
+        self.assertEqual("runtime-openbao-read", steady["persistent_secret_authority"]["delivery_mode"])
+
+    def test_transition_requires_rotation_and_complete_teardown(self):
+        transition = self.policy["transition"]
+        self.assertTrue(transition["required"])
+        self.assertEqual("mandatory-replacement-not-copy", transition["key_rotation"])
+        self.assertEqual("forbidden", transition["copying_bootstrap_key_to_openbao"])
+        self.assertEqual("forbidden", transition["bootstrap_authority_after_transition"])
+        self.assertEqual(
+            {
+                "bootstrap_gateway_private_key": "delete",
+                "bootstrap_peer_staging": "remove",
+                "temporary_public_ssh": "remove",
+            },
+            transition["revocation_teardown"],
+        )
 
     def test_threat_model_has_all_required_boundaries_and_controls(self):
         expected = {
@@ -195,13 +224,13 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertIn("config/contracts/mgmt-wireguard-access.yaml", index)
         self.assertIn("config/infrastructure/mgmt-access-gateways.yaml", index)
 
-    def test_exact_document_records_no_active_implementation(self):
+    def test_exact_document_records_static_implementation_boundary(self):
         text = DOC.read_text(encoding="utf-8")
-        self.assertIn("This architecture PR does not create a VM", text)
+        self.assertIn("Static qualification does not create a VM", text)
         self.assertIn("SNAT on `wg-01`", text)
         self.assertIn("Terraform/OpenTofu owns provider resources", text)
         self.assertIn("Ansible owns Rocky Linux state", text)
-        self.assertIn("OpenBao is the secret authority", text)
+        self.assertIn("OpenBao is the permanent secret authority", text)
         self.assertIn("operator peer private keys", text)
 
 

@@ -6,7 +6,9 @@ tls-san:
 write-kubeconfig-mode: "0640"
 disable:
   - rke2-ingress-nginx
-cni: none
+cni: cilium
+cluster-cidr: "{{ rke2_cluster_cidr }}"
+service-cidr: "{{ rke2_service_cidr }}"
 {% if rke2_server_url | length > 0 %}
 server: "{{ rke2_server_url }}"
 {% endif %}

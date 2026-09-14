@@ -58,6 +58,14 @@ wireguard:
       address_source: provider-runtime-output
       protocol: udp
       listen_port: 51820
+    bootstrap_transport:
+      protocol: tcp
+      port: 22
+      node: wg-01
+      enabled_default: false
+      source_cidrs: runtime-only
+      global_source: forbidden
+      teardown_after_wireguard_proof: required
     allowed_routes:
       - 10.243.0.0/16
     return_path:

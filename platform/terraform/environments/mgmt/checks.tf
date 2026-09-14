@@ -5,6 +5,22 @@ check "exact_mgmt_node_set" {
   }
 }
 
+check "governed_bootstrap_ssh" {
+  assert {
+    condition = !var.bootstrap_ssh_enabled || (
+      var.bootstrap_ssh_human_gate_confirmed && length(var.bootstrap_ssh_allowed_cidrs) > 0
+    )
+    error_message = "Temporary wg-01 bootstrap SSH requires a confirmed human gate and at least one explicit restricted source CIDR."
+  }
+}
+
+check "governed_wireguard_udp" {
+  assert {
+    condition     = !var.wireguard_udp_enabled || var.wireguard_udp_human_gate_confirmed
+    error_message = "Public WireGuard UDP activation requires an explicit human gate."
+  }
+}
+
 check "known_vm_profiles" {
   assert {
     condition = alltrue([

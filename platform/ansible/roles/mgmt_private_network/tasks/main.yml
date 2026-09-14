@@ -1,4 +1,102 @@
 ---
+- name: Install private-network firewall authority
+  ansible.builtin.dnf:
+    name: firewalld
+    state: present
+
+- name: Enable and start private-network firewall authority
+  ansible.builtin.systemd_service:
+    name: firewalld
+    enabled: true
+    state: started
+
+- name: Require canonical trust-zone inputs
+  ansible.builtin.assert:
+    that:
+      - mgmt_firewall_role in ['control-plane', 'worker']
+      - mgmt_firewall_cidrs[401] | length > 0
+      - mgmt_firewall_cidrs[402] | length > 0
+      - mgmt_firewall_cidrs[403] | length > 0
+      - mgmt_firewall_cidrs[405] | length > 0
+    fail_msg: "Private host filtering requires distinct canonical management, Kubernetes, storage, and backup segments."
+
+- name: Query the dedicated private enforcement zone
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, --get-zones]
+  register: mgmt_private_firewall_zones
+  changed_when: false
+
+- name: Create the dedicated private enforcement zone
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, --new-zone=mgmt-private]
+  when: "'mgmt-private' not in mgmt_private_firewall_zones.stdout.split()"
+  changed_when: true
+  notify: Reload private firewalld
+
+- name: Reconcile default-deny target for the private enforcement zone
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, --zone=mgmt-private, --set-target=DROP]
+  register: mgmt_private_firewall_target
+  changed_when: "'ZONE_ALREADY_SET' not in mgmt_private_firewall_target.stderr"
+  failed_when: mgmt_private_firewall_target.rc != 0
+  notify: Reload private firewalld
+
+- name: Reconcile canonical source segments into the private enforcement zone
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, --zone=mgmt-private, "--add-source={{ item.value }}"]
+  loop: "{{ mgmt_firewall_cidrs | dict2items }}"
+  register: mgmt_private_firewall_sources
+  changed_when: "'ALREADY_ENABLED' not in mgmt_private_firewall_sources.stderr"
+  failed_when: mgmt_private_firewall_sources.rc != 0
+  notify: Reload private firewalld
+
+- name: Define canonical private east-west firewall rules
+  ansible.builtin.set_fact:
+    mgmt_private_firewall_rules: >-
+      {{
+        [
+          'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[401] ~ ' service name=ssh accept',
+          'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[402] ~ ' port port=10250 protocol=tcp accept',
+          'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[402] ~ ' port port=8472 protocol=udp accept'
+        ]
+        + (
+          [
+            'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[402] ~ ' port port=6443 protocol=tcp accept',
+            'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[402] ~ ' port port=9345 protocol=tcp accept',
+            'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[402] ~ ' port port=2379-2381 protocol=tcp accept'
+          ] if mgmt_firewall_role == 'control-plane' else [
+            'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[403] ~ ' accept',
+            'rule family=ipv4 source address=' ~ mgmt_firewall_cidrs[405] ~ ' accept'
+          ]
+        )
+      }}
+
+- name: Query persistent private east-west allow rules
+  ansible.builtin.command:
+    argv:
+      - firewall-cmd
+      - --permanent
+      - --zone=mgmt-private
+      - "--query-rich-rule={{ item }}"
+  loop: "{{ mgmt_private_firewall_rules }}"
+  register: mgmt_private_firewall_queries
+  changed_when: false
+  failed_when: mgmt_private_firewall_queries.rc not in [0, 1]
+
+- name: Add missing persistent private east-west allow rules
+  ansible.builtin.command:
+    argv:
+      - firewall-cmd
+      - --permanent
+      - --zone=mgmt-private
+      - "--add-rich-rule={{ item.item }}"
+  loop: "{{ mgmt_private_firewall_queries.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.rc == 1
+  changed_when: true
+  notify: Reload private firewalld
+
 - name: Assert canonical private-network inputs
   ansible.builtin.assert:
     that:

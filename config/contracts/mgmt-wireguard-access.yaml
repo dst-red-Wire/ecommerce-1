@@ -26,6 +26,59 @@ access:
   route_source: config/infrastructure/network-plan.yaml#wireguard.mgmt.allowed_routes
   break_glass: separately-controlled
 
+phases:
+  bootstrap:
+    bootstrap_transport:
+      path: controller-to-temporary-restricted-public-ssh-wg01-proxyjump-private-nodes
+      public_ssh_node: wg-01-only
+      source_cidrs: explicit-runtime-input
+      global_cidrs: forbidden
+      human_gate: required
+      teardown_after_wireguard_proof: mandatory
+    bootstrap_secret_authority:
+      authority: wg-01-local-host
+      owner: ansible
+      mode: bootstrap-local
+      gateway_key: generated-cryptographically-secure-on-wg01
+      gateway_key_permissions: root-0600
+      controller_output: forbidden
+      terraform_state: forbidden
+      peer_public_keys: runtime-input-identity-associated
+      operator_peer_private_keys: operator-device-only
+  steady_state:
+    persistent_transport:
+      path: controller-wireguard-to-private-mgmt-addresses
+      public_endpoint: wireguard-udp-only
+      public_ssh: forbidden
+    persistent_secret_authority:
+      authority: openbao
+      delivery_owner: ansible
+      delivery_mode: runtime-openbao-read
+      kubernetes_eso_for_gateway: forbidden
+
+transition:
+  required: true
+  activation_owner: M4-platform-baseline
+  executed_in_m2_5: false
+  ordered_steps:
+    - mgmt-rke2-available
+    - openbao-governed-activation-available
+    - persistent-wireguard-records-established-in-openbao
+    - rotate-gateway-key-to-openbao-controlled-replacement
+    - switch-ansible-to-runtime-openbao-read
+    - delete-bootstrap-gateway-private-key
+    - remove-bootstrap-peer-staging
+    - confirm-bootstrap-ssh-teardown
+    - remove-temporary-public-ssh-ingress
+    - prove-wireguard-only-external-management
+  key_rotation: mandatory-replacement-not-copy
+  copying_bootstrap_key_to_openbao: forbidden
+  bootstrap_authority_after_transition: forbidden
+  revocation_teardown:
+    bootstrap_gateway_private_key: delete
+    bootstrap_peer_staging: remove
+    temporary_public_ssh: remove
+
 secrets:
   git: forbidden
   authority: openbao
@@ -64,9 +117,12 @@ ownership:
 
 human_gates:
   provider_apply: required
-  public_ingress_activation: required
+  bootstrap_public_ssh_activation: required
+  wireguard_public_udp_activation: required
   routing_change: required
   peer_or_key_change: required
+  bootstrap_ssh_teardown_confirmation: required
+  openbao_authority_transition: required
 
 threat_model:
   internet_scanning:
