@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -78,10 +80,17 @@ class GitHubAPIError(RuntimeError):
     """A sanitized, observation-only GitHub API failure."""
 
 
+def _validate_github_token(token: str | None) -> None:
+    """Reject values that cannot safely cross the stdlib HTTP header boundary."""
+    if token and (not token.isascii() or re.search(r"[\x00-\x1f\x7f]", token)):
+        raise GitHubAPIError("invalid GitHub authentication token format")
+
+
 class GitHubReader:
     """Small GET-only GitHub REST reader; deliberately has no mutation method."""
 
     def __init__(self, token: str | None = None, opener=urllib.request.urlopen):
+        _validate_github_token(token)
         self.token = token
         self.opener = opener
         self.request_budget = None if token else GITHUB_UNAUTHENTICATED_REQUEST_BUDGET
@@ -97,8 +106,8 @@ class GitHubReader:
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = urllib.request.Request(f"{GITHUB_API}{path}", headers=headers, method="GET")
         try:
+            request = urllib.request.Request(f"{GITHUB_API}{path}", headers=headers, method="GET")
             self.request_count += 1
             with self.opener(request, timeout=GITHUB_HTTP_TIMEOUT_SECONDS) as response:
                 return json.load(response)
@@ -106,7 +115,13 @@ class GitHubReader:
             if exc.code in (401, 403):
                 raise GitHubAPIError(f"GitHub API authentication/authorization failed (HTTP {exc.code})") from None
             raise GitHubAPIError(f"GitHub API request failed (HTTP {exc.code})") from None
-        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        except (
+            urllib.error.URLError,
+            OSError,
+            json.JSONDecodeError,
+            http.client.HTTPException,
+            ValueError,
+        ) as exc:
             raise GitHubAPIError(f"GitHub API request failed ({type(exc).__name__})") from None
 
     def pages(self, path: str, *, max_pages: int = 100) -> list[dict]:
@@ -2020,10 +2035,10 @@ def codex_review_states(reviews: list[dict], comments: list[dict], expected_sha:
 
 def wait_reviews_command(
     repo: str,
-    pr: int,
+    pr: int | str,
     expected_sha: str,
-    interval: float,
-    max_attempts: int,
+    interval: float | str,
+    max_attempts: int | str,
     json_mode: bool,
     *,
     reader: GitHubReader | None = None,
@@ -2049,7 +2064,20 @@ def wait_reviews_command(
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
         return invalid("INVALID_INPUT: --repo must be OWNER/REPO")
-    if pr <= 0 or interval <= 0 or max_attempts <= 0 or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or ""):
+    try:
+        pr = int(pr)
+        interval = float(interval)
+        max_attempts = int(max_attempts)
+    except (TypeError, ValueError):
+        return invalid("INVALID_INPUT: PR and max-attempts must be integers; interval must be a finite number")
+    result["pr"] = pr
+    if (
+        pr <= 0
+        or not math.isfinite(interval)
+        or interval <= 0
+        or max_attempts <= 0
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or "")
+    ):
         return invalid(
             "INVALID_INPUT: PR, interval and max-attempts must be positive; SHA must be exactly 40 hex characters",
         )
@@ -2060,9 +2088,10 @@ def wait_reviews_command(
             "INVALID_INPUT: unauthenticated polling permits at most "
             f"{GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS} attempts; provide GH_TOKEN/GITHUB_TOKEN or lower --max-attempts"
         )
-    api = reader or GitHubReader(token)
     result.update(expected_sha=expected_sha, result="TIMEOUT")
     try:
+        _validate_github_token(token)
+        api = reader or GitHubReader(token)
         for attempt in range(1, max_attempts + 1):
             result["attempt"] = attempt
             metadata = api.get(f"/repos/{repo}/pulls/{pr}")
@@ -2246,13 +2275,12 @@ def main() -> int:
         ),
     )
     wr.add_argument("--repo", required=True, help="GitHub OWNER/REPO")
-    wr.add_argument("--pr", required=True, type=int, help="positive pull request number")
+    wr.add_argument("--pr", required=True, help="positive pull request number")
     wr.add_argument("--sha", required=True, help="immutable full 40-character PR head SHA")
-    wr.add_argument("--interval", type=float, default=75, help="poll interval in seconds (default: 75)")
+    wr.add_argument("--interval", default="75", help="poll interval in seconds (default: 75)")
     wr.add_argument(
         "--max-attempts",
-        type=int,
-        default=40,
+        default="40",
         help="bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)",
     )
     wr.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")

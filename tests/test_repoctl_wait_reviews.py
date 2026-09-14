@@ -1,4 +1,5 @@
 import importlib.util
+import http.client
 import io
 import json
 from pathlib import Path
@@ -61,6 +62,17 @@ class Response:
         return False
 
 
+class TruncatedResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self, *_args):
+        raise http.client.IncompleteRead(b"partial", 100)
+
+
 class WaitReviewsTests(unittest.TestCase):
     def invoke(self, reader, **overrides):
         args = dict(
@@ -77,6 +89,18 @@ class WaitReviewsTests(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
             code = REPOCTL.wait_reviews_command(**args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def invoke_cli(self, *arguments, env=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        argv = ["repoctl.py", "wait-reviews", *arguments]
+        with (
+            mock.patch.object(REPOCTL.sys, "argv", argv),
+            mock.patch.dict(REPOCTL.os.environ, env or {}, clear=True),
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+        ):
+            code = REPOCTL.main()
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_invalid_inputs_exit_four(self):
@@ -101,6 +125,34 @@ class WaitReviewsTests(unittest.TestCase):
                 self.assertEqual("INVALID_INPUT", document["result"])
                 self.assertEqual(0, document["attempt"])
                 self.assertIn("INVALID_INPUT", err)
+
+    def test_parser_level_invalid_inputs_use_wait_reviews_contract(self):
+        base = ["--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--sha", SHA, "--max-attempts", "1"]
+        for option, value in (("--pr", "nope"), ("--interval", "nope"), ("--max-attempts", "nope")):
+            arguments = base.copy()
+            if option in arguments:
+                arguments[arguments.index(option) + 1] = value
+            else:
+                arguments.extend((option, value))
+            with self.subTest(option=option, json_mode=True):
+                code, out, err = self.invoke_cli(*arguments, "--json")
+                self.assertEqual(4, code)
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+                self.assertNotIn("usage:", err)
+            with self.subTest(option=option, json_mode=False):
+                code, out, err = self.invoke_cli(*arguments)
+                self.assertEqual(4, code)
+                self.assertEqual("", out)
+                self.assertIn("INVALID_INPUT", err)
+                self.assertNotIn("usage:", err)
+
+    def test_non_finite_intervals_are_invalid(self):
+        for interval in ("nan", "+nan", "-nan", "inf", "+inf", "-inf", "Infinity"):
+            with self.subTest(interval=interval):
+                code, out, _ = self.invoke(FakeReader(), interval=interval, json_mode=True)
+                self.assertEqual(4, code)
+                self.assertEqual("INVALID_INPUT", json.loads(out)["result"])
+        self.assertEqual(3, self.invoke(FakeReader(), interval="0.25")[0])
 
     def test_head_movement_exits_two_before_collections(self):
         reader = FakeReader(head=STALE)
@@ -141,6 +193,15 @@ class WaitReviewsTests(unittest.TestCase):
     def test_final_head_confirmation_allows_success(self):
         reader = FakeReader(heads=[SHA, SHA], reviews=[review("code")], comments=[review("security")])
         self.assertEqual(0, self.invoke(reader)[0])
+        self.assertEqual(
+            [
+                ("GET", "/repos/dst-red-Wire/ecommerce-1/pulls/77"),
+                ("GET", "/repos/dst-red-Wire/ecommerce-1/pulls/77/reviews"),
+                ("GET", "/repos/dst-red-Wire/ecommerce-1/issues/77/comments"),
+                ("GET", "/repos/dst-red-Wire/ecommerce-1/pulls/77"),
+            ],
+            reader.calls,
+        )
 
     def test_reviews_on_different_shas_never_succeed(self):
         reader = FakeReader(reviews=[review("code")], comments=[review("security", STALE)])
@@ -170,7 +231,7 @@ class WaitReviewsTests(unittest.TestCase):
 
     def test_malformed_users_are_ignored_without_hiding_valid_history(self):
         malformed = []
-        for user in (None, {}, "deleted-user", {"login": None}):
+        for user in (None, {}, "deleted-user", {"login": None}, {"login": 123}):
             item = review("code", SHA)
             item["user"] = user
             malformed.append(item)
@@ -241,6 +302,15 @@ class WaitReviewsTests(unittest.TestCase):
         self.assertEqual("API_FAILURE", json.loads(out)["result"])
         self.assertIn("GitHub API request failed", err)
 
+    def test_truncated_response_is_sanitized_api_failure(self):
+        reader = REPOCTL.GitHubReader("token", lambda _req, timeout: TruncatedResponse())
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(5, code)
+        self.assertEqual("API_FAILURE", json.loads(out)["result"])
+        self.assertIn("IncompleteRead", err)
+        self.assertNotIn("partial", out + err)
+        self.assertNotIn("Traceback", out + err)
+
     def test_json_success_is_one_document_and_progress_is_stderr(self):
         reader = FakeReader(reviews=[review("code")], comments=[review("security")])
         code, out, err = self.invoke(reader, json_mode=True)
@@ -293,6 +363,38 @@ class WaitReviewsTests(unittest.TestCase):
         with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "authentication/authorization") as raised:
             REPOCTL.GitHubReader("highly-secret-token", lambda _req, timeout: (_ for _ in ()).throw(error)).get("/x")
         self.assertNotIn("highly-secret-token", str(raised.exception))
+
+    def test_malformed_environment_tokens_never_leak(self):
+        sentinel = "super-secret-token\nINJECTED"
+        args = ["--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--sha", SHA, "--max-attempts", "1", "--json"]
+        for variable in ("GH_TOKEN", "GITHUB_TOKEN"):
+            with self.subTest(variable=variable):
+                code, out, err = self.invoke_cli(*args, env={variable: sentinel})
+                self.assertEqual(5, code)
+                self.assertEqual("API_FAILURE", json.loads(out)["result"])
+                self.assertIn("invalid GitHub authentication token format", err)
+                self.assertNotIn(sentinel, out + err)
+                self.assertNotIn("super-secret-token", out + err)
+
+    def test_gh_token_precedes_github_token(self):
+        captured = []
+        fake = FakeReader(head=STALE)
+
+        def reader_factory(token):
+            captured.append(token)
+            return fake
+
+        with mock.patch.object(REPOCTL, "GitHubReader", side_effect=reader_factory):
+            # Default arguments are accepted with authentication; the first GET
+            # exits on head movement without persisting or printing either token.
+            code, out, err = self.invoke_cli(
+                "--repo", "dst-red-Wire/ecommerce-1", "--pr", "77", "--sha", SHA,
+                env={"GH_TOKEN": "preferred", "GITHUB_TOKEN": "fallback"},
+            )
+        self.assertEqual(2, code)
+        self.assertEqual(["preferred"], captured)
+        self.assertNotIn("preferred", out + err)
+        self.assertNotIn("fallback", out + err)
 
     def test_unauthenticated_attempt_policy_rejects_unsafe_before_api_call(self):
         reader = FakeReader()
