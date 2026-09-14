@@ -17,8 +17,9 @@ def load(path: str):
     return yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
 
 
-def validate_contracts(inventory, network, access, bootstrap, architecture) -> list[str]:
+def validate_contracts(inventory, network, access, bootstrap, architecture, wireguard=None) -> list[str]:
     errors: list[str] = []
+    wireguard = wireguard or load("config/contracts/mgmt-wireguard-access.yaml")
     cps, workers = inventory.get("control_planes", {}), inventory.get("workers", {})
     expected_cp = {f"cp-0{i}" for i in range(1, 4)}
     expected_workers = {f"worker-0{i}" for i in range(1, 4)}
@@ -41,15 +42,69 @@ def validate_contracts(inventory, network, access, bootstrap, architecture) -> l
     if architecture.get("platform", {}).get("node_os") != "rocky-linux-9":
         errors.append("MGMT node OS must be Rocky Linux 9")
     services = bootstrap.get("platform_bootstrap", {}).get("services", {})
-    required = {"gitea", "harbor", "tekton", "rancher", "rancher-fleet", "openbao-bootstrap", "tetragon"}
+    required = {
+        "gitea",
+        "harbor",
+        "tekton",
+        "rancher",
+        "rancher-fleet",
+        "openbao-bootstrap",
+        "external-secrets",
+        "tetragon",
+    }
     if not required.issubset(services):
         errors.append("platform bootstrap service set incomplete")
     if not services.get("rancher-fleet", {}).get("gitops_authority"):
         errors.append("Fleet must remain canonical GitOps")
+    if services.get("external-secrets", {}).get("dependency") != "openbao-initialized-and-scoped-auth-created":
+        errors.append("External Secrets must retain its explicit OpenBao dependency")
+    authority = bootstrap.get("wireguard_authority", {})
+    if authority.get("phase_selector") != "required-runtime-input":
+        errors.append("WireGuard authority phase selector is mandatory")
+    if authority.get("bootstrap", {}).get("permanent_use") != "forbidden":
+        errors.append("bootstrap WireGuard authority must not become permanent")
+    if authority.get("steady_state", {}).get("mode") != "runtime-openbao-read":
+        errors.append("steady WireGuard authority must use runtime OpenBao reads")
+    transition = authority.get("transition", {})
+    if transition.get("key_rotation") != "mandatory-replacement-not-copy":
+        errors.append("WireGuard transition requires replacement key rotation")
+    for field in ("bootstrap_key_cleanup", "bootstrap_peer_staging_cleanup", "bootstrap_public_ssh_cleanup"):
+        if transition.get(field) != "mandatory":
+            errors.append(f"WireGuard transition requires {field}")
+    phases = wireguard.get("phases", {})
+    bootstrap_transport = phases.get("bootstrap", {}).get("bootstrap_transport", {})
+    if bootstrap_transport.get("public_ssh_node") != "wg-01-only":
+        errors.append("bootstrap public SSH must be scoped to wg-01 only")
+    if bootstrap_transport.get("global_cidrs") != "forbidden":
+        errors.append("globally permissive bootstrap SSH CIDRs are forbidden")
+    if bootstrap_transport.get("human_gate") != "required":
+        errors.append("bootstrap public SSH requires a human gate")
+    steady_transport = phases.get("steady_state", {}).get("persistent_transport", {})
+    if steady_transport.get("public_ssh") != "forbidden":
+        errors.append("steady state must not retain public SSH")
+    policy_transition = wireguard.get("transition", {})
+    if policy_transition.get("key_rotation") != "mandatory-replacement-not-copy":
+        errors.append("policy requires gateway key rotation rather than bootstrap key copy")
+    if policy_transition.get("copying_bootstrap_key_to_openbao") != "forbidden":
+        errors.append("copying bootstrap key to OpenBao is forbidden")
+    teardown = policy_transition.get("revocation_teardown", {})
+    expected_teardown = {
+        "bootstrap_gateway_private_key": "delete",
+        "bootstrap_peer_staging": "remove",
+        "temporary_public_ssh": "remove",
+    }
+    if teardown != expected_teardown:
+        errors.append("WireGuard authority transition teardown is incomplete")
     state = bootstrap.get("state", {})
-    if state.get("bootstrap", {}).get("availability_dependency") == "post-bootstrap" or state.get("persistent", {}).get("availability_dependency") != "post-bootstrap":
+    if (
+        state.get("bootstrap", {}).get("availability_dependency") == "post-bootstrap"
+        or state.get("persistent", {}).get("availability_dependency") != "post-bootstrap"
+    ):
         errors.append("state backend circular dependency")
-    if inventory.get("bootstrap", {}).get("human_apply_gate") is not True or access.get("implementation", {}).get("human_apply_gate") is not True:
+    if (
+        inventory.get("bootstrap", {}).get("human_apply_gate") is not True
+        or access.get("implementation", {}).get("human_apply_gate") is not True
+    ):
         errors.append("human apply gate is mandatory")
     deps = architecture.get("milestone_dependencies", {})
     if deps.get("M2-5-persistent-mgmt-bootstrap") != ["M1-monorepo-bootstrap"]:
@@ -73,6 +128,17 @@ def validate_repository_text() -> list[str]:
     forbidden_ownership = re.compile(r"(remote-exec|local-exec|install-rke2|rke2-server\.service)", re.I)
     if forbidden_ownership.search(tf):
         errors.append("Terraform attempts Ansible/RKE2 ownership")
+    module = (ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf").read_text(encoding="utf-8")
+    if "bootstrap_ssh_allowed_cidrs" not in module or 'dynamic "rule"' not in module:
+        errors.append("temporary wg-01 bootstrap SSH lifecycle is not modeled")
+    if "--add-masquerade" in "\n".join(
+        p.read_text(encoding="utf-8") for p in (ROOT / "platform/ansible").rglob("*.yml")
+    ):
+        errors.append("generic masquerade is forbidden; exact SNAT is required")
+    rke2 = (ROOT / "platform/ansible/roles/rke2_server/templates/config.yaml.j2").read_text(encoding="utf-8")
+    for field in ("cluster-cidr", "service-cidr"):
+        if field not in rke2:
+            errors.append(f"RKE2 server template requires {field}")
     governed = [
         ROOT / "config/infrastructure/mgmt-bootstrap.yaml",
         ROOT / "platform/terraform/environments/mgmt",
@@ -95,19 +161,26 @@ def validate_repository_text() -> list[str]:
             errors.append(f"mutable latest image in {rel}")
         if re.search(r"(?i)\b(fluxcd|woodpecker)\b", text):
             errors.append(f"superseded runtime authority in {rel}")
-        if re.search(r"(?i)(private_key|root_token|admin_password|cluster_token):\s*['\"]?(?!runtime-only|runtime-secret-input|forbidden)[A-Za-z0-9+/=]{20,}", text):
+        if re.search(
+            r"(?i)(private_key|root_token|admin_password|cluster_token):\s*['\"]?(?!runtime-only|runtime-secret-input|forbidden)[A-Za-z0-9+/=]{20,}",
+            text,
+        ):
             errors.append(f"possible embedded secret in {rel}")
     return errors
 
 
 def main() -> int:
-    errors = validate_contracts(
-        load("config/infrastructure/mgmt-inventory.yaml"),
-        load("config/infrastructure/network-plan.yaml"),
-        load("config/infrastructure/mgmt-access-gateways.yaml"),
-        load("config/infrastructure/mgmt-bootstrap.yaml"),
-        load("architecture.lock.yaml"),
-    ) + validate_repository_text()
+    errors = (
+        validate_contracts(
+            load("config/infrastructure/mgmt-inventory.yaml"),
+            load("config/infrastructure/network-plan.yaml"),
+            load("config/infrastructure/mgmt-access-gateways.yaml"),
+            load("config/infrastructure/mgmt-bootstrap.yaml"),
+            load("architecture.lock.yaml"),
+            load("config/contracts/mgmt-wireguard-access.yaml"),
+        )
+        + validate_repository_text()
+    )
     if errors:
         print("M2.5 STATIC VALIDATION: FAIL", file=sys.stderr)
         for error in errors:

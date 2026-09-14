@@ -25,6 +25,7 @@ class M25BootstrapContractTests(unittest.TestCase):
         self.access = load("config/infrastructure/mgmt-access-gateways.yaml")
         self.bootstrap = load("config/infrastructure/mgmt-bootstrap.yaml")
         self.architecture = load("architecture.lock.yaml")
+        self.wireguard = load("config/contracts/mgmt-wireguard-access.yaml")
 
     def validate(self, **changes):
         values = {
@@ -33,6 +34,7 @@ class M25BootstrapContractTests(unittest.TestCase):
             "access": copy.deepcopy(self.access),
             "bootstrap": copy.deepcopy(self.bootstrap),
             "architecture": copy.deepcopy(self.architecture),
+            "wireguard": copy.deepcopy(self.wireguard),
         }
         values.update(changes)
         return validator.validate_contracts(**values)
@@ -83,13 +85,70 @@ class M25BootstrapContractTests(unittest.TestCase):
         mutated["platform_bootstrap"]["services"]["woodpecker"] = {}
         self.assertTrue(self.validate(bootstrap=mutated))
 
+    def test_external_secrets_removal_fails_closed(self):
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated["platform_bootstrap"]["services"].pop("external-secrets")
+        self.assertIn("platform bootstrap service set incomplete", self.validate(bootstrap=mutated))
+
+    def test_external_secrets_openbao_dependency_mutation_fails(self):
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated["platform_bootstrap"]["services"]["external-secrets"].pop("dependency")
+        self.assertIn("External Secrets must retain its explicit OpenBao dependency", self.validate(bootstrap=mutated))
+
+    def test_wireguard_transition_mutations_fail_closed(self):
+        mutations = {
+            "permanent bootstrap": ("permanent_use", "allowed"),
+            "missing rotation": ("key_rotation", "copy-bootstrap-key"),
+            "missing key cleanup": ("bootstrap_key_cleanup", "optional"),
+            "missing peer cleanup": ("bootstrap_peer_staging_cleanup", "optional"),
+            "missing SSH cleanup": ("bootstrap_public_ssh_cleanup", "optional"),
+        }
+        for label, (field, value) in mutations.items():
+            mutated = copy.deepcopy(self.bootstrap)
+            section = "bootstrap" if field == "permanent_use" else "transition"
+            mutated["wireguard_authority"][section][field] = value
+            with self.subTest(label=label):
+                self.assertTrue(self.validate(bootstrap=mutated))
+
+    def test_steady_authority_raw_environment_secret_mutation_fails(self):
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated["wireguard_authority"]["steady_state"]["mode"] = "raw-environment-private-key"
+        self.assertIn("steady WireGuard authority must use runtime OpenBao reads", self.validate(bootstrap=mutated))
+
+    def test_bootstrap_transport_and_teardown_mutations_fail_closed(self):
+        mutations = []
+        public_node = copy.deepcopy(self.wireguard)
+        public_node["phases"]["bootstrap"]["bootstrap_transport"]["public_ssh_node"] = "all-rke2-nodes"
+        mutations.append(public_node)
+        global_cidr = copy.deepcopy(self.wireguard)
+        global_cidr["phases"]["bootstrap"]["bootstrap_transport"]["global_cidrs"] = "0.0.0.0/0"
+        mutations.append(global_cidr)
+        global_ipv6 = copy.deepcopy(self.wireguard)
+        global_ipv6["phases"]["bootstrap"]["bootstrap_transport"]["global_cidrs"] = "::/0"
+        mutations.append(global_ipv6)
+        no_gate = copy.deepcopy(self.wireguard)
+        no_gate["phases"]["bootstrap"]["bootstrap_transport"]["human_gate"] = "optional"
+        mutations.append(no_gate)
+        steady_ssh = copy.deepcopy(self.wireguard)
+        steady_ssh["phases"]["steady_state"]["persistent_transport"]["public_ssh"] = "allowed"
+        mutations.append(steady_ssh)
+        copied_key = copy.deepcopy(self.wireguard)
+        copied_key["transition"]["copying_bootstrap_key_to_openbao"] = "allowed"
+        mutations.append(copied_key)
+        no_cleanup = copy.deepcopy(self.wireguard)
+        no_cleanup["transition"]["revocation_teardown"].pop("bootstrap_gateway_private_key")
+        mutations.append(no_cleanup)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertTrue(self.validate(wireguard=mutation))
+
     def test_static_artifacts_reject_forbidden_textual_mutations(self):
         latest = "image: registry.invalid/component:latest"
         ssh = 'port = "22"\nsource_ips = ["0.0.0.0/0"]'
         secret = "private_key: abcdefghijklmnop"
         terraform_rke2 = 'provisioner "remote-exec" { command = "install-rke2" }'
         self.assertRegex(latest, r":latest")
-        self.assertRegex(ssh, r'0\.0\.0\.0/0')
+        self.assertRegex(ssh, r"0\.0\.0\.0/0")
         self.assertRegex(secret, r"private_key:.*abcdefghijkl")
         self.assertRegex(terraform_rke2, r"remote-exec")
 

@@ -93,6 +93,11 @@ variable "access_server_types" { type = map(string) }
 variable "wireguard_listen_port" { type = number }
 variable "management_cidr" { type = string }
 variable "kubernetes_cidr" { type = string }
+variable "bootstrap_ssh_enabled" { type = bool }
+variable "bootstrap_ssh_allowed_cidrs" { type = list(string) }
+variable "bootstrap_ssh_human_gate_confirmed" { type = bool }
+variable "wireguard_udp_enabled" { type = bool }
+variable "wireguard_udp_human_gate_confirmed" { type = bool }
 
 resource "hcloud_network" "mgmt" {
   name     = "ecommerce-mgmt"
@@ -154,12 +159,25 @@ resource "hcloud_server_network" "access_gateway" {
 
 resource "hcloud_firewall" "access_gateway" {
   name = "ecommerce-mgmt-wireguard-ingress"
-  rule {
-    direction   = "in"
-    protocol    = "udp"
-    port        = tostring(var.wireguard_listen_port)
-    source_ips  = ["0.0.0.0/0", "::/0"]
-    description = "Explicit public WireGuard transport only; no SSH is exposed"
+  dynamic "rule" {
+    for_each = var.wireguard_udp_enabled && var.wireguard_udp_human_gate_confirmed ? [1] : []
+    content {
+      direction   = "in"
+      protocol    = "udp"
+      port        = tostring(var.wireguard_listen_port)
+      source_ips  = ["0.0.0.0/0", "::/0"]
+      description = "Human-gated public WireGuard transport"
+    }
+  }
+  dynamic "rule" {
+    for_each = var.bootstrap_ssh_enabled && var.bootstrap_ssh_human_gate_confirmed ? [1] : []
+    content {
+      direction   = "in"
+      protocol    = "tcp"
+      port        = "22"
+      source_ips  = var.bootstrap_ssh_allowed_cidrs
+      description = "TEMPORARY human-gated wg-01 bootstrap SSH; remove after WireGuard proof"
+    }
   }
   apply_to { label_selector = "project=ecommerce-1,site=mgmt,trust_zone=Z5" }
 }
@@ -215,6 +233,25 @@ output "servers" {
       id   = server.id
       ipv4 = server.ipv4_address
       ipv6 = server.ipv6_address
+    }
+  }
+}
+
+output "runtime_transport" {
+  value = {
+    phase = var.bootstrap_ssh_enabled ? "bootstrap" : (var.wireguard_udp_enabled ? "steady-state" : "disabled")
+    gateway = {
+      name            = "wg-01"
+      provider_public = hcloud_server.access_gateway["wg-01"].ipv4_address
+      private_address = hcloud_server_network.access_gateway["wg-01"].ip
+      bootstrap_ssh   = var.bootstrap_ssh_enabled
+    }
+    nodes = {
+      for name, attachment in hcloud_server_network.node : name => {
+        provider_public = hcloud_server.node[name].ipv4_address
+        private_address = attachment.ip
+        gateway         = "wg-01"
+      }
     }
   }
 }

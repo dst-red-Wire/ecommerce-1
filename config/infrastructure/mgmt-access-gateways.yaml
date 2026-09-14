@@ -18,6 +18,14 @@ access_gateways:
     mgmt_ip: 10.243.1.41
     kubernetes_member: false
     public_endpoint: provider-runtime-output
+    bootstrap_ssh:
+      enabled_default: false
+      node_scope: wg-01-only
+      source_cidrs: explicit-runtime-input
+      unrestricted_cidrs: forbidden
+      human_gate: required
+      teardown: mandatory-after-wireguard-proof
+    steady_public_ssh: forbidden
 implementation:
   terraform_wiring: platform/terraform/modules/hcloud-mgmt
   ansible_wiring: platform/ansible/roles/wireguard_gateway

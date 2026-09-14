@@ -5,8 +5,11 @@
   gather_facts: true
   serial: 1
   vars:
-    wireguard_private_key: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_PRIVATE_KEY') }}"
-    wireguard_peers_json: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_PEERS_JSON') }}"
+    wireguard_secret_mode: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_SECRET_MODE') }}"
+    wireguard_bootstrap_human_gate: "{{ lookup('ansible.builtin.env', 'MGMT_BOOTSTRAP_HUMAN_GATE') | bool }}"
+    wireguard_bootstrap_peers_json: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_BOOTSTRAP_PEERS_JSON') }}"
+    wireguard_openbao_addr: "{{ lookup('ansible.builtin.env', 'MGMT_OPENBAO_ADDR') }}"
+    wireguard_openbao_token: "{{ lookup('ansible.builtin.env', 'MGMT_OPENBAO_RUNTIME_TOKEN') }}"
   roles:
     - wireguard_gateway
 

@@ -22,10 +22,18 @@ transport_path = ENV.fetch("MGMT_TRANSPORT_INVENTORY", File.join(root, ".context
 transport = File.file?(transport_path) ? JSON.parse(File.read(transport_path)) : nil
 transport_hosts = transport ? transport.fetch("hosts") : {}
 expected_hosts = (control_planes.keys + workers.keys + access_gateways.keys).sort
-transport_host_sets = [expected_hosts, (control_planes.keys + workers.keys).sort]
-if transport && !transport_host_sets.include?(transport_hosts.keys.sort)
+if transport && transport_hosts.keys.sort != expected_hosts
   warn "MGMT transport overlay host set mismatch"
   exit 2
+end
+
+
+def transport_vars(hosts, name, fallback)
+  return { "ansible_host" => fallback } if hosts.empty?
+
+  value = hosts.fetch(name)
+  raise KeyError, "transport host #{name} must be a mapping" unless value.is_a?(Hash)
+  value.slice("ansible_host", "ansible_ssh_common_args", "transport")
 end
 
 def cidr_for(ip, segment, segments)
@@ -39,21 +47,23 @@ bootstrap_server = bootstrap.fetch("rke2").fetch("bootstrap_server")
 server_url = "https://#{control_planes.fetch(bootstrap_server).fetch('k8s_ip')}:9345"
 
 control_planes.each do |name, node|
-  hostvars[name] = {
-    "ansible_host" => transport_hosts.fetch(name, node.fetch("mgmt_ip")),
+  hostvars[name] = transport_vars(transport_hosts, name, node.fetch("mgmt_ip")).merge({
     "rke2_role" => "server",
     "profile" => node.fetch("profile"),
     "mgmt_ip" => node.fetch("mgmt_ip"),
     "k8s_ip" => node.fetch("k8s_ip"),
     "mgmt_private_alias_cidrs" => [cidr_for(node.fetch("k8s_ip"), 402, mgmt_segments)],
     "rke2_version" => rke2_version,
-    "rke2_server_url" => name == bootstrap_server ? "" : server_url
-  }
+    "rke2_server_url" => name == bootstrap_server ? "" : server_url,
+    "rke2_cluster_cidr" => network_plan.dig("kubernetes", "mgmt", "pod_cidr"),
+    "rke2_service_cidr" => network_plan.dig("kubernetes", "mgmt", "service_cidr"),
+    "mgmt_firewall_role" => "control-plane",
+    "mgmt_firewall_cidrs" => mgmt_segments.transform_values { |segment| segment.fetch("cidr") }
+  })
 end
 
 workers.each do |name, node|
-  hostvars[name] = {
-    "ansible_host" => transport_hosts.fetch(name, node.fetch("mgmt_ip")),
+  hostvars[name] = transport_vars(transport_hosts, name, node.fetch("mgmt_ip")).merge({
     "rke2_role" => "agent",
     "profile" => node.fetch("profile"),
     "mgmt_ip" => node.fetch("mgmt_ip"),
@@ -66,19 +76,23 @@ workers.each do |name, node|
       cidr_for(node.fetch("backup_ip"), 405, mgmt_segments)
     ],
     "rke2_version" => rke2_version,
-    "rke2_server_url" => server_url
-  }
+    "rke2_server_url" => server_url,
+    "mgmt_firewall_role" => "worker",
+    "mgmt_firewall_cidrs" => mgmt_segments.transform_values { |segment| segment.fetch("cidr") }
+  })
 end
 
 access_gateways.each do |name, node|
-  hostvars[name] = {
-    "ansible_host" => transport_hosts.fetch(name, node.fetch("mgmt_ip")),
+  hostvars[name] = transport_vars(transport_hosts, name, node.fetch("mgmt_ip")).merge({
     "mgmt_ip" => node.fetch("mgmt_ip"),
     "wireguard_listen_port" => network_plan.dig("wireguard", "mgmt", "endpoint", "listen_port"),
     "wireguard_tunnel_cidr" => network_plan.dig("wireguard", "mgmt", "tunnel_cidr"),
     "wireguard_gateway_tunnel_ip" => network_plan.dig("wireguard", "mgmt", "gateway_tunnel_ip"),
-    "wireguard_allowed_routes" => network_plan.dig("wireguard", "mgmt", "allowed_routes")
-  }
+    "wireguard_allowed_routes" => network_plan.dig("wireguard", "mgmt", "allowed_routes"),
+    "wireguard_snat_source_cidr" => network_plan.dig("wireguard", "mgmt", "return_path", "source_cidr"),
+    "wireguard_snat_destination_cidr" => network_plan.dig("wireguard", "mgmt", "return_path", "destination_cidr"),
+    "wireguard_snat_to_source" => network_plan.dig("wireguard", "mgmt", "return_path", "translated_source_ip")
+  })
 end
 
 inventory = {

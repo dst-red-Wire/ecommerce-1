@@ -20,17 +20,23 @@ runtime inputs because provider SKUs cannot be inferred from resource intent.
 Terraform does not install packages, render RKE2 configuration, configure
 systemd, or install Kubernetes software. Ansible owns Rocky Linux 9 prerequisites,
 private address aliases, the WireGuard host, and pinned RKE2 server/agent setup.
-The RKE2 token, WireGuard private key, and peer material are mandatory runtime
-inputs and are never repository defaults. Kubernetes/Fleet owns later platform
+The RKE2 token remains a runtime secret input. WireGuard has two deliberately
+separate phases: first bootstrap generates a temporary key locally on `wg-01`
+and accepts only identity-associated peer public keys at runtime; steady state
+uses Ansible runtime reads from OpenBao. Kubernetes/Fleet owns later platform
 activation.
 
 ## Access and trust boundary
 
 The six RKE2 nodes have provider public networking disabled. The dedicated
-`wg-01` Z5 gateway is the only public transport: provider ingress admits only
-the canonical WireGuard UDP port. SSH is never admitted from the Internet;
-internal-node SSH is limited to the canonical management segment. Host routing
-and masquerade remain Ansible-owned, default forwarding is denied by contract,
+`wg-01` Z5 gateway is the only public transport. During bootstrap only, a human
+may enable TCP/22 for explicit runtime source CIDRs (never `0.0.0.0/0` or
+`::/0`); Ansible then reaches private RKE2 addresses through a controlled
+ProxyJump. The rule is disabled by default and its removal after WireGuard proof
+is mandatory. In steady state provider ingress admits only the canonical
+WireGuard UDP port and public SSH is forbidden. Internal-node SSH is limited to
+the canonical management segment. Host routing and exact scoped SNAT remain
+Ansible-owned, default forwarding is denied by contract,
 and operator/break-glass peer issuance remains a separately authorized runtime
 ceremony. No operator CIDR is invented by Terraform.
 
@@ -41,6 +47,15 @@ aliases. This provider constraint does not collapse their trust or traffic-polic
 ownership.
 
 ## Non-circular state transition
+
+The same non-circular rule applies to WireGuard authority. The bootstrap key is
+generated cryptographically on `wg-01`, stays root-owned mode `0600`, and never
+returns to Terraform, inventory, Git, or controller output. After M4 performs a
+governed OpenBao activation, it must establish persistent records, rotate to a
+new OpenBao-controlled gateway key (copying the bootstrap key is forbidden),
+switch Ansible to `runtime-openbao-read`, delete the bootstrap key and peer
+staging, and remove temporary SSH. M2.5 models and automates readiness for this
+transition; it does not initialize or read/write a real OpenBao instance.
 
 1. A human authorizes first provisioning using local state on an encrypted,
    operator-controlled workstation. State, plans, and credentials are forbidden

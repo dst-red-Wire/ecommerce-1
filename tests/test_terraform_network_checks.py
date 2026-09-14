@@ -80,6 +80,27 @@ class TerraformNetworkChecksTest(unittest.TestCase):
             aliases = [node["k8s_ip"], node["storage_ip"], node["backup_ip"]]
             self.assertEqual(3, len(set(aliases)))
 
+    def test_bootstrap_ssh_is_temporary_restricted_and_gateway_only(self):
+        module = MODULE_MAIN.read_text(encoding="utf-8")
+        variables = ENV_VARIABLES.read_text(encoding="utf-8")
+        self.assertIn("default     = false", variables)
+        self.assertIn("bootstrap_ssh_allowed_cidrs", module)
+        self.assertIn("bootstrap_ssh_human_gate_confirmed", module)
+        self.assertIn('dynamic "rule"', module)
+        self.assertIn("TEMPORARY human-gated wg-01 bootstrap SSH", module)
+        node_resource = module.split('resource "hcloud_server" "node"', 1)[1].split(
+            'resource "hcloud_server" "access_gateway"', 1
+        )[0]
+        self.assertNotIn('port        = "22"', node_resource)
+        self.assertIn('["0.0.0.0/0", "::/0"]', variables)
+
+    def test_runtime_transport_keeps_private_nodes_and_gateway_explicit(self):
+        module = MODULE_MAIN.read_text(encoding="utf-8")
+        self.assertIn('output "runtime_transport"', module)
+        self.assertIn("private_address = attachment.ip", module)
+        self.assertIn("provider_public = hcloud_server.node[name].ipv4_address", module)
+        self.assertIn('gateway         = "wg-01"', module)
+
 
 if __name__ == "__main__":
     unittest.main()

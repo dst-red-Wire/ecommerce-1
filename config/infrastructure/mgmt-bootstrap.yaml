@@ -7,6 +7,31 @@ scope:
   runtime_activation: deferred-to-consolidated-cloud-qualification
   paid_resources_created: 0
 
+wireguard_authority:
+  phase_selector: required-runtime-input
+  bootstrap:
+    mode: bootstrap-local
+    authority: wg-01-local-host
+    human_gate: required
+    gateway_key:
+      generation: local-on-wg01
+      permissions: root-0600
+    peer_public_keys: runtime-staged-non-secret
+    permanent_use: forbidden
+  steady_state:
+    mode: runtime-openbao-read
+    authority: openbao
+    authentication: runtime-injected-nonpersisted
+    raw-controller-secret_environment: forbidden
+  transition:
+    required: true
+    key_rotation: mandatory-replacement-not-copy
+    bootstrap_key_cleanup: mandatory
+    bootstrap_peer_staging_cleanup: mandatory
+    bootstrap_public_ssh_cleanup: mandatory
+    execution_owner: M4-platform-baseline
+    executed_in_m2_5: false
+
 rke2:
   version: v1.37.0+rke2r1
   os: rocky-linux-9
