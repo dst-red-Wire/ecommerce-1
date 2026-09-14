@@ -1,0 +1,112 @@
+---
+- name: Require an explicit qualification proxy client contract
+  ansible.builtin.assert:
+    that:
+      - qualification_user is defined
+      - qualification_user | length > 0
+      - qualification_proxy_url is match('^http://10\\.248\\.[0-9]+\\.[0-9]+:3128$')
+
+- name: Reconcile the APT proxy
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/90-ecommerce-qualification-proxy
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      Acquire::http::Proxy "{{ qualification_proxy_url }}";
+      Acquire::https::Proxy "{{ qualification_proxy_url }}";
+
+- name: Reconcile system Git proxy configuration
+  ansible.builtin.copy:
+    dest: /etc/gitconfig
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [http]
+        proxy = {{ qualification_proxy_url }}
+      [https]
+        proxy = {{ qualification_proxy_url }}
+
+- name: Reconcile login-session proxy environment
+  ansible.builtin.copy:
+    dest: /etc/environment
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      HTTP_PROXY={{ qualification_proxy_url }}
+      HTTPS_PROXY={{ qualification_proxy_url }}
+      NO_PROXY={{ qualification_proxy_no_proxy }}
+      http_proxy={{ qualification_proxy_url }}
+      https_proxy={{ qualification_proxy_url }}
+      no_proxy={{ qualification_proxy_no_proxy }}
+
+- name: Preserve bounded proxy variables through noninteractive sudo
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/90-ecommerce-qualification-proxy
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+    content: |
+      Defaults env_keep += "HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy"
+
+- name: Reconcile qualification shell and bootstrap proxy environment
+  ansible.builtin.copy:
+    dest: /etc/profile.d/ecommerce-qualification-proxy.sh
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      export HTTP_PROXY={{ qualification_proxy_url | quote }}
+      export HTTPS_PROXY={{ qualification_proxy_url | quote }}
+      export NO_PROXY={{ qualification_proxy_no_proxy | quote }}
+      export http_proxy="$HTTP_PROXY"
+      export https_proxy="$HTTPS_PROXY"
+      export no_proxy="$NO_PROXY"
+
+- name: Reconcile curl proxy for non-login bootstrap commands
+  ansible.builtin.copy:
+    dest: "/home/{{ qualification_user }}/.curlrc"
+    owner: "{{ qualification_user }}"
+    group: "{{ qualification_user }}"
+    mode: "0600"
+    content: "proxy = {{ qualification_proxy_url | quote }}\n"
+
+- name: Reconcile Docker daemon proxy directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Reconcile Docker daemon proxy drop-in before installation
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/10-ecommerce-qualification-proxy.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      Environment="HTTP_PROXY={{ qualification_proxy_url }}"
+      Environment="HTTPS_PROXY={{ qualification_proxy_url }}"
+      Environment="NO_PROXY={{ qualification_proxy_no_proxy }}"
+  register: qualification_docker_proxy
+
+- name: Reload systemd for the Docker proxy drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: qualification_docker_proxy.changed
+
+- name: Discover installed services
+  ansible.builtin.service_facts:
+
+- name: Restart Docker when an existing daemon proxy changes
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted
+  when:
+    - qualification_docker_proxy.changed
+    - "'docker.service' in ansible_facts.services"
