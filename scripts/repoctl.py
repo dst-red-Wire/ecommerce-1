@@ -584,6 +584,31 @@ def reconcile_ansible_collections() -> None:
     print("PASS project-owned Ansible collections reconciled")
 
 
+def conforming_terraform_provider(pins: dict[str, str] | None = None) -> str | None:
+    """Keep the contracted provider order, accepting only each provider's exact pin."""
+    from capability_bootstrap import load_contract
+
+    pins = pinned_versions() if pins is None else pins
+    capability = next(item for item in load_contract()["capabilities"] if item["name"] == "terraform")
+    if capability.get("selection_policy") != "first_conforming":
+        raise RuntimeError("Terraform provider selection requires the first_conforming contract")
+    for provider in capability["any_of"]:
+        executable = shutil.which(provider["command"])
+        if not executable:
+            continue
+        executable = os.path.abspath(executable)
+        try:
+            result = run([executable, "version", "-json"], check=False, capture=True, timeout=15)
+            if (
+                not result.returncode
+                and json.loads(result.stdout)["terraform_version"] == pins[provider["version_key"]]
+            ):
+                return executable
+        except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
 def developer_state_ready(tags: str) -> bool:
     """Fast-path: avoid Ansible startup when requested local state is already exact."""
     wanted = {tag.strip() for tag in tags.split(",") if tag.strip()}
@@ -609,20 +634,8 @@ def developer_state_ready(tags: str) -> bool:
     if "cgo" in wanted and not shutil.which("cc"):
         return False
     if "terraform" in wanted:
-        tofu = shutil.which("tofu")
-        tool = tofu or shutil.which("terraform")
         cache = Path(os.environ.get("TF_PLUGIN_CACHE_DIR", TOOL_HOME / "cache/terraform/providers"))
-        if not tool or not cache.is_dir():
-            return False
-        got = run([tool, "version", "-json"], check=False, capture=True)
-        try:
-            if (
-                got.returncode
-                or json.loads(got.stdout)["terraform_version"]
-                != pins["OPENTOFU_VERSION" if tofu else "TERRAFORM_VERSION"]
-            ):
-                return False
-        except (ValueError, KeyError):
+        if not cache.is_dir() or not conforming_terraform_provider(pins):
             return False
     if "docker_client" in wanted:
         docker = shutil.which("docker")
@@ -1148,6 +1161,8 @@ def ensure_developer(tags: str) -> None:
         ]
     )
     if not developer_state_ready(tags):
+        if "terraform" in {tag.strip() for tag in tags.split(",")} and not conforming_terraform_provider():
+            raise RuntimeError("no conforming Terraform/OpenTofu provider is available after reconciliation")
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
 
 
@@ -1248,9 +1263,9 @@ def terraform_check() -> int:
         print("SKIP terraform: no Terraform files found")
         return 0
     ensure_developer("terraform")
-    tool = shutil.which("tofu") or shutil.which("terraform")
+    tool = conforming_terraform_provider()
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
+        return fail("no conforming Terraform/OpenTofu provider is available after reconciliation")
     run([tool, "fmt", "-check", "-recursive", "-diff"])
     for directory in sorted({p.parent for p in tf_files}):
         print(f"CHECK terraform: {directory.relative_to(ROOT)}")

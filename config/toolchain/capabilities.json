@@ -588,7 +588,7 @@
       ],
       "classification": "managed",
       "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
-      "selection_policy": "first_available",
+      "selection_policy": "first_conforming",
       "any_of": [
         {
           "command": "tofu",

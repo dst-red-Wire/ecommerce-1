@@ -1,4 +1,5 @@
 import os
+import json
 import importlib.util
 import pathlib
 import subprocess
@@ -41,7 +42,16 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
             mock.patch.object(MOD, "ensure_developer") as ensure,
-            mock.patch.object(MOD, "run", side_effect=lambda argv, **kwargs: calls.append(argv)),
+            mock.patch.object(
+                MOD,
+                "run",
+                side_effect=lambda argv, **kwargs: (
+                    calls.append(argv)
+                    or subprocess.CompletedProcess(
+                        argv, 0, json.dumps({"terraform_version": MOD.pinned_versions()["OPENTOFU_VERSION"]}), ""
+                    )
+                ),
+            ),
         ):
             self.assertEqual(0, MOD.terraform_check())
 

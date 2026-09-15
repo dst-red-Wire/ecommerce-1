@@ -1443,7 +1443,8 @@ class CapabilityClosureTest(unittest.TestCase):
         item.pop("provision_requires")
         item.pop("provision")
         auditor = CapabilityAuditTest().auditor([item], outcomes, present=present)
-        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+        with mock.patch.object(MOD, "MANAGED_BIN_DIRS", ()):
+            result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
         return item, auditor, result
 
     def test_terraform_provider_selection_and_resolved_executable(self):
@@ -1480,8 +1481,8 @@ class CapabilityClosureTest(unittest.TestCase):
                     "/bin/tofu": (0, "OpenTofu 0.1.0"),
                     "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
                 },
-                "FAIL",
-                None,
+                "PASS",
+                "/bin/terraform",
             ),
             ("stale terraform", {"terraform"}, {"/bin/terraform": (0, "Terraform v0.1.0")}, "FAIL", None),
         )
@@ -1513,8 +1514,8 @@ class CapabilityClosureTest(unittest.TestCase):
                 (
                     "managed tofu stale",
                     {"managed/tofu": "0.1.0", "path/terraform": versions["TERRAFORM_VERSION"]},
-                    "FAIL",
-                    None,
+                    "PASS",
+                    "path/terraform",
                 ),
                 (
                     "PATH tofu",
@@ -1529,6 +1530,12 @@ class CapabilityClosureTest(unittest.TestCase):
                     "managed/terraform",
                 ),
                 ("PATH terraform", {"path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/terraform"),
+                (
+                    "managed terraform stale",
+                    {"managed/terraform": "0.1.0", "path/terraform": versions["TERRAFORM_VERSION"]},
+                    "FAIL",
+                    None,
+                ),
             )
             for label, tools, expected_state, selected in cases:
                 with self.subTest(label=label):
@@ -1544,10 +1551,6 @@ class CapabilityClosureTest(unittest.TestCase):
                         outcomes[str(executable)] = (0, product + version)
                     caller_path = str(path_bin)
                     which = lambda command: shutil.which(command, path=caller_path)
-                    effective_path = os.pathsep.join((str(managed_bin), caller_path))
-                    repoctl_selected = shutil.which("tofu", path=effective_path) or shutil.which(
-                        "terraform", path=effective_path
-                    )
                     with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
                         auditor = MOD.Auditor(
                             contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which
@@ -1556,10 +1559,7 @@ class CapabilityClosureTest(unittest.TestCase):
                     self.assertEqual(expected_state, result.state)
                     expected_executable = str(Path(tmp) / selected) if selected else None
                     self.assertEqual(expected_executable, auditor.resolved_executables.get("terraform"))
-                    if result.state == "PASS":
-                        self.assertEqual(repoctl_selected, auditor.resolved_executables["terraform"])
-
-                    if label == "managed tofu stale":
+                    if label == "managed terraform stale":
                         mutation_auditor = MOD.Auditor(
                             contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which
                         )
@@ -1576,7 +1576,8 @@ class CapabilityClosureTest(unittest.TestCase):
             "requires": [],
             "any_of": [{"command": "tofu", "version_key": "OPENTOFU_VERSION"}],
         }
-        MOD.validate_contract(contract([{**base, "selection_policy": "first_available"}]))
+        for policy in ("first_available", "first_conforming"):
+            MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
         for policy in ("", None, False, "invalid"):
             with (
                 self.subTest(policy=policy),
@@ -1584,7 +1585,7 @@ class CapabilityClosureTest(unittest.TestCase):
             ):
                 MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
 
-    def test_terraform_legacy_fallback_mutation_is_caught(self):
+    def test_terraform_first_found_mutation_is_caught(self):
         versions = MOD.load_versions()
         outcomes = {
             "/bin/tofu": (0, "OpenTofu 0.1.0"),
@@ -1592,11 +1593,11 @@ class CapabilityClosureTest(unittest.TestCase):
         }
         item, _, restored = self.terraform_audit({"tofu", "terraform"}, outcomes)
         mutated = dict(item)
-        mutated.pop("selection_policy")
+        mutated["selection_policy"] = "first_available"
         mutation_auditor = CapabilityAuditTest().auditor([mutated], outcomes, present={"tofu", "terraform"})
         mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-        self.assertEqual("PASS", mutation.state, "legacy fallback mutation must reproduce the false PASS")
-        self.assertEqual("FAIL", restored.state, "preferred stale tofu must fail closed")
+        self.assertEqual("FAIL", mutation.state, "first-found selection incorrectly blocks a conforming fallback")
+        self.assertEqual("PASS", restored.state, "the conforming Terraform fallback must be available")
 
 
 if __name__ == "__main__":
