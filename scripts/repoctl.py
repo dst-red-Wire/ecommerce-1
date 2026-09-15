@@ -1196,8 +1196,35 @@ def _component_command(component: str) -> tuple[list[str] | None, str | None]:
     raise RuntimeError(f"unsupported affected component: {component}")
 
 
+def preflight(base: str, head: str) -> int:
+    """Fail cheaply on missing runners and changed-source syntax before test gates."""
+    components = affected(base, head)
+    required = {"ruby", "gitleaks"}
+    if any(component.startswith(("service:", "frontend:")) for component in components):
+        required.update({"go", "gofmt"})
+    if "platform:terraform" in components:
+        required.add("terraform")
+    if "platform:ansible" in components:
+        required.update({"ansible-playbook", "ansible-lint"})
+    for executable in sorted(required):
+        require(executable)
+
+    paths = changed_paths(base, head)
+    python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
+    ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
+    if python_files:
+        require("ruff")
+        run(["ruff", "check", *python_files])
+        run([sys.executable, "-m", "py_compile", *python_files])
+    for path in ruby_files:
+        run(["ruby", "-c", path])
+    print(f"PASS preflight capabilities/syntax ({len(paths)} changed paths)")
+    return 0
+
+
 def _global_gate_commands(base: str, head: str) -> list[tuple[str, list[str]]]:
     return [
+        ("preflight", _controller_command("preflight", "--base", base, "--head", head)),
         ("governance", _controller_command("governance")),
         ("runtime-efficiency", _controller_command("runtime-efficiency")),
         ("contracts", _controller_command("contracts", "--base", base, "--head", head)),
@@ -1918,6 +1945,9 @@ def main() -> int:
         "site",
     ]:
         sub.add_parser(name)
+    pf = sub.add_parser("preflight")
+    pf.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pf.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -1996,6 +2026,8 @@ def main() -> int:
     try:
         if args.cmd == "governance":
             return governance()
+        if args.cmd == "preflight":
+            return preflight(args.base, args.head)
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
