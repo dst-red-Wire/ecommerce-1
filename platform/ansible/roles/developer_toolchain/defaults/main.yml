@@ -8,6 +8,7 @@ node_sha256: "{{ lookup('ansible.builtin.ini', 'NODE_SHA256_LINUX_X64', type='pr
 pnpm_version: "{{ lookup('ansible.builtin.ini', 'PNPM_VERSION', type='properties', file=versions_file) }}"
 go_version: "{{ lookup('ansible.builtin.ini', 'GO_VERSION', type='properties', file=versions_file) }}"
 go_sha256: "{{ lookup('ansible.builtin.ini', 'GO_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
+templ_version: "{{ lookup('ansible.builtin.ini', 'TEMPL_VERSION', type='properties', file=versions_file) }}"
 sqlc_version: "{{ lookup('ansible.builtin.ini', 'SQLC_VERSION', type='properties', file=versions_file) }}"
 sqlc_sha256: "{{ lookup('ansible.builtin.ini', 'SQLC_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
 ripgrep_version: "{{ lookup('ansible.builtin.ini', 'RIPGREP_VERSION', type='properties', file=versions_file) }}"
