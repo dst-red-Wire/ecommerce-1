@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -244,5 +245,38 @@ func TestQualificationRejectsRemoteRyukBeforeCreation(t *testing.T) {
 		if address, err := localQualificationAddress(endpoint); err != nil || !address.IsLoopback() {
 			t.Fatalf("local endpoint rejected: %v", err)
 		}
+	}
+}
+
+// Run a fresh test process so Testcontainers reads the actual temporary properties
+// file, rather than reusing its process-global configuration cache.
+func TestQualificationRefusesRemoteConfigurationInSubprocess(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ name, endpoint, properties string }{
+		{"environment", "https://127.0.0.1:1", ""},
+		{"tc-host", "unix:///var/run/docker.sock", "tc.host=https://127.0.0.1:1\n"},
+		{"docker-host", "unix:///var/run/docker.sock", "docker.host=tcp://127.0.0.1:1\n"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".testcontainers.properties"), []byte(test.properties), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestPostgresPersistenceAndIdempotencySurviveRestart$", "-test.timeout=8s")
+			command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "DOCKER_HOST="+test.endpoint)
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("remote refusal did not finish promptly: %v", ctx.Err())
+			}
+			if err == nil || !strings.Contains(string(output), "remote Ryuk interface binding cannot be enforced") {
+				t.Fatalf("expected refusal before container creation; error=%v output=%s", err, output)
+			}
+		})
 	}
 }

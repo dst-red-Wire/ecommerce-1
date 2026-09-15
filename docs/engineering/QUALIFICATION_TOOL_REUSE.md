@@ -216,3 +216,39 @@ The existing provider binding also applies to Docker access/readiness probes, wh
 reuse the validated client executable without applying its pin to the server.
 `make env-check` remains a read-only audit; only `make qualify` orders bootstrap,
 then the audit, then qualification, including under parallel Make execution.
+
+
+## Reproducing installation, cache and integrity checks
+
+These regression tests are source-controlled and run through the existing cumulative
+`make qualify BASE=<immutable-base-sha>` and `make ci BASE=<immutable-base-sha>` gates.
+They do not read session evidence archives or depend on a particular developer checkout.
+The bootstrap supplies the pinned seed, tools and checksum-locked Galaxy archive closure;
+a fresh machine needs access to those upstream artifacts for that initial acquisition.
+No tool version is defined by these examples: the existing versions file, dependency
+locks and image digests remain authoritative.
+
+| Coverage | Versioned tests | Execution boundary |
+| --- | --- | --- |
+| Cold seed, warm reuse, corrupt seed repair, concurrent writers and active readers | `tests/test_seed_repair_real.py` | Real isolated Python environments; lock-pinned acquisition |
+| Cold Docker client destination, damaged executable, warm inode reuse, failed candidate and concurrent repair | `tests/test_pr86_repairs_real.py::DockerClientRepairReal` | Real Ansible; temporary destinations; pinned Docker archive; no daemon changes |
+| Offline Galaxy installation, repair, old readers and warm closure verification | `tests/test_pr86_repairs_real.py::CollectionsRepairReal` | Real pinned Ansible/Galaxy using the archive closure prepared by bootstrap |
+| Cold archive transfer, warm/offline reuse, corrupt cache replacement, truncated or checksum-mismatched transfer | `tests/test_qualification_reproducibility.py::ArchiveAcquisitionTests` | Real loopback HTTP and filesystem; synthetic checksum-locked fixture; no upstream network |
+| OS/architecture support matrix and WSL2/native/CI normalization | `tests/test_qualification_reproducibility.py::PlatformContractTests` | Simulated platforms, canonical capability contract; no host provisioning |
+| Installed payload/inventory tampering, extra files, symlink boundaries and incomplete archives | `tests/test_pr86_five_active.py::CollectionIntegrityGenerationTests` | Temporary fixtures and real archive/content validation |
+| Plaintext Docker refusal and secure-remote Ryuk restriction | `tests/test_pr86_security.py` | Preflight boundary; asserts no daemon calls |
+| Direct Go invocation and actual `tc.host`/`docker.host` overrides | `TestQualificationRefusesRemoteConfigurationInSubprocess` in the Product integration suite | Fresh test subprocesses, temporary HOME/properties, expected refusal before container creation |
+| Product persistence, immutable images and owned cleanup | Product integration suite | Real local Docker, PostgreSQL and Ryuk; no remote daemon claim |
+
+For a focused run after canonical bootstrap, use the qualification Python interpreter:
+
+```console
+.venv/qualification/bin/python -m unittest discover -s tests -p test_qualification_reproducibility.py
+.venv/qualification/bin/python -m unittest discover -s tests -p 'test_*real.py'
+```
+
+The Product gate (`make service-check SERVICE=product`) runs both the Go subprocess
+regressions and real local persistence tests. Platform simulations prove dispatch and
+rejection behavior; they do not certify native execution on macOS, Windows or ARM64.
+Published evidence remains a generated result outside Git; test logic and fixtures are
+reproducible from the committed source.
