@@ -15,8 +15,8 @@ SPEC.loader.exec_module(MOD)
 
 
 class RoutingTests(unittest.TestCase):
-    def _managed_yq(self, home: pathlib.Path, log: pathlib.Path) -> pathlib.Path:
-        binary = home / ".local" / "bin" / "yq"
+    def _managed_yq(self, root: pathlib.Path, log: pathlib.Path) -> pathlib.Path:
+        binary = root / ".tools" / "bin" / "yq"
         binary.parent.mkdir(parents=True)
         binary.write_text(
             f"#!{sys.executable}\n"
@@ -30,11 +30,11 @@ class RoutingTests(unittest.TestCase):
 
     def test_context_yaml_uses_managed_yq_even_when_path_omits_local_bin(self):
         with tempfile.TemporaryDirectory() as tmp:
-            home = pathlib.Path(tmp) / "home"
+            root = pathlib.Path(tmp) / "checkout"
             log = pathlib.Path(tmp) / "called"
-            binary = self._managed_yq(home, log)
+            binary = self._managed_yq(root, log)
             with (
-                mock.patch.object(pathlib.Path, "home", return_value=home),
+                mock.patch.object(MOD, "ROOT", root),
                 mock.patch.dict(os.environ, {"PATH": "/usr/bin"}),
             ):
                 result = MOD.yq_json(".", ROOT / "config/context/router.yaml")
@@ -44,10 +44,10 @@ class RoutingTests(unittest.TestCase):
     def test_missing_managed_yq_is_reported_before_subprocess(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.object(pathlib.Path, "home", return_value=pathlib.Path(tmp)),
+            mock.patch.object(MOD, "ROOT", pathlib.Path(tmp)),
             mock.patch.object(subprocess, "run") as run,
         ):
-            with self.assertRaisesRegex(RuntimeError, "managed yq missing: run `make context-tools`"):
+            with self.assertRaisesRegex(RuntimeError, "repository yq missing: run `make tools-yq`"):
                 MOD.yq_json(".", ROOT / "config/context/router.yaml")
             run.assert_not_called()
 
@@ -59,10 +59,10 @@ class RoutingTests(unittest.TestCase):
             (system / "yq").write_text("#!/bin/true\n", encoding="utf-8")
             (system / "yq").chmod(0o755)
             with (
-                mock.patch.object(pathlib.Path, "home", return_value=root / "home"),
+                mock.patch.object(MOD, "ROOT", root / "checkout"),
                 mock.patch.dict(os.environ, {"PATH": str(system)}),
             ):
-                with self.assertRaisesRegex(RuntimeError, "managed yq missing"):
+                with self.assertRaisesRegex(RuntimeError, "repository yq missing"):
                     MOD.yq_json(".", ROOT / "config/context/router.yaml")
 
     def test_architecture_task_routes_l2_even_without_diff(self):

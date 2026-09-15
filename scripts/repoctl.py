@@ -55,7 +55,8 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+REPOSITORY_BIN = ROOT / ".tools" / "bin"
+os.environ["PATH"] = f"{REPOSITORY_BIN}:{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
