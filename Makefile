@@ -158,7 +158,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
-.PHONY: context diff-context failure-context nx-graph bazel-verify
+.PHONY: context diff-context failure-context nx-graph bazel-verify pr-monitor
 
 context: ## Build bounded task-aware context pack; use TASK="..."
 	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
@@ -168,6 +168,9 @@ diff-context: ## Build compact diff-only context pack
 
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
+
+pr-monitor: ## Poll one GitHub PR cheaply; PR/OWNER/REPO required, CODEX_COMMAND optional
+	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(CODEX_COMMAND),--codex-command $(CODEX_COMMAND),)
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph
