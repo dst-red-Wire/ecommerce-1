@@ -126,36 +126,12 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn('run(["ansible-lint", "--offline", *files])', source)
 
     def test_warm_prepare_never_acquires_or_reinstalls(self):
-        data = COLLECTION_MOD.load_lock()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(COLLECTION_MOD, "TOOL_HOME", pathlib.Path(tmp)):
-            destination = COLLECTION_MOD.paths()[1]
-            for item in data["collections"]:
-                namespace, collection = item["name"].split(".")
-                manifest = destination / "ansible_collections" / namespace / collection / "MANIFEST.json"
-                manifest.parent.mkdir(parents=True, exist_ok=True)
-                manifest.write_text(
-                    json.dumps({"collection_info": {"version": item["version"], "dependencies": item["dependencies"]}}),
-                    encoding="utf-8",
-                )
-            (destination / ".ecommerce-collections.json").write_text(
-                json.dumps(
-                    {
-                        "identity": COLLECTION_MOD.identity(),
-                        "installer": {
-                            "ansible_core": data["installer"]["ansible_core"],
-                            "executable": "/locked/bin/ansible-galaxy",
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-            with (
-                mock.patch.object(COLLECTION_MOD, "acquire") as acquire,
-                mock.patch.object(COLLECTION_MOD, "install") as install,
-            ):
-                COLLECTION_MOD.prepare()
-            acquire.assert_not_called()
-            install.assert_not_called()
+        from test_pr86_five_active import CollectionIntegrityGenerationTests
+
+        case = CollectionIntegrityGenerationTests("test_warm_reuse_does_not_acquire_or_install")
+        result = unittest.TestResult()
+        case.run(result)
+        self.assertTrue(result.wasSuccessful(), result.errors or result.failures)
 
     def test_offline_missing_archive_fails_with_exact_identity(self):
         item = COLLECTION_MOD.load_lock()["collections"][0]

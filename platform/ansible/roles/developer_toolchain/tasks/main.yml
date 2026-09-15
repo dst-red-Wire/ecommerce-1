@@ -706,18 +706,58 @@
     mode: "0755"
   tags: [docker_client]
 
-- name: Extract only the pinned Docker client
+- name: Probe the installed pinned Docker client
   ansible.builtin.command:
-    argv:
-      - tar
-      - -xzf
-      - "{{ local_cache }}/docker-{{ docker_client_version }}.tgz"
-      - --strip-components=1
-      - -C
-      - "{{ local_share }}/tools/docker-{{ docker_client_version }}"
-      - docker/docker
-    creates: "{{ local_share }}/tools/docker-{{ docker_client_version }}/docker"
+    argv: ["{{ local_share }}/tools/docker-{{ docker_client_version }}/docker", --version]
+  register: docker_client_probe
+  failed_when: false
+  changed_when: false
   tags: [docker_client]
+
+- name: Prepare and publish a validated Docker client candidate
+  when: docker_client_probe.rc != 0 or not (docker_client_probe.stdout is match('^Docker version ' + (docker_client_version | regex_escape) + '(,|$)'))
+  tags: [docker_client]
+  block:
+    - name: Create a unique Docker client candidate directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: "{{ local_share }}/tools/docker-{{ docker_client_version }}"
+        prefix: .candidate-
+      register: docker_client_candidate
+
+    - name: Extract only the pinned Docker client into its candidate
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -xzf
+          - "{{ local_cache }}/docker-{{ docker_client_version }}.tgz"
+          - --strip-components=1
+          - -C
+          - "{{ docker_client_candidate.path }}"
+          - docker/docker
+      changed_when: true
+
+    - name: Validate the Docker client candidate
+      ansible.builtin.command:
+        argv: ["{{ docker_client_candidate.path }}/docker", --version]
+      register: docker_client_candidate_probe
+      changed_when: false
+      failed_when: docker_client_candidate_probe.rc != 0 or not (docker_client_candidate_probe.stdout is match('^Docker version ' + (docker_client_version | regex_escape) + '(,|$)'))
+
+    - name: Publish the validated Docker client atomically
+      ansible.builtin.command:
+        argv:
+          - mv
+          - -f
+          - "{{ docker_client_candidate.path }}/docker"
+          - "{{ local_share }}/tools/docker-{{ docker_client_version }}/docker"
+      changed_when: true
+  always:
+    - name: Remove the unpublished Docker client candidate
+      ansible.builtin.file:
+        path: "{{ docker_client_candidate.path }}"
+        state: absent
+      when: docker_client_candidate.path is defined
 
 - name: Link pinned Docker client into the user path
   ansible.builtin.file:

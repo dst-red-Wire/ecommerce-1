@@ -449,9 +449,15 @@
         "type": "ansible",
         "tags": "docker_client"
       },
-      "classification": "platform-provided",
-      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
-      "requirement": "optional-runtime"
+      "classification": "managed",
+      "justification": "Ansible supplies the pinned Docker CLI; daemon lifecycle and server version remain environment-owned.",
+      "requirement": "optional-runtime",
+      "version_key": "DOCKER_CLIENT_VERSION",
+      "checksum_key": "DOCKER_CLIENT_SHA256_LINUX_AMD64",
+      "platforms": [
+        "linux/amd64"
+      ],
+      "runtime_selection": true
     },
     {
       "name": "docker-user-access",
@@ -699,7 +705,8 @@
     "terraform": "ansible",
     "kustomize": "ansible",
     "kind": "ansible",
-    "gitleaks": "ansible"
+    "gitleaks": "ansible",
+    "docker-client-installed": "ansible"
   },
   "seed_prerequisites": [
     {

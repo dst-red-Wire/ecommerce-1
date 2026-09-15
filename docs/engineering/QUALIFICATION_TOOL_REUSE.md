@@ -171,3 +171,31 @@ Gate subprocesses clear the repository-local Git variables reported by
 `git rev-parse --local-env-vars`. This prevents temporary fixture repositories
 from inheriting a commit hook's index or worktree, while the parent verification
 keeps the intended commit index and all hook checks remain enabled.
+
+### Five active PR86 findings
+
+Collection reuse verifies every installed archive member against the locally retained,
+SHA-256-locked archive, including MANIFEST.json and FILES.json themselves. The tar
+inventory preserves the actual symlink types used by the pinned Galaxy releases
+(FILES format 1 lists these as files). Paths, parent directories, link targets and
+member types are checked; an altered inventory cannot authorize altered payloads.
+The warm path requires the verified archives and performs no acquisition or install.
+Missing or invalid archives cause an explicit offline failure, or bounded acquisition
+through the existing preparation entry point.
+
+Repairs publish `<identity>.current` atomically, selecting a validated directory under
+`<identity>.generations/`. Each Make, workstation, controller and bootstrap consumer
+resolves that selector to a concrete directory before launching Ansible. Legacy
+`<identity>` directories and previously published generations stay in place. Failed
+unpublished candidates are removed; interrupted candidates may remain and are never
+selected by directory scanning. No automatic destructive collection is performed.
+
+Docker client reconciliation probes presence, executability and the canonical version,
+extracts only the client into a unique candidate beside the destination, validates it,
+and publishes the file with a same-filesystem atomic rename. Concurrent preparations
+use independent candidates and only publish validated clients. A conforming destination
+is not reinstalled. The canonical checksum protects the retained official archive.
+The runtime capability audit uses the same selected executable as repoctl and compares
+only the client with DOCKER_CLIENT_VERSION; the environment owns the daemon version.
+Malformed Docker URL/port errors become redacted capability diagnostics before any
+daemon probe or resource creation.

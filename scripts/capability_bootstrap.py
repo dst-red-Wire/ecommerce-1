@@ -256,10 +256,10 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         env = os.environ.copy()
         if Path(command[0]).name.startswith("ansible"):
-            from ansible_collections import paths, load_lock
+            from ansible_collections import selected_path, load_lock
 
             load_lock()
-            env["ANSIBLE_COLLECTIONS_PATH"] = str(paths()[1])
+            env["ANSIBLE_COLLECTIONS_PATH"] = str(selected_path())
         return subprocess.run(
             command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
         )
@@ -382,6 +382,9 @@ class Auditor:
                 provider_executable if argv and argv[0] == provider_item["command"] else self.provider_entrypoint(item)
             )
             resolved_candidates = [provider_command] if provider_command else []
+        elif item.get("runtime_selection"):
+            selected = self.resolve_repoctl_runtime(command)
+            resolved_candidates = [selected] if selected else []
         elif item.get("isolated"):
             resolved_candidates = [
                 str(candidate)

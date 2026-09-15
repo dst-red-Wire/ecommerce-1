@@ -107,14 +107,14 @@ def run(
 ) -> subprocess.CompletedProcess[str]:
     effective_env = os.environ if env is None else env
     if Path(cmd[0]).name in {"ansible-playbook", "ansible-lint"}:
-        from ansible_collections import load_lock, installer_provenance, paths
+        from ansible_collections import load_lock, installer_provenance, selected_path
 
         installer_provenance(
             load_lock(),
             env=effective_env,
             playbook_command=cmd[0] if Path(cmd[0]).name == "ansible-playbook" else "ansible-playbook",
         )
-        env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(paths()[1])}
+        env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(selected_path())}
         effective_env = env
     sensitive = Path(cmd[0]).name == "docker" or bool(effective_env.get("DOCKER_HOST"))
     try:
@@ -158,13 +158,34 @@ class DockerCapabilityError(RuntimeError):
     """The selected Docker endpoint cannot execute Product container tests."""
 
 
+def _parse_docker_endpoint(endpoint: str):
+    """Reject expected URL errors without including credentials or parser text."""
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+        host = parsed.hostname
+    except ValueError:
+        raise DockerCapabilityError(
+            "invalid Docker endpoint URL or port; check DOCKER_HOST/context configuration"
+        ) from None
+    if parsed.scheme not in {"unix", "npipe", "tcp", "http", "https", "ssh"}:
+        raise DockerCapabilityError("unsupported Docker endpoint scheme")
+    if parsed.scheme in {"tcp", "http", "https", "ssh"} and (not host or port == 0):
+        raise DockerCapabilityError("invalid Docker endpoint host or port")
+    if parsed.scheme in {"unix", "npipe"} and (parsed.netloc or not parsed.path.startswith("/")):
+        raise DockerCapabilityError("invalid Docker socket endpoint")
+    if parsed.query or parsed.fragment or any(ord(char) < 33 for char in endpoint):
+        raise DockerCapabilityError("invalid Docker endpoint URL components")
+    return parsed
+
+
 def _safe_docker_endpoint(endpoint: str) -> str:
     """Return a credential-free endpoint identity suitable for qualification logs."""
     if not endpoint:
         return "default"
-    if endpoint.startswith("unix://") or endpoint.startswith("npipe://"):
+    parsed = _parse_docker_endpoint(endpoint)
+    if parsed.scheme in {"unix", "npipe"}:
         return endpoint
-    parsed = urlsplit(endpoint)
     host = parsed.hostname or "unresolved"
     port = f":{parsed.port}" if parsed.port else ""
     return f"{parsed.scheme or 'unknown'}://{host}{port}"
@@ -175,11 +196,20 @@ def _safe_docker_detail(detail: str, env: dict[str, str]) -> str:
         detail = detail.replace(env["POSTGRES_PASSWORD"], "[REDACTED]")
     endpoint = env.get("DOCKER_HOST", "").strip()
     if endpoint:
-        detail = detail.replace(endpoint, _safe_docker_endpoint(endpoint))
+        try:
+            safe_endpoint = _safe_docker_endpoint(endpoint)
+            parsed = _parse_docker_endpoint(endpoint)
+            credentials = (parsed.username, parsed.password)
+        except DockerCapabilityError:
+            safe_endpoint = "[invalid Docker endpoint]"
+            # Malformed IPv6/ports still have lexical userinfo. Do not replace
+            # unrelated successful command output (for example architecture JSON).
+            authority = endpoint.split("://", 1)[-1]
+            credentials = authority.split("@", 1)[0].split(":", 1) if "@" in authority else ()
+        detail = detail.replace(endpoint, safe_endpoint)
         from urllib.parse import unquote
 
-        parsed = urlsplit(endpoint)
-        for value in (parsed.username, parsed.password):
+        for value in credentials:
             if value:
                 detail = detail.replace(value, "[REDACTED]").replace(unquote(value), "[REDACTED]")
     detail = re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1", detail, flags=re.IGNORECASE)
@@ -232,7 +262,7 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
         skip_tls = entry.get("Endpoints", {}).get("docker", {}).get("SkipTLSVerify", False)
         tls_required = (
             bool(entry.get("TLSMaterial", {}).get("docker"))
-            or urlsplit(endpoint).scheme == "https"
+            or _parse_docker_endpoint(endpoint).scheme == "https"
             or bool(tls_path and Path(tls_path, "docker").is_dir())
         )
         if tls_required and skip_tls:
@@ -247,7 +277,7 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
                 env["DOCKER_TLS_VERIFY"] = "1"
 
     env.pop("DOCKER_CONTEXT", None)
-    parsed = urlsplit(endpoint)
+    parsed = _parse_docker_endpoint(endpoint)
     is_remote = parsed.scheme in {"tcp", "http", "https", "ssh"}
     if is_remote and not env.get("TESTCONTAINERS_HOST_OVERRIDE", "").strip():
         if parsed.scheme == "ssh" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
@@ -260,7 +290,12 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
 
 
 def docker_bind_address(env: dict[str, str]) -> str:
-    remote = urlsplit(env.get("DOCKER_HOST", "")).scheme in {"tcp", "http", "https", "ssh"}
+    remote = _parse_docker_endpoint(env.get("DOCKER_HOST", "unix:///var/run/docker.sock")).scheme in {
+        "tcp",
+        "http",
+        "https",
+        "ssh",
+    }
     address = env.get("ECOMMERCE_DOCKER_BIND_ADDRESS", "").strip() if remote else "127.0.0.1"
     if not address:
         raise DockerCapabilityError(
@@ -485,10 +520,10 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
 def resolved_ansible_collection_version(name: str, collections_root: Path | None = None) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
     if collections_root is None:
-        from ansible_collections import load_lock, paths
+        from ansible_collections import load_lock, selected_path
 
         load_lock()
-        collections_root = paths()[1]
+        collections_root = selected_path()
     namespace, collection = name.split(".", 1)
     manifest = collections_root / "ansible_collections" / namespace / collection / "MANIFEST.json"
     if not manifest.is_file():
@@ -584,7 +619,10 @@ def developer_state_ready(tags: str) -> bool:
         docker = shutil.which("docker")
         if not docker:
             return False
-        got = run([docker, "--version"], check=False, capture=True)
+        try:
+            got = run([docker, "--version"], check=False, capture=True, timeout=15)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
+            return False
         if got.returncode or f"Docker version {pins.get('DOCKER_CLIENT_VERSION', '')}," not in got.stdout:
             return False
     if "templ" in wanted:

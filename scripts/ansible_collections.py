@@ -7,8 +7,9 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,70 @@ def paths() -> tuple[Path, Path]:
     return base / "archives", base / "collections" / identity()
 
 
+def selected_path() -> Path:
+    """Pin a concrete generation once for a consumer; legacy trees stay in place."""
+    legacy = paths()[1]
+    selector = legacy.with_suffix(".current")
+    if selector.is_symlink():
+        selected = selector.resolve(strict=True)
+        if selected.parent != legacy.with_suffix(".generations").resolve():
+            raise RuntimeError("collection selector escapes its identity")
+        return selected
+    if selector.exists():
+        raise RuntimeError("invalid collection generation selector")
+    return legacy.resolve()
+
+
+def payload_ok(item: dict, root: Path) -> bool:
+    """Compare payload and inventory to the checksum-locked archive, including links.
+
+    Galaxy FILES format 1 describes symlinks as files. Tar metadata is the
+    authoritative type/link inventory, so do not mistake those links for files.
+    """
+    archive = archive_path(item)
+    validate_archive(item, archive)
+    if root.is_symlink() or not root.is_dir():
+        return False
+    concrete = root.resolve()
+    with tarfile.open(archive, "r:gz") as bundle:
+        seen = set()
+        checked_parents = set()
+        for member in bundle:
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts or member.name in seen:
+                return False
+            seen.add(member.name)
+            target = root.joinpath(*name.parts)
+            # Validate each parent once within this verification, never across runs.
+            for parent in target.parents:
+                if parent == root:
+                    break
+                if parent in checked_parents:
+                    break
+                if parent.is_symlink() or not parent.is_dir():
+                    return False
+                checked_parents.add(parent)
+            if member.issym():
+                if not target.is_symlink() or os.readlink(target) != member.linkname:
+                    return False
+                link = PurePosixPath(member.linkname)
+                if link.is_absolute() or not (target.parent / member.linkname).resolve().is_relative_to(concrete):
+                    return False
+            elif member.isdir():
+                if target.is_symlink() or not target.is_dir():
+                    return False
+            elif member.isfile():
+                if target.is_symlink() or not target.is_file() or target.stat().st_size != member.size:
+                    return False
+                stream = bundle.extractfile(member)
+                expected = hashlib.file_digest(stream, "sha256").hexdigest()
+                if digest(target) != expected:
+                    return False
+            else:
+                return False
+    return True
+
+
 def archive_path(item: dict) -> Path:
     archives, _ = paths()
     return archives / f"{item['name'].replace('.', '-')}-{item['version']}-{item['sha256']}.tar.gz"
@@ -84,6 +149,19 @@ def validate_archive(item: dict, path: Path) -> None:
     if not path.is_file() or path.stat().st_size != item["size"] or digest(path) != item["sha256"]:
         raise RuntimeError(f"invalid archive {item['name']}:{item['version']} ({path})")
     with tarfile.open(path, "r:gz") as bundle:
+        seen = set()
+        for member in bundle.getmembers():
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts or str(name) in seen:
+                raise RuntimeError(f"unsafe archive path in {item['name']}")
+            seen.add(str(name))
+            if member.issym():
+                link = PurePosixPath(member.linkname)
+                target = posixpath.normpath(str(name.parent / link))
+                if link.is_absolute() or target == ".." or target.startswith("../"):
+                    raise RuntimeError(f"unsafe archive link in {item['name']}")
+            elif not (member.isdir() or member.isfile()):
+                raise RuntimeError(f"unsupported archive member type in {item['name']}")
         manifest = json.load(bundle.extractfile("MANIFEST.json"))
     info = manifest["collection_info"]
     got = f"{info['namespace']}.{info['name']}:{info['version']}"
@@ -103,11 +181,18 @@ def installed_ok(data: dict, destination: Path) -> bool:
             return False
         for item in data["collections"]:
             namespace, collection = item["name"].split(".")
+            if any(
+                (destination / relative).is_symlink()
+                for relative in ("ansible_collections", f"ansible_collections/{namespace}")
+            ):
+                return False
             manifest = destination / "ansible_collections" / namespace / collection / "MANIFEST.json"
+            if not payload_ok(item, manifest.parent):
+                return False
             info = json.loads(manifest.read_text(encoding="utf-8"))["collection_info"]
             if str(info["version"]) != item["version"] or info.get("dependencies", {}) != item["dependencies"]:
                 return False
-    except (OSError, KeyError, json.JSONDecodeError):
+    except (OSError, KeyError, ValueError, TypeError, RuntimeError, tarfile.TarError):
         return False
     return True
 
@@ -182,7 +267,12 @@ def installer_provenance(
 def install(data: dict, destination: Path) -> None:
     provenance = installer_provenance(data)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{identity()}.install-", dir=destination.parent))
+    generations = destination.with_suffix(".generations")
+    generations.mkdir(parents=True, exist_ok=True)
+    temporary = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
+    selector = destination.with_suffix(".current")
+    pending = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
+    published = False
     try:
         galaxy = provenance["executable"]
         env = os.environ.copy()
@@ -206,12 +296,13 @@ def install(data: dict, destination: Path) -> None:
         )
         if not installed_ok(data, temporary):
             raise RuntimeError("installed collection closure failed validation")
-        if destination.exists():
-            shutil.rmtree(destination)
-        os.replace(temporary, destination)
+        pending.symlink_to(temporary, target_is_directory=True)
+        os.replace(pending, selector)
+        published = True
         print(f"PUBLISH collections identity={identity()} path={destination}")
     finally:
-        if temporary.exists():
+        pending.unlink(missing_ok=True)
+        if not published and temporary.exists():
             shutil.rmtree(temporary)
 
 
@@ -219,7 +310,7 @@ def prepare(*, offline: bool = False) -> None:
     data = load_lock()
     _, destination = paths()
     installer_provenance(data)
-    if installed_ok(data, destination):
+    if installed_ok(data, selected_path()):
         print(f"REUSE collections identity={identity()} path={destination}")
         return
     lock_path = destination.with_suffix(".lock")
@@ -227,7 +318,7 @@ def prepare(*, offline: bool = False) -> None:
     from capability_bootstrap import identity_lock
 
     with identity_lock(lock_path):
-        if installed_ok(data, destination):
+        if installed_ok(data, selected_path()):
             print(f"REUSE collections identity={identity()} path={destination} after-lock=true")
             return
         for item in data["collections"]:
@@ -241,8 +332,8 @@ def run_playbook(arguments: list[str]) -> int:
     seed_environment()
     env = os.environ.copy()
     env["PATH"] = str(LOCAL_SEED_VENV / "bin") + os.pathsep + env.get("PATH", "")
-    env["ANSIBLE_COLLECTIONS_PATH"] = str(paths()[1])
     subprocess.run([str(LOCAL_SEED_VENV / "bin/python"), str(Path(__file__).resolve()), "prepare"], env=env, check=True)
+    env["ANSIBLE_COLLECTIONS_PATH"] = str(selected_path())
     executable = LOCAL_SEED_VENV / "bin/ansible-playbook"
     return subprocess.run([str(executable), *arguments], env=env, check=False).returncode
 
@@ -259,7 +350,7 @@ def main() -> int:
             print(identity())
         elif args.command == "check":
             data = load_lock()
-            if not installed_ok(data, paths()[1]):
+            if not installed_ok(data, selected_path()):
                 raise RuntimeError(f"collection installation invalid or missing: identity={identity()}")
             print(f"PASS collections identity={identity()} path={paths()[1]}")
         elif args.command == "acquire":
