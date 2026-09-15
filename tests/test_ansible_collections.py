@@ -12,6 +12,11 @@ WORKSTATION_TASKS = (ROOT / "platform/ansible/roles/developer_workstation/tasks/
 SPEC = importlib.util.spec_from_file_location("repoctl", ROOT / "scripts/repoctl.py")
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
+COLLECTION_SPEC = importlib.util.spec_from_file_location(
+    "ansible_collections", ROOT / "scripts/ansible_collections.py"
+)
+COLLECTION_MOD = importlib.util.module_from_spec(COLLECTION_SPEC)
+COLLECTION_SPEC.loader.exec_module(COLLECTION_MOD)
 
 
 class AnsibleCollectionResolutionTest(unittest.TestCase):
@@ -33,6 +38,9 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
                 "containers.podman": "1.11.0",
                 "hetzner.hcloud": "2.4.1",
                 "kubernetes.core": "2.4.0",
+                "community.library_inventory_filtering_v1": "1.0.0",
+                "ansible.netcommon": "2.0.0",
+                "ansible.utils": "2.0.0",
             },
             MOD.required_ansible_collections(),
         )
@@ -62,10 +70,9 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
             )
 
     def test_bootstrap_repairs_only_when_project_collections_drift(self):
-        self.assertIn("Identify project-owned Ansible collection drift", WORKSTATION_TASKS)
-        self.assertIn("when: developer_collection_drift | length > 0", WORKSTATION_TASKS)
-        self.assertIn("- --force", WORKSTATION_TASKS)
-        self.assertNotIn("Reconcile pinned project Ansible collections", WORKSTATION_TASKS)
+        self.assertIn("Prepare verified project Ansible collection closure", WORKSTATION_TASKS)
+        self.assertIn("scripts/ansible_collections.py", WORKSTATION_TASKS)
+        self.assertNotIn("collection install", WORKSTATION_TASKS)
 
     def test_exact_project_pins_make_the_second_bootstrap_a_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -73,7 +80,7 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
             for name, version in MOD.required_ansible_collections().items():
                 self.write_manifest(root, name, version)
                 self.assertEqual(version, MOD.resolved_ansible_collection_version(name, root))
-        self.assertIn("when: developer_collection_drift | length > 0", WORKSTATION_TASKS)
+        self.assertIn("'PUBLISH collections' in developer_collection_prepare.stdout", WORKSTATION_TASKS)
 
     def test_make_entrypoints_export_project_ansible_configuration(self):
         self.assertIn("ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg", MAKEFILE)
@@ -83,20 +90,18 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
 
     def test_ansible_gate_reconciles_missing_project_collections_once(self):
-        with mock.patch.object(MOD, "ansible_collections_ready", side_effect=[False, True]):
+        with mock.patch.object(MOD, "ansible_collections_ready", return_value=True):
             with mock.patch.object(MOD, "require") as require_mock:
                 with mock.patch.object(MOD, "run") as run_mock:
                     MOD.reconcile_ansible_collections()
-        require_mock.assert_any_call("ansible-playbook")
         require_mock.assert_any_call("ansible-galaxy")
         command = run_mock.call_args.args[0]
-        self.assertIn("platform/ansible/developer.yml", command)
-        self.assertEqual("ansible_collections", command[command.index("--tags") + 1])
+        self.assertEqual([MOD.sys.executable, "scripts/ansible_collections.py", "prepare"], command)
 
         with mock.patch.object(MOD, "ansible_collections_ready", return_value=True):
-            with mock.patch.object(MOD, "run") as second_run:
+            with mock.patch.object(MOD, "require"), mock.patch.object(MOD, "run") as second_run:
                 MOD.reconcile_ansible_collections()
-        second_run.assert_not_called()
+        second_run.assert_called_once()
 
     def test_bootstrap_uses_only_the_ansible_core_stdout_callback(self):
         self.assertNotIn("stdout_callback = yaml", ANSIBLE_CFG)
@@ -104,6 +109,49 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn("stdout_callback = default", ANSIBLE_CFG)
         self.assertIn("callback_result_format = yaml", ANSIBLE_CFG)
         self.assertIn("collections_path = ../../.ansible/collections", ANSIBLE_CFG)
+
+    def test_lock_records_complete_dependency_closure_and_official_digests(self):
+        lock = json.loads((ROOT / "platform/ansible/collections.lock.json").read_text(encoding="utf-8"))
+        by_name = {item["name"]: item for item in lock["collections"]}
+        self.assertIn("Galaxy v3 artifact metadata", lock["digest_authority"])
+        for item in lock["collections"]:
+            self.assertRegex(item["sha256"], r"^[0-9a-f]{64}$")
+            for dependency in item["dependencies"]:
+                self.assertIn(dependency, by_name)
+        self.assertEqual(">=1.0.0", by_name["community.docker"]["dependencies"]["community.library_inventory_filtering_v1"])
+        self.assertEqual(">=2.0.0", by_name["ansible.netcommon"]["dependencies"]["ansible.utils"])
+
+    def test_gate_forces_supported_ansible_lint_offline_mode(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        self.assertIn('run(["ansible-lint", "--offline", *files])', source)
+
+    def test_warm_prepare_never_acquires_or_reinstalls(self):
+        data = COLLECTION_MOD.load_lock()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(COLLECTION_MOD, "TOOL_HOME", pathlib.Path(tmp)):
+            destination = COLLECTION_MOD.paths()[1]
+            for item in data["collections"]:
+                namespace, collection = item["name"].split(".")
+                manifest = destination / "ansible_collections" / namespace / collection / "MANIFEST.json"
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                manifest.write_text(
+                    json.dumps({"collection_info": {"version": item["version"], "dependencies": item["dependencies"]}}),
+                    encoding="utf-8",
+                )
+            (destination / ".ecommerce-collections.json").write_text(
+                json.dumps({"identity": COLLECTION_MOD.identity()}), encoding="utf-8"
+            )
+            with mock.patch.object(COLLECTION_MOD, "acquire") as acquire, mock.patch.object(
+                COLLECTION_MOD, "install"
+            ) as install:
+                COLLECTION_MOD.prepare()
+            acquire.assert_not_called()
+            install.assert_not_called()
+
+    def test_offline_missing_archive_fails_with_exact_identity(self):
+        item = COLLECTION_MOD.load_lock()["collections"][0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(COLLECTION_MOD, "TOOL_HOME", pathlib.Path(tmp)):
+            with self.assertRaisesRegex(RuntimeError, rf"{item['name']}:{item['version']} sha256={item['sha256']}"):
+                COLLECTION_MOD.acquire(item, offline=True)
 
 
 if __name__ == "__main__":

@@ -56,8 +56,8 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
-COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "requirements.yml"
+os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{Path.home() / '.local/bin'}"
+COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "collections.lock.json"
 COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest() if COLLECTIONS_LOCK.is_file() else ""
 TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
 PROJECT_COLLECTIONS = TOOL_HOME / "ansible" / "collections" / COLLECTIONS_ID
@@ -135,8 +135,11 @@ def pinned_versions() -> dict[str, str]:
 
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
-    """Read the canonical Ansible collection lock without duplicating its pins."""
-    source = requirements or ROOT / "platform" / "ansible" / "requirements.yml"
+    """Read the complete canonical Ansible collection lock."""
+    if requirements is None:
+        data = json.loads(COLLECTIONS_LOCK.read_text(encoding="utf-8"))
+        return {item["name"]: str(item["version"]) for item in data["collections"]}
+    source = requirements
     result: dict[str, str] = {}
     name: str | None = None
     for raw in source.read_text(encoding="utf-8").splitlines():
@@ -188,23 +191,13 @@ def ansible_collections_ready() -> bool:
 
 
 def reconcile_ansible_collections() -> None:
-    """Reconcile the checkout-local pinned Galaxy collections only when missing or drifted."""
-    if ansible_collections_ready():
-        return
-    require("ansible-playbook")
+    """Prepare the verified closure once; warm runs do not start Galaxy or Ansible."""
     require("ansible-galaxy")
     run(
         [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            "platform/ansible/developer.yml",
-            "-e",
-            f"repo_root={ROOT}",
-            "--tags",
-            "ansible_collections",
+            sys.executable,
+            "scripts/ansible_collections.py",
+            "prepare",
         ]
     )
     if not ansible_collections_ready():
@@ -882,7 +875,7 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+    run(["ansible-lint", "--offline", *files])
     run(
         [
             "ansible-playbook",

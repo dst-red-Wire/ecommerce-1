@@ -8,7 +8,8 @@ normal exact base/head and signed-evidence rules remain in force.
 ## Persistent identities
 
 `ECOMMERCE_TOOL_HOME` defaults to `~/.cache/ecommerce-1/qualification` and may point to a
-runner-owned persistent volume outside every checkout. The Python seed identity includes
+runner-owned persistent volume outside every checkout. The Python seed (Ansible Core,
+ansible-lint, and their complete Python closure) identity includes
 the Python implementation and major/minor runtime, OS/architecture, complete lockfile
 SHA-256, and hash-enforcing pip parameters. A checkout's `.venv/qualification` is only an
 atomic local reference to that immutable environment; the venv is created directly at its
@@ -30,8 +31,16 @@ Go module/build data use the native concurrency-safe caches. Templ preparation i
 by its version/platform lock. Archive-based Ansible installers validate canonical SHA-256
 values before extraction and retain verified archives in the user cache.
 Ansible collections resolve from
-`$ECOMMERCE_TOOL_HOME/ansible/collections/<requirements-sha256>` and installation is
-serialized by that identity, so checkouts with equal locks reuse the same collection tree.
+`$ECOMMERCE_TOOL_HOME/ansible/collections/<collections-lock-sha256>`. The lock includes the
+complete direct and transitive closure, official Galaxy artifact metadata SHA-256 values,
+the Ansible Core installer version, and layout parameters. Archives persist under
+`$ECOMMERCE_TOOL_HOME/ansible/archives`; `make ansible-collections` is the only network
+acquisition entry point and `make ansible-collections-offline` rebuilds an installation
+strictly from those verified archives. A local digest match proves integrity against the
+locked Galaxy metadata digest; it is not a signature or independent authenticity proof.
+Installation is serialized by identity, rechecked after locking, built in a temporary
+directory, validated, and atomically published, so equal locks in different checkouts reuse
+the same collection tree without exposing partial installs.
 
 The exported persistent caches are:
 

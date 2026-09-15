@@ -495,7 +495,11 @@ class Auditor:
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
-    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+    for package, key in (
+        ("ansible-core", "ANSIBLE_CORE_VERSION"),
+        ("ansible-lint", "ANSIBLE_LINT_VERSION"),
+        ("pyyaml", "PYYAML_VERSION"),
+    ):
         expected = versions[key]
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
@@ -584,7 +588,8 @@ def seed_environment() -> int:
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
     print(
-        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
+        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} "
+        f"ansible-lint={versions['ANSIBLE_LINT_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
 
