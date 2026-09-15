@@ -35,7 +35,7 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, strict_unknown: false)
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, service_consumers: {}, strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
@@ -55,6 +55,7 @@ module AffectedComponents
         raise ArgumentError, "unknown service path changed: #{service}" unless services.include?(service)
 
         components << "service:#{service}"
+        Array(service_consumers[service]).each { |consumer| components << "service:#{consumer}" }
       when %r{\Afrontend/apps/(storefront|admin)/}
         components << "frontend:#{Regexp.last_match(1)}"
       when %r{\Afrontend/(?:internal|static|templates)/},
@@ -103,10 +104,13 @@ module AffectedComponents
       when %r{\Atests/}, %r{\Ascripts/}
         # Other repository-level tests and native helpers are exercised by system.
         components << "system"
+      when %r{\A(?:docs|instruction)/}, "README.md", "AGENTS.md"
+        # Documentation remains covered by the global governance/security gates.
+        force_all!(components, services) if strict_unknown
       else
         # Incremental reuse needs stronger guarantees than ordinary affected routing.
         # Unknown deltas may not inherit component PASS evidence.
-        force_all!(components, services) if strict_unknown
+        force_all!(components, services)
       end
     end
 
@@ -123,12 +127,12 @@ module AffectedComponents
 
   def changed_paths(root, base, head)
     if head == "WORKTREE"
-      output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--") || ""
+      output = run_git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base, "--") || ""
       untracked = run_git(root, "ls-files", "--others", "--exclude-standard") || ""
       return (output.lines + untracked.lines).map(&:strip).reject(&:empty?).uniq.sort
     end
 
-    output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--")
+    output = run_git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head, "--")
     output.lines.map(&:strip).reject(&:empty?).uniq.sort
   end
 
@@ -284,6 +288,32 @@ module AffectedComponents
 
     [services, public_contract_index(public_api), public_api["common_components"]]
   end
+
+  def service_consumers(root, base, head, services)
+    maps = [yaml_at(root, base, "config/contracts/dependency-map.yaml"),
+            yaml_at(root, head, "config/contracts/dependency-map.yaml")]
+    reverse = Hash.new { |hash, key| hash[key] = Set.new }
+    maps.each do |data|
+      data.fetch("services", {}).each do |consumer, spec|
+        next unless services.include?(consumer)
+        %w[sync sync_external].each do |kind|
+          Array(spec && spec[kind]).each do |provider|
+            reverse[provider] << consumer if services.include?(provider)
+          end
+        end
+      end
+    end
+    services.to_h do |provider|
+      found = Set.new
+      pending = reverse[provider].to_a
+      until pending.empty?
+        consumer = pending.shift
+        next unless found.add?(consumer)
+        pending.concat(reverse[consumer].to_a)
+      end
+      [provider, found.to_a.sort]
+    end
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -306,12 +336,14 @@ if $PROGRAM_NAME == __FILE__
   contract_impact = AffectedComponents.contract_impact_map(
     root, options[:base], options[:head], paths, services: services
   )
+  consumers = AffectedComponents.service_consumers(root, options[:base], options[:head], services)
   affected = AffectedComponents.classify(
     paths,
     services: services,
     public_contracts: public_contracts,
     common_openapi: common_openapi,
     contract_impact: contract_impact,
+    service_consumers: consumers,
     strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"

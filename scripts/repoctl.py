@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -234,6 +236,12 @@ def developer_state_ready(tags: str) -> bool:
             return False
         got = run([go, "version"], check=False, capture=True)
         if got.returncode or f"go{pins.get('GO_VERSION', '')}" not in got.stdout:
+            return False
+        templ = managed_bin / "templ"
+        if not templ.is_file():
+            return False
+        got = run([str(templ), "version"], check=False, capture=True)
+        if got.returncode or pins.get("TEMPL_VERSION", "") not in got.stdout:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
@@ -601,8 +609,9 @@ def frontend(action: str, scope: str = "") -> int:
     env.pop("GOTOOLDIR", None)
     go = managed_bin / "go"
     gofmt = managed_bin / "gofmt"
-    if not go.is_file() or not gofmt.is_file():
-        raise RuntimeError("validated managed Go provider is unavailable")
+    templ = managed_bin / "templ"
+    if not go.is_file() or not gofmt.is_file() or not templ.is_file():
+        raise RuntimeError("validated managed Go/templ provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
@@ -617,12 +626,13 @@ def frontend(action: str, scope: str = "") -> int:
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
                 generated_root = Path(temp_dir) / "frontend"
-                shutil.copytree(frontend_root, generated_root)
-                run(
-                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
-                    cwd=generated_root,
-                    env=env,
-                )
+                template_inputs = sorted(frontend_root.rglob("*.templ"))
+                for source in template_inputs:
+                    relative = source.relative_to(frontend_root)
+                    destination = generated_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                run([str(templ), "generate"], cwd=generated_root, env=env)
                 committed = sorted(frontend_root.rglob("*_templ.go"))
                 generated = sorted(generated_root.rglob("*_templ.go"))
                 relative_committed = [path.relative_to(frontend_root) for path in committed]
@@ -636,9 +646,8 @@ def frontend(action: str, scope: str = "") -> int:
             run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
         env = dict(env, CGO_ENABLED="1")
-        # One module-wide invocation runs shared package tests exactly once as well as
-        # the independently deployable application packages.
-        run([str(go), "test", "-race", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "test", "-race", *packages], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
@@ -648,7 +657,8 @@ def frontend(action: str, scope: str = "") -> int:
                     env=env,
                 )
     if action == "check":
-        run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "vet", *packages], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
 
@@ -922,11 +932,11 @@ def test_all() -> int:
 
 def changed_paths(base: str, head: str) -> list[str]:
     if head == "WORKTREE":
-        tracked = git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--").splitlines()
+        tracked = git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, "--").splitlines()
         untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
         return sorted(set(filter(None, tracked + untracked)))
     return sorted(
-        set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines()))
+        set(filter(None, git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head, "--").splitlines()))
     )
 
 
@@ -960,7 +970,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 4
+        evidence.get("schema_version", 0) < 5
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -968,7 +978,11 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_sha") != current_head
         or evidence.get("source_head_sha") != current_head
         or evidence.get("source_tree_sha") != current_tree
+        or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not isinstance(evidence.get("gates"), list)
@@ -1015,7 +1029,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     payload = copy.deepcopy(source)
     payload.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "evidence_kind": "exact_commit",
             "head_ref": requested,
             "head_sha": requested,
@@ -1052,13 +1066,43 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("status") != "PASS"
+        evidence.get("schema_version", 0) < 5
+        or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base_ref, head)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
+        or not isinstance(evidence.get("gates"), list)
+        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
         return None
     return path
+
+
+def qualification_identity() -> str:
+    """Bind reusable evidence to validator/configuration and actual core runners."""
+    digest = hashlib.sha256()
+    for relative in (
+        "scripts/repoctl.py",
+        "scripts/ci-affected.rb",
+        "config/contracts/ci-evidence.yaml",
+        "config/contracts/ci-topology.yaml",
+        "config/toolchain/versions.env",
+        "config/toolchain/capabilities.json",
+    ):
+        path = ROOT / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes())
+    digest.update(sys.version.encode())
+    ruby = shutil.which("ruby") or ""
+    digest.update(ruby.encode())
+    if ruby:
+        digest.update(output([ruby, "--version"]).encode())
+    return digest.hexdigest()
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
@@ -1094,6 +1138,88 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     return p.returncode == 0
 
 
+def _local_parallelism(gate_count: int) -> int:
+    cpu = max(1, os.cpu_count() or 1)
+    try:
+        memory_gib = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // (1024**3)
+    except (OSError, ValueError):
+        memory_gib = 1
+    resource_bound = max(1, min(cpu, max(1, memory_gib // 2), gate_count, 4))
+    configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+    return max(1, min(configured, resource_bound))
+
+
+def _run_independent_gates(
+    gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]
+) -> bool:
+    """Run read-only local gates concurrently and stop siblings on first failure."""
+    jobs = _local_parallelism(len(gates))
+    pending = list(gates)
+    running: dict[str, tuple[subprocess.Popen, object, Path, float, list[str]]] = {}
+    lock = threading.Lock()
+    logs = CONTEXT / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    child_env = dict(env)
+    child_env.setdefault("GOMAXPROCS", str(max(1, (os.cpu_count() or 1) // jobs)))
+    child_env.setdefault("ANSIBLE_FORKS", str(max(1, (os.cpu_count() or 1) // jobs)))
+
+    def stop_all():
+        for process, *_ in running.values():
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        for process, *_ in running.values():
+            try:
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                name, command = pending.pop(0)
+                log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+                handle = log_path.open("w", encoding="utf-8")
+                process = subprocess.Popen(
+                    command,
+                    cwd=ROOT,
+                    env=child_env,
+                    text=True,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                running[name] = (process, handle, log_path, time.monotonic(), command)
+            finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
+            if finished is None:
+                time.sleep(0.05)
+                continue
+            process, handle, log_path, started, command = running.pop(finished)
+            handle.close()
+            record = {
+                "gate": finished,
+                "status": "PASS" if process.returncode == 0 else "FAIL",
+                "exit_code": process.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "command": command,
+                "log": str(log_path.relative_to(ROOT)),
+            }
+            with lock:
+                records.append(record)
+            print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
+            if process.returncode:
+                print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
+                stop_all()
+                return False
+        return True
+    except (KeyboardInterrupt, SystemExit):
+        stop_all()
+        raise
+    finally:
+        for _process, handle, *_rest in running.values():
+            handle.close()
+
+
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
     """Return direct-parent evidence only when every exactness invariant holds."""
     if head == "WORKTREE":
@@ -1118,12 +1244,18 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 2
+        evidence.get("schema_version", 0) < 5
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha
         or evidence.get("base_sha") != base_sha
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base, parent_sha)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
         or not isinstance(evidence.get("gates"), list)
+        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
         return None, None
     return parent_sha, evidence
@@ -1196,8 +1328,35 @@ def _component_command(component: str) -> tuple[list[str] | None, str | None]:
     raise RuntimeError(f"unsupported affected component: {component}")
 
 
+def preflight(base: str, head: str) -> int:
+    """Fail cheaply on missing runners and changed-source syntax before test gates."""
+    components = affected(base, head)
+    required = {"ruby", "gitleaks"}
+    if any(component.startswith(("service:", "frontend:")) for component in components):
+        required.update({"go", "gofmt"})
+    if "platform:terraform" in components:
+        required.add("terraform")
+    if "platform:ansible" in components:
+        required.update({"ansible-playbook", "ansible-lint"})
+    for executable in sorted(required):
+        require(executable)
+
+    paths = changed_paths(base, head)
+    python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
+    ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
+    if python_files:
+        require("ruff")
+        run(["ruff", "check", *python_files])
+        run([sys.executable, "-m", "py_compile", *python_files])
+    for path in ruby_files:
+        run(["ruby", "-c", path])
+    print(f"PASS preflight capabilities/syntax ({len(paths)} changed paths)")
+    return 0
+
+
 def _global_gate_commands(base: str, head: str) -> list[tuple[str, list[str]]]:
     return [
+        ("preflight", _controller_command("preflight", "--base", base, "--head", head)),
         ("governance", _controller_command("governance")),
         ("runtime-efficiency", _controller_command("runtime-efficiency")),
         ("contracts", _controller_command("contracts", "--base", base, "--head", head)),
@@ -1441,12 +1600,19 @@ def write_evidence(
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
+        "head_tree_sha": (
+            verification_data.get("source_tree_sha")
+            if head == "WORKTREE"
+            else git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        ),
+        "created_at_epoch": time.time(),
+        "qualification_identity": qualification_identity(),
         "exact_commit_evidence": exact,
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,
@@ -1524,10 +1690,19 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
-    for name, command in global_commands:
+    preparation = [(name, command) for name, command in global_commands if name == "preflight"]
+    independent = [(name, command) for name, command in global_commands if name != "preflight"]
+    for name, command in preparation:
         if not run_stable_gate(name, command):
             write_evidence(base, head, paths, components, records, verification)
             return 1
+    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_independent_gates(independent, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
+        write_evidence(base, head, paths, components, records, verification)
+        return fail("parallel global gates mutated the worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
@@ -1869,7 +2044,29 @@ def deliver(base: str, title: str, message: str) -> int:
 
 
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--").splitlines()
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        run(["git", "checkout-index", "--all", f"--prefix={snapshot}/"])
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", *python_files], cwd=snapshot)
+            run(["ruff", "check", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
@@ -1918,6 +2115,9 @@ def main() -> int:
         "site",
     ]:
         sub.add_parser(name)
+    pf = sub.add_parser("preflight")
+    pf.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pf.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -1996,6 +2196,8 @@ def main() -> int:
     try:
         if args.cmd == "governance":
             return governance()
+        if args.cmd == "preflight":
+            return preflight(args.base, args.head)
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
