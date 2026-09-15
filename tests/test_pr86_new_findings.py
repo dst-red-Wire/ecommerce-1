@@ -48,6 +48,33 @@ class NewFindings(unittest.TestCase):
             self.assertNotEqual(0, required.returncode)
             self.assertIn("python3", required.stderr)
 
+    def test_tekton_and_git_make_consumers_use_collection_wrapper(self):
+        for target in ("tekton-proof", "git-local-reconcile"):
+            with self.subTest(target=target):
+                result = subprocess.run(
+                    ["make", "-n", target], cwd=ctl.ROOT, text=True, capture_output=True, check=True
+                )
+                self.assertIn("scripts/ansible_collections.py run-playbook --", result.stdout)
+
+    def test_controller_rejects_provider_in_effective_path_and_absolute_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good, bad = root / "good", root / "bad"
+            for folder, version in ((good, "2.20.3"), (bad, "0.0.0")):
+                folder.mkdir()
+                for name in ("ansible-galaxy", "ansible-playbook"):
+                    executable = folder / name
+                    executable.write_text(
+                        f"#!{sys.executable}\nimport sys\nprint({name + ' [core ' + version + ']'!r})\n"
+                    )
+                    executable.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": str(good)}):
+                for command, path in (("ansible-playbook", bad), (str(bad / "ansible-playbook"), good)):
+                    with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, "mismatch"):
+                        ctl.run([command, "--version"], env={**os.environ, "PATH": str(path)}, capture=True)
+                result = ctl.run(["ansible-playbook", "--version"], env={**os.environ, "PATH": str(good)}, capture=True)
+                self.assertIn("2.20.3", result.stdout)
+
     def test_invalid_collection_identity_fails_when_consumed(self):
         with tempfile.TemporaryDirectory() as directory:
             lock = Path(directory) / "lock.json"

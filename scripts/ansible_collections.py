@@ -148,12 +148,18 @@ def acquire(item: dict, *, offline: bool) -> None:
             time.sleep(attempt)
 
 
-def installer_provenance(data: dict) -> dict[str, str]:
-    galaxy = shutil.which("ansible-galaxy")
+def installer_provenance(
+    data: dict, *, env: dict[str, str] | None = None, playbook_command: str = "ansible-playbook"
+) -> dict[str, str]:
+    effective_env = os.environ if env is None else env
+    search_path = effective_env.get("PATH", os.defpath)
+    galaxy = shutil.which("ansible-galaxy", path=search_path)
     if not galaxy:
         raise RuntimeError("ansible-galaxy missing: run make seed and use its locked PATH")
     galaxy = str(Path(galaxy).resolve())
-    probe = subprocess.run([galaxy, "--version"], text=True, capture_output=True, check=False, timeout=15)
+    probe = subprocess.run(
+        [galaxy, "--version"], text=True, capture_output=True, check=False, timeout=15, env=effective_env
+    )
     match = re.search(r"ansible-galaxy \[core ([^\]]+)\]", probe.stdout)
     actual = match.group(1) if match else "unknown"
     expected = data["installer"]["ansible_core"]
@@ -161,10 +167,12 @@ def installer_provenance(data: dict) -> dict[str, str]:
         raise RuntimeError(
             f"ansible-galaxy installer mismatch: expected {expected}, got {actual} at {galaxy}; run make seed"
         )
-    playbook = shutil.which("ansible-playbook")
+    playbook = shutil.which(playbook_command, path=search_path)
     if not playbook:
         raise RuntimeError("ansible-playbook missing: run make seed")
-    probe = subprocess.run([playbook, "--version"], text=True, capture_output=True, check=False, timeout=15)
+    probe = subprocess.run(
+        [playbook, "--version"], text=True, capture_output=True, check=False, timeout=15, env=effective_env
+    )
     match = re.search(r"ansible-playbook \[core ([^\]]+)\]", probe.stdout)
     if probe.returncode or not match or match.group(1) != expected:
         raise RuntimeError(f"ansible-playbook provider mismatch: expected {expected}; run make seed")

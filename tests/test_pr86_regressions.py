@@ -27,7 +27,10 @@ class ReviewRegressions(TestCase):
                     if directory == seed and name in ("go", "docker", "terraform"):
                         continue
                     binary = directory / name
-                    binary.write_text(f"#!{sys.executable}\nprint({str(binary)!r})\n")
+                    binary.write_text(
+                        f"#!{sys.executable}\nimport sys\n"
+                        f"print({name!r} + ' [core 2.20.3]' if '--version' in sys.argv else {str(binary)!r})\n"
+                    )
                     binary.chmod(0o755)
             with mock.patch.object(ctl, "ROOT", root), mock.patch.object(Path, "home", return_value=root):
                 env = dict(os.environ, PATH=ctl.execution_path(str(system)))

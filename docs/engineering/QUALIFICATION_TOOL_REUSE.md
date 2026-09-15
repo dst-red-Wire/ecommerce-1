@@ -16,7 +16,7 @@ atomic local reference to that immutable environment. Repairs build a fresh gene
 under `python/<identity>.generations/` at its final path, validate it, then atomically
 update `<identity>.current` and the checkout reference. Venvs are never moved. Existing
 generations remain for running consumers (which do not take the preparation lock);
-failed preparation leaves the published generation untouched. Maintenance can reclaim
+failed preparation removes its unpublished candidate and leaves the published generation untouched. Maintenance can reclaim
 unreferenced generations only after consumers have stopped. The lock includes the
 conditional `ruamel-yaml-clib` dependency for Python below 3.14 and `typing-extensions`
 for Python below 3.13; its closure is installable under Ubuntu 24.04's Python 3.12.

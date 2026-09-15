@@ -628,31 +628,39 @@ def seed_environment() -> int:
             seed_root = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
             metadata_path = seed_root / ".ecommerce-tool.json"
             python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
-            subprocess.run(
-                [
-                    str(python),
-                    "-m",
-                    "pip",
-                    "install",
-                    "--disable-pip-version-check",
-                    "--require-hashes",
-                    "-r",
-                    str(SEED_LOCK),
-                ],
-                check=True,
-                env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
-            )
-            metadata_path.write_text(
-                json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            if not valid():
-                raise RuntimeError("seed environment verification failed after installation")
             temporary_selector = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
-            temporary_selector.unlink(missing_ok=True)
-            temporary_selector.symlink_to(seed_root, target_is_directory=True)
-            os.replace(temporary_selector, selector)
+            try:
+                subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
+                subprocess.run(
+                    [
+                        str(python),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "--require-hashes",
+                        "-r",
+                        str(SEED_LOCK),
+                    ],
+                    check=True,
+                    env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+                )
+                metadata_path.write_text(
+                    json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                if not valid():
+                    raise RuntimeError("seed environment verification failed after installation")
+                temporary_selector.unlink(missing_ok=True)
+                temporary_selector.symlink_to(seed_root, target_is_directory=True)
+                os.replace(temporary_selector, selector)
+            except BaseException:
+                # Only discard this unpublished candidate; published readers retain their paths.
+                if not selector.is_symlink() or selector.resolve() != seed_root:
+                    shutil.rmtree(seed_root)
+                raise
+            finally:
+                temporary_selector.unlink(missing_ok=True)
         publish_checkout_reference(seed_root)
     ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)

@@ -14,7 +14,8 @@ endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 export ANSIBLE_CONFIG
-ANSIBLE_LOCAL = $(PYTHON) scripts/ansible_collections.py run-playbook -- -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
+ANSIBLE_PLAYBOOK = $(PYTHON) scripts/ansible_collections.py run-playbook --
+ANSIBLE_LOCAL = $(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime qualify ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
@@ -148,7 +149,7 @@ product-bootstrap-persistence: ## Reconcile Product persistence generation/depen
 	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
 
 git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target another checkout
-	@ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
+	@$(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
 
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
@@ -221,4 +222,4 @@ resource-candidate: ## Derive a deterministic candidate from representative prep
 .PHONY: tekton-proof
 
 tekton-proof: ## Reconcile Tekton and run one exact remote proof; RUNTIME_CONFIG/BASE_SHA/PARENT_SHA/HEAD_SHA required
-	@ansible-playbook -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"
+	@$(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"

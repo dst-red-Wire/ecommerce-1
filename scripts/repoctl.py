@@ -109,7 +109,11 @@ def run(
     if Path(cmd[0]).name in {"ansible-playbook", "ansible-lint"}:
         from ansible_collections import load_lock, installer_provenance, paths
 
-        installer_provenance(load_lock())
+        installer_provenance(
+            load_lock(),
+            env=effective_env,
+            playbook_command=cmd[0] if Path(cmd[0]).name == "ansible-playbook" else "ansible-playbook",
+        )
         env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(paths()[1])}
         effective_env = env
     sensitive = Path(cmd[0]).name == "docker" or bool(effective_env.get("DOCKER_HOST"))

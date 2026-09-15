@@ -48,12 +48,14 @@ class SeedRepairReal(unittest.TestCase):
                     "with mock.patch.object(b.subprocess, 'run', side_effect=fail): b.seed_environment()",
                 )
             )
+            generations_before = set(old.parent.iterdir())
             failed = subprocess.run(
                 [str(python), str(failed_runner)], env=env, capture_output=True, text=True, timeout=60
             )
             self.assertNotEqual(0, failed.returncode)
             self.assertEqual(old, reference.resolve())
             self.assertTrue(python.exists())
+            self.assertEqual(generations_before, set(old.parent.iterdir()))
             first = subprocess.Popen(
                 [str(python), str(runner)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
