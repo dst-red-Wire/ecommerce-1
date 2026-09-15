@@ -985,7 +985,7 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
-    ensure_developer("go,cgo,templ")
+    ensure_developer("go,cgo,templ" if action == "check" else "go,cgo")
     managed_bin = Path.home() / ".local/bin"
     env = dict(os.environ, PATH=execution_path(os.environ.get("PATH", "")))
     # A version manager may export a GOROOT for a different system Go. The
@@ -998,12 +998,13 @@ def frontend(action: str, scope: str = "") -> int:
         raise RuntimeError("validated managed Go provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
-    templ_version = pinned_versions().get("TEMPL_VERSION")
-    if not templ_version:
-        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
-    templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / templ_version / "linux-amd64/templ"
-    if not templ.is_file():
-        raise RuntimeError("validated managed templ provider is unavailable")
+    if action == "check":
+        templ_version = pinned_versions().get("TEMPL_VERSION")
+        if not templ_version:
+            raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+        templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / templ_version / "linux-amd64/templ"
+        if not templ.is_file():
+            raise RuntimeError("validated managed templ provider is unavailable")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)

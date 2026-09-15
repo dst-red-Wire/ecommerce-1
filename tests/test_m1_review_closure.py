@@ -37,7 +37,7 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('ensure_developer("go,cgo,templ")', frontend)
+        self.assertIn('ensure_developer("go,cgo,templ" if action == "check" else "go,cgo")', frontend)
         self.assertIn("TemporaryDirectory", frontend)
         self.assertIn("frontend templ generated code is stale", frontend)
 

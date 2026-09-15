@@ -545,6 +545,21 @@ def validate_seed_lock(lock_path: str) -> bool:
     )
 
 
+class SeedGenerationBoundaryError(RuntimeError):
+    """The seed cache cannot safely own its generation directory."""
+
+
+def validate_seed_generation_root(generations: Path) -> None:
+    try:
+        invalid = generations.is_symlink() or generations.resolve() != generations
+    except (OSError, RuntimeError) as exc:
+        raise SeedGenerationBoundaryError("seed generation root cannot be resolved safely") from exc
+    if invalid:
+        raise SeedGenerationBoundaryError(
+            "seed generation root is a symlink or escapes its expected identity/tool-home"
+        )
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -571,6 +586,7 @@ def seed_environment() -> int:
     lock_path = tool_home / "locks" / f"python-{identity}.lock"
     selector = seed_root.with_suffix(".current")
     generations = seed_root.with_suffix(".generations")
+    validate_seed_generation_root(generations)
     metadata_path = seed_root / ".ecommerce-tool.json"
     python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -602,6 +618,7 @@ def seed_environment() -> int:
             return False
 
     with identity_lock(lock_path):
+        validate_seed_generation_root(generations)
         if selector.is_symlink():
             selected = selector.resolve()
             if selected.parent != generations:
@@ -628,6 +645,7 @@ def seed_environment() -> int:
             )
             if json.loads(probe.stdout) != [platform.python_implementation(), list(sys.version_info[:2])]:
                 raise RuntimeError("bootstrap interpreter does not match seed Python identity")
+            validate_seed_generation_root(generations)
             generations.mkdir(parents=True, exist_ok=True)
             seed_root = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
             metadata_path = seed_root / ".ecommerce-tool.json"
@@ -730,7 +748,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", choices=("static", "runtime"), default="static")
     args = parser.parse_args(argv)
     if args.mode == "seed":
-        return seed_environment()
+        try:
+            return seed_environment()
+        except SeedGenerationBoundaryError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
     contract = load_contract(args.contract)
     auditor = Auditor(contract)
     os_name, arch, context = normalized_platform(args.os, args.arch)

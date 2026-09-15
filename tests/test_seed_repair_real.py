@@ -21,7 +21,7 @@ class SeedRepairReal(unittest.TestCase):
                 f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
                 "import capability_bootstrap as b\n"
                 f"b.LOCAL_SEED_VENV = Path({str(reference)!r})\n"
-                "raise SystemExit(b.seed_environment())\n"
+                "raise SystemExit(b.main(['seed']))\n"
             )
             env = dict(os.environ, ECOMMERCE_TOOL_HOME=str(root / "tools"))
 
@@ -31,6 +31,31 @@ class SeedRepairReal(unittest.TestCase):
             cold = invoke(sys.executable)
             self.assertEqual(0, cold.returncode, cold.stdout + cold.stderr)
             old = reference.resolve()
+            # Exercise the public seed entry point before any candidate creation.
+            # Every mutated path belongs to this dedicated temporary tool home.
+            external = root / "external"
+            external.mkdir()
+            sentinel = external / "keep"
+            sentinel.write_bytes(b"external data must remain untouched")
+            before = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns, external.stat().st_mtime_ns)
+            for boundary in (old.parent, root / "tools/python"):
+                saved = root / "saved-boundary"
+                boundary.rename(saved)
+                boundary.symlink_to(external, target_is_directory=True)
+                refused = invoke(sys.executable)
+                self.assertEqual(1, refused.returncode, refused.stdout + refused.stderr)
+                self.assertIn("FAIL seed generation root", refused.stderr)
+                self.assertNotIn("Traceback", refused.stderr)
+                self.assertEqual([sentinel], list(external.iterdir()))
+                self.assertEqual(
+                    before, (sentinel.read_bytes(), sentinel.stat().st_mtime_ns, external.stat().st_mtime_ns)
+                )
+                boundary.unlink()
+                saved.rename(boundary)
+                restored = invoke(sys.executable)
+                self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
+                self.assertIn("REUSE qualification seed", restored.stdout)
+                self.assertEqual(old, reference.resolve())
             python = old / "bin/python"
             package = next(old.glob("lib/python*/site-packages/ansible_core-*.dist-info/METADATA"))
             original = package.read_text()
@@ -39,7 +64,7 @@ class SeedRepairReal(unittest.TestCase):
             failed_runner = root / "failed.py"
             failed_runner.write_text(
                 runner.read_text().replace(
-                    "raise SystemExit(b.seed_environment())",
+                    "raise SystemExit(b.main(['seed']))",
                     "from unittest import mock\n"
                     "real_run = b.subprocess.run\n"
                     "def fail(command, **kwargs):\n"
