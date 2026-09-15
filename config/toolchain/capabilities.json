@@ -194,6 +194,7 @@
       "identity_path": ".local/share/ecommerce-1/tools/templ/{version}/linux-amd64/templ",
       "version_args": ["version"],
       "version_key": "TEMPL_VERSION",
+      "platforms": ["linux/amd64"],
       "provision": {"type": "ansible", "tags": "templ"},
       "classification": "managed",
       "requirement": "required-static"

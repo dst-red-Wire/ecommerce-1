@@ -509,7 +509,7 @@ def seed_environment() -> int:
         sort_keys=True,
     ).encode()
     identity = hashlib.sha256(identity_input).hexdigest()
-    tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
+    tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")).resolve()
     seed_root = tool_home / "python" / identity
     lock_path = tool_home / "locks" / f"python-{identity}.lock"
     metadata_path = seed_root / ".ecommerce-tool.json"
@@ -523,15 +523,27 @@ def seed_environment() -> int:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if metadata != {"identity": identity, "input": json.loads(identity_input)}:
                 return False
+            locked = dict(
+                re.findall(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", SEED_LOCK.read_text(encoding="utf-8"), re.MULTILINE)
+            )
+            expected = json.dumps({name.lower().replace("_", "-"): version for name, version in locked.items()})
             proc = subprocess.run(
-                [str(python), "-c", "import ansible,yaml; print(ansible.__version__, yaml.__version__)"],
+                [
+                    str(python),
+                    "-c",
+                    "import importlib.metadata as m,json,subprocess,sys; "
+                    "expected=json.loads(sys.argv[1]); "
+                    "actual={n:m.version(n) for n in expected}; "
+                    "sys.exit(0 if actual == expected and subprocess.run([sys.executable,'-m','pip','check'], "
+                    "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0 else 1)",
+                    expected,
+                ],
                 text=True,
                 capture_output=True,
                 check=False,
                 timeout=30,
             )
-            expected_versions = [versions["ANSIBLE_CORE_VERSION"], versions["PYYAML_VERSION"]]
-            return proc.returncode == 0 and proc.stdout.split() == expected_versions
+            return proc.returncode == 0
         except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
             return False
 

@@ -32,7 +32,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "ansible_facts.architecture == qualification_architecture",
         "net.ipv4.ip_forward=1",
         "argv: [sysctl, -n, net.ipv4.ip_forward]",
-        "qualification_ip_forward.stdout != \"1\"",
+        'qualification_ip_forward.stdout != "1"',
         "argv: [docker, version]",
         "'Server:' not in qualification_docker_version.stdout",
         "argv: [docker, info]",
@@ -96,9 +96,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     if trust_positions != sorted(trust_positions):
         raise AssertionError("candidate host key is enrolled before fingerprint equality")
 
-    remote_start = runbook.find(
-        'ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes'
-    )
+    remote_start = runbook.find('ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes')
     remote_end = runbook.find("\nQUALIFICATION_RUNNER", remote_start + 1)
     if remote_start < 0 or remote_end < 0:
         raise AssertionError("qualification commands lack an explicit verified SSH context")
@@ -155,9 +153,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         post_bootstrap,
     )
     final_clean = remote_sequence.find('test -z "$post_bootstrap_status"', post_bootstrap)
-    final_forwarding = remote_sequence.find(
-        'test "$(sysctl -n net.ipv4.ip_forward)" = "1"', post_bootstrap
-    )
+    final_forwarding = remote_sequence.find('test "$(sysctl -n net.ipv4.ip_forward)" = "1"', post_bootstrap)
     if not (post_bootstrap < final_head < final_clean < final_forwarding < product_start):
         raise AssertionError("post-bootstrap fail-closed checks do not immediately precede Product")
 
@@ -195,9 +191,7 @@ class QualificationRunnerContractTest(unittest.TestCase):
         self.assertTrue(all("=" in package for package in self._declared_packages()))
 
     def test_mutation_disallow_pinned_snapshot_downgrade(self):
-        self.assert_mutation_rejected(
-            tasks=self.tasks.replace("allow_downgrade: true", "allow_downgrade: false")
-        )
+        self.assert_mutation_rejected(tasks=self.tasks.replace("allow_downgrade: true", "allow_downgrade: false"))
 
     def test_mutation_remove_non_root_docker_info_verification(self):
         start = self.tasks.index("- name: Verify Docker daemon information")
@@ -208,7 +202,9 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_remove_persistent_sysctl_file(self):
         self.assert_mutation_rejected(
-            defaults=self.defaults.replace("qualification_sysctl_file: /etc/sysctl.d/", "qualification_sysctl_file: /tmp/")
+            defaults=self.defaults.replace(
+                "qualification_sysctl_file: /etc/sysctl.d/", "qualification_sysctl_file: /tmp/"
+            )
         )
 
     def test_mutation_add_m4_resource(self):
@@ -244,9 +240,7 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_use_default_ci_base(self):
         self.assert_mutation_rejected(
-            runbook=self.runbook.replace(
-                "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci", "make ci"
-            )
+            runbook=self.runbook.replace("BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci", "make ci")
         )
 
     def test_mutation_reuse_general_known_hosts(self):
@@ -264,7 +258,9 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_accept_reusable_tainted_runner(self):
         self.assert_mutation_rejected(
-            playbook=self.playbook.replace("not qualification_consumed.stat.exists", "qualification_consumed.stat.exists")
+            playbook=self.playbook.replace(
+                "not qualification_consumed.stat.exists", "qualification_consumed.stat.exists"
+            )
         )
 
     def test_mutation_remove_post_bootstrap_worktree_check(self):
@@ -275,7 +271,7 @@ class QualificationRunnerContractTest(unittest.TestCase):
     def test_mutation_remove_post_bootstrap_exact_head_check(self):
         marker = 'test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f'
         position = self.runbook.index(marker, self.runbook.index("make env-check"))
-        mutated = self.runbook[:position] + "git rev-parse HEAD" + self.runbook[position + len(marker):]
+        mutated = self.runbook[:position] + "git rev-parse HEAD" + self.runbook[position + len(marker) :]
         self.assert_mutation_rejected(runbook=mutated)
 
     def test_mutation_replace_final_ip_forward_assertion_with_print(self):
@@ -287,16 +283,10 @@ class QualificationRunnerContractTest(unittest.TestCase):
         )
 
     def test_mutation_remove_credential_isolation_requirement(self):
-        self.assert_mutation_rejected(
-            runbook=self.runbook.replace("no cloud instance role", "ordinary cloud host")
-        )
+        self.assert_mutation_rejected(runbook=self.runbook.replace("no cloud instance role", "ordinary cloud host"))
 
     def _declared_packages(self):
-        return [
-            line.strip()[3:-1]
-            for line in self.defaults.splitlines()
-            if line.strip().startswith('- "')
-        ]
+        return [line.strip()[3:-1] for line in self.defaults.splitlines() if line.strip().startswith('- "')]
 
 
 if __name__ == "__main__":

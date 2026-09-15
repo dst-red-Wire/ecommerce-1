@@ -7,8 +7,10 @@
   loop:
     - "{{ local_bin }}"
     - "{{ local_share }}"
+    - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+    - "{{ qualification_tool_home }}/cache/terraform/providers"
+  tags: [toolchain, agent_tools, node, go, cgo, sqlc, templ, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -142,14 +144,16 @@
       - --timeout
       - '300'
       - "{{ local_cache }}/templ-{{ templ_version }}-linux-amd64.lock"
-      - "{{ local_share }}/toolchains/go/{{ go_version }}/go/bin/go"
+      - "{{ resolved_executables.go | default(local_bin + '/go') }}"
       - install
       - "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"
   environment:
     GOBIN: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
-    GOROOT: "{{ local_share }}/toolchains/go/{{ go_version }}/go"
-    GOMODCACHE: "{{ local_cache }}/go/mod"
-    GOCACHE: "{{ local_cache }}/go/{{ go_version }}/linux-amd64/build"
+    # Empty makes the selected Go executable derive its own root instead of
+    # inheriting a version-manager GOROOT from the Ansible controller.
+    GOROOT: ""
+    GOMODCACHE: "{{ qualification_tool_home }}/cache/go/mod"
+    GOCACHE: "{{ qualification_tool_home }}/cache/go/{{ go_version }}/build"
   when: templ_identity.rc != 0 or templ_version not in templ_identity.stdout
   changed_when: true
   tags: [toolchain, go, templ]

@@ -58,7 +58,7 @@ except ModuleNotFoundError as exc:
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
 COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "requirements.yml"
-COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest()
+COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest() if COLLECTIONS_LOCK.is_file() else ""
 TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
 PROJECT_COLLECTIONS = TOOL_HOME / "ansible" / "collections" / COLLECTIONS_ID
 # Every Ansible subprocess resolves collections from the immutable lock identity only.
@@ -241,6 +241,16 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
+    if "docker_client" in wanted and not shutil.which("docker"):
+        return False
+    if "templ" in wanted:
+        version = pins.get("TEMPL_VERSION", "")
+        templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / version / "linux-amd64/templ"
+        if not templ.is_file() or not os.access(templ, os.X_OK):
+            return False
+        got = run([str(templ), "version"], check=False, capture=True)
+        if got.returncode or version not in got.stdout:
+            return False
     if "quality_tools" in wanted:
         for command, key in (("oxlint", "OXLINT_VERSION"), ("oxfmt", "OXFMT_VERSION"), ("ruff", "RUFF_VERSION")):
             executable = shutil.which(command)
@@ -763,11 +773,10 @@ def service_check(service: str) -> int:
     selected_tests = list(module.rglob("*_test.go"))
     needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
     if needs_containers:
+        ensure_developer("docker_client")
         docker = shutil.which("docker")
         if not docker:
-            return fail(
-                "PLATFORM NOT CAPABLE: Docker client absent; run the runtime bootstrap on a compatible runner", 2
-            )
+            return fail("PLATFORM NOT CAPABLE: Docker client reconciliation did not publish an executable", 2)
         context = run([docker, "context", "show"], check=False, capture=True)
         endpoint = os.environ.get("DOCKER_HOST", "").strip()
         daemon = run([docker, "info", "--format", "{{json .ServerVersion}}"], check=False, capture=True)

@@ -44,9 +44,7 @@ def resolve_base(value: str) -> str | None:
         if result.returncode:
             raise AssertionError(f"BASE is not a resolvable local Git ref: {value}")
         candidate = result.stdout.strip()
-    exists = subprocess.run(
-        ["git", "cat-file", "-e", f"{candidate}^{{commit}}"], cwd=ROOT
-    )
+    exists = subprocess.run(["git", "cat-file", "-e", f"{candidate}^{{commit}}"], cwd=ROOT)
     if exists.returncode:
         raise AssertionError("the immutable BASE commit must exist")
     return candidate
@@ -66,20 +64,20 @@ def validate_contract(files: dict[str, str]) -> None:
         'resource "hcloud_network_subnet" "qualification"',
         'resource "hcloud_server" "runner"',
         'resource "hcloud_server" "gateway"',
-        'network_zone = data.hcloud_location.qualification.network_zone',
-        'subnet_cidr        = var.network_cidr',
-        'gateway_private_ip = cidrhost(var.network_cidr, 2)',
-        'runner_private_ip  = cidrhost(var.network_cidr, 3)',
-        'source_ips = ["${local.gateway_private_ip}/32"]',
+        "network_zone = data.hcloud_location.qualification.network_zone",
+        "subnet_cidr        = var.network_cidr",
+        "gateway_private_ip = cidrhost(var.network_cidr, 2)",
+        "runner_private_ip  = cidrhost(var.network_cidr, 3)",
+        'source_ips  = ["${local.gateway_private_ip}/32"]',
         'destination_ips = ["${local.gateway_private_ip}/32"]',
-        'ipv4_enabled = false',
-        'ipv4_enabled = true',
-        'qualification_gateway_user',
+        "ipv4_enabled = false",
+        "ipv4_enabled = true",
+        "qualification_gateway_user",
         'ProxyCommand=\\"ssh',
-        'KnownHostsCommand=none',
-        'StrictHostKeyChecking=yes',
-        'ForwardAgent=no',
-        'ClearAllForwardings=yes',
+        "KnownHostsCommand=none",
+        "StrictHostKeyChecking=yes",
+        "ForwardAgent=no",
+        "ClearAllForwardings=yes",
         '!endswith(cidr, "/0")',
     )
     for marker in required:
@@ -110,12 +108,26 @@ def validate_contract(files: dict[str, str]) -> None:
         if marker not in proxy_tasks:
             raise AssertionError(f"runner proxy client is incomplete: {marker}")
     required_domains = (
-        "snapshot.ubuntu.com", "github.com", "api.github.com",
-        "objects.githubusercontent.com", "release-assets.githubusercontent.com",
-        "pypi.org", "files.pythonhosted.org", "proxy.golang.org", "sum.golang.org",
-        "go.dev", "dl.google.com", "storage.googleapis.com", "nodejs.org",
-        "registry.npmjs.org", "get.helm.sh", "releases.hashicorp.com", "dl.k8s.io",
-        "registry-1.docker.io", "auth.docker.io", "production.cloudflare.docker.com",
+        "snapshot.ubuntu.com",
+        "github.com",
+        "api.github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "proxy.golang.org",
+        "sum.golang.org",
+        "go.dev",
+        "dl.google.com",
+        "storage.googleapis.com",
+        "nodejs.org",
+        "registry.npmjs.org",
+        "get.helm.sh",
+        "releases.hashicorp.com",
+        "dl.k8s.io",
+        "registry-1.docker.io",
+        "auth.docker.io",
+        "production.cloudflare.docker.com",
         "docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com",
     )
     for domain in required_domains:
@@ -136,43 +148,41 @@ def validate_contract(files: dict[str, str]) -> None:
     )[0]
     gateway_proxy = (
         '-o ProxyCommand=\\"ssh '
-        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
-        '-o GlobalKnownHostsFile=/dev/null '
-        '-o KnownHostsCommand=none '
-        '-o StrictHostKeyChecking=yes '
-        '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
-        '-o ForwardAgent=no -o ClearAllForwardings=yes '
-        '-l ${module.hcloud_qualification.gateway_user} -W %h:%p '
+        "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} "
+        "-o GlobalKnownHostsFile=/dev/null "
+        "-o KnownHostsCommand=none "
+        "-o StrictHostKeyChecking=yes "
+        "-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} "
+        "-o ForwardAgent=no -o ClearAllForwardings=yes "
+        "-l ${module.hcloud_qualification.gateway_user} -W %h:%p "
         '${module.hcloud_qualification.gateway_ipv4}\\"'
     )
     if gateway_proxy not in inventory_output:
         raise AssertionError("inventory gateway hop is not bound to its dedicated trust policy")
     runner_trust = (
-        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
-        '-o GlobalKnownHostsFile=/dev/null '
-        '-o KnownHostsCommand=none '
-        '-o StrictHostKeyChecking=yes '
-        '-o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} '
-        '-o ForwardAgent=no -o ClearAllForwardings=yes'
+        "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} "
+        "-o GlobalKnownHostsFile=/dev/null "
+        "-o KnownHostsCommand=none "
+        "-o StrictHostKeyChecking=yes "
+        "-o HostKeyAlias=${module.hcloud_qualification.runner_private_ip} "
+        "-o ForwardAgent=no -o ClearAllForwardings=yes"
     )
     if runner_trust not in inventory_output:
         raise AssertionError("inventory runner hop is not bound to its dedicated trust policy")
-    gateway_inventory_output = outputs.split(
-        'output "qualification_gateway_inventory_host_line"', 1
-    )[1].split('output "qualification_proxyjump"', 1)[0]
+    gateway_inventory_output = outputs.split('output "qualification_gateway_inventory_host_line"', 1)[1].split(
+        'output "qualification_proxyjump"', 1
+    )[0]
     gateway_trust = (
-        '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} '
-        '-o GlobalKnownHostsFile=/dev/null '
-        '-o KnownHostsCommand=none '
-        '-o StrictHostKeyChecking=yes '
-        '-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} '
-        '-o ForwardAgent=no -o ClearAllForwardings=yes'
+        "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} "
+        "-o GlobalKnownHostsFile=/dev/null "
+        "-o KnownHostsCommand=none "
+        "-o StrictHostKeyChecking=yes "
+        "-o HostKeyAlias=${module.hcloud_qualification.gateway_ipv4} "
+        "-o ForwardAgent=no -o ClearAllForwardings=yes"
     )
     if gateway_trust not in gateway_inventory_output:
         raise AssertionError("inventory gateway connection permits alternate SSH trust")
-    ansible_ssh_args_output = terraform_output_block(
-        outputs, "qualification_ansible_ssh_args"
-    )
+    ansible_ssh_args_output = terraform_output_block(outputs, "qualification_ansible_ssh_args")
     if runner_trust not in ansible_ssh_args_output:
         raise AssertionError("standalone Ansible runner hop permits alternate SSH trust")
     if gateway_proxy not in ansible_ssh_args_output:
@@ -188,17 +198,17 @@ def validate_contract(files: dict[str, str]) -> None:
             raise AssertionError(f"two-hop trust procedure is incomplete: {trust_marker}")
     enrollment_gateway_trust = (
         'ssh -o UserKnownHostsFile="$staged_known_hosts" '
-        '-o GlobalKnownHostsFile=/dev/null \\\n'
-        '  -o KnownHostsCommand=none \\\n'
-        '  -o StrictHostKeyChecking=yes \\\n'
+        "-o GlobalKnownHostsFile=/dev/null \\\n"
+        "  -o KnownHostsCommand=none \\\n"
+        "  -o StrictHostKeyChecking=yes \\\n"
         '  -o HostKeyAlias="$QUALIFICATION_GATEWAY_HOST" \\\n'
-        '  -o ForwardAgent=no -o ClearAllForwardings=yes'
+        "  -o ForwardAgent=no -o ClearAllForwardings=yes"
     )
     if enrollment_gateway_trust not in runbook:
         raise AssertionError("gateway enrollment is not isolated from global SSH trust")
     if (
         'ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
-        '-o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes '
+        "-o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes "
         '-o ForwardAgent=no -o ClearAllForwardings=yes"'
     ) not in runbook:
         raise AssertionError("qualification Ansible SSH args permit global trust fallback")
@@ -209,28 +219,36 @@ def validate_contract(files: dict[str, str]) -> None:
     final_proof = runbook[final_proof_start:final_proof_end]
     gateway_proxy = (
         '-o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS '
-        '-o GlobalKnownHostsFile=/dev/null '
-        '-o KnownHostsCommand=none '
-        '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST '
-        '-o ForwardAgent=no -o ClearAllForwardings=yes '
+        "-o GlobalKnownHostsFile=/dev/null "
+        "-o KnownHostsCommand=none "
+        "-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST "
+        "-o ForwardAgent=no -o ClearAllForwardings=yes "
         '-l $GATEWAY_USER -W %h:%p $GATEWAY_HOST"'
     )
     runner_trust = (
         '-o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" \\\n'
-        '  -o GlobalKnownHostsFile=/dev/null \\\n'
-        '  -o KnownHostsCommand=none \\\n'
-        '  -o StrictHostKeyChecking=yes \\\n'
+        "  -o GlobalKnownHostsFile=/dev/null \\\n"
+        "  -o KnownHostsCommand=none \\\n"
+        "  -o StrictHostKeyChecking=yes \\\n"
         '  -o HostKeyAlias="$RUNNER_PRIVATE_HOST" \\\n'
-        '  -o ForwardAgent=no \\\n'
-        '  -o ClearAllForwardings=yes'
+        "  -o ForwardAgent=no \\\n"
+        "  -o ClearAllForwardings=yes"
     )
     for marker in (
         runner_trust,
         gateway_proxy,
         '"${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}"',
-        "whoami", "hostname", "uname -a", "docker version", "docker info",
-        "sysctl -n net.ipv4.ip_forward", "git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f",
-        "make seed", "make bootstrap", "make env-check", "git status --porcelain=v1",
+        "whoami",
+        "hostname",
+        "uname -a",
+        "docker version",
+        "docker info",
+        "sysctl -n net.ipv4.ip_forward",
+        "git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f",
+        "make seed",
+        "make bootstrap",
+        "make env-check",
+        "git status --porcelain=v1",
         "$HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1",
         "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci",
     ):
@@ -269,7 +287,12 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 "ansible/gateway_defaults": (ANSIBLE / "roles/qualification_gateway/defaults/main.yml").read_text(),
                 "ansible/gateway_tasks": (ANSIBLE / "roles/qualification_gateway/tasks/main.yml").read_text(),
                 "ansible/squid_policy": (ANSIBLE / "roles/qualification_gateway/templates/squid.conf.j2").read_text(),
-                "ansible/proxy_tasks": (ANSIBLE / "roles/qualification_proxy_client/tasks/main.yml").read_text(),
+                "ansible/proxy_tasks": "\n".join(
+                    (
+                        (ANSIBLE / "roles/qualification_proxy_client/tasks/main.yml").read_text(),
+                        (ANSIBLE / "roles/qualification_proxy_client/handlers/main.yml").read_text(),
+                    )
+                ),
                 "runbook": (ENV / "README.md").read_text(),
             }
         )
@@ -327,16 +350,16 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ("environment/outputs.tf", "StrictHostKeyChecking=yes", "StrictHostKeyChecking=no"),
             (
                 "environment/outputs.tf",
-                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
-                '-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}',
+                "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}",
+                "-o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o StrictHostKeyChecking=yes -o HostKeyAlias=${module.hcloud_qualification.runner_private_ip}",
             ),
             (
                 "environment/outputs.tf",
                 '-o ProxyCommand=\\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS} -o GlobalKnownHostsFile=/dev/null',
                 '-o ProxyCommand=\\"ssh -o UserKnownHostsFile=$${QUALIFICATION_KNOWN_HOSTS}',
             ),
-            ("runbook", 'QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:', "GATEWAY_SCAN_IS_TRUSTED="),
-            ("runbook", 'QUALIFICATION_RUNNER_FINGERPRINT=SHA256:', "RUNNER_SCAN_IS_TRUSTED="),
+            ("runbook", "QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:", "GATEWAY_SCAN_IS_TRUSTED="),
+            ("runbook", "QUALIFICATION_RUNNER_FINGERPRINT=SHA256:", "RUNNER_SCAN_IS_TRUSTED="),
             ("runbook", '-o ProxyCommand="ssh ', '-o ProxyCommand="false '),
             (
                 "runbook",
@@ -355,13 +378,13 @@ class QualificationTerraformContractTest(unittest.TestCase):
             ),
             (
                 "runbook",
-                '-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST',
-                '-o StrictHostKeyChecking=yes',
+                "-o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST",
+                "-o StrictHostKeyChecking=yes",
             ),
             (
                 "runbook",
-                '-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no',
-                '-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=yes',
+                "-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no",
+                "-o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=yes",
             ),
             (
                 "runbook",
@@ -396,18 +419,14 @@ class QualificationTerraformContractTest(unittest.TestCase):
         ):
             with self.subTest(hop=hop, marker=marker):
                 segment = runner_hop if hop == "runner" else gateway_hop
-                self.assertEqual(
-                    segment.count(marker), 1, f"{hop} mutation fixture must be exact"
-                )
+                self.assertEqual(segment.count(marker), 1, f"{hop} mutation fixture must be exact")
                 mutated_segment = segment.replace(marker, "", 1)
                 if hop == "runner":
                     mutated_block = mutated_segment + proxy_boundary + gateway_hop
                 else:
                     mutated_block = runner_hop + proxy_boundary + mutated_segment
                 mutated = dict(self.files)
-                mutated["environment/outputs.tf"] = outputs.replace(
-                    block, mutated_block, 1
-                )
+                mutated["environment/outputs.tf"] = outputs.replace(block, mutated_block, 1)
                 with self.assertRaises(AssertionError):
                     validate_contract(mutated)
 
@@ -439,9 +458,9 @@ class QualificationTerraformContractTest(unittest.TestCase):
                 resolve_base("not-a-real-base-ref")
         finally:
             subprocess.run(["git", "update-ref", "-d", test_ref], cwd=ROOT, check=True)
-        self.assertNotEqual(0, subprocess.run(
-            ["git", "show-ref", "--verify", "--quiet", test_ref], cwd=ROOT
-        ).returncode)
+        self.assertNotEqual(
+            0, subprocess.run(["git", "show-ref", "--verify", "--quiet", test_ref], cwd=ROOT).returncode
+        )
         developer_ref_after = subprocess.run(
             ["git", "rev-parse", "--verify", developer_ref],
             cwd=ROOT,

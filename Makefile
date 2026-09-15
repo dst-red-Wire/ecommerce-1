@@ -38,7 +38,9 @@ env-check-runtime: ## Audit and require optional external runtime capabilities
 	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
 
-qualify: bootstrap env-check ## Prepare missing pinned prerequisites once, then qualify the exact worktree
+env-check: bootstrap
+
+qualify: env-check ## Prepare missing pinned prerequisites once, then qualify the exact worktree
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 help: ## Show the available checks

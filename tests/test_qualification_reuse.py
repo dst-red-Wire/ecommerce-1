@@ -8,7 +8,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class QualificationReuseContractTests(unittest.TestCase):
     def test_canonical_entrypoint_prepares_before_qualification(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-        self.assertIn("qualify: bootstrap env-check", makefile)
+        self.assertIn("env-check: bootstrap", makefile)
+        self.assertIn("qualify: env-check", makefile)
         self.assertIn("ECOMMERCE_TOOL_HOME ?=", makefile)
         self.assertIn("TF_PLUGIN_CACHE_DIR ?=", makefile)
 

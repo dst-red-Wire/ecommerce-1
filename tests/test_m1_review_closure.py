@@ -92,7 +92,10 @@ class M1ReviewClosureTests(unittest.TestCase):
                 mock.patch.object(REPOCTL.shutil, "which", return_value="/bin/docker"),
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))
-                ensure.assert_called_once_with(expected)
+                expected_calls = [mock.call(expected)]
+                if service == "product":
+                    expected_calls.insert(0, mock.call("docker_client"))
+                self.assertEqual(expected_calls, ensure.call_args_list)
 
     def test_site_builds_and_terminates_exact_binaries(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
