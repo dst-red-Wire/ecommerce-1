@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1094,6 +1095,81 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     return p.returncode == 0
 
 
+def _local_parallelism(gate_count: int) -> int:
+    cpu = max(1, os.cpu_count() or 1)
+    try:
+        memory_gib = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // (1024**3)
+    except (OSError, ValueError):
+        memory_gib = 1
+    resource_bound = max(1, min(cpu, max(1, memory_gib // 2), gate_count, 4))
+    configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+    return max(1, min(configured, resource_bound))
+
+
+def _run_independent_gates(
+    gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]
+) -> bool:
+    """Run read-only local gates concurrently and stop siblings on first failure."""
+    jobs = _local_parallelism(len(gates))
+    pending = list(gates)
+    running: dict[str, tuple[subprocess.Popen, object, Path, float, list[str]]] = {}
+    lock = threading.Lock()
+    logs = CONTEXT / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    child_env = dict(env)
+    child_env.setdefault("GOMAXPROCS", str(max(1, (os.cpu_count() or 1) // jobs)))
+    child_env.setdefault("ANSIBLE_FORKS", str(max(1, (os.cpu_count() or 1) // jobs)))
+
+    def stop_all():
+        for process, *_ in running.values():
+            if process.poll() is None:
+                process.terminate()
+        deadline = time.monotonic() + 3
+        for process, *_ in running.values():
+            try:
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                name, command = pending.pop(0)
+                log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+                handle = log_path.open("w", encoding="utf-8")
+                process = subprocess.Popen(
+                    command, cwd=ROOT, env=child_env, text=True, stdout=handle, stderr=subprocess.STDOUT
+                )
+                running[name] = (process, handle, log_path, time.monotonic(), command)
+            finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
+            if finished is None:
+                time.sleep(0.05)
+                continue
+            process, handle, log_path, started, command = running.pop(finished)
+            handle.close()
+            record = {
+                "gate": finished,
+                "status": "PASS" if process.returncode == 0 else "FAIL",
+                "exit_code": process.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "command": command,
+                "log": str(log_path.relative_to(ROOT)),
+            }
+            with lock:
+                records.append(record)
+            print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
+            if process.returncode:
+                stop_all()
+                return False
+        return True
+    except (KeyboardInterrupt, SystemExit):
+        stop_all()
+        raise
+    finally:
+        for _process, handle, *_rest in running.values():
+            handle.close()
+
+
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
     """Return direct-parent evidence only when every exactness invariant holds."""
     if head == "WORKTREE":
@@ -1524,10 +1600,13 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
-    for name, command in global_commands:
-        if not run_stable_gate(name, command):
-            write_evidence(base, head, paths, components, records, verification)
-            return 1
+    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_independent_gates(global_commands, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
+        write_evidence(base, head, paths, components, records, verification)
+        return fail("parallel global gates mutated the worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
