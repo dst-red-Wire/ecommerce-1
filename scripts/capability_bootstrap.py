@@ -260,6 +260,7 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
 
             load_lock()
             env["ANSIBLE_COLLECTIONS_PATH"] = str(selected_path())
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(
             command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
         )

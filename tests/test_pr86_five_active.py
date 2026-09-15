@@ -84,7 +84,17 @@ class CollectionIntegrityGenerationTests(unittest.TestCase):
         return collections.selected_path()
 
     def test_payload_and_inventory_corruption_repair_preserves_readers(self):
-        for corruption in ("deleted", "modified", "inventory", "both", "escape", "type"):
+        for corruption in (
+            "deleted",
+            "modified",
+            "inventory",
+            "both",
+            "escape",
+            "type",
+            "extra-file",
+            "extra-dir",
+            "bytecode",
+        ):
             with self.subTest(corruption=corruption):
                 old = self.prepare()
                 payload = old / "ansible_collections/test/fixture/plugins/module.py"
@@ -103,6 +113,13 @@ class CollectionIntegrityGenerationTests(unittest.TestCase):
                 if corruption == "type":
                     payload.unlink()
                     payload.mkdir()
+                if corruption == "extra-file":
+                    (payload.parent / "unverified.py").write_text("unverified plugin")
+                if corruption == "extra-dir":
+                    (payload.parent / "unverified").mkdir()
+                if corruption == "bytecode":
+                    (payload.parent / "__pycache__").mkdir()
+                    (payload.parent / "__pycache__/module.cpython-312.pyc").write_bytes(b"unverified")
                 self.assertFalse(collections.installed_ok(self.data, old))
                 new = self.prepare()
                 self.assertNotEqual(old, new)
@@ -132,6 +149,8 @@ class CollectionIntegrityGenerationTests(unittest.TestCase):
                 collections.prepare(offline=True)
         self.assertEqual(before, set(generations.iterdir()))
         self.assertEqual(old, collections.selected_path())
+        selector = self.destination.with_suffix(".current")
+        selector.with_name(f".{selector.name}.{os.getpid()}.tmp").symlink_to(interrupted)
         self.assertNotEqual(old, self.prepare())
         self.assertTrue(interrupted.exists())
 
@@ -265,6 +284,7 @@ class DockerMalformedSubprocessTests(unittest.TestCase):
     def test_real_make_entry_and_unrelated_json_output(self):
         root = Path(__file__).resolve().parents[1]
         for endpoint in (
+            "tcp://a:1@daemon:abc",
             "tcp://fixture-user:fixture-secret@daemon:abc",
             "tcp://daemon:-1",
             "tcp://daemon:65536",
@@ -272,7 +292,7 @@ class DockerMalformedSubprocessTests(unittest.TestCase):
         ):
             with self.subTest(case=endpoint):
                 env = dict(os.environ, DOCKER_HOST=endpoint)
-                self.assertEqual('{"ok":true}', ctl._safe_docker_detail('{"ok":true}', env))
+                self.assertEqual('{"a":1,"ok":true}', ctl._safe_docker_detail('{"a":1,"ok":true}', env))
                 result = subprocess.run(
                     ["make", "service-check", "SERVICE=product"],
                     cwd=root,
@@ -286,3 +306,79 @@ class DockerMalformedSubprocessTests(unittest.TestCase):
                 self.assertIn("PLATFORM NOT CAPABLE", output)
                 for forbidden in ("Traceback", "fixture-secret", "fixture-user"):
                     self.assertNotIn(forbidden, output)
+
+
+class ReviewFollowupTests(unittest.TestCase):
+    def test_collection_closure_rejects_additional_namespaces_and_collections(self):
+        case = CollectionIntegrityGenerationTests()
+        case.setUp()
+        try:
+            for relative in ("unlisted", "ansible_collections/unknown", "ansible_collections/test/extra"):
+                old = case.prepare()
+                (old / relative).mkdir()
+                self.assertFalse(collections.installed_ok(case.data, old))
+                self.assertNotEqual(old, case.prepare())
+        finally:
+            case.doCleanups()
+
+    def test_dependent_docker_probes_use_validated_client_outside_path(self):
+        contract = bootstrap.load_contract()
+        version = bootstrap.load_versions()["DOCKER_CLIENT_VERSION"]
+        calls = []
+
+        def runner(command):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                f"Docker version {version}, build fixture" if command[-1] == "--version" else "Server 29.7.2",
+                "",
+            )
+
+        auditor = bootstrap.Auditor(contract, runner=runner, which=lambda command: None)
+        with mock.patch.object(auditor, "resolve_repoctl_runtime", return_value="/validated/docker"):
+            for name in ("docker-client-installed", "docker-user-access", "docker-daemon-ready", "docker"):
+                self.assertEqual("PASS", auditor.check(auditor.graph.items[name], name).state)
+        self.assertEqual([["/validated/docker", "--version"], *[["/validated/docker", "info"]] * 3], calls)
+
+    def test_env_check_cannot_bootstrap_when_seed_is_absent(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            shutil.copy2(root / "Makefile", target / "Makefile")
+            (target / "config/toolchain").mkdir(parents=True)
+            shutil.copy2(root / "config/toolchain/versions.env", target / "config/toolchain/versions.env")
+            # A trap records any attempted Python reconciliation. A read-only audit
+            # must fail on the missing seed before invoking it.
+            trap = target / "python-trap"
+            trap.write_text("#!/usr/bin/python3\nfrom pathlib import Path\nPath('unexpected-reconciliation').touch()\n")
+            trap.chmod(0o755)
+            result = subprocess.run(["make", "env-check", f"PYTHON={trap}"], cwd=target, capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("BLOCKED qualification seed missing", result.stderr + result.stdout)
+            self.assertFalse((target / "unexpected-reconciliation").exists())
+            self.assertFalse((target / ".venv").exists())
+
+    def test_qualify_orders_reconciliation_before_audit_even_with_parallel_make(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            shutil.copy2(root / "Makefile", target / "Makefile")
+            (target / "config/toolchain").mkdir(parents=True)
+            shutil.copy2(root / "config/toolchain/versions.env", target / "config/toolchain/versions.env")
+            # Executed targets assert the dependency order; -j must not fan out
+            # bootstrap and audit as independent prerequisites.
+            extra = target / "order.mk"
+            extra.write_text(
+                "include Makefile\nseed:\n\t@true\nbootstrap:\n\t@touch prepared\nenv-check:\n\t@test -f prepared\n\t@touch audited\n"
+            )
+            trap = target / "qualification-python"
+            trap.write_text("#!/usr/bin/python3\nfrom pathlib import Path\nassert Path('audited').exists()\n")
+            trap.chmod(0o755)
+            result = subprocess.run(
+                ["make", "-j4", "-f", str(extra), "qualify", f"QUALIFICATION_PYTHON={trap}", "MAKE=make -f order.mk"],
+                cwd=target,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)

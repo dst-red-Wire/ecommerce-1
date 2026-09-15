@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -149,6 +150,46 @@ class CollectionsRepairReal(unittest.TestCase):
             self.assertEqual(0, cold.returncode, cold.stdout + cold.stderr)
             selector = root / f"ansible/collections/{collections.identity()}.current"
             old = selector.resolve()
+            # Loading a real collection filter through a canonical consumer must
+            # leave the verified generation reusable (including its inventory).
+            import capability_bootstrap as bootstrap
+
+            playbook = root / "consume.yml"
+            playbook.write_text(
+                json.dumps(
+                    [
+                        {
+                            "hosts": "localhost",
+                            "gather_facts": False,
+                            "tasks": [
+                                {
+                                    "name": "Import a collection filter",
+                                    "ansible.builtin.assert": {
+                                        "that": ["([('a', 1)] | community.general.dict).a == 1"]
+                                    },
+                                }
+                            ],
+                        }
+                    ]
+                )
+            )
+            with mock.patch.object(collections, "TOOL_HOME", root), mock.patch.dict(os.environ, env):
+                consumer = bootstrap.default_runner(
+                    [
+                        str(ROOT / ".venv/qualification/bin/ansible-playbook"),
+                        "-i",
+                        "localhost,",
+                        "-c",
+                        "local",
+                        str(playbook),
+                    ]
+                )
+            self.assertEqual(0, consumer.returncode, consumer.stdout + consumer.stderr)
+            after_consumer = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, timeout=90)
+            self.assertEqual(0, after_consumer.returncode, after_consumer.stdout + after_consumer.stderr)
+            self.assertIn("REUSE collections", after_consumer.stdout)
+            self.assertNotIn("PUBLISH", after_consumer.stdout)
+            self.assertEqual(old, selector.resolve())
             payload = old / "ansible_collections/ansible/posix/plugins/modules/mount.py"
             late_file = old / "ansible_collections/community/docker/plugins/modules/docker_container.py"
             late_contents = late_file.read_bytes()

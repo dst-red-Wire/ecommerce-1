@@ -100,7 +100,7 @@ def payload_ok(item: dict, root: Path) -> bool:
             name = PurePosixPath(member.name)
             if name.is_absolute() or ".." in name.parts or member.name in seen:
                 return False
-            seen.add(member.name)
+            seen.add(str(name))
             target = root.joinpath(*name.parts)
             # Validate each parent once within this verification, never across runs.
             for parent in target.parents:
@@ -129,7 +129,14 @@ def payload_ok(item: dict, root: Path) -> bool:
                     return False
             else:
                 return False
-    return True
+    actual = set()
+    pending = [root]
+    while pending:
+        for entry in pending.pop().iterdir():
+            actual.add(entry.relative_to(root).as_posix())
+            if entry.is_dir() and not entry.is_symlink():
+                pending.append(entry)
+    return actual == seen - {"."}
 
 
 def archive_path(item: dict) -> Path:
@@ -172,6 +179,22 @@ def validate_archive(item: dict, path: Path) -> None:
 def installed_ok(data: dict, destination: Path) -> bool:
     marker = destination / ".ecommerce-collections.json"
     try:
+        if marker.is_symlink() or {entry.name for entry in destination.iterdir()} != {
+            "ansible_collections",
+            marker.name,
+        }:
+            return False
+        expected_names = {}
+        for item in data["collections"]:
+            namespace, collection = item["name"].split(".")
+            expected_names.setdefault(namespace, set()).add(collection)
+        closure = destination / "ansible_collections"
+        if closure.is_symlink() or {entry.name for entry in closure.iterdir()} != set(expected_names):
+            return False
+        for namespace, names in expected_names.items():
+            folder = closure / namespace
+            if folder.is_symlink() or {entry.name for entry in folder.iterdir()} != names:
+                return False
         provenance = json.loads(marker.read_text(encoding="utf-8"))
         if provenance.get("installer", {}).get("ansible_core") != data["installer"]["ansible_core"]:
             return False
@@ -277,6 +300,7 @@ def install(data: dict, destination: Path) -> None:
         galaxy = provenance["executable"]
         env = os.environ.copy()
         env["ANSIBLE_COLLECTIONS_PATH"] = str(temporary)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         for item in data["collections"]:
             subprocess.run(
                 [
@@ -296,10 +320,11 @@ def install(data: dict, destination: Path) -> None:
         )
         if not installed_ok(data, temporary):
             raise RuntimeError("installed collection closure failed validation")
+        pending.unlink(missing_ok=True)
         pending.symlink_to(temporary, target_is_directory=True)
         os.replace(pending, selector)
         published = True
-        print(f"PUBLISH collections identity={identity()} path={destination}")
+        print(f"PUBLISH collections identity={identity()} path={temporary} selector={selector}")
     finally:
         pending.unlink(missing_ok=True)
         if not published and temporary.exists():
@@ -310,16 +335,18 @@ def prepare(*, offline: bool = False) -> None:
     data = load_lock()
     _, destination = paths()
     installer_provenance(data)
-    if installed_ok(data, selected_path()):
-        print(f"REUSE collections identity={identity()} path={destination}")
+    current = selected_path()
+    if installed_ok(data, current):
+        print(f"REUSE collections identity={identity()} path={current}")
         return
     lock_path = destination.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     from capability_bootstrap import identity_lock
 
     with identity_lock(lock_path):
-        if installed_ok(data, selected_path()):
-            print(f"REUSE collections identity={identity()} path={destination} after-lock=true")
+        current = selected_path()
+        if installed_ok(data, current):
+            print(f"REUSE collections identity={identity()} path={current} after-lock=true")
             return
         for item in data["collections"]:
             acquire(item, offline=offline)
@@ -334,6 +361,7 @@ def run_playbook(arguments: list[str]) -> int:
     env["PATH"] = str(LOCAL_SEED_VENV / "bin") + os.pathsep + env.get("PATH", "")
     subprocess.run([str(LOCAL_SEED_VENV / "bin/python"), str(Path(__file__).resolve()), "prepare"], env=env, check=True)
     env["ANSIBLE_COLLECTIONS_PATH"] = str(selected_path())
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     executable = LOCAL_SEED_VENV / "bin/ansible-playbook"
     return subprocess.run([str(executable), *arguments], env=env, check=False).returncode
 
@@ -352,7 +380,7 @@ def main() -> int:
             data = load_lock()
             if not installed_ok(data, selected_path()):
                 raise RuntimeError(f"collection installation invalid or missing: identity={identity()}")
-            print(f"PASS collections identity={identity()} path={paths()[1]}")
+            print(f"PASS collections identity={identity()} path={selected_path()}")
         elif args.command == "acquire":
             for item in load_lock()["collections"]:
                 acquire(item, offline=args.offline)

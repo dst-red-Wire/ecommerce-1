@@ -114,7 +114,7 @@ def run(
             env=effective_env,
             playbook_command=cmd[0] if Path(cmd[0]).name == "ansible-playbook" else "ansible-playbook",
         )
-        env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(selected_path())}
+        env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(selected_path()), "PYTHONDONTWRITEBYTECODE": "1"}
         effective_env = env
     sensitive = Path(cmd[0]).name == "docker" or bool(effective_env.get("DOCKER_HOST"))
     try:
@@ -198,20 +198,11 @@ def _safe_docker_detail(detail: str, env: dict[str, str]) -> str:
     if endpoint:
         try:
             safe_endpoint = _safe_docker_endpoint(endpoint)
-            parsed = _parse_docker_endpoint(endpoint)
-            credentials = (parsed.username, parsed.password)
         except DockerCapabilityError:
             safe_endpoint = "[invalid Docker endpoint]"
-            # Malformed IPv6/ports still have lexical userinfo. Do not replace
-            # unrelated successful command output (for example architecture JSON).
-            authority = endpoint.split("://", 1)[-1]
-            credentials = authority.split("@", 1)[0].split(":", 1) if "@" in authority else ()
+        # Credentials are scoped to endpoint-shaped text. Replacing a short
+        # username/password globally corrupts unrelated captured JSON and versions.
         detail = detail.replace(endpoint, safe_endpoint)
-        from urllib.parse import unquote
-
-        for value in credentials:
-            if value:
-                detail = detail.replace(value, "[REDACTED]").replace(unquote(value), "[REDACTED]")
     detail = re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1", detail, flags=re.IGNORECASE)
     return re.sub(
         r"(?i)(password|passwd|token|secret|authorization)(\s*[=:]\s*)([^\s,;\"\']+)",

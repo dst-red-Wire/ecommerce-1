@@ -464,6 +464,7 @@
       "requires": [
         "docker-client-installed"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"
@@ -475,8 +476,10 @@
     {
       "name": "docker-daemon-ready",
       "requires": [
+        "docker-client-installed",
         "docker-user-access"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"
@@ -488,8 +491,10 @@
     {
       "name": "docker",
       "requires": [
+        "docker-client-installed",
         "docker-daemon-ready"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"

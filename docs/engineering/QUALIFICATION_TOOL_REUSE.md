@@ -199,3 +199,11 @@ The runtime capability audit uses the same selected executable as repoctl and co
 only the client with DOCKER_CLIENT_VERSION; the environment owns the daemon version.
 Malformed Docker URL/port errors become redacted capability diagnostics before any
 daemon probe or resource creation.
+
+The full collection inventory is checked in both directions: unlisted files,
+directories and bytecode caches invalidate a generation. Wrapped Ansible consumers
+set `PYTHONDONTWRITEBYTECODE=1`, so ordinary imports do not pollute managed trees.
+The existing provider binding also applies to Docker access/readiness probes, which
+reuse the validated client executable without applying its pin to the server.
+`make env-check` remains a read-only audit; only `make qualify` orders bootstrap,
+then the audit, then qualification, including under parallel Make execution.
