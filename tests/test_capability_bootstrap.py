@@ -98,7 +98,7 @@ def contract(items):
 class CapabilityGraphTest(unittest.TestCase):
     def test_qualification_virtualenv_is_ignored(self):
         ignored = subprocess.run(
-            ["git", "check-ignore", ".venv/qualification/pyvenv.cfg"],
+            ["git", "check-ignore", ".venv/qualification"],
             cwd=ROOT,
             text=True,
             capture_output=True,

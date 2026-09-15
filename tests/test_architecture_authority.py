@@ -14,6 +14,27 @@ authority = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(authority)
 
 
+def copy_fixture_tree(source, destination):
+    """Use GNU copy-on-write when available; preserve independent portable fixtures."""
+    cp = shutil.which("cp")
+    if cp:
+        probe = subprocess.run([cp, "--version"], capture_output=True, text=True, check=False)
+        if probe.returncode == 0 and "GNU coreutils" in probe.stdout:
+            result = subprocess.run(
+                [cp, "--archive", "--reflink=auto", str(source), str(destination)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            if "unrecognized option" not in result.stderr and "illegal option" not in result.stderr:
+                raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+            if Path(destination).exists():
+                shutil.rmtree(destination)
+    shutil.copytree(source, destination, symlinks=True, copy_function=shutil.copy2)
+
+
 class ArchitectureAuthorityTest(unittest.TestCase):
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
@@ -290,9 +311,8 @@ graph LR
         root = Path(directory)
         for relative in ("architecture.lock.yaml", "AGENTS.md", "README.md"):
             shutil.copy2(ROOT / relative, root / relative)
-        shutil.copytree(ROOT / "config", root / "config")
-        shutil.copytree(ROOT / "docs", root / "docs")
-        shutil.copytree(ROOT / "instruction", root / "instruction")
+        for relative in ("config", "docs", "instruction"):
+            copy_fixture_tree(ROOT / relative, root / relative)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         return root
 

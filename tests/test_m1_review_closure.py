@@ -37,7 +37,7 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('ensure_developer("go,cgo")', frontend)
+        self.assertIn('ensure_developer("go,cgo,templ" if action == "check" else "go,cgo")', frontend)
         self.assertIn("TemporaryDirectory", frontend)
         self.assertIn("frontend templ generated code is stale", frontend)
 
@@ -50,6 +50,8 @@ class M1ReviewClosureTests(unittest.TestCase):
         self.assertIn("TEMPL_VERSION :=", makefile)
         self.assertIn("templ@v$(TEMPL_VERSION)", makefile)
         self.assertIn('pinned_versions().get("TEMPL_VERSION")', frontend)
+        self.assertIn('[str(templ), "generate"]', frontend)
+        self.assertNotIn('"go", "run"', frontend)
         self.assertNotIn("templ@v0.", makefile + frontend)
 
     def test_frontend_tests_cover_shared_packages_once(self):
@@ -88,9 +90,20 @@ class M1ReviewClosureTests(unittest.TestCase):
                 ),
                 mock.patch.object(REPOCTL, "run", side_effect=successful_run),
                 mock.patch.object(REPOCTL.shutil, "which", return_value="/bin/docker"),
+                mock.patch.object(
+                    REPOCTL,
+                    "docker_preflight",
+                    return_value=({"DOCKER_HOST": "unix:///var/run/docker.sock"}, "mode=local"),
+                ),
+                mock.patch.object(REPOCTL, "docker_runtime_proof"),
+                mock.patch.object(REPOCTL, "docker_ryuk_image_proof") as ryuk_proof,
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))
-                ensure.assert_called_once_with(expected)
+                expected_calls = [mock.call(expected)]
+                if service == "product":
+                    expected_calls.insert(0, mock.call("docker_client"))
+                self.assertEqual(expected_calls, ensure.call_args_list)
+                self.assertEqual(service == "product", ryuk_proof.called)
 
     def test_site_builds_and_terminates_exact_binaries(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")

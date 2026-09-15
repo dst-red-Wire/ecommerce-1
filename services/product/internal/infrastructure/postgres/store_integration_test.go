@@ -4,7 +4,18 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net/netip"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/application"
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
@@ -12,6 +23,8 @@ import (
 	"github.com/dst-red-Wire/ecommerce-1/services/product/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -20,51 +33,81 @@ const postgresTestImage = "docker.io/library/postgres:17.10-alpine3.22@sha256:b0
 
 func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	ctx := context.Background()
+	config := testcontainers.ReadConfig().Config
+	// Validate the effective cached configuration before Testcontainers can start
+	// Ryuk or substitute any image. Post-start digest checks are only defense in depth.
+	if config.RyukPrivileged || config.RyukDisabled || config.HubImageNamePrefix != "" {
+		t.Fatal("unsafe Testcontainers configuration: require enabled unprivileged Ryuk and no image prefix")
+	}
+	ip, err := localQualificationAddress(os.Getenv("DOCKER_HOST"), config.TestcontainersHost, config.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwordBytes := make([]byte, 32)
+	if _, err := rand.Read(passwordBytes); err != nil {
+		t.Fatal("generate PostgreSQL credential")
+	}
+	password := hex.EncodeToString(passwordBytes)
+	safeError := func(err error) string { return strings.ReplaceAll(err.Error(), password, "[REDACTED]") }
 	container, err := tcpostgres.Run(
 		ctx,
 		postgresTestImage,
 		tcpostgres.WithDatabase("product"),
 		tcpostgres.WithUsername("product"),
-		tcpostgres.WithPassword("product-test-only"),
+		tcpostgres.WithPassword(password),
+		testcontainers.WithHostConfigModifier(func(config *container.HostConfig) {
+			config.PortBindings = network.PortMap{network.MustParsePort("5432/tcp"): []network.PortBinding{{HostIP: ip, HostPort: ""}}}
+		}),
 		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Fatalf("start postgres: %s", safeError(err))
 	}
 	t.Cleanup(func() {
 		if err := testcontainers.TerminateContainer(container); err != nil {
-			t.Errorf("terminate postgres: %v", err)
+			t.Errorf("terminate postgres: %v", safeError(err))
 		}
 	})
 
+	inspection, err := container.Inspect(ctx)
+	if err != nil {
+		t.Fatalf("inspect PostgreSQL publication: %s", safeError(err))
+	}
+	bindings := inspection.NetworkSettings.Ports[network.MustParsePort("5432/tcp")]
+	if len(bindings) != 1 || bindings[0].HostIP != ip || bindings[0].HostPort == "" {
+		t.Fatal("PostgreSQL publication does not match the authorized daemon interface")
+	}
+
+	requirePinnedRyuk(t, container.SessionID())
+
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		t.Fatalf("connection string: %v", err)
+		t.Fatalf("connection string: %v", safeError(err))
 	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect for migration: %v", err)
+		t.Fatalf("connect for migration: %v", safeError(err))
 	}
 	if err := migrations.Up(ctx, conn); err != nil {
 		_ = conn.Close(ctx)
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("migrate: %v", safeError(err))
 	}
 	if err := migrations.Up(ctx, conn); err != nil {
 		_ = conn.Close(ctx)
-		t.Fatalf("second migrate should be idempotent: %v", err)
+		t.Fatalf("second migrate should be idempotent: %v", safeError(err))
 	}
 	if err := conn.Close(ctx); err != nil {
-		t.Fatalf("close migration connection: %v", err)
+		t.Fatalf("close migration connection: %v", safeError(err))
 	}
 
 	newService := func() (*application.Service, *pgxpool.Pool) {
 		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
-			t.Fatalf("new pool: %v", err)
+			t.Fatalf("new pool: %v", safeError(err))
 		}
 		if err := pool.Ping(ctx); err != nil {
 			pool.Close()
-			t.Fatalf("ping pool: %v", err)
+			t.Fatalf("ping pool: %v", safeError(err))
 		}
 		store := productpostgres.NewStore(pool)
 		return application.NewService(store, store), pool
@@ -77,7 +120,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("create product: %v", err)
+		t.Fatalf("create product: %v", safeError(err))
 	}
 	if replayed {
 		pool.Close()
@@ -92,7 +135,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("replay product create after restart: %v", err)
+		t.Fatalf("replay product create after restart: %v", safeError(err))
 	}
 	if !replayed || replayedProduct.ID != product.ID {
 		pool.Close()
@@ -103,7 +146,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	updated, replayed, err := service.UpdateProduct(ctx, product.ID, "update-product-001", application.ETag(product.Version), application.UpdateProductInput{Name: &newName})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("update product: %v", err)
+		t.Fatalf("update product: %v", safeError(err))
 	}
 	if replayed || updated.Version != product.Version+1 {
 		pool.Close()
@@ -115,7 +158,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	t.Cleanup(pool.Close)
 	replayedUpdate, replayed, err := service.UpdateProduct(ctx, product.ID, "update-product-001", application.ETag(product.Version), application.UpdateProductInput{Name: &newName})
 	if err != nil {
-		t.Fatalf("replay update after restart: %v", err)
+		t.Fatalf("replay update after restart: %v", safeError(err))
 	}
 	if !replayed || replayedUpdate.Version != updated.Version || replayedUpdate.Name != newName {
 		t.Fatalf("durable update replay mismatch: replayed=%v version=%d name=%q", replayed, replayedUpdate.Version, replayedUpdate.Name)
@@ -126,7 +169,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 		OptionValues: map[string]string{"color": "black"},
 	})
 	if err != nil {
-		t.Fatalf("create sku: %v", err)
+		t.Fatalf("create sku: %v", safeError(err))
 	}
 	if replayed || sku.ProductID != product.ID {
 		t.Fatalf("unexpected sku result: replayed=%v product=%s", replayed, sku.ProductID)
@@ -134,9 +177,147 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 
 	items, more, err := service.ListSKUs(ctx, product.ID, 0, 20)
 	if err != nil {
-		t.Fatalf("list skus: %v", err)
+		t.Fatalf("list skus: %v", safeError(err))
 	}
 	if more || len(items) != 1 || items[0].ID != sku.ID {
 		t.Fatalf("unexpected persisted SKU list: more=%v count=%d", more, len(items))
+	}
+}
+
+// Testcontainers Go 0.44 hardcodes Ryuk's tag and ignores RYUK_CONTAINER_IMAGE.
+// Check the running session's image ID too, so retagging after preflight cannot
+// produce a successful qualification with an unapproved reaper.
+func requirePinnedRyuk(t *testing.T, session string) {
+	t.Helper()
+	image := os.Getenv("ECOMMERCE_RYUK_IMAGE")
+	if image == "" {
+		image = "docker.io/testcontainers/ryuk:0.14.0@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	docker := func(args ...string) string {
+		t.Helper()
+		output, err := exec.CommandContext(ctx, "docker", args...).Output()
+		if err != nil {
+			t.Fatalf("verify running Ryuk image: %v", err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	expected := docker("image", "inspect", image, "--format", "{{.Id}}")
+	if !strings.HasPrefix(expected, "sha256:") {
+		t.Fatal("pinned Ryuk image identity is absent")
+	}
+	ids := strings.Fields(docker("ps", "--quiet", "--filter", "label=org.testcontainers.sessionId="+session, "--filter", "label=org.testcontainers.ryuk=true"))
+	if len(ids) != 1 {
+		t.Fatalf("expected one running Ryuk for session %s, got %d", session, len(ids))
+	}
+	if actual := docker("inspect", ids[0], "--format", "{{.Image}}"); actual != expected {
+		t.Fatalf("running Ryuk image mismatch: got %s, want %s", actual, expected)
+	}
+	t.Logf("Ryuk running image matches pinned digest: %s", image)
+}
+
+// Reject remote execution before Testcontainers can create its separately managed
+// Ryuk container, whose control-port interface cannot be constrained by this fixture.
+var localDockerNamedPipe = regexp.MustCompile(`^npipe:////\./pipe/[A-Za-z0-9_-][A-Za-z0-9_.-]*$`)
+
+func localQualificationAddress(raw string, alternatives ...string) (netip.Addr, error) {
+	for _, alternative := range alternatives {
+		if alternative != "" {
+			if _, err := localQualificationAddress(alternative); err != nil {
+				return netip.Addr{}, err
+			}
+		}
+	}
+	endpoint, err := url.Parse(raw)
+	if err != nil || (endpoint.Scheme == "npipe" && !localDockerNamedPipe.MatchString(raw)) || endpoint.Path == "" || (endpoint.Scheme != "unix" && endpoint.Scheme != "npipe") || (endpoint.Host != "" && endpoint.Host != ".") {
+		return netip.Addr{}, fmt.Errorf("Product integration requires an explicit local Docker socket: remote Ryuk interface binding cannot be enforced")
+	}
+	return netip.MustParseAddr("127.0.0.1"), nil
+}
+
+func TestQualificationRejectsRemoteRyukBeforeCreation(t *testing.T) {
+	for _, endpoint := range []string{"", "tcp://daemon:2376", "http://daemon:2375", "https://daemon:2376", "ssh://user@daemon", "tcp://127.0.0.1:2376", "npipe://remote/pipe/docker_engine", "npipe:////server/pipe/docker_engine", "npipe:////127.0.0.1/pipe/docker_engine", "npipe:////./pipe/../server/pipe", "npipe:////%2e/pipe/docker_engine", "npipe:////./pipe/%2e%2e"} {
+		t.Run(endpoint, func(t *testing.T) {
+			if _, err := localQualificationAddress(endpoint); err == nil {
+				t.Fatal("remote or unresolved daemon accepted")
+			}
+		})
+	}
+	for _, alternative := range []string{"tcp://daemon:2376", "https://daemon:2376", "ssh://daemon"} {
+		if _, err := localQualificationAddress("unix:///var/run/docker.sock", alternative); err == nil {
+			t.Fatal("remote Testcontainers property override accepted")
+		}
+	}
+	for _, endpoint := range []string{"unix:///var/run/docker.sock", "npipe:////./pipe/docker_engine"} {
+		if address, err := localQualificationAddress(endpoint); err != nil || !address.IsLoopback() {
+			t.Fatalf("local endpoint rejected: %v", err)
+		}
+	}
+}
+
+// Run a fresh test process so Testcontainers reads the actual temporary properties
+// file, rather than reusing its process-global configuration cache.
+func TestQualificationRefusesUnsafeConfigurationInSubprocess(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const remoteRefusal = "remote Ryuk interface binding cannot be enforced"
+	const unsafeRefusal = "unsafe Testcontainers configuration"
+	type refusalCase struct {
+		name, endpoint, properties, want string
+		env                              []string
+	}
+	cases := []refusalCase{
+		{"environment", "https://127.0.0.1:1", "", remoteRefusal, nil},
+		{"unc-environment", "npipe:////server/pipe/docker_engine", "", remoteRefusal, nil},
+		{"unc-property", "unix:///var/run/docker.sock", "tc.host=npipe:////server/pipe/docker_engine\n", remoteRefusal, nil},
+		{"tc-host", "unix:///var/run/docker.sock", "tc.host=https://127.0.0.1:1\n", remoteRefusal, nil},
+		{"docker-host", "unix:///var/run/docker.sock", "docker.host=tcp://127.0.0.1:1\n", remoteRefusal, nil},
+	}
+	for _, setting := range []struct{ name, property, variable, value string }{
+		{"privileged", "ryuk.container.privileged", "TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED", "true"},
+		{"image-prefix", "hub.image.name.prefix", "TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "untrusted.invalid/private/"},
+		{"disabled", "ryuk.disabled", "TESTCONTAINERS_RYUK_DISABLED", "true"},
+	} {
+		// A nonexistent local socket makes these regression tests safe even if
+		// the guard regresses: they must fail with our diagnostic, not a daemon error.
+		endpoint := "unix://" + filepath.ToSlash(filepath.Join(t.TempDir(), "absent.sock"))
+		for _, source := range []string{"property", "environment"} {
+			test := refusalCase{name: setting.name + "-" + source, endpoint: endpoint, want: unsafeRefusal}
+			if source == "property" {
+				test.properties = setting.property + "=" + setting.value + "\n"
+			} else {
+				test.env = []string{setting.variable + "=" + setting.value}
+			}
+			cases = append(cases, test)
+		}
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".testcontainers.properties"), []byte(test.properties), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestPostgresPersistenceAndIdempotencySurviveRestart$", "-test.timeout=8s")
+			for _, variable := range os.Environ() {
+				if !strings.HasPrefix(variable, "TESTCONTAINERS_") && !strings.HasPrefix(variable, "RYUK_") {
+					command.Env = append(command.Env, variable)
+				}
+			}
+			command.Env = append(command.Env, "HOME="+home, "USERPROFILE="+home, "DOCKER_HOST="+test.endpoint)
+			command.Env = append(command.Env, test.env...)
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("configuration refusal did not finish promptly: %v", ctx.Err())
+			}
+			if err == nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("expected refusal before container creation; error=%v output=%s", err, output)
+			}
+		})
 	}
 }
