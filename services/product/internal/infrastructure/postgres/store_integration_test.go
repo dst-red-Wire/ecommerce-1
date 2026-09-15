@@ -34,6 +34,11 @@ const postgresTestImage = "docker.io/library/postgres:17.10-alpine3.22@sha256:b0
 func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	ctx := context.Background()
 	config := testcontainers.ReadConfig().Config
+	// Validate the effective cached configuration before Testcontainers can start
+	// Ryuk or substitute any image. Post-start digest checks are only defense in depth.
+	if config.RyukPrivileged || config.RyukDisabled || config.HubImageNamePrefix != "" {
+		t.Fatal("unsafe Testcontainers configuration: require enabled unprivileged Ryuk and no image prefix")
+	}
 	ip, err := localQualificationAddress(os.Getenv("DOCKER_HOST"), config.TestcontainersHost, config.Host)
 	if err != nil {
 		t.Fatal(err)
@@ -253,18 +258,43 @@ func TestQualificationRejectsRemoteRyukBeforeCreation(t *testing.T) {
 
 // Run a fresh test process so Testcontainers reads the actual temporary properties
 // file, rather than reusing its process-global configuration cache.
-func TestQualificationRefusesRemoteConfigurationInSubprocess(t *testing.T) {
+func TestQualificationRefusesUnsafeConfigurationInSubprocess(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct{ name, endpoint, properties string }{
-		{"environment", "https://127.0.0.1:1", ""},
-		{"unc-environment", "npipe:////server/pipe/docker_engine", ""},
-		{"unc-property", "unix:///var/run/docker.sock", "tc.host=npipe:////server/pipe/docker_engine\n"},
-		{"tc-host", "unix:///var/run/docker.sock", "tc.host=https://127.0.0.1:1\n"},
-		{"docker-host", "unix:///var/run/docker.sock", "docker.host=tcp://127.0.0.1:1\n"},
+	const remoteRefusal = "remote Ryuk interface binding cannot be enforced"
+	const unsafeRefusal = "unsafe Testcontainers configuration"
+	type refusalCase struct {
+		name, endpoint, properties, want string
+		env                              []string
 	}
+	cases := []refusalCase{
+		{"environment", "https://127.0.0.1:1", "", remoteRefusal, nil},
+		{"unc-environment", "npipe:////server/pipe/docker_engine", "", remoteRefusal, nil},
+		{"unc-property", "unix:///var/run/docker.sock", "tc.host=npipe:////server/pipe/docker_engine\n", remoteRefusal, nil},
+		{"tc-host", "unix:///var/run/docker.sock", "tc.host=https://127.0.0.1:1\n", remoteRefusal, nil},
+		{"docker-host", "unix:///var/run/docker.sock", "docker.host=tcp://127.0.0.1:1\n", remoteRefusal, nil},
+	}
+	for _, setting := range []struct{ name, property, variable, value string }{
+		{"privileged", "ryuk.container.privileged", "TESTCONTAINERS_RYUK_CONTAINER_PRIVILEGED", "true"},
+		{"image-prefix", "hub.image.name.prefix", "TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "untrusted.invalid/private/"},
+		{"disabled", "ryuk.disabled", "TESTCONTAINERS_RYUK_DISABLED", "true"},
+	} {
+		// A nonexistent local socket makes these regression tests safe even if
+		// the guard regresses: they must fail with our diagnostic, not a daemon error.
+		endpoint := "unix://" + filepath.ToSlash(filepath.Join(t.TempDir(), "absent.sock"))
+		for _, source := range []string{"property", "environment"} {
+			test := refusalCase{name: setting.name + "-" + source, endpoint: endpoint, want: unsafeRefusal}
+			if source == "property" {
+				test.properties = setting.property + "=" + setting.value + "\n"
+			} else {
+				test.env = []string{setting.variable + "=" + setting.value}
+			}
+			cases = append(cases, test)
+		}
+	}
+
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -274,12 +304,18 @@ func TestQualificationRefusesRemoteConfigurationInSubprocess(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			command := exec.CommandContext(ctx, executable, "-test.run=^TestPostgresPersistenceAndIdempotencySurviveRestart$", "-test.timeout=8s")
-			command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "DOCKER_HOST="+test.endpoint)
+			for _, variable := range os.Environ() {
+				if !strings.HasPrefix(variable, "TESTCONTAINERS_") && !strings.HasPrefix(variable, "RYUK_") {
+					command.Env = append(command.Env, variable)
+				}
+			}
+			command.Env = append(command.Env, "HOME="+home, "USERPROFILE="+home, "DOCKER_HOST="+test.endpoint)
+			command.Env = append(command.Env, test.env...)
 			output, err := command.CombinedOutput()
 			if ctx.Err() != nil {
-				t.Fatalf("remote refusal did not finish promptly: %v", ctx.Err())
+				t.Fatalf("configuration refusal did not finish promptly: %v", ctx.Err())
 			}
-			if err == nil || !strings.Contains(string(output), "remote Ryuk interface binding cannot be enforced") {
+			if err == nil || !strings.Contains(string(output), test.want) {
 				t.Fatalf("expected refusal before container creation; error=%v output=%s", err, output)
 			}
 		})

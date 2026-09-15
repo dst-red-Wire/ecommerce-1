@@ -239,7 +239,7 @@ locks and image digests remain authoritative.
 | OS/architecture support matrix and WSL2/native/CI normalization | `tests/test_qualification_reproducibility.py::PlatformContractTests` | Simulated platforms, canonical capability contract; no host provisioning |
 | Installed payload/inventory tampering, extra files, symlink boundaries and incomplete archives | `tests/test_pr86_five_active.py::CollectionIntegrityGenerationTests` | Temporary fixtures and real archive/content validation |
 | Plaintext Docker refusal and secure-remote Ryuk restriction | `tests/test_pr86_security.py` | Preflight boundary; asserts no daemon calls |
-| Direct Go invocation and actual `tc.host`/`docker.host` overrides | `TestQualificationRefusesRemoteConfigurationInSubprocess` in the Product integration suite | Fresh test subprocesses, temporary HOME/properties, expected refusal before container creation |
+| Direct Go invocation and actual `tc.host`/`docker.host` overrides | `TestQualificationRefusesUnsafeConfigurationInSubprocess` in the Product integration suite | Fresh test subprocesses, temporary HOME/properties, expected refusal before container creation |
 | Product persistence, immutable images and owned cleanup | Product integration suite | Real local Docker, PostgreSQL and Ryuk; no remote daemon claim |
 
 For a focused run after canonical bootstrap, use the qualification Python interpreter:
@@ -254,3 +254,14 @@ regressions and real local persistence tests. Platform simulations prove dispatc
 rejection behavior; they do not certify native execution on macOS, Windows or ARM64.
 Published evidence remains a generated result outside Git; test logic and fixtures are
 reproducible from the committed source.
+
+### Testcontainers configuration boundary
+
+Before creating any container, the Product fixture validates the effective cached
+Testcontainers configuration from both environment variables and
+`.testcontainers.properties`. It rejects privileged or disabled Ryuk and nonempty
+`hub.image.name.prefix` values. These settings can bypass cleanup or substitute
+an executable image before a post-start digest check can protect the host.
+The pinned dependency and image digests remain unchanged. Fresh subprocess tests
+cover each unsafe setting from both sources using a nonexistent local socket;
+the normal local integration gate verifies that the safe configuration still runs.
