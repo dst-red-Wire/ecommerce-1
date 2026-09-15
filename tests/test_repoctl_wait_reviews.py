@@ -735,6 +735,18 @@ class WaitReviewsTests(unittest.TestCase):
         duplicate["body"] += '\n<!-- codex-security-review:v1 {"headSha":"' + SHA + '","status":"completed"} -->'
         self.assertNotEqual("COMPLETED", REPOCTL.codex_review_states([], [duplicate], SHA)[1])
 
+    def test_security_repository_identity_is_case_insensitive(self):
+        item = summary(repo="DST-RED-wire/ECOMMERCE-1")
+        self.assertEqual(
+            "COMPLETED",
+            REPOCTL.codex_review_states([], [item], SHA, "dst-red-Wire/ecommerce-1", 77)[1],
+        )
+
+    def test_equal_cross_endpoint_timestamps_keep_request_pending(self):
+        stale = review("code", STALE, 999, "2026-01-01T00:01:00Z")
+        pending = request("code", 1, "2026-01-01T00:01:00Z")
+        self.assertEqual("REQUESTED_OR_RUNNING", REPOCTL.codex_review_states([stale], [pending], SHA)[0])
+
     def test_exact_completion_is_not_downgraded_by_later_request(self):
         exact = review("code", SHA, 10, "2026-01-01T00:01:00Z")
         newer = request("code", 20, "2026-01-01T00:02:00Z")
@@ -747,7 +759,6 @@ class WaitReviewsTests(unittest.TestCase):
             "invalid",
             123,
             {},
-            {"user": None},
             {"user": []},
             {"user": {}},
             {"user": {"login": 123}},
@@ -785,7 +796,7 @@ class WaitReviewsTests(unittest.TestCase):
 
     def test_malformed_users_are_rejected_before_valid_history_is_processed(self):
         malformed = []
-        for user in (None, {}, "deleted-user", {"login": None}, {"login": 123}):
+        for user in ({}, "deleted-user", {"login": None}, {"login": 123}):
             item = review("code", SHA)
             item["user"] = user
             malformed.append(item)
@@ -793,6 +804,47 @@ class WaitReviewsTests(unittest.TestCase):
             with self.subTest(user=item["user"]):
                 with self.assertRaisesRegex(REPOCTL.GitHubAPIError, "invalid member shape"):
                     REPOCTL.codex_review_states([review("code", SHA, 30), item], [], SHA)
+
+    def test_deleted_review_author_is_ignored_before_real_codex_completion(self):
+        deleted = review("code", SHA, 10)
+        deleted["user"] = None
+        reader = FakeReader(reviews=[deleted, review("code", SHA, 20)], comments=[review("security")])
+        code, out, err = self.invoke(reader, json_mode=True)
+        self.assertEqual(0, code)
+        self.assertEqual("REVIEWS_COMPLETE", json.loads(out)["result"])
+        self.assertNotIn("Traceback", out + err)
+
+    def test_deleted_comment_author_is_ignored(self):
+        deleted = request("code")
+        deleted["user"] = None
+        reader = FakeReader(reviews=[review("code")], comments=[deleted, review("security")])
+        code, out, _ = self.invoke(reader, json_mode=True)
+        self.assertEqual(0, code)
+        self.assertEqual("REVIEWS_COMPLETE", json.loads(out)["result"])
+
+    def test_event_id_shape_failures_are_sanitized(self):
+        for event_id in ("not-a-number", None, [], {}, True):
+            item = review("code")
+            item["id"] = event_id
+            reader = FakeReader(reviews=[review("code", event_id=19), item], comments=[])
+            with self.subTest(event_id=event_id):
+                code, out, err = self.invoke(reader, json_mode=True)
+                self.assertEqual(5, code)
+                self.assertEqual(1, len(out.strip().splitlines()))
+                self.assertEqual("API_FAILURE", json.loads(out)["result"])
+                self.assertIn("invalid event id", err)
+                self.assertNotIn("Traceback", out + err)
+                self.assertNotIn("ValueError", out + err)
+                self.assertNotIn("TypeError", out + err)
+                self.assertNotIn(repr(event_id), out + err)
+
+    def test_integer_and_decimal_string_event_ids_are_supported(self):
+        numeric_string = review("code")
+        numeric_string["id"] = "20"
+        self.assertEqual(
+            ("COMPLETED", "COMPLETED"),
+            REPOCTL.codex_review_states([numeric_string], [review("security")], SHA),
+        )
 
     def test_command_matching_is_bounded(self):
         self.assertEqual("code", REPOCTL._request_kind("  @codex review please  "))

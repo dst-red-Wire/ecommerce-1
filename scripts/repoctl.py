@@ -1979,8 +1979,15 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
-def _event_order(item: dict) -> tuple[str, int]:
-    return (str(item.get("submitted_at") or item.get("created_at") or ""), int(item.get("id") or 0))
+def _event_order(item: Mapping) -> tuple[str, int]:
+    """Return an ordering key without trusting API-controlled numeric values."""
+    return (str(item.get("submitted_at") or item.get("created_at") or ""), _validated_event_id(item.get("id")))
+
+
+def _validated_event_id(value: object) -> int:
+    if isinstance(value, bool) or not (isinstance(value, int) or isinstance(value, str) and value.isdecimal()):
+        raise GitHubAPIError("GitHub event has invalid event id")
+    return int(value)
 
 
 def _codex_author(item: dict) -> bool:
@@ -2026,9 +2033,15 @@ def _validated_review_collection(payload: object, name: str) -> list[Mapping]:
     for item in payload:
         if not isinstance(item, Mapping):
             raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
-        user = item.get("user")
-        if not isinstance(user, Mapping) or not isinstance(user.get("login"), str):
+        if "user" not in item:
             raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        user = item.get("user")
+        if user is not None and (not isinstance(user, Mapping) or not isinstance(user.get("login"), str)):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        try:
+            _validated_event_id(item.get("id"))
+        except GitHubAPIError:
+            raise GitHubAPIError(f"GitHub {name} collection has invalid event id") from None
     return payload
 
 
@@ -2059,7 +2072,8 @@ def _security_metadata(body: str, expected_repo: str, expected_pr: int | None) -
         return None
     if not isinstance(metadata, dict) or metadata.get("status") != "completed" or not _full_sha(metadata.get("headSha")):
         return None
-    if "repository" in metadata and metadata["repository"] != expected_repo:
+    repository = metadata.get("repository")
+    if repository is not None and (not isinstance(repository, str) or repository.casefold() != expected_repo.casefold()):
         return None
     if "pullRequestNumber" in metadata and metadata["pullRequestNumber"] != expected_pr:
         return None
@@ -2188,7 +2202,13 @@ def codex_review_states(
         # request exists; moving away and back does not invalidate that evidence.
         if exact:
             state = "COMPLETED"
-        elif latest_request and (not latest or _event_order(latest_request) > _event_order(latest)):
+        # IDs from reviews and issue comments have unrelated namespaces.  At
+        # equal timestamps, conservatively retain the pending request rather
+        # than using incomparable IDs to call an older completion authoritative.
+        elif latest_request and (
+            not latest
+            or str(latest_request.get("created_at") or "") >= str(latest.get("submitted_at") or latest.get("created_at") or "")
+        ):
             state = "REQUESTED_OR_RUNNING"
         elif latest:
             state = "STALE_SHA"
@@ -2643,8 +2663,6 @@ def main(raw_argv: list[str] | None = None) -> int:
         return 1
     except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc), 1)
-    except KeyboardInterrupt:
-        return fail("wait interrupted; no review request was made", 130)
     return 2
 
 
