@@ -57,9 +57,9 @@ class SeedRepairReal(unittest.TestCase):
                 self.assertIn("REUSE qualification seed", restored.stdout)
                 self.assertEqual(old, reference.resolve())
             python = old / "bin/python"
-            package = next(old.glob("lib/python*/site-packages/ansible_core-*.dist-info/METADATA"))
+            package = next(old.glob("lib/python*/site-packages/ansible/__init__.py"))
             original = package.read_text()
-            package.write_text(original.replace("Version: 2.20.3", "Version: 0.0.0", 1))
+            package.write_text(original + "\n# corrupted payload without metadata changes\n")
             # A failed preparation must leave the published reference usable.
             failed_runner = root / "failed.py"
             failed_runner.write_text(
