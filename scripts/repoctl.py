@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1052,13 +1053,43 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("status") != "PASS"
+        evidence.get("schema_version", 0) < 5
+        or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base_ref, head)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
+        or not isinstance(evidence.get("gates"), list)
+        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
         return None
     return path
+
+
+def qualification_identity() -> str:
+    """Bind reusable evidence to validator/configuration and actual core runners."""
+    digest = hashlib.sha256()
+    for relative in (
+        "scripts/repoctl.py",
+        "scripts/ci-affected.rb",
+        "config/contracts/ci-evidence.yaml",
+        "config/contracts/ci-topology.yaml",
+        "config/toolchain/versions.env",
+        "config/toolchain/capabilities.json",
+    ):
+        path = ROOT / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes())
+    digest.update(sys.version.encode())
+    ruby = shutil.which("ruby") or ""
+    digest.update(ruby.encode())
+    if ruby:
+        digest.update(output([ruby, "--version"]).encode())
+    return digest.hexdigest()
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
@@ -1441,12 +1472,15 @@ def write_evidence(
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
+        "head_tree_sha": source_tree_sha if head == "WORKTREE" else git("rev-parse", f"{head_sha}^{{tree}}").strip(),
+        "created_at_epoch": time.time(),
+        "qualification_identity": qualification_identity(),
         "exact_commit_evidence": exact,
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,
