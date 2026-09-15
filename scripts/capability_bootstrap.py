@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -253,7 +254,15 @@ Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        env = os.environ.copy()
+        if Path(command[0]).name.startswith("ansible"):
+            from ansible_collections import paths, load_lock
+
+            load_lock()
+            env["ANSIBLE_COLLECTIONS_PATH"] = str(paths()[1])
+        return subprocess.run(
+            command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
@@ -556,6 +565,8 @@ def seed_environment() -> int:
     tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")).resolve()
     seed_root = tool_home / "python" / identity
     lock_path = tool_home / "locks" / f"python-{identity}.lock"
+    selector = seed_root.with_suffix(".current")
+    generations = seed_root.with_suffix(".generations")
     metadata_path = seed_root / ".ecommerce-tool.json"
     python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -587,16 +598,37 @@ def seed_environment() -> int:
             return False
 
     with identity_lock(lock_path):
+        if selector.is_symlink():
+            selected = selector.resolve()
+            if selected.parent != generations:
+                raise RuntimeError("seed generation selector escapes its identity")
+            seed_root = selected
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if valid():
             print(f"REUSE qualification seed identity={identity[:16]}")
         else:
             print(f"PREPARE qualification seed identity={identity[:16]}")
-            if seed_root.exists():
-                shutil.rmtree(seed_root)
-            seed_root.parent.mkdir(parents=True, exist_ok=True)
-            # Virtual environments contain absolute paths and are therefore built
-            # directly at their immutable final location, never moved into place.
-            subprocess.run([sys.executable, "-m", "venv", str(seed_root)], check=True)
+            # Keep published generations in place: running consumers do not take
+            # the writer lock, and venv shebangs must never change location.
+            bootstrap = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
+            probe = subprocess.run(
+                [
+                    bootstrap,
+                    "-c",
+                    "import json,platform,sys; print(json.dumps([platform.python_implementation(), list(sys.version_info[:2])]))",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            if json.loads(probe.stdout) != [platform.python_implementation(), list(sys.version_info[:2])]:
+                raise RuntimeError("bootstrap interpreter does not match seed Python identity")
+            generations.mkdir(parents=True, exist_ok=True)
+            seed_root = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
             subprocess.run(
                 [
                     str(python),
@@ -617,6 +649,10 @@ def seed_environment() -> int:
             )
             if not valid():
                 raise RuntimeError("seed environment verification failed after installation")
+            temporary_selector = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
+            temporary_selector.unlink(missing_ok=True)
+            temporary_selector.symlink_to(seed_root, target_is_directory=True)
+            os.replace(temporary_selector, selector)
         publish_checkout_reference(seed_root)
     ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)

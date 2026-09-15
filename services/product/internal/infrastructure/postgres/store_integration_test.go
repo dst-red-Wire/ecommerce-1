@@ -4,6 +4,10 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,6 +20,8 @@ import (
 	"github.com/dst-red-Wire/ecommerce-1/services/product/migrations"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
@@ -24,53 +30,85 @@ const postgresTestImage = "docker.io/library/postgres:17.10-alpine3.22@sha256:b0
 
 func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	ctx := context.Background()
+	address := "127.0.0.1"
+	endpoint, err := url.Parse(os.Getenv("DOCKER_HOST"))
+	if err != nil {
+		t.Fatal("invalid Docker endpoint")
+	}
+	switch endpoint.Scheme {
+	case "tcp", "http", "https", "ssh":
+		address = os.Getenv("ECOMMERCE_DOCKER_BIND_ADDRESS")
+	}
+	ip, err := netip.ParseAddr(address)
+	ip = ip.Unmap()
+	if err != nil || ip.IsUnspecified() || ip.IsMulticast() {
+		t.Fatal("Docker requires an explicitly authorized, non-wildcard daemon bind address")
+	}
+	passwordBytes := make([]byte, 32)
+	if _, err := rand.Read(passwordBytes); err != nil {
+		t.Fatal("generate PostgreSQL credential")
+	}
+	password := hex.EncodeToString(passwordBytes)
+	safeError := func(err error) string { return strings.ReplaceAll(err.Error(), password, "[REDACTED]") }
 	container, err := tcpostgres.Run(
 		ctx,
 		postgresTestImage,
 		tcpostgres.WithDatabase("product"),
 		tcpostgres.WithUsername("product"),
-		tcpostgres.WithPassword("product-test-only"),
+		tcpostgres.WithPassword(password),
+		testcontainers.WithHostConfigModifier(func(config *container.HostConfig) {
+			config.PortBindings = network.PortMap{network.MustParsePort("5432/tcp"): []network.PortBinding{{HostIP: ip, HostPort: ""}}}
+		}),
 		tcpostgres.BasicWaitStrategies(),
 	)
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Fatalf("start postgres: %s", safeError(err))
 	}
 	t.Cleanup(func() {
 		if err := testcontainers.TerminateContainer(container); err != nil {
-			t.Errorf("terminate postgres: %v", err)
+			t.Errorf("terminate postgres: %v", safeError(err))
 		}
 	})
+
+	inspection, err := container.Inspect(ctx)
+	if err != nil {
+		t.Fatalf("inspect PostgreSQL publication: %s", safeError(err))
+	}
+	bindings := inspection.NetworkSettings.Ports[network.MustParsePort("5432/tcp")]
+	if len(bindings) != 1 || bindings[0].HostIP != ip || bindings[0].HostPort == "" {
+		t.Fatal("PostgreSQL publication does not match the authorized daemon interface")
+	}
 
 	requirePinnedRyuk(t, container.SessionID())
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
-		t.Fatalf("connection string: %v", err)
+		t.Fatalf("connection string: %v", safeError(err))
 	}
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect for migration: %v", err)
+		t.Fatalf("connect for migration: %v", safeError(err))
 	}
 	if err := migrations.Up(ctx, conn); err != nil {
 		_ = conn.Close(ctx)
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("migrate: %v", safeError(err))
 	}
 	if err := migrations.Up(ctx, conn); err != nil {
 		_ = conn.Close(ctx)
-		t.Fatalf("second migrate should be idempotent: %v", err)
+		t.Fatalf("second migrate should be idempotent: %v", safeError(err))
 	}
 	if err := conn.Close(ctx); err != nil {
-		t.Fatalf("close migration connection: %v", err)
+		t.Fatalf("close migration connection: %v", safeError(err))
 	}
 
 	newService := func() (*application.Service, *pgxpool.Pool) {
 		pool, err := pgxpool.New(ctx, dsn)
 		if err != nil {
-			t.Fatalf("new pool: %v", err)
+			t.Fatalf("new pool: %v", safeError(err))
 		}
 		if err := pool.Ping(ctx); err != nil {
 			pool.Close()
-			t.Fatalf("ping pool: %v", err)
+			t.Fatalf("ping pool: %v", safeError(err))
 		}
 		store := productpostgres.NewStore(pool)
 		return application.NewService(store, store), pool
@@ -83,7 +121,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("create product: %v", err)
+		t.Fatalf("create product: %v", safeError(err))
 	}
 	if replayed {
 		pool.Close()
@@ -98,7 +136,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("replay product create after restart: %v", err)
+		t.Fatalf("replay product create after restart: %v", safeError(err))
 	}
 	if !replayed || replayedProduct.ID != product.ID {
 		pool.Close()
@@ -109,7 +147,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	updated, replayed, err := service.UpdateProduct(ctx, product.ID, "update-product-001", application.ETag(product.Version), application.UpdateProductInput{Name: &newName})
 	if err != nil {
 		pool.Close()
-		t.Fatalf("update product: %v", err)
+		t.Fatalf("update product: %v", safeError(err))
 	}
 	if replayed || updated.Version != product.Version+1 {
 		pool.Close()
@@ -121,7 +159,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	t.Cleanup(pool.Close)
 	replayedUpdate, replayed, err := service.UpdateProduct(ctx, product.ID, "update-product-001", application.ETag(product.Version), application.UpdateProductInput{Name: &newName})
 	if err != nil {
-		t.Fatalf("replay update after restart: %v", err)
+		t.Fatalf("replay update after restart: %v", safeError(err))
 	}
 	if !replayed || replayedUpdate.Version != updated.Version || replayedUpdate.Name != newName {
 		t.Fatalf("durable update replay mismatch: replayed=%v version=%d name=%q", replayed, replayedUpdate.Version, replayedUpdate.Name)
@@ -132,7 +170,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 		OptionValues: map[string]string{"color": "black"},
 	})
 	if err != nil {
-		t.Fatalf("create sku: %v", err)
+		t.Fatalf("create sku: %v", safeError(err))
 	}
 	if replayed || sku.ProductID != product.ID {
 		t.Fatalf("unexpected sku result: replayed=%v product=%s", replayed, sku.ProductID)
@@ -140,7 +178,7 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 
 	items, more, err := service.ListSKUs(ctx, product.ID, 0, 20)
 	if err != nil {
-		t.Fatalf("list skus: %v", err)
+		t.Fatalf("list skus: %v", safeError(err))
 	}
 	if more || len(items) != 1 || items[0].ID != sku.ID {
 		t.Fatalf("unexpected persisted SKU list: more=%v count=%d", more, len(items))

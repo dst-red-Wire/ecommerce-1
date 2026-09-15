@@ -24,6 +24,13 @@ TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/eco
 
 
 def load_lock() -> dict:
+    try:
+        return _load_lock()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("invalid or missing locked Ansible collection metadata") from exc
+
+
+def _load_lock() -> dict:
     data = json.loads(LOCK.read_text(encoding="utf-8"))
     names = {item["name"] for item in data["collections"]}
     direct = {item["name"] for item in data["collections"] if item["direct"]}
@@ -154,6 +161,13 @@ def installer_provenance(data: dict) -> dict[str, str]:
         raise RuntimeError(
             f"ansible-galaxy installer mismatch: expected {expected}, got {actual} at {galaxy}; run make seed"
         )
+    playbook = shutil.which("ansible-playbook")
+    if not playbook:
+        raise RuntimeError("ansible-playbook missing: run make seed")
+    probe = subprocess.run([playbook, "--version"], text=True, capture_output=True, check=False, timeout=15)
+    match = re.search(r"ansible-playbook \[core ([^\]]+)\]", probe.stdout)
+    if probe.returncode or not match or match.group(1) != expected:
+        raise RuntimeError(f"ansible-playbook provider mismatch: expected {expected}; run make seed")
     return {"ansible_core": actual, "executable": galaxy}
 
 
@@ -196,6 +210,7 @@ def install(data: dict, destination: Path) -> None:
 def prepare(*, offline: bool = False) -> None:
     data = load_lock()
     _, destination = paths()
+    installer_provenance(data)
     if installed_ok(data, destination):
         print(f"REUSE collections identity={identity()} path={destination}")
         return
@@ -212,7 +227,21 @@ def prepare(*, offline: bool = False) -> None:
         install(data, destination)
 
 
+def run_playbook(arguments: list[str]) -> int:
+    from capability_bootstrap import seed_environment, LOCAL_SEED_VENV
+
+    seed_environment()
+    env = os.environ.copy()
+    env["PATH"] = str(LOCAL_SEED_VENV / "bin") + os.pathsep + env.get("PATH", "")
+    env["ANSIBLE_COLLECTIONS_PATH"] = str(paths()[1])
+    subprocess.run([str(LOCAL_SEED_VENV / "bin/python"), str(Path(__file__).resolve()), "prepare"], env=env, check=True)
+    executable = LOCAL_SEED_VENV / "bin/ansible-playbook"
+    return subprocess.run([str(executable), *arguments], env=env, check=False).returncode
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["run-playbook"]:
+        return run_playbook(sys.argv[3:] if sys.argv[2:3] == ["--"] else sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=("prepare", "acquire", "check", "identity"))
     parser.add_argument("--offline", action="store_true")

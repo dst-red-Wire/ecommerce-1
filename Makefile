@@ -13,17 +13,8 @@ export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_ID := $(shell $(PYTHON) scripts/ansible_collections.py identity || echo COLLECTION_IDENTITY_FAILED)
-ifneq ($(findstring COLLECTION_IDENTITY_FAILED,$(ANSIBLE_COLLECTIONS_ID)),)
-$(error Cannot calculate locked Ansible collection identity)
-endif
-ifeq ($(strip $(ANSIBLE_COLLECTIONS_ID)),)
-$(error Cannot calculate locked Ansible collection identity)
-endif
-ANSIBLE_COLLECTIONS_PATH := $(ECOMMERCE_TOOL_HOME)/ansible/collections/$(ANSIBLE_COLLECTIONS_ID)
 export ANSIBLE_CONFIG
-export ANSIBLE_COLLECTIONS_PATH
-ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
+ANSIBLE_LOCAL = $(PYTHON) scripts/ansible_collections.py run-playbook -- -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime qualify ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 

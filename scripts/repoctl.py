@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import ipaddress
+import secrets
 import json
 import os
 from pathlib import Path
@@ -70,13 +72,8 @@ def execution_path(inherited: str) -> str:
 
 
 os.environ["PATH"] = execution_path(os.environ.get("PATH", ""))
-COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "collections.lock.json"
-COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest() if COLLECTIONS_LOCK.is_file() else ""
 TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
-PROJECT_COLLECTIONS = TOOL_HOME / "ansible" / "collections" / COLLECTIONS_ID
-# Every Ansible subprocess resolves collections from the immutable lock identity only.
-# This prevents another checkout, user or distro installation from changing execution.
-os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
+COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "collections.lock.json"
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
 
@@ -109,6 +106,12 @@ def run(
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     effective_env = os.environ if env is None else env
+    if Path(cmd[0]).name in {"ansible-playbook", "ansible-lint"}:
+        from ansible_collections import load_lock, installer_provenance, paths
+
+        installer_provenance(load_lock())
+        env = {**effective_env, "ANSIBLE_COLLECTIONS_PATH": str(paths()[1])}
+        effective_env = env
     sensitive = Path(cmd[0]).name == "docker" or bool(effective_env.get("DOCKER_HOST"))
     try:
         p = subprocess.run(
@@ -164,6 +167,8 @@ def _safe_docker_endpoint(endpoint: str) -> str:
 
 
 def _safe_docker_detail(detail: str, env: dict[str, str]) -> str:
+    if env.get("POSTGRES_PASSWORD"):
+        detail = detail.replace(env["POSTGRES_PASSWORD"], "[REDACTED]")
     endpoint = env.get("DOCKER_HOST", "").strip()
     if endpoint:
         detail = detail.replace(endpoint, _safe_docker_endpoint(endpoint))
@@ -217,8 +222,21 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
         except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
             raise DockerCapabilityError(f"Docker endpoint is unresolved for context {context_name!r}") from exc
         env["DOCKER_HOST"] = endpoint
+        for key in ("DOCKER_TLS", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+            env.pop(key, None)
         tls_path = entry.get("Storage", {}).get("TLSPath", "")
         skip_tls = entry.get("Endpoints", {}).get("docker", {}).get("SkipTLSVerify", False)
+        tls_required = (
+            bool(entry.get("TLSMaterial", {}).get("docker"))
+            or urlsplit(endpoint).scheme == "https"
+            or bool(tls_path and Path(tls_path, "docker").is_dir())
+        )
+        if tls_required and skip_tls:
+            raise DockerCapabilityError("selected Docker TLS context disables certificate verification")
+        if tls_required and not all(
+            Path(tls_path, "docker", name).is_file() for name in ("ca.pem", "cert.pem", "key.pem")
+        ):
+            raise DockerCapabilityError("selected Docker context is missing required TLS certificates")
         if tls_path and Path(tls_path, "docker").is_dir():
             env["DOCKER_CERT_PATH"] = str(Path(tls_path, "docker"))
             if not skip_tls:
@@ -233,7 +251,25 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
                 "remote Docker endpoint requires an explicit TESTCONTAINERS_HOST_OVERRIDE reachable by the test process"
             )
         env["TESTCONTAINERS_HOST_OVERRIDE"] = parsed.hostname
+    env["ECOMMERCE_DOCKER_BIND_ADDRESS"] = docker_bind_address(env)
     return env, f"mode={'remote' if is_remote else 'local'} source={source} endpoint={_safe_docker_endpoint(endpoint)}"
+
+
+def docker_bind_address(env: dict[str, str]) -> str:
+    remote = urlsplit(env.get("DOCKER_HOST", "")).scheme in {"tcp", "http", "https", "ssh"}
+    address = env.get("ECOMMERCE_DOCKER_BIND_ADDRESS", "").strip() if remote else "127.0.0.1"
+    if not address:
+        raise DockerCapabilityError(
+            "remote Docker requires an explicitly authorized ECOMMERCE_DOCKER_BIND_ADDRESS on the daemon"
+        )
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        raise DockerCapabilityError("Docker bind address must be a literal IPv4 or IPv6 address") from None
+    parsed = getattr(parsed, "ipv4_mapped", None) or parsed
+    if parsed.is_unspecified or parsed.is_multicast:
+        raise DockerCapabilityError("Docker bind address cannot be wildcard or multicast")
+    return str(parsed)
 
 
 def docker_preflight(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
@@ -306,8 +342,9 @@ def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
     label = f"ecommerce-1.product-qualification={token}"
     volume = f"ecommerce-product-qualification-{token}"
     container = ""
-    endpoint_scheme = urlsplit(env.get("DOCKER_HOST", "")).scheme
-    publish = "5432" if endpoint_scheme in {"tcp", "http", "https", "ssh"} else "127.0.0.1::5432"
+    address = docker_bind_address(env)
+    publish = f"[{address}]::5432" if ":" in address else f"{address}::5432"
+    env = {**env, "POSTGRES_PASSWORD": secrets.token_urlsafe(32)}
     try:
         run([docker, "volume", "create", "--label", label, volume], env=env, timeout=15, capture=True)
         started = run(
@@ -324,7 +361,7 @@ def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
                 "--publish",
                 publish,
                 "--env",
-                "POSTGRES_PASSWORD=product-test-only",
+                "POSTGRES_PASSWORD",
                 image,
             ],
             env=env,
@@ -333,7 +370,10 @@ def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
         )
         container = started.stdout.strip()
         mapping = run([docker, "port", container, "5432/tcp"], env=env, capture=True, timeout=10).stdout.strip()
-        port = int(mapping.rsplit(":", 1)[1])
+        bound_host, bound_port = mapping.rsplit(":", 1)
+        if ipaddress.ip_address(bound_host.strip("[]")) != ipaddress.ip_address(address):
+            raise DockerCapabilityError("Docker published PostgreSQL on an unexpected daemon interface")
+        port = int(bound_port)
         host = env.get("TESTCONTAINERS_HOST_OVERRIDE", "127.0.0.1")
         deadline = time.monotonic() + 30
         while True:
@@ -438,8 +478,13 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
     return result
 
 
-def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
+def resolved_ansible_collection_version(name: str, collections_root: Path | None = None) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
+    if collections_root is None:
+        from ansible_collections import load_lock, paths
+
+        load_lock()
+        collections_root = paths()[1]
     namespace, collection = name.split(".", 1)
     manifest = collections_root / "ansible_collections" / namespace / collection / "MANIFEST.json"
     if not manifest.is_file():
@@ -1398,8 +1443,13 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
     start = time.monotonic()
+    # Git hooks export repository-local variables, including an alternate index.
+    # Gate tests create foreign repositories; never let them inherit that index.
+    gate_env = dict(os.environ if env is None else env)
+    for variable in output(["git", "rev-parse", "--local-env-vars"]).splitlines():
+        gate_env.pop(variable, None)
     with log_path.open("w", encoding="utf-8") as log:
-        p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
+        p = subprocess.run(command, cwd=ROOT, env=gate_env, text=True, stdout=log, stderr=subprocess.STDOUT)
     duration = round(time.monotonic() - start, 3)
     records.append(
         {

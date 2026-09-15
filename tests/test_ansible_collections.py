@@ -83,8 +83,8 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
     def test_make_entrypoints_export_project_ansible_configuration(self):
         self.assertIn("ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg", MAKEFILE)
         self.assertIn("export ANSIBLE_CONFIG", MAKEFILE)
-        self.assertIn("ANSIBLE_COLLECTIONS_ID :=", MAKEFILE)
-        self.assertIn("$(ECOMMERCE_TOOL_HOME)/ansible/collections/$(ANSIBLE_COLLECTIONS_ID)", MAKEFILE)
+        self.assertIn("scripts/ansible_collections.py run-playbook", MAKEFILE)
+        self.assertNotIn("$(shell $(PYTHON) scripts/ansible_collections.py", MAKEFILE)
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
 
     def test_ansible_gate_reconciles_missing_project_collections_once(self):

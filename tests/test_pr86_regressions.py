@@ -57,6 +57,7 @@ class ReviewRegressions(TestCase):
     def test_r4_both_variables_host_wins_without_changing_input(self):
         original = {
             "DOCKER_HOST": "tcp://daemon.example:2376",
+            "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.10",
             "DOCKER_CONTEXT": "foreign",
             "DOCKER_TLS_VERIFY": "1",
             "TESTCONTAINERS_HOST_OVERRIDE": "ports.example",
@@ -72,9 +73,13 @@ class ReviewRegressions(TestCase):
     def test_r4_context_only_preserves_tls(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "docker").mkdir()
+            for name in ("ca.pem", "cert.pem", "key.pem"):
+                (Path(tmp) / "docker" / name).touch()
             entry = [{"Endpoints": {"docker": {"Host": "tcp://daemon.example:2376"}}, "Storage": {"TLSPath": tmp}}]
             with mock.patch.object(ctl, "run", side_effect=[completed("selected"), completed(json.dumps(entry))]):
-                env, _ = ctl.docker_test_environment("docker", {"DOCKER_CONTEXT": "selected"})
+                env, _ = ctl.docker_test_environment(
+                    "docker", {"DOCKER_CONTEXT": "selected", "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.10"}
+                )
             self.assertNotIn("DOCKER_CONTEXT", env)
             self.assertEqual("1", env["DOCKER_TLS_VERIFY"])
             self.assertEqual(str(Path(tmp) / "docker"), env["DOCKER_CERT_PATH"])
@@ -150,7 +155,7 @@ class ReviewRegressions(TestCase):
             binary = Path(tmp) / "sha256sum"
             binary.write_text(f"#!{sys.executable}\nraise SystemExit(99)\n")
             binary.chmod(0o755)
-            makefile = "include Makefile\npr86-identity:\n\t@echo $(ANSIBLE_COLLECTIONS_ID)\n"
+            makefile = "include Makefile\npr86-identity:\n\t@$(PYTHON) scripts/ansible_collections.py identity\n"
             env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"])
             result = subprocess.run(
                 ["make", "-s", "-f", "-", "pr86-identity"],
@@ -171,7 +176,7 @@ class ReviewRegressions(TestCase):
                 capture_output=True,
             )
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("Cannot calculate", result.stderr)
+            self.assertIn("Error", result.stderr)
 
     def test_r8_cold_and_warm_cache_readiness(self):
         with (
@@ -197,6 +202,9 @@ class ReviewRegressions(TestCase):
                 binary = Path(tmp) / "ansible-galaxy"
                 binary.write_text(f'#!{sys.executable}\nprint("ansible-galaxy [core {version}]")\n')
                 binary.chmod(0o755)
+                playbook = Path(tmp) / "ansible-playbook"
+                playbook.write_text(f'#!{sys.executable}\nprint("ansible-playbook [core {version}]")\n')
+                playbook.chmod(0o755)
                 with mock.patch.dict(os.environ, {"PATH": tmp}):
                     if version == "0.0.0":
                         with self.assertRaisesRegex(RuntimeError, "installer mismatch"):

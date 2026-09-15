@@ -27,7 +27,10 @@ class DockerProductPreflightTests(unittest.TestCase):
 
     def test_explicit_remote_endpoint_wins_and_sets_reachable_host(self):
         with mock.patch.object(REPOCTL, "run", return_value=completed("ignored-context\n")):
-            env, identity = REPOCTL.docker_test_environment("docker", {"DOCKER_HOST": "tcp://docker.example.test:2376"})
+            env, identity = REPOCTL.docker_test_environment(
+                "docker",
+                {"DOCKER_HOST": "tcp://docker.example.test:2376", "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.10"},
+            )
         self.assertEqual("tcp://docker.example.test:2376", env["DOCKER_HOST"])
         self.assertEqual("docker.example.test", env["TESTCONTAINERS_HOST_OVERRIDE"])
         self.assertIn("mode=remote source=DOCKER_HOST", identity)

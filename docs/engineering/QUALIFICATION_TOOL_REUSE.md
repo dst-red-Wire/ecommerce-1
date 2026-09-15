@@ -12,8 +12,12 @@ runner-owned persistent volume outside every checkout. The Python seed (Ansible 
 ansible-lint, and their complete Python closure) identity includes
 the Python implementation and major/minor runtime, OS/architecture, complete lockfile
 SHA-256, and hash-enforcing pip parameters. A checkout's `.venv/qualification` is only an
-atomic local reference to that immutable environment; the venv is created directly at its
-final path because virtual environments contain absolute paths. The lock includes the
+atomic local reference to that immutable environment. Repairs build a fresh generation
+under `python/<identity>.generations/` at its final path, validate it, then atomically
+update `<identity>.current` and the checkout reference. Venvs are never moved. Existing
+generations remain for running consumers (which do not take the preparation lock);
+failed preparation leaves the published generation untouched. Maintenance can reclaim
+unreferenced generations only after consumers have stopped. The lock includes the
 conditional `ruamel-yaml-clib` dependency for Python below 3.14 and `typing-extensions`
 for Python below 3.13; its closure is installable under Ubuntu 24.04's Python 3.12.
 
@@ -68,6 +72,13 @@ The gate resolves the active context into `DOCKER_HOST` for both its bounded pre
 and testcontainers-go. An explicit `DOCKER_HOST` remains authoritative. For a remote
 daemon, `TESTCONTAINERS_HOST_OVERRIDE` must identify the address at which the test
 process can reach published ports; it is derived only for a non-loopback TCP hostname.
+Remote publication additionally requires `ECOMMERCE_DOCKER_BIND_ADDRESS`, an explicit
+operator authorization for a literal daemon-side IPv4/IPv6 interface. Wildcard and
+multicast addresses are refused before container creation; a private address is never
+automatically authorized. This address is independent of the client-side host override.
+Both the preflight and Product Testcontainers PostgreSQL bind this interface with an
+allocated host port; local runs bind loopback. PostgreSQL credentials are random per run.
+
 This avoids treating the client namespace's forwarding sysctl as evidence about a
 remote server. TLS variables from the selected context are propagated rather than
 disabled.
@@ -143,3 +154,20 @@ The `docker_client` and `terraform` tags both initialize their configured direct
 The standalone Terraform gate checks the pinned executable and
 `TF_PLUGIN_CACHE_DIR` before init, invoking only Terraform reconciliation when either
 is missing or invalid. A warm gate avoids Ansible preparation entirely.
+
+### Second PR86 review
+
+Make does not calculate collection identities during parsing. Its Ansible recipe
+wrapper prepares Python first, resolves the single collection identity, prepares the
+collection tree under the locked provider, and invokes the seed's absolute playbook
+executable. This works for mixed and parallel Make goals without a target allowlist.
+Direct collection preparation checks both Galaxy and playbook versions before cold
+installation or warm reuse; warm verification does not acquire Galaxy artifacts.
+Resolved contexts clear foreign TLS parameters before applying their own metadata;
+missing required context certificates fail explicitly. Explicit DOCKER_HOST retains
+its associated TLS settings and precedence over DOCKER_CONTEXT.
+
+Gate subprocesses clear the repository-local Git variables reported by
+`git rev-parse --local-env-vars`. This prevents temporary fixture repositories
+from inheriting a commit hook's index or worktree, while the parent verification
+keeps the intended commit index and all hook checks remain enabled.
