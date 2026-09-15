@@ -138,6 +138,37 @@ class CollectionIntegrityGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "escapes its identity"):
             self.prepare()
 
+    def test_symlinked_generation_root_is_rejected_before_publication(self):
+        root = self.destination.with_suffix(".generations")
+        root.parent.mkdir(parents=True)
+        outside = self.root / "external-generations"
+        outside.mkdir()
+        root.symlink_to(outside, target_is_directory=True)
+        selector = self.destination.with_suffix(".current")
+        for selected in (False, True):
+            with self.subTest(selected=selected):
+                if selected:
+                    selector.symlink_to(outside / "generation-external")
+                with self.assertRaisesRegex(RuntimeError, "generation root.*symlink"):
+                    self.prepare()
+                self.assertEqual([], list(outside.iterdir()))
+        with self.assertRaisesRegex(RuntimeError, "generation root.*symlink"):
+            collections.install(self.data, self.destination)
+
+    def test_directory_archive_reports_controlled_failure_without_removal(self):
+        self.archive.unlink()
+        self.archive.mkdir()
+        sentinel = self.archive / "keep"
+        sentinel.write_text("untouched")
+        for offline in (False, True):
+            output = io.StringIO()
+            arguments = ["collections", "acquire", *(["--offline"] if offline else [])]
+            with mock.patch("sys.argv", arguments), contextlib.redirect_stderr(output):
+                self.assertEqual(1, collections.main())
+            self.assertIn("invalid archive path type", output.getvalue())
+            self.assertNotIn("Traceback", output.getvalue())
+            self.assertEqual("untouched", sentinel.read_text())
+
     def test_warm_reuse_does_not_acquire_or_install(self):
         old = self.prepare()
         with mock.patch.object(collections, "acquire") as acquire, mock.patch.object(collections, "install") as install:
@@ -220,6 +251,43 @@ class DockerConfigurationTests(unittest.TestCase):
             self.assertNotIn("Traceback", output.getvalue())
             self.assertNotIn("synthetic-secret", output.getvalue())
             run.assert_not_called()
+
+    def test_context_capture_preserves_ssh_user_but_diagnostics_redact_it(self):
+        endpoint = "ssh://synthetic-user@daemon:22"
+        inspected = json.dumps([{"Endpoints": {"docker": {"Host": endpoint}}}])
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                ctl.subprocess,
+                "run",
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "fixture-context\n", ""),
+                    subprocess.CompletedProcess([], 0, inspected, ""),
+                ],
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(output),
+        ):
+            env, identity = ctl.docker_test_environment(
+                "docker",
+                {
+                    "TESTCONTAINERS_HOST_OVERRIDE": "daemon",
+                    "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.1",
+                },
+            )
+        self.assertEqual(endpoint, env["DOCKER_HOST"])
+        self.assertNotIn("synthetic-user", identity + output.getvalue())
+        for code in (0, 1):
+            with mock.patch.object(
+                ctl.subprocess, "run", return_value=subprocess.CompletedProcess([], code, inspected, inspected)
+            ):
+                if code:
+                    with self.assertRaises(RuntimeError) as error:
+                        ctl.run(["docker", "context", "inspect"], capture=True, raw_stdout=True)
+                    self.assertNotIn("synthetic-user", str(error.exception))
+                else:
+                    result = ctl.run(["docker", "context", "inspect"], capture=True)
+                    self.assertNotIn("synthetic-user", result.stdout + result.stderr)
 
     def test_supported_endpoints(self):
         for endpoint in (

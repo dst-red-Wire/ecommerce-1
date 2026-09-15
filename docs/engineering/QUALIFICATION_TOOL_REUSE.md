@@ -191,6 +191,8 @@ unpublished candidates are removed; interrupted candidates may remain and are ne
 selected by directory scanning. No automatic destructive collection is performed.
 A dangling selector inside its identity is treated as an invalid cache and repaired
 from locked archives; selectors escaping that identity remain rejected.
+The generation root itself must not be a symlink. Unexpected non-file archive
+paths fail with a controlled diagnostic and retain their contents for reconciliation.
 
 Docker client reconciliation probes presence, executability and the canonical version,
 extracts only the client into a unique candidate beside the destination, validates it,
@@ -203,6 +205,9 @@ The runtime capability audit uses the same selected executable as repoctl and co
 only the client with DOCKER_CLIENT_VERSION; the environment owns the daemon version.
 Malformed Docker URL/port errors become redacted capability diagnostics before any
 daemon probe or resource creation.
+Successful context inspection retains its raw stdout only for internal endpoint
+parsing, preserving SSH user selection. Emitted diagnostics and failed captures
+remain redacted.
 
 The full collection inventory is checked in both directions: unlisted files,
 directories and bytecode caches invalidate a generation. Wrapped Ansible consumers

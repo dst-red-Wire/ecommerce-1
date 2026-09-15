@@ -68,15 +68,23 @@ def paths() -> tuple[Path, Path]:
     return base / "archives", base / "collections" / identity()
 
 
+def generation_root(destination: Path) -> Path:
+    root = destination.with_suffix(".generations")
+    if root.is_symlink():
+        raise RuntimeError("collection generation root must not be a symlink")
+    return root
+
+
 def selected_path() -> Path:
     """Pin a concrete generation once for a consumer; legacy trees stay in place."""
     legacy = paths()[1]
+    generations = generation_root(legacy)
     selector = legacy.with_suffix(".current")
     if selector.is_symlink():
         # A missing in-identity generation is an invalid cache, repairable from
         # locked archives. Still resolve existing links before checking ownership.
         selected = selector.resolve()
-        if selected.parent != legacy.with_suffix(".generations").resolve():
+        if selected.parent != generations.resolve():
             raise RuntimeError("collection selector escapes its identity")
         return selected
     if selector.exists():
@@ -229,6 +237,10 @@ def acquire(item: dict, *, offline: bool) -> None:
         print(f"REUSE archive {item['name']}:{item['version']}")
         return
     except RuntimeError:
+        if target.exists() and not target.is_file() and not target.is_symlink():
+            raise RuntimeError(
+                f"invalid archive path type for {item['name']}:{item['version']}; expected file"
+            ) from None
         if target.exists():
             target.unlink()
     if offline:
@@ -292,7 +304,7 @@ def installer_provenance(
 def install(data: dict, destination: Path) -> None:
     provenance = installer_provenance(data)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    generations = destination.with_suffix(".generations")
+    generations = generation_root(destination)
     generations.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
     selector = destination.with_suffix(".current")

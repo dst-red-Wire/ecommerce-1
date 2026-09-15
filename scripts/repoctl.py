@@ -103,6 +103,7 @@ def run(
     env: dict[str, str] | None = None,
     check: bool = True,
     capture: bool = False,
+    raw_stdout: bool = False,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     effective_env = os.environ if env is None else env
@@ -141,7 +142,10 @@ def run(
             raise
         raise RuntimeError(_safe_docker_detail(str(exc), effective_env)) from None
     if sensitive:
-        p.stdout = _safe_docker_detail(p.stdout or "", effective_env)
+        # Only a successful, explicitly requested internal capture may retain
+        # endpoint userinfo. Printed output and every failure remain redacted.
+        if not (capture and raw_stdout and p.returncode == 0):
+            p.stdout = _safe_docker_detail(p.stdout or "", effective_env)
         p.stderr = _safe_docker_detail(p.stderr or "", effective_env)
         p.args = [_safe_docker_detail(part, effective_env) for part in cmd]
         if not capture:
@@ -236,7 +240,9 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
     source = "DOCKER_HOST" if endpoint else f"context:{context_name}"
     if not endpoint:
         try:
-            inspected = run([docker, "context", "inspect", context_name], env=env, capture=True, timeout=5)
+            inspected = run(
+                [docker, "context", "inspect", context_name], env=env, capture=True, raw_stdout=True, timeout=5
+            )
         except subprocess.TimeoutExpired:
             raise DockerCapabilityError("Docker context inspection timed out after 5s") from None
         except RuntimeError as exc:
