@@ -601,8 +601,9 @@ def frontend(action: str, scope: str = "") -> int:
     env.pop("GOTOOLDIR", None)
     go = managed_bin / "go"
     gofmt = managed_bin / "gofmt"
-    if not go.is_file() or not gofmt.is_file():
-        raise RuntimeError("validated managed Go provider is unavailable")
+    templ = managed_bin / "templ"
+    if not go.is_file() or not gofmt.is_file() or not templ.is_file():
+        raise RuntimeError("validated managed Go/templ provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
@@ -617,12 +618,13 @@ def frontend(action: str, scope: str = "") -> int:
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
                 generated_root = Path(temp_dir) / "frontend"
-                shutil.copytree(frontend_root, generated_root)
-                run(
-                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
-                    cwd=generated_root,
-                    env=env,
-                )
+                template_inputs = sorted(frontend_root.rglob("*.templ"))
+                for source in template_inputs:
+                    relative = source.relative_to(frontend_root)
+                    destination = generated_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                run([str(templ), "generate"], cwd=generated_root, env=env)
                 committed = sorted(frontend_root.rglob("*_templ.go"))
                 generated = sorted(generated_root.rglob("*_templ.go"))
                 relative_committed = [path.relative_to(frontend_root) for path in committed]
@@ -636,9 +638,8 @@ def frontend(action: str, scope: str = "") -> int:
             run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
         env = dict(env, CGO_ENABLED="1")
-        # One module-wide invocation runs shared package tests exactly once as well as
-        # the independently deployable application packages.
-        run([str(go), "test", "-race", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "test", "-race", *packages], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
@@ -648,7 +649,8 @@ def frontend(action: str, scope: str = "") -> int:
                     env=env,
                 )
     if action == "check":
-        run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "vet", *packages], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
 

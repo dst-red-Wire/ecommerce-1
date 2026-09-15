@@ -120,6 +120,24 @@
   loop: [go, gofmt]
   tags: [toolchain, go]
 
+- name: Detect pinned templ generator
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/templ", version]
+  register: templ_current
+  failed_when: false
+  changed_when: false
+  tags: [toolchain, go]
+
+- name: Install pinned templ generator
+  ansible.builtin.command:
+    argv: ["{{ local_share }}/toolchains/go/{{ go_version }}/go/bin/go", install, "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"]
+  environment:
+    GOBIN: "{{ local_bin }}"
+    GOROOT: ""
+    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
+  when: templ_current.rc != 0 or templ_version not in templ_current.stdout
+  tags: [toolchain, go]
+
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:
     url: "https://github.com/sqlc-dev/sqlc/releases/download/v{{ sqlc_version }}/sqlc_{{ sqlc_version }}_linux_amd64.tar.gz"
