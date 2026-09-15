@@ -1123,13 +1123,13 @@ def _run_independent_gates(
     def stop_all():
         for process, *_ in running.values():
             if process.poll() is None:
-                process.terminate()
+                os.killpg(process.pid, signal.SIGTERM)
         deadline = time.monotonic() + 3
         for process, *_ in running.values():
             try:
                 process.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
 
     try:
         while pending or running:
@@ -1138,7 +1138,13 @@ def _run_independent_gates(
                 log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
                 handle = log_path.open("w", encoding="utf-8")
                 process = subprocess.Popen(
-                    command, cwd=ROOT, env=child_env, text=True, stdout=handle, stderr=subprocess.STDOUT
+                    command,
+                    cwd=ROOT,
+                    env=child_env,
+                    text=True,
+                    stdout=handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
                 )
                 running[name] = (process, handle, log_path, time.monotonic(), command)
             finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
@@ -1159,6 +1165,7 @@ def _run_independent_gates(
                 records.append(record)
             print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
             if process.returncode:
+                print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
                 stop_all()
                 return False
         return True
