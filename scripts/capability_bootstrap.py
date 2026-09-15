@@ -24,7 +24,7 @@ CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditi
 REQUIREMENTS = {"required-static", "optional-runtime"}
 SEED_LOCK = ROOT / "config/python/requirements.lock"
 SEED_VENV = ROOT / ".venv/qualification"
-MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
+MANAGED_BIN_DIRS = (ROOT / ".tools" / "bin", Path.home() / ".local" / "bin")
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
