@@ -1607,8 +1607,14 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
+    preparation = [(name, command) for name, command in global_commands if name == "preflight"]
+    independent = [(name, command) for name, command in global_commands if name != "preflight"]
+    for name, command in preparation:
+        if not run_stable_gate(name, command):
+            write_evidence(base, head, paths, components, records, verification)
+            return 1
     before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
-    if not _run_independent_gates(global_commands, records, env):
+    if not _run_independent_gates(independent, records, env):
         write_evidence(base, head, paths, components, records, verification)
         return 1
     if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
