@@ -313,6 +313,12 @@ def docker_bind_address(env: dict[str, str]) -> str:
 def docker_preflight(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
     """Bounded server probe whose environment is returned unchanged to Testcontainers."""
     env, identity = docker_test_environment(docker, base_env)
+    if _parse_docker_endpoint(env["DOCKER_HOST"]).scheme == "npipe" and not re.fullmatch(
+        r"npipe:////\./pipe/[A-Za-z0-9_-][A-Za-z0-9_.-]*", env["DOCKER_HOST"]
+    ):
+        raise DockerCapabilityError(
+            "Product qualification requires a canonical local named pipe (npipe:////./pipe/name)"
+        )
     if _parse_docker_endpoint(env["DOCKER_HOST"]).scheme not in {"unix", "npipe"}:
         raise DockerCapabilityError(
             "remote Product qualification is unsupported: Ryuk interface binding cannot be enforced"

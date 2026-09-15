@@ -57,3 +57,36 @@ class DockerSecurityTests(unittest.TestCase):
                         },
                     )
                 run.assert_not_called()
+
+
+class NamedPipeSecurityTests(unittest.TestCase):
+    def test_remote_and_noncanonical_named_pipes_never_contact_daemon(self):
+        for endpoint in (
+            "npipe:////server/pipe/docker_engine",
+            "npipe:////127.0.0.1/pipe/docker_engine",
+            "npipe://server/pipe/docker_engine",
+            "npipe:////./pipe/../server/pipe",
+            "npipe:////%2e/pipe/docker_engine",
+            "npipe:////./pipe/%2e%2e",
+            "npipe:////./pipe/docker_engine?host=server",
+        ):
+            with self.subTest(endpoint=endpoint), mock.patch.object(ctl, "run") as run:
+                with self.assertRaises(ctl.DockerCapabilityError):
+                    ctl.docker_preflight("docker", {"DOCKER_HOST": endpoint})
+                run.assert_not_called()
+
+    def test_canonical_local_named_pipe_can_reach_preflight(self):
+        endpoint = "npipe:////./pipe/docker_engine"
+        with mock.patch.object(ctl, "run", return_value=completed('"server-version"')) as run:
+            env, _ = ctl.docker_preflight("docker", {"DOCKER_HOST": endpoint})
+        self.assertEqual(endpoint, env["DOCKER_HOST"])
+        run.assert_called_once()
+        self.assertEqual(["docker", "version", "--format", "{{json .Server.Version}}"], run.call_args.args[0])
+
+    def test_remote_named_pipe_context_is_refused_after_local_inspection(self):
+        context = [{"Endpoints": {"docker": {"Host": "npipe:////server/pipe/docker_engine"}}}]
+        with mock.patch.object(ctl, "run", side_effect=[completed("remote"), completed(json.dumps(context))]) as run:
+            with self.assertRaisesRegex(ctl.DockerCapabilityError, "canonical local named pipe"):
+                ctl.docker_preflight("docker", {})
+        self.assertEqual(2, run.call_count)
+        self.assertTrue(all(call.args[0][1] == "context" for call in run.call_args_list))

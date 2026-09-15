@@ -73,7 +73,9 @@ and testcontainers-go. An explicit `DOCKER_HOST` remains authoritative. Network 
 resolution requires `DOCKER_TLS_VERIFY=1` for TCP/HTTP/HTTPS and preserves context TLS
 certificates; SSH remains an authenticated transport.
 
-Product qualification currently accepts only local Unix sockets or named pipes. It
+Product qualification currently accepts only local Unix sockets or canonical local
+named pipes (`npipe:////./pipe/name`). UNC server paths, encoded paths and alternate
+namespace forms are refused before daemon contact. It
 rejects remote endpoints before contacting the daemon: Testcontainers Go 0.44.0 creates
 Ryuk separately and does not expose a supported binding override for its unauthenticated
 control port. The Go fixture independently rejects remote or unresolved endpoints before

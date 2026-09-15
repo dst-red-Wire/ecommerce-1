@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,8 @@ func requirePinnedRyuk(t *testing.T, session string) {
 
 // Reject remote execution before Testcontainers can create its separately managed
 // Ryuk container, whose control-port interface cannot be constrained by this fixture.
+var localDockerNamedPipe = regexp.MustCompile(`^npipe:////\./pipe/[A-Za-z0-9_-][A-Za-z0-9_.-]*$`)
+
 func localQualificationAddress(raw string, alternatives ...string) (netip.Addr, error) {
 	for _, alternative := range alternatives {
 		if alternative != "" {
@@ -222,14 +225,14 @@ func localQualificationAddress(raw string, alternatives ...string) (netip.Addr, 
 		}
 	}
 	endpoint, err := url.Parse(raw)
-	if err != nil || endpoint.Path == "" || (endpoint.Scheme != "unix" && endpoint.Scheme != "npipe") || (endpoint.Host != "" && endpoint.Host != ".") {
+	if err != nil || (endpoint.Scheme == "npipe" && !localDockerNamedPipe.MatchString(raw)) || endpoint.Path == "" || (endpoint.Scheme != "unix" && endpoint.Scheme != "npipe") || (endpoint.Host != "" && endpoint.Host != ".") {
 		return netip.Addr{}, fmt.Errorf("Product integration requires an explicit local Docker socket: remote Ryuk interface binding cannot be enforced")
 	}
 	return netip.MustParseAddr("127.0.0.1"), nil
 }
 
 func TestQualificationRejectsRemoteRyukBeforeCreation(t *testing.T) {
-	for _, endpoint := range []string{"", "tcp://daemon:2376", "http://daemon:2375", "https://daemon:2376", "ssh://user@daemon", "tcp://127.0.0.1:2376", "npipe://remote/pipe/docker_engine"} {
+	for _, endpoint := range []string{"", "tcp://daemon:2376", "http://daemon:2375", "https://daemon:2376", "ssh://user@daemon", "tcp://127.0.0.1:2376", "npipe://remote/pipe/docker_engine", "npipe:////server/pipe/docker_engine", "npipe:////127.0.0.1/pipe/docker_engine", "npipe:////./pipe/../server/pipe", "npipe:////%2e/pipe/docker_engine", "npipe:////./pipe/%2e%2e"} {
 		t.Run(endpoint, func(t *testing.T) {
 			if _, err := localQualificationAddress(endpoint); err == nil {
 				t.Fatal("remote or unresolved daemon accepted")
@@ -257,6 +260,8 @@ func TestQualificationRefusesRemoteConfigurationInSubprocess(t *testing.T) {
 	}
 	cases := []struct{ name, endpoint, properties string }{
 		{"environment", "https://127.0.0.1:1", ""},
+		{"unc-environment", "npipe:////server/pipe/docker_engine", ""},
+		{"unc-property", "unix:///var/run/docker.sock", "tc.host=npipe:////server/pipe/docker_engine\n"},
 		{"tc-host", "unix:///var/run/docker.sock", "tc.host=https://127.0.0.1:1\n"},
 		{"docker-host", "unix:///var/run/docker.sock", "docker.host=tcp://127.0.0.1:1\n"},
 	}
