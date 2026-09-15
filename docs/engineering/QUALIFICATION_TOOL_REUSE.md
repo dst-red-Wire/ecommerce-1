@@ -55,6 +55,42 @@ new checkout reuses matching tools and dependencies. A pin change prepares only 
 identity and preserves the old one. Fully cached preparation works without network access;
 application integration tests may independently require network access.
 
+## Product Docker qualification
+
+`make service-check SERVICE=product` is the canonical Product gate. When the Docker
+client is missing, the existing `docker_client` Ansible tag downloads the official,
+checksum-pinned archive and installs only its CLI. It does not start a daemon, alter a
+global Docker context, grant socket access, or attempt privileged Docker-in-Docker.
+
+The gate resolves the active context into `DOCKER_HOST` for both its bounded preflight
+and testcontainers-go. An explicit `DOCKER_HOST` remains authoritative. For a remote
+daemon, `TESTCONTAINERS_HOST_OVERRIDE` must identify the address at which the test
+process can reach published ports; it is derived only for a non-loopback TCP hostname.
+This avoids treating the client namespace's forwarding sysctl as evidence about a
+remote server. TLS variables from the selected context are propagated rather than
+disabled.
+
+Before Go downloads or compilation, the gate requires a real server response. It then
+uses the pinned PostgreSQL image to prove pull/reuse, container start, a labelled volume,
+and published-port reachability. Cleanup addresses only the unique labelled container
+and volume from that invocation and verifies they are absent. The Product integration
+test subsequently runs uncached with the race detector and uses the pinned Ryuk image;
+Ryuk, TLS, integrity checks, and Testcontainers cleanup remain enabled.
+
+To resume on a compatible runner, make a clean checkout at the exact commit, verify
+`git status --porcelain=v1` is empty, pass any Docker endpoint variables explicitly for
+that invocation, and run:
+
+```text
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+BASE="$MAIN_BASELINE_SHA" make service-check SERVICE=product
+```
+
+Successful command output is execution evidence only when it includes the exact Git
+identity, Docker client and server identities, the runtime-proof cleanup PASS, and the
+real PostgreSQL/Testcontainers test PASS. A repository runner definition or `docker
+info` alone is not runtime evidence.
+
 Maintenance is explicit: stop qualification processes, then remove only unused identity
 directories or cache entries below `ECOMMERCE_TOOL_HOME`. Never delete a referenced Python
 identity, never clean these caches at bootstrap time, and never place sources, credentials,
