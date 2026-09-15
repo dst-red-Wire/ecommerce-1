@@ -69,19 +69,19 @@ checksum-pinned archive and installs only its CLI. It does not start a daemon, a
 global Docker context, grant socket access, or attempt privileged Docker-in-Docker.
 
 The gate resolves the active context into `DOCKER_HOST` for both its bounded preflight
-and testcontainers-go. An explicit `DOCKER_HOST` remains authoritative. For a remote
-daemon, `TESTCONTAINERS_HOST_OVERRIDE` must identify the address at which the test
-process can reach published ports; it is derived only for a non-loopback TCP hostname.
-Remote publication additionally requires `ECOMMERCE_DOCKER_BIND_ADDRESS`, an explicit
-operator authorization for a literal daemon-side IPv4/IPv6 interface. Wildcard and
-multicast addresses are refused before container creation; a private address is never
-automatically authorized. This address is independent of the client-side host override.
-Both the preflight and Product Testcontainers PostgreSQL bind this interface with an
-allocated host port; local runs bind loopback. PostgreSQL credentials are random per run.
+and testcontainers-go. An explicit `DOCKER_HOST` remains authoritative. Network endpoint
+resolution requires `DOCKER_TLS_VERIFY=1` for TCP/HTTP/HTTPS and preserves context TLS
+certificates; SSH remains an authenticated transport.
 
-This avoids treating the client namespace's forwarding sysctl as evidence about a
-remote server. TLS variables from the selected context are propagated rather than
-disabled.
+Product qualification currently accepts only local Unix sockets or named pipes. It
+rejects remote endpoints before contacting the daemon: Testcontainers Go 0.44.0 creates
+Ryuk separately and does not expose a supported binding override for its unauthenticated
+control port. The Go fixture independently rejects remote or unresolved endpoints before
+creating any container, including when invoked directly. This includes the `tc.host`
+and `docker.host` property overrides. A host override, an authorized
+PostgreSQL bind address, or verified Docker TLS does not waive this restriction. Remote
+qualification can return only once Ryuk's interface binding can be enforced before it
+starts. Local PostgreSQL publication remains loopback with a random per-run credential.
 
 Before Go downloads or compilation, the gate requires a real server response. It then
 uses the pinned PostgreSQL image to prove pull/reuse, container start, a labelled volume,

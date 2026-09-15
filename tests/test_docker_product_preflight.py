@@ -29,7 +29,11 @@ class DockerProductPreflightTests(unittest.TestCase):
         with mock.patch.object(REPOCTL, "run", return_value=completed("ignored-context\n")):
             env, identity = REPOCTL.docker_test_environment(
                 "docker",
-                {"DOCKER_HOST": "tcp://docker.example.test:2376", "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.10"},
+                {
+                    "DOCKER_HOST": "tcp://docker.example.test:2376",
+                    "DOCKER_TLS_VERIFY": "1",
+                    "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.10",
+                },
             )
         self.assertEqual("tcp://docker.example.test:2376", env["DOCKER_HOST"])
         self.assertEqual("docker.example.test", env["TESTCONTAINERS_HOST_OVERRIDE"])
@@ -40,7 +44,7 @@ class DockerProductPreflightTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "run", return_value=completed("default\n")),
             self.assertRaisesRegex(REPOCTL.DockerCapabilityError, "TESTCONTAINERS_HOST_OVERRIDE"),
         ):
-            REPOCTL.docker_test_environment("docker", {"DOCKER_HOST": "tcp://127.0.0.1:2376"})
+            REPOCTL.docker_test_environment("docker", {"DOCKER_HOST": "tcp://127.0.0.1:2376", "DOCKER_TLS_VERIFY": "1"})
 
     def test_daemon_absent_is_distinct_from_client_or_context_failure(self):
         calls = [

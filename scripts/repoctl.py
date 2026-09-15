@@ -276,6 +276,8 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
     env.pop("DOCKER_CONTEXT", None)
     parsed = _parse_docker_endpoint(endpoint)
     is_remote = parsed.scheme in {"tcp", "http", "https", "ssh"}
+    if parsed.scheme in {"tcp", "http", "https"} and env.get("DOCKER_TLS_VERIFY") != "1":
+        raise DockerCapabilityError("network Docker endpoints require verified TLS (DOCKER_TLS_VERIFY=1)")
     if is_remote and not env.get("TESTCONTAINERS_HOST_OVERRIDE", "").strip():
         if parsed.scheme == "ssh" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
             raise DockerCapabilityError(
@@ -311,6 +313,10 @@ def docker_bind_address(env: dict[str, str]) -> str:
 def docker_preflight(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
     """Bounded server probe whose environment is returned unchanged to Testcontainers."""
     env, identity = docker_test_environment(docker, base_env)
+    if _parse_docker_endpoint(env["DOCKER_HOST"]).scheme not in {"unix", "npipe"}:
+        raise DockerCapabilityError(
+            "remote Product qualification is unsupported: Ryuk interface binding cannot be enforced"
+        )
     try:
         daemon = run(
             [docker, "version", "--format", "{{json .Server.Version}}"],

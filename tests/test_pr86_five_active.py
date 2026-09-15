@@ -300,6 +300,7 @@ class DockerConfigurationTests(unittest.TestCase):
                 "docker",
                 {
                     "DOCKER_HOST": endpoint,
+                    "DOCKER_TLS_VERIFY": "1",
                     "TESTCONTAINERS_HOST_OVERRIDE": "daemon",
                     "ECOMMERCE_DOCKER_BIND_ADDRESS": "192.0.2.1",
                 },
