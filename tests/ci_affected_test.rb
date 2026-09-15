@@ -213,6 +213,40 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+  def test_changed_paths_preserves_deletions
+    Dir.mktmpdir("ci-affected-delete") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "deleted.txt"), "one\n")
+        isolated_git("add", "deleted.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.delete(File.join(dir, "deleted.txt"))
+        assert_equal ["deleted.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+      end
+    end
+  end
+
+  def test_service_consumers_include_transitive_dependents
+    Dir.mktmpdir("ci-affected-consumers") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        FileUtils.mkdir_p(File.join(dir, "config/contracts"))
+        File.write(File.join(dir, "config/contracts/dependency-map.yaml"), <<~YAML)
+          services:
+            product: {sync: []}
+            cart: {sync: [product]}
+            checkout: {sync: [cart]}
+        YAML
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        head = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        consumers = AffectedComponents.service_consumers(dir, head, head, %w[product cart checkout])
+        assert_equal %w[cart checkout], consumers["product"]
+      end
+    end
+  end
+
   def test_unknown_service_path_fails_closed
     assert_raises(ArgumentError) { classify("services/warehouse/main.go") }
   end

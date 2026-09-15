@@ -922,11 +922,11 @@ def test_all() -> int:
 
 def changed_paths(base: str, head: str) -> list[str]:
     if head == "WORKTREE":
-        tracked = git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--").splitlines()
+        tracked = git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, "--").splitlines()
         untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
         return sorted(set(filter(None, tracked + untracked)))
     return sorted(
-        set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines()))
+        set(filter(None, git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head, "--").splitlines()))
     )
 
 
