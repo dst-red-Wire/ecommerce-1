@@ -90,6 +90,12 @@ class M1ReviewClosureTests(unittest.TestCase):
                 ),
                 mock.patch.object(REPOCTL, "run", side_effect=successful_run),
                 mock.patch.object(REPOCTL.shutil, "which", return_value="/bin/docker"),
+                mock.patch.object(
+                    REPOCTL,
+                    "docker_preflight",
+                    return_value=({"DOCKER_HOST": "unix:///var/run/docker.sock"}, "mode=local"),
+                ),
+                mock.patch.object(REPOCTL, "docker_runtime_proof"),
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))
                 expected_calls = [mock.call(expected)]

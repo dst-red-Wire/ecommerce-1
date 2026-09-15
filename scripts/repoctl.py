@@ -17,10 +17,13 @@ from pathlib import Path
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from urllib.parse import urlsplit
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -93,6 +96,7 @@ def run(
     env: dict[str, str] | None = None,
     check: bool = True,
     capture: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     p = subprocess.run(
         cmd,
@@ -101,11 +105,188 @@ def run(
         text=True,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
+        timeout=timeout,
     )
     if check and p.returncode:
         detail = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
     return p
+
+
+class DockerCapabilityError(RuntimeError):
+    """The selected Docker endpoint cannot execute Product container tests."""
+
+
+def _safe_docker_endpoint(endpoint: str) -> str:
+    """Return a credential-free endpoint identity suitable for qualification logs."""
+    if not endpoint:
+        return "default"
+    if endpoint.startswith("unix://") or endpoint.startswith("npipe://"):
+        return endpoint
+    parsed = urlsplit(endpoint)
+    host = parsed.hostname or "unresolved"
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme or 'unknown'}://{host}{port}"
+
+
+def _safe_docker_detail(detail: str, env: dict[str, str]) -> str:
+    endpoint = env.get("DOCKER_HOST", "").strip()
+    if endpoint:
+        detail = detail.replace(endpoint, _safe_docker_endpoint(endpoint))
+    # Defensive fallback for CLI diagnostics that normalize an endpoint but retain userinfo.
+    return re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@", r"\1", detail, flags=re.IGNORECASE)
+
+
+def docker_test_environment(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
+    """Resolve one endpoint for both the CLI preflight and testcontainers-go.
+
+    Docker SDK clients do not consistently honor the CLI's active context.  Resolve
+    that context into standard Docker environment variables without changing global
+    context state, while preserving an explicit DOCKER_HOST as the highest authority.
+    """
+    env = dict(base_env or os.environ)
+    try:
+        context = run([docker, "context", "show"], env=env, capture=True, timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise DockerCapabilityError("Docker context resolution timed out after 5s") from exc
+    if context.returncode:
+        raise DockerCapabilityError("Docker context is invalid or unavailable")
+    context_name = context.stdout.strip() or "default"
+    endpoint = env.get("DOCKER_HOST", "").strip()
+    source = "DOCKER_HOST" if endpoint else f"context:{context_name}"
+    if not endpoint:
+        try:
+            inspected = run([docker, "context", "inspect", context_name], env=env, capture=True, timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise DockerCapabilityError("Docker context inspection timed out after 5s") from exc
+        try:
+            entry = json.loads(inspected.stdout)[0]
+            endpoint = entry["Endpoints"]["docker"]["Host"]
+        except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise DockerCapabilityError(f"Docker endpoint is unresolved for context {context_name!r}") from exc
+        env["DOCKER_HOST"] = endpoint
+        tls_path = entry.get("Storage", {}).get("TLSPath", "")
+        skip_tls = entry.get("Endpoints", {}).get("docker", {}).get("SkipTLSVerify", False)
+        if tls_path and Path(tls_path, "docker").is_dir():
+            env["DOCKER_CERT_PATH"] = str(Path(tls_path, "docker"))
+            if not skip_tls:
+                env["DOCKER_TLS_VERIFY"] = "1"
+
+    parsed = urlsplit(endpoint)
+    is_remote = parsed.scheme in {"tcp", "http", "https", "ssh"}
+    if is_remote and not env.get("TESTCONTAINERS_HOST_OVERRIDE", "").strip():
+        if parsed.scheme == "ssh" or not parsed.hostname or parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+            raise DockerCapabilityError(
+                "remote Docker endpoint requires an explicit TESTCONTAINERS_HOST_OVERRIDE reachable by the test process"
+            )
+        env["TESTCONTAINERS_HOST_OVERRIDE"] = parsed.hostname
+    return env, f"mode={'remote' if is_remote else 'local'} source={source} endpoint={_safe_docker_endpoint(endpoint)}"
+
+
+def docker_preflight(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
+    """Bounded server probe whose environment is returned unchanged to Testcontainers."""
+    env, identity = docker_test_environment(docker, base_env)
+    try:
+        daemon = run(
+            [docker, "version", "--format", "{{json .Server.Version}}"],
+            env=env,
+            check=False,
+            capture=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DockerCapabilityError(f"Docker server probe timed out after 10s ({identity})") from exc
+    if daemon.returncode:
+        detail = _safe_docker_detail(" ".join((daemon.stderr or daemon.stdout).strip().split()), env)[:240]
+        lowered = detail.lower()
+        if "permission denied" in lowered:
+            category = "socket inaccessible"
+        elif "connection refused" in lowered and "unix://" in identity:
+            category = "local daemon stopped"
+        elif "cannot connect" in lowered and "unix://" in identity:
+            category = "local daemon absent or stopped"
+        else:
+            category = "configured endpoint inaccessible"
+        raise DockerCapabilityError(f"{category} ({identity}): {detail or 'daemon probe failed'}")
+    return env, identity
+
+
+def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
+    """Prove pull/start, volume, published-port reachability, and owned cleanup."""
+    token = uuid.uuid4().hex
+    label = f"ecommerce-1.product-qualification={token}"
+    volume = f"ecommerce-product-qualification-{token}"
+    container = ""
+    endpoint_scheme = urlsplit(env.get("DOCKER_HOST", "")).scheme
+    publish = "5432" if endpoint_scheme in {"tcp", "http", "https", "ssh"} else "127.0.0.1::5432"
+    try:
+        run([docker, "volume", "create", "--label", label, volume], env=env, timeout=15, capture=True)
+        started = run(
+            [
+                docker,
+                "run",
+                "--detach",
+                "--label",
+                label,
+                "--name",
+                volume,
+                "--mount",
+                f"type=volume,src={volume},dst=/var/lib/postgresql/data",
+                "--publish",
+                publish,
+                "--env",
+                "POSTGRES_PASSWORD=product-test-only",
+                image,
+            ],
+            env=env,
+            capture=True,
+            timeout=120,
+        )
+        container = started.stdout.strip()
+        mapping = run([docker, "port", container, "5432/tcp"], env=env, capture=True, timeout=10).stdout.strip()
+        port = int(mapping.rsplit(":", 1)[1])
+        host = env.get("TESTCONTAINERS_HOST_OVERRIDE", "127.0.0.1")
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                with socket.create_connection((host, port), timeout=1):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    logs = run(
+                        [docker, "logs", "--tail", "40", container], env=env, capture=True, check=False, timeout=5
+                    )
+                    detail = " ".join((logs.stderr or logs.stdout).split())[:400]
+                    raise DockerCapabilityError(f"published port {host}:{port} unreachable after 30s: {detail}")
+                time.sleep(0.5)
+    except (RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
+        if isinstance(exc, DockerCapabilityError):
+            raise
+        raise DockerCapabilityError(f"Docker runtime proof failed: {exc}") from exc
+    finally:
+        if container:
+            try:
+                run([docker, "rm", "--force", container], env=env, check=False, capture=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            run([docker, "volume", "rm", "--force", volume], env=env, check=False, capture=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            pass
+    leaked_containers = run(
+        [docker, "ps", "--all", "--quiet", "--filter", f"label={label}"],
+        env=env,
+        capture=True,
+        timeout=10,
+    ).stdout.strip()
+    leaked_volumes = run(
+        [docker, "volume", "ls", "--quiet", "--filter", f"label={label}"],
+        env=env,
+        capture=True,
+        timeout=10,
+    ).stdout.strip()
+    if leaked_containers or leaked_volumes:
+        raise DockerCapabilityError("owned Docker qualification resources remain after cleanup")
 
 
 def output(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
@@ -241,8 +422,13 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
-    if "docker_client" in wanted and not shutil.which("docker"):
-        return False
+    if "docker_client" in wanted:
+        docker = shutil.which("docker")
+        if not docker:
+            return False
+        got = run([docker, "--version"], check=False, capture=True)
+        if got.returncode or f"Docker version {pins.get('DOCKER_CLIENT_VERSION', '')}," not in got.stdout:
+            return False
     if "templ" in wanted:
         version = pins.get("TEMPL_VERSION", "")
         templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / version / "linux-amd64/templ"
@@ -777,24 +963,21 @@ def service_check(service: str) -> int:
         docker = shutil.which("docker")
         if not docker:
             return fail("PLATFORM NOT CAPABLE: Docker client reconciliation did not publish an executable", 2)
-        context = run([docker, "context", "show"], check=False, capture=True)
-        endpoint = os.environ.get("DOCKER_HOST", "").strip()
-        daemon = run([docker, "info", "--format", "{{json .ServerVersion}}"], check=False, capture=True)
-        if daemon.returncode:
-            detail = " ".join((daemon.stderr or daemon.stdout).strip().split())[:240]
-            return fail(
-                "PLATFORM NOT CAPABLE: Docker daemon unavailable or inaccessible "
-                f"(context={(context.stdout.strip() if context.returncode == 0 else 'unresolved')}, "
-                f"endpoint={'DOCKER_HOST' if endpoint else 'context/default'}): {detail or 'daemon probe failed'}",
-                2,
-            )
-        print(
-            "PASS Docker daemon connection "
-            f"context={(context.stdout.strip() if context.returncode == 0 else 'unresolved')} "
-            f"endpoint={'DOCKER_HOST' if endpoint else 'context/default'}"
-        )
+        try:
+            docker_env, docker_identity = docker_preflight(docker)
+            postgres_image = "docker.io/library/postgres:17.10-alpine3.22@sha256:b02d9b5bcf608c2719da32cdabee274a33841202487fd5dc9b065b63f886753f"
+            docker_runtime_proof(docker, docker_env, postgres_image)
+        except DockerCapabilityError as exc:
+            return fail(f"PLATFORM NOT CAPABLE: {exc}", 2)
+        print(f"PASS Docker runtime proof and owned cleanup ({docker_identity})")
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
+    if needs_containers:
+        env.update(docker_env)
+        env["RYUK_CONTAINER_IMAGE"] = (
+            "docker.io/testcontainers/ryuk:0.14.0@sha256:"
+            "7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
+        )
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)
