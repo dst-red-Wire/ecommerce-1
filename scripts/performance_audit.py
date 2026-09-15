@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import statistics
 from typing import Any
 
 GLOBAL_GATES = (
@@ -31,6 +32,26 @@ REUSE_FIELDS = (
     "reused_from_sha",
     "promoted_from_worktree",
     "reused_from_worktree_tree_sha",
+)
+CAMPAIGN_SCENARIOS = (
+    "documentation",
+    "go-service-local",
+    "frontend-application-local",
+    "ansible",
+    "independent-tool",
+    "repository-controller",
+)
+CAMPAIGN_PHASES = (
+    "tool-preparation",
+    "commit-hook",
+    "push-hook",
+    "change-classification",
+    "global-qualification",
+    "component-qualification",
+    "generation",
+    "compilation",
+    "tests",
+    "evidence-reuse",
 )
 
 
@@ -47,6 +68,95 @@ def _round(value: float) -> float:
 
 def _is_reused(record: dict[str, Any]) -> bool:
     return any(bool(record.get(field)) for field in REUSE_FIELDS)
+
+
+def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
+    """Validate and summarize an externally measured, bounded campaign.
+
+    Measurements are observations, never PASS authorization. Cold runs must use an
+    isolated cache rather than deleting a user's cache, and warm results remain
+    explicitly labelled so they cannot be mistaken for skipped controls.
+    """
+    if not isinstance(campaign, dict):
+        raise ValueError("campaign must be a JSON object")
+    runs = campaign.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError("campaign must contain a non-empty runs array")
+    for field in ("head_sha", "environment", "commands", "limitations"):
+        if field not in campaign:
+            raise ValueError(f"campaign must document {field}")
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    observed_scenarios: set[str] = set()
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict):
+            raise ValueError(f"campaign run {index} must be an object")
+        scenario = str(run.get("scenario", ""))
+        if scenario not in CAMPAIGN_SCENARIOS:
+            raise ValueError(f"campaign run {index} has unknown scenario: {scenario}")
+        cache_state = str(run.get("cache_state", ""))
+        if cache_state not in {"cold-isolated", "warm"}:
+            raise ValueError(f"campaign run {index} has invalid cache_state")
+        if cache_state == "cold-isolated" and not str(run.get("cache_root", "")).strip():
+            raise ValueError(f"campaign run {index} cold cache must name its isolated cache_root")
+        if run.get("result") not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
+            raise ValueError(f"campaign run {index} has invalid result")
+        phases = run.get("phases")
+        if not isinstance(phases, dict):
+            raise ValueError(f"campaign run {index} must contain phase measurements")
+        unknown_phases = sorted(set(phases) - set(CAMPAIGN_PHASES))
+        if unknown_phases:
+            raise ValueError(f"campaign run {index} has unknown phases: {', '.join(unknown_phases)}")
+        for phase, seconds in phases.items():
+            if not isinstance(seconds, (int, float)) or seconds < 0:
+                raise ValueError(f"campaign run {index} phase {phase} must be non-negative seconds")
+        for field in ("wall_seconds", "task_duration_sum_seconds", "estimated_saved_seconds"):
+            if not isinstance(run.get(field), (int, float)) or run[field] < 0:
+                raise ValueError(f"campaign run {index} {field} must be non-negative seconds")
+        observed_scenarios.add(scenario)
+        grouped.setdefault((scenario, cache_state), []).append(run)
+
+    missing = sorted(set(CAMPAIGN_SCENARIOS) - observed_scenarios)
+    if missing:
+        raise ValueError("campaign is missing required scenarios: " + ", ".join(missing))
+
+    summaries = []
+    for (scenario, cache_state), samples in sorted(grouped.items()):
+        walls = [float(sample["wall_seconds"]) for sample in samples]
+        task_sums = [float(sample["task_duration_sum_seconds"]) for sample in samples]
+        saved = [float(sample["estimated_saved_seconds"]) for sample in samples]
+        summaries.append(
+            {
+                "scenario": scenario,
+                "cache_state": cache_state,
+                "samples": len(samples),
+                "executed_runs": sum(sample["result"] != "SKIP" for sample in samples),
+                "results": {
+                    status: sum(sample["result"] == status for sample in samples)
+                    for status in ("PASS", "FAIL", "BLOCKED", "SKIP")
+                },
+                "wall_seconds_median": _round(statistics.median(walls)),
+                "wall_seconds_min": _round(min(walls)),
+                "wall_seconds_max": _round(max(walls)),
+                "wall_seconds_range": _round(max(walls) - min(walls)),
+                "task_duration_sum_seconds_median": _round(statistics.median(task_sums)),
+                "estimated_saved_seconds_median": _round(statistics.median(saved)),
+                "phase_seconds_median": {
+                    phase: _round(statistics.median([float(sample["phases"].get(phase, 0.0)) for sample in samples]))
+                    for phase in CAMPAIGN_PHASES
+                },
+            }
+        )
+    return {
+        "head_sha": campaign["head_sha"],
+        "environment": campaign["environment"],
+        "commands": campaign["commands"],
+        "limitations": campaign["limitations"],
+        "scenario_count": len(observed_scenarios),
+        "run_count": len(runs),
+        "groups": summaries,
+        "safety": {"authorizes_pass": False, "cold_cache_policy": "isolated-cache-only"},
+    }
 
 
 def _source_seconds(record: dict[str, Any]) -> float:
@@ -372,7 +482,13 @@ def recommendations(
     return items
 
 
-def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+def audit(
+    evidence: dict[str, Any],
+    *,
+    root: Path,
+    baseline: dict[str, Any] | None = None,
+    campaign: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     records = _validate_evidence(evidence)
     inventory = gate_inventory(records)
     critical = tekton_critical_path(records)
@@ -398,6 +514,8 @@ def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | No
     }
     if baseline is not None:
         report["comparison"] = compare_baseline(evidence, baseline)
+    if campaign is not None:
+        report["campaign"] = campaign_summary(campaign)
     return report
 
 
@@ -466,6 +584,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", default=os.environ.get("EVIDENCE", ""))
     parser.add_argument("--baseline", default=os.environ.get("BASELINE_EVIDENCE", ""))
     parser.add_argument("--output", default=os.environ.get("PERF_OUTPUT", ""))
+    parser.add_argument(
+        "--campaign", default=os.environ.get("PERF_CAMPAIGN", ""), help="bounded measured campaign JSON"
+    )
     parser.add_argument("--json", action="store_true", help="print the full JSON report to stdout")
     args = parser.parse_args(argv)
 
@@ -481,7 +602,13 @@ def main(argv: list[str] | None = None) -> int:
             if not baseline_path.is_absolute():
                 baseline_path = root / baseline_path
             baseline = _load(baseline_path, label="baseline evidence")
-        report = audit(evidence, root=root, baseline=baseline)
+        campaign = None
+        if args.campaign:
+            campaign_path = Path(args.campaign).expanduser()
+            if not campaign_path.is_absolute():
+                campaign_path = root / campaign_path
+            campaign = _load(campaign_path, label="campaign")
+        report = audit(evidence, root=root, baseline=baseline, campaign=campaign)
         identity = str(report.get("head_sha") or "worktree")
         destination = (
             Path(args.output).expanduser() if args.output else root / ".context" / "performance" / f"{identity}.json"

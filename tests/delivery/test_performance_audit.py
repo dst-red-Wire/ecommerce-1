@@ -14,6 +14,40 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class PerformanceAuditTests(unittest.TestCase):
+    def campaign(self):
+        runs = []
+        for scenario in AUDIT.CAMPAIGN_SCENARIOS:
+            runs.append(
+                {
+                    "scenario": scenario,
+                    "cache_state": "cold-isolated",
+                    "cache_root": f"/tmp/{scenario}",
+                    "result": "PASS",
+                    "wall_seconds": 10.0,
+                    "task_duration_sum_seconds": 14.0,
+                    "estimated_saved_seconds": 0.0,
+                    "phases": {"tests": 5.0, "tool-preparation": 2.0},
+                }
+            )
+            runs.append(
+                {
+                    "scenario": scenario,
+                    "cache_state": "warm",
+                    "result": "PASS",
+                    "wall_seconds": 6.0,
+                    "task_duration_sum_seconds": 8.0,
+                    "estimated_saved_seconds": 2.0,
+                    "phases": {"tests": 3.0, "tool-preparation": 0.5},
+                }
+            )
+        return {
+            "head_sha": "2" * 40,
+            "environment": {"cpus": 4, "memory_bytes": 1024},
+            "commands": ["make verify-change"],
+            "limitations": ["local observation"],
+            "runs": runs,
+        }
+
     def evidence(self):
         return {
             "schema_version": 4,
@@ -134,6 +168,31 @@ class PerformanceAuditTests(unittest.TestCase):
         evidence["gates"][0]["status"] = "UNKNOWN"
         with self.assertRaisesRegex(ValueError, "invalid status"):
             AUDIT.audit(evidence, root=Path("."))
+
+    def test_campaign_separates_wall_task_sum_execution_savings_and_cache_state(self):
+        summary = AUDIT.campaign_summary(self.campaign())
+        self.assertEqual(6, summary["scenario_count"])
+        self.assertEqual(12, summary["run_count"])
+        warm = next(
+            row for row in summary["groups"] if row["scenario"] == "documentation" and row["cache_state"] == "warm"
+        )
+        self.assertEqual(6.0, warm["wall_seconds_median"])
+        self.assertEqual(8.0, warm["task_duration_sum_seconds_median"])
+        self.assertEqual(2.0, warm["estimated_saved_seconds_median"])
+        self.assertEqual(1, warm["executed_runs"])
+        self.assertFalse(summary["safety"]["authorizes_pass"])
+
+    def test_campaign_requires_all_bounded_scenarios(self):
+        campaign = self.campaign()
+        campaign["runs"] = [run for run in campaign["runs"] if run["scenario"] != "ansible"]
+        with self.assertRaisesRegex(ValueError, "missing required scenarios: ansible"):
+            AUDIT.campaign_summary(campaign)
+
+    def test_cold_campaign_requires_isolated_cache_root(self):
+        campaign = self.campaign()
+        campaign["runs"][0].pop("cache_root")
+        with self.assertRaisesRegex(ValueError, "isolated cache_root"):
+            AUDIT.campaign_summary(campaign)
 
 
 if __name__ == "__main__":
