@@ -1482,7 +1482,11 @@ def write_evidence(
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
-        "head_tree_sha": source_tree_sha if head == "WORKTREE" else git("rev-parse", f"{head_sha}^{{tree}}").strip(),
+        "head_tree_sha": (
+            verification_data.get("source_tree_sha")
+            if head == "WORKTREE"
+            else git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        ),
         "created_at_epoch": time.time(),
         "qualification_identity": qualification_identity(),
         "exact_commit_evidence": exact,
