@@ -59,7 +59,17 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{Path.home() / '.local/bin'}"
+
+
+def execution_path(inherited: str) -> str:
+    """Keep the locked seed ahead of managed tools, then inherited commands."""
+    seed = ROOT / ".venv/qualification/bin"
+    prefixes = [str(seed)] if (seed / "python").is_file() else []
+    prefixes.append(str(Path.home() / ".local/bin"))
+    return os.pathsep.join(dict.fromkeys([*prefixes, *inherited.split(os.pathsep)]))
+
+
+os.environ["PATH"] = execution_path(os.environ.get("PATH", ""))
 COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "collections.lock.json"
 COLLECTIONS_ID = hashlib.sha256(COLLECTIONS_LOCK.read_bytes()).hexdigest() if COLLECTIONS_LOCK.is_file() else ""
 TOOL_HOME = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification"))
@@ -98,18 +108,42 @@ def run(
     capture: bool = False,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    p = subprocess.run(
-        cmd,
-        cwd=cwd or ROOT,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        timeout=timeout,
-    )
+    effective_env = os.environ if env is None else env
+    sensitive = Path(cmd[0]).name == "docker" or bool(effective_env.get("DOCKER_HOST"))
+    try:
+        p = subprocess.run(
+            cmd,
+            cwd=cwd or ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE if capture or sensitive else None,
+            stderr=subprocess.PIPE if capture or sensitive else None,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if not sensitive:
+            raise
+        safe = lambda value: _safe_docker_detail(
+            value.decode(errors="replace") if isinstance(value, bytes) else value or "", effective_env
+        )
+        raise subprocess.TimeoutExpired(
+            [safe(part) for part in cmd], exc.timeout, output=safe(exc.output), stderr=safe(exc.stderr)
+        ) from None
+    except OSError as exc:
+        if not sensitive:
+            raise
+        raise RuntimeError(_safe_docker_detail(str(exc), effective_env)) from None
+    if sensitive:
+        p.stdout = _safe_docker_detail(p.stdout or "", effective_env)
+        p.stderr = _safe_docker_detail(p.stderr or "", effective_env)
+        p.args = [_safe_docker_detail(part, effective_env) for part in cmd]
+        if not capture:
+            print(p.stdout, end="")
+            print(p.stderr, end="", file=sys.stderr)
     if check and p.returncode:
         detail = (p.stderr or p.stdout or "").strip()
-        raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
+        fallback = f"command failed ({p.returncode}): {' '.join(cmd)}"
+        raise RuntimeError(detail or (_safe_docker_detail(fallback, effective_env) if sensitive else fallback))
     return p
 
 
@@ -133,8 +167,18 @@ def _safe_docker_detail(detail: str, env: dict[str, str]) -> str:
     endpoint = env.get("DOCKER_HOST", "").strip()
     if endpoint:
         detail = detail.replace(endpoint, _safe_docker_endpoint(endpoint))
-    # Defensive fallback for CLI diagnostics that normalize an endpoint but retain userinfo.
-    return re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@", r"\1", detail, flags=re.IGNORECASE)
+        from urllib.parse import unquote
+
+        parsed = urlsplit(endpoint)
+        for value in (parsed.username, parsed.password):
+            if value:
+                detail = detail.replace(value, "[REDACTED]").replace(unquote(value), "[REDACTED]")
+    detail = re.sub(r"([a-z][a-z0-9+.-]*://)[^\s/@]+@", r"\1", detail, flags=re.IGNORECASE)
+    return re.sub(
+        r"(?i)(password|passwd|token|secret|authorization)(\s*[=:]\s*)([^\s,;\"\']+)",
+        r"\1\2[REDACTED]",
+        detail,
+    )
 
 
 def docker_test_environment(docker: str, base_env: dict[str, str] | None = None) -> tuple[dict[str, str], str]:
@@ -144,21 +188,29 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
     that context into standard Docker environment variables without changing global
     context state, while preserving an explicit DOCKER_HOST as the highest authority.
     """
-    env = dict(base_env or os.environ)
-    try:
-        context = run([docker, "context", "show"], env=env, capture=True, timeout=5)
-    except subprocess.TimeoutExpired as exc:
-        raise DockerCapabilityError("Docker context resolution timed out after 5s") from exc
-    if context.returncode:
-        raise DockerCapabilityError("Docker context is invalid or unavailable")
-    context_name = context.stdout.strip() or "default"
+    env = dict(os.environ if base_env is None else base_env)
+    if env.get("DOCKER_HOST", "").strip():
+        env.pop("DOCKER_CONTEXT", None)
     endpoint = env.get("DOCKER_HOST", "").strip()
+    context_name = "default"
+    if not endpoint:
+        try:
+            context = run([docker, "context", "show"], env=env, capture=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            raise DockerCapabilityError("Docker context resolution timed out after 5s") from None
+        except RuntimeError as exc:
+            raise DockerCapabilityError(_safe_docker_detail(str(exc), env)) from None
+        if context.returncode:
+            raise DockerCapabilityError("Docker context is invalid or unavailable")
+        context_name = context.stdout.strip() or "default"
     source = "DOCKER_HOST" if endpoint else f"context:{context_name}"
     if not endpoint:
         try:
             inspected = run([docker, "context", "inspect", context_name], env=env, capture=True, timeout=5)
-        except subprocess.TimeoutExpired as exc:
-            raise DockerCapabilityError("Docker context inspection timed out after 5s") from exc
+        except subprocess.TimeoutExpired:
+            raise DockerCapabilityError("Docker context inspection timed out after 5s") from None
+        except RuntimeError as exc:
+            raise DockerCapabilityError(_safe_docker_detail(str(exc), env)) from None
         try:
             entry = json.loads(inspected.stdout)[0]
             endpoint = entry["Endpoints"]["docker"]["Host"]
@@ -172,6 +224,7 @@ def docker_test_environment(docker: str, base_env: dict[str, str] | None = None)
             if not skip_tls:
                 env["DOCKER_TLS_VERIFY"] = "1"
 
+    env.pop("DOCKER_CONTEXT", None)
     parsed = urlsplit(endpoint)
     is_remote = parsed.scheme in {"tcp", "http", "https", "ssh"}
     if is_remote and not env.get("TESTCONTAINERS_HOST_OVERRIDE", "").strip():
@@ -243,7 +296,7 @@ def docker_ryuk_image_proof(docker: str, env: dict[str, str], image: str) -> Non
         if inspect(tag) != pinned_id:
             raise DockerCapabilityError("Ryuk tag differs from the pinned digest; existing tag left unchanged")
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
-        raise DockerCapabilityError(f"Ryuk image proof failed: {exc}") from exc
+        raise DockerCapabilityError(f"Ryuk image proof failed: {_safe_docker_detail(str(exc), env)}") from None
     print(f"PASS Ryuk image digest {image} image_id={pinned_id}")
 
 
@@ -296,33 +349,44 @@ def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
                     raise DockerCapabilityError(f"published port {host}:{port} unreachable after 30s: {detail}")
                 time.sleep(0.5)
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
-        if isinstance(exc, DockerCapabilityError):
-            raise
-        raise DockerCapabilityError(f"Docker runtime proof failed: {exc}") from exc
-    finally:
-        if container:
-            try:
-                run([docker, "rm", "--force", container], env=env, check=False, capture=True, timeout=15)
-            except subprocess.TimeoutExpired:
-                pass
+        failure = _safe_docker_detail(str(exc), env)
+    else:
+        failure = ""
+    cleanup_errors = []
+    # A failed run may already have created the container without returning its ID.
+    # Inspect the known name, prove this invocation's label, then delete by ID.
+    for kind in ("container", "volume"):
         try:
-            run([docker, "volume", "rm", "--force", volume], env=env, check=False, capture=True, timeout=15)
-        except subprocess.TimeoutExpired:
-            pass
-    leaked_containers = run(
-        [docker, "ps", "--all", "--quiet", "--filter", f"label={label}"],
-        env=env,
-        capture=True,
-        timeout=10,
-    ).stdout.strip()
-    leaked_volumes = run(
-        [docker, "volume", "ls", "--quiet", "--filter", f"label={label}"],
-        env=env,
-        capture=True,
-        timeout=10,
-    ).stdout.strip()
-    if leaked_containers or leaked_volumes:
-        raise DockerCapabilityError("owned Docker qualification resources remain after cleanup")
+            inspected = run(
+                [docker, kind, "inspect", volume],
+                env=env,
+                check=False,
+                capture=True,
+                timeout=10,
+            )
+            if inspected.returncode:
+                if "no such" in (inspected.stderr or "").lower():
+                    continue
+                raise DockerCapabilityError(f"cannot establish {kind} ownership: {inspected.stderr}")
+            entry = json.loads(inspected.stdout)[0]
+            labels = entry.get("Config", {}).get("Labels", {}) if kind == "container" else entry.get("Labels", {})
+            if (labels or {}).get("ecommerce-1.product-qualification") != token:
+                raise DockerCapabilityError(f"refusing cleanup of foreign {kind} named {volume}")
+            target = entry["Id"] if kind == "container" else volume
+            command = [docker, "rm", "--force", target] if kind == "container" else [docker, "volume", "rm", volume]
+            run(command, env=env, capture=True, timeout=15)
+            verified = run([docker, kind, "inspect", volume], env=env, check=False, capture=True, timeout=10)
+            if verified.returncode == 0 or "no such" not in (verified.stderr or "").lower():
+                raise DockerCapabilityError(f"{kind} disappearance could not be verified")
+        except (RuntimeError, subprocess.TimeoutExpired, ValueError, KeyError, IndexError) as exc:
+            cleanup_errors.append(_safe_docker_detail(str(exc), env))
+            # Never attempt volume removal while container removal is uncertain.
+            break
+    if cleanup_errors:
+        failure = "; ".join(filter(None, [failure, "cleanup failed: " + "; ".join(cleanup_errors)]))
+    if failure:
+        raise DockerCapabilityError(f"Docker runtime proof failed: {failure}") from None
+    print(f"PASS owned Docker cleanup invocation={token} container=absent volume=absent")
 
 
 def output(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
@@ -451,6 +515,22 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
+    if "terraform" in wanted:
+        tofu = shutil.which("tofu")
+        tool = tofu or shutil.which("terraform")
+        cache = Path(os.environ.get("TF_PLUGIN_CACHE_DIR", TOOL_HOME / "cache/terraform/providers"))
+        if not tool or not cache.is_dir():
+            return False
+        got = run([tool, "version", "-json"], check=False, capture=True)
+        try:
+            if (
+                got.returncode
+                or json.loads(got.stdout)["terraform_version"]
+                != pins["OPENTOFU_VERSION" if tofu else "TERRAFORM_VERSION"]
+            ):
+                return False
+        except (ValueError, KeyError):
+            return False
     if "docker_client" in wanted:
         docker = shutil.which("docker")
         if not docker:
@@ -823,7 +903,7 @@ def frontend(action: str, scope: str = "") -> int:
         return fail("frontend usage: frontend <storefront|admin|all>")
     ensure_developer("go,cgo,templ")
     managed_bin = Path.home() / ".local/bin"
-    env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
+    env = dict(os.environ, PATH=execution_path(os.environ.get("PATH", "")))
     # A version manager may export a GOROOT for a different system Go. The
     # repository-managed binary must discover and execute its own toolchain.
     env.pop("GOROOT", None)
@@ -888,7 +968,7 @@ def frontend(action: str, scope: str = "") -> int:
 def site() -> int:
     """Run both independently deployable Go frontends until interrupted."""
     ensure_developer("go")
-    env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
+    env = dict(os.environ, PATH=execution_path(os.environ.get("PATH", "")))
     with tempfile.TemporaryDirectory(prefix="ecommerce-site-") as output_dir:
         binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
         for target, binary in zip(("storefront", "admin"), binaries, strict=True):
@@ -1007,9 +1087,9 @@ def service_check(service: str) -> int:
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     if needs_containers:
-        env.update(docker_env)
+        env = docker_env.copy()
         env["ECOMMERCE_RYUK_IMAGE"] = ryuk_image
-    env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env["PATH"] = execution_path(env.get("PATH", ""))
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
@@ -1070,6 +1150,7 @@ def terraform_check() -> int:
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
+    ensure_developer("terraform")
     tool = shutil.which("tofu") or shutil.which("terraform")
     if not tool:
         return fail("Terraform sources exist but neither tofu nor terraform is installed")

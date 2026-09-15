@@ -75,9 +75,17 @@ class DockerProductPreflightTests(unittest.TestCase):
 
     def test_runtime_proof_cleans_only_its_exact_container_and_volume(self):
         commands = []
+        inspected = set()
 
         def fake_run(command, **_kwargs):
             commands.append(command)
+            if command[1:3] in (["container", "inspect"], ["volume", "inspect"]):
+                kind = command[1]
+                if kind in inspected:
+                    return completed(stderr="No such resource", returncode=1)
+                inspected.add(kind)
+                labels = {"ecommerce-1.product-qualification": "owned"}
+                return completed(json.dumps([{"Id": "container-id", "Config": {"Labels": labels}, "Labels": labels}]))
             if command[1] == "run":
                 return completed("container-id\n")
             if command[1] == "port":
@@ -93,7 +101,7 @@ class DockerProductPreflightTests(unittest.TestCase):
         ):
             REPOCTL.docker_runtime_proof("docker", {}, "postgres@sha256:pinned")
         self.assertIn(["docker", "rm", "--force", "container-id"], commands)
-        self.assertIn(["docker", "volume", "rm", "--force", "ecommerce-product-qualification-owned"], commands)
+        self.assertIn(["docker", "volume", "rm", "ecommerce-product-qualification-owned"], commands)
         self.assertFalse(any("prune" in command for command in commands))
 
     def test_ryuk_digest_mismatch_fails_without_retagging(self):
@@ -109,7 +117,6 @@ class DockerProductPreflightTests(unittest.TestCase):
             with self.assertRaisesRegex(REPOCTL.DockerCapabilityError, "tag differs"):
                 REPOCTL.docker_ryuk_image_proof("docker", {}, image)
         self.assertTrue(all(call.args[0][1:3] == ["image", "inspect"] for call in run.call_args_list))
-
 
     def test_ryuk_missing_digest_is_pulled_and_verified_against_tag(self):
         image = "docker.io/testcontainers/ryuk:0.14.0@sha256:" + "a" * 64
@@ -128,13 +135,11 @@ class DockerProductPreflightTests(unittest.TestCase):
         self.assertEqual(["docker", "pull", image], run.call_args_list[1].args[0])
         self.assertEqual(120, run.call_args_list[1].kwargs["timeout"])
 
-
     def test_ryuk_unpinned_reference_fails_before_daemon_access(self):
         with mock.patch.object(REPOCTL, "run") as run:
             with self.assertRaisesRegex(REPOCTL.DockerCapabilityError, "immutable SHA-256"):
                 REPOCTL.docker_ryuk_image_proof("docker", {}, "testcontainers/ryuk:0.14.0")
         run.assert_not_called()
-
 
     def test_endpoint_logging_removes_embedded_credentials(self):
         self.assertEqual(

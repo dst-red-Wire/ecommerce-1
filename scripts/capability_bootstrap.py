@@ -492,6 +492,46 @@ class Auditor:
         return results
 
 
+def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> dict[str, str]:
+    # pip is supplied by venv/ensurepip, before the locked closure is installed.
+    # Its vendored PEP 508 parser avoids bootstrapping a dependency on packaging.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = {}
+    for raw in lock.splitlines():
+        if not raw or raw[0].isspace() or raw.startswith("#"):
+            continue
+        requirement = Requirement(raw.rstrip().removesuffix("\\").strip())
+        if requirement.marker and not requirement.marker.evaluate(environment):
+            continue
+        pins = list(requirement.specifier)
+        if len(pins) != 1 or pins[0].operator != "==":
+            raise ValueError(f"seed requires an exact version: {requirement.name}")
+        expected[canonicalize_name(requirement.name)] = pins[0].version
+    return expected
+
+
+def validate_seed_lock(lock_path: str) -> bool:
+    import importlib.metadata as metadata
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    try:
+        if any(metadata.version(name) != version for name, version in expected.items()):
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    return (
+        subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -527,20 +567,15 @@ def seed_environment() -> int:
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if metadata != {"identity": identity, "input": json.loads(identity_input)}:
                 return False
-            locked = dict(
-                re.findall(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", SEED_LOCK.read_text(encoding="utf-8"), re.MULTILINE)
-            )
-            expected = json.dumps({name.lower().replace("_", "-"): version for name, version in locked.items()})
             proc = subprocess.run(
                 [
                     str(python),
                     "-c",
-                    "import importlib.metadata as m,json,subprocess,sys; "
-                    "expected=json.loads(sys.argv[1]); "
-                    "actual={n:m.version(n) for n in expected}; "
-                    "sys.exit(0 if actual == expected and subprocess.run([sys.executable,'-m','pip','check'], "
-                    "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode == 0 else 1)",
-                    expected,
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "from capability_bootstrap import validate_seed_lock; "
+                    "sys.exit(0 if validate_seed_lock(sys.argv[2]) else 1)",
+                    str(ROOT / "scripts"),
+                    str(SEED_LOCK),
                 ],
                 text=True,
                 capture_output=True,

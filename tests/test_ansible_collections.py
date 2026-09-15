@@ -12,9 +12,7 @@ WORKSTATION_TASKS = (ROOT / "platform/ansible/roles/developer_workstation/tasks/
 SPEC = importlib.util.spec_from_file_location("repoctl", ROOT / "scripts/repoctl.py")
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
-COLLECTION_SPEC = importlib.util.spec_from_file_location(
-    "ansible_collections", ROOT / "scripts/ansible_collections.py"
-)
+COLLECTION_SPEC = importlib.util.spec_from_file_location("ansible_collections", ROOT / "scripts/ansible_collections.py")
 COLLECTION_MOD = importlib.util.module_from_spec(COLLECTION_SPEC)
 COLLECTION_SPEC.loader.exec_module(COLLECTION_MOD)
 
@@ -118,7 +116,9 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
             self.assertRegex(item["sha256"], r"^[0-9a-f]{64}$")
             for dependency in item["dependencies"]:
                 self.assertIn(dependency, by_name)
-        self.assertEqual(">=1.0.0", by_name["community.docker"]["dependencies"]["community.library_inventory_filtering_v1"])
+        self.assertEqual(
+            ">=1.0.0", by_name["community.docker"]["dependencies"]["community.library_inventory_filtering_v1"]
+        )
         self.assertEqual(">=2.0.0", by_name["ansible.netcommon"]["dependencies"]["ansible.utils"])
 
     def test_gate_forces_supported_ansible_lint_offline_mode(self):
@@ -138,11 +138,21 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
                     encoding="utf-8",
                 )
             (destination / ".ecommerce-collections.json").write_text(
-                json.dumps({"identity": COLLECTION_MOD.identity()}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "identity": COLLECTION_MOD.identity(),
+                        "installer": {
+                            "ansible_core": data["installer"]["ansible_core"],
+                            "executable": "/locked/bin/ansible-galaxy",
+                        },
+                    }
+                ),
+                encoding="utf-8",
             )
-            with mock.patch.object(COLLECTION_MOD, "acquire") as acquire, mock.patch.object(
-                COLLECTION_MOD, "install"
-            ) as install:
+            with (
+                mock.patch.object(COLLECTION_MOD, "acquire") as acquire,
+                mock.patch.object(COLLECTION_MOD, "install") as install,
+            ):
                 COLLECTION_MOD.prepare()
             acquire.assert_not_called()
             install.assert_not_called()

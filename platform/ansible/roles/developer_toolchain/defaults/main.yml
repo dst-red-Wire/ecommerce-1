@@ -64,3 +64,4 @@ kustomize_sha256: "{{ lookup('ansible.builtin.ini', 'KUSTOMIZE_SHA256_LINUX_AMD6
 kind_version: "{{ lookup('ansible.builtin.ini', 'KIND_VERSION', type='properties', file=versions_file) }}"
 kind_sha256: "{{ lookup('ansible.builtin.ini', 'KIND_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
 ansible_lint_version: "{{ lookup('ansible.builtin.ini', 'ANSIBLE_LINT_VERSION', type='properties', file=versions_file) }}"
+terraform_plugin_cache: "{{ lookup('ansible.builtin.env', 'TF_PLUGIN_CACHE_DIR') | default(qualification_tool_home + '/cache/terraform/providers', true) }}"

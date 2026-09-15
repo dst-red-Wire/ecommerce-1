@@ -13,7 +13,13 @@ export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_ID := $(shell sha256sum platform/ansible/collections.lock.json | cut -d' ' -f1)
+ANSIBLE_COLLECTIONS_ID := $(shell $(PYTHON) scripts/ansible_collections.py identity || echo COLLECTION_IDENTITY_FAILED)
+ifneq ($(findstring COLLECTION_IDENTITY_FAILED,$(ANSIBLE_COLLECTIONS_ID)),)
+$(error Cannot calculate locked Ansible collection identity)
+endif
+ifeq ($(strip $(ANSIBLE_COLLECTIONS_ID)),)
+$(error Cannot calculate locked Ansible collection identity)
+endif
 ANSIBLE_COLLECTIONS_PATH := $(ECOMMERCE_TOOL_HOME)/ansible/collections/$(ANSIBLE_COLLECTIONS_ID)
 export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
@@ -94,11 +100,11 @@ ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
 .PHONY: ansible-collections ansible-collections-offline
-ansible-collections: ## Acquire verified archives and atomically prepare the locked collection closure
-	@$(PYTHON) scripts/ansible_collections.py prepare
+ansible-collections: seed ## Acquire verified archives and atomically prepare the locked collection closure
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/ansible_collections.py prepare
 
-ansible-collections-offline: ## Prepare only from verified local archives; never contact Galaxy
-	@$(PYTHON) scripts/ansible_collections.py prepare --offline
+ansible-collections-offline: seed ## Prepare only from verified local archives; never contact Galaxy
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/ansible_collections.py prepare --offline
 
 .PHONY: mgmt-runtime-inventory
 

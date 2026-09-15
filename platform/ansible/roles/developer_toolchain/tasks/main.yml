@@ -9,8 +9,8 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-    - "{{ qualification_tool_home }}/cache/terraform/providers"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, templ, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+    - "{{ terraform_plugin_cache }}"
+  tags: [docker_client, toolchain, agent_tools, node, go, cgo, sqlc, templ, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:

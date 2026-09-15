@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,7 +28,9 @@ def load_lock() -> dict:
     names = {item["name"] for item in data["collections"]}
     direct = {item["name"] for item in data["collections"] if item["direct"]}
     expected = _direct_requirements()
-    if direct != set(expected) or any(next(x for x in data["collections"] if x["name"] == n)["version"] != v for n, v in expected.items()):
+    if direct != set(expected) or any(
+        next(x for x in data["collections"] if x["name"] == n)["version"] != v for n, v in expected.items()
+    ):
         raise RuntimeError("collections.lock.json direct pins differ from requirements.yml")
     for item in data["collections"]:
         for dependency in item["dependencies"]:
@@ -85,7 +87,12 @@ def validate_archive(item: dict, path: Path) -> None:
 def installed_ok(data: dict, destination: Path) -> bool:
     marker = destination / ".ecommerce-collections.json"
     try:
-        if json.loads(marker.read_text(encoding="utf-8"))["identity"] != identity():
+        provenance = json.loads(marker.read_text(encoding="utf-8"))
+        if provenance.get("installer", {}).get("ansible_core") != data["installer"]["ansible_core"]:
+            return False
+        if not Path(provenance.get("installer", {}).get("executable", "")).is_absolute():
+            return False
+        if provenance["identity"] != identity():
             return False
         for item in data["collections"]:
             namespace, collection = item["name"].split(".")
@@ -128,22 +135,53 @@ def acquire(item: dict, *, offline: bool) -> None:
         except (OSError, urllib.error.URLError, RuntimeError) as exc:
             temporary.unlink(missing_ok=True)
             if attempt == 3:
-                raise RuntimeError(f"acquisition failed for {item['name']}:{item['version']}: {type(exc).__name__}") from exc
+                raise RuntimeError(
+                    f"acquisition failed for {item['name']}:{item['version']}: {type(exc).__name__}"
+                ) from exc
             time.sleep(attempt)
 
 
+def installer_provenance(data: dict) -> dict[str, str]:
+    galaxy = shutil.which("ansible-galaxy")
+    if not galaxy:
+        raise RuntimeError("ansible-galaxy missing: run make seed and use its locked PATH")
+    galaxy = str(Path(galaxy).resolve())
+    probe = subprocess.run([galaxy, "--version"], text=True, capture_output=True, check=False, timeout=15)
+    match = re.search(r"ansible-galaxy \[core ([^\]]+)\]", probe.stdout)
+    actual = match.group(1) if match else "unknown"
+    expected = data["installer"]["ansible_core"]
+    if probe.returncode or actual != expected:
+        raise RuntimeError(
+            f"ansible-galaxy installer mismatch: expected {expected}, got {actual} at {galaxy}; run make seed"
+        )
+    return {"ansible_core": actual, "executable": galaxy}
+
+
 def install(data: dict, destination: Path) -> None:
+    provenance = installer_provenance(data)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{identity()}.install-", dir=destination.parent))
     try:
-        galaxy = shutil.which("ansible-galaxy")
-        if not galaxy:
-            raise RuntimeError("ansible-galaxy missing from the locked Python environment")
+        galaxy = provenance["executable"]
         env = os.environ.copy()
         env["ANSIBLE_COLLECTIONS_PATH"] = str(temporary)
         for item in data["collections"]:
-            subprocess.run([galaxy, "collection", "install", str(archive_path(item)), "--collections-path", str(temporary), "--no-deps"], check=True, env=env)
-        (temporary / ".ecommerce-collections.json").write_text(json.dumps({"identity": identity()}, sort_keys=True) + "\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    galaxy,
+                    "collection",
+                    "install",
+                    str(archive_path(item)),
+                    "--collections-path",
+                    str(temporary),
+                    "--no-deps",
+                ],
+                check=True,
+                env=env,
+            )
+        (temporary / ".ecommerce-collections.json").write_text(
+            json.dumps({"identity": identity(), "installer": provenance}, sort_keys=True) + "\n", encoding="utf-8"
+        )
         if not installed_ok(data, temporary):
             raise RuntimeError("installed collection closure failed validation")
         if destination.exists():
@@ -163,8 +201,9 @@ def prepare(*, offline: bool = False) -> None:
         return
     lock_path = destination.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+    from capability_bootstrap import identity_lock
+
+    with identity_lock(lock_path):
         if installed_ok(data, destination):
             print(f"REUSE collections identity={identity()} path={destination} after-lock=true")
             return

@@ -115,3 +115,31 @@ rebuild it. Ephemeral Task workspaces should mount runner-owned persistent volum
 four caches above; retention and garbage collection are platform policy, not a source
 checkout lifecycle. This repository change prepares that wiring and performs no remote
 publication or infrastructure mutation.
+
+## PR #86 review hardening
+
+The execution order is the checkout's locked Python seed, managed user tools, then
+inherited system commands. Docker endpoints resolve once: an explicit `DOCKER_HOST`
+wins; otherwise the selected context supplies the endpoint and TLS settings. The
+resolved environment removes `DOCKER_CONTEXT` for both CLI and Testcontainers.
+Docker subprocess diagnostics are redacted before output, exceptions or persisted
+qualification logs. Cleanup inspects the unique invocation label before removing
+containers by ID, then volumes by name, and verifies disappearance even after a
+partial creation failure. Cleanup failure retains the initial diagnostic.
+
+Seed validation evaluates PEP 508 markers inside the target interpreter using pip's
+vendored parser, then checks exact installed versions and `pip check`. Simulated
+Python 3.12/3.13/3.14 marker tests do not count as running those interpreters.
+
+Collection identities use `ansible_collections.identity()` through the portable
+Python CLI. Installation records the resolved Galaxy executable and its probed
+Ansible Core version. Existing installations without this provenance are invalid
+and rebuilt once from checksum-verified cached archives; complete installations
+with matching provenance retain the local fast path without invoking Galaxy.
+The Make preparation entry points prepare the seed first. Direct helper callers
+must supply a conforming installer; a mismatch fails before publication.
+
+The `docker_client` and `terraform` tags both initialize their configured directories.
+The standalone Terraform gate checks the pinned executable and
+`TF_PLUGIN_CACHE_DIR` before init, invoking only Terraform reconciliation when either
+is missing or invalid. A warm gate avoids Ansible preparation entirely.
