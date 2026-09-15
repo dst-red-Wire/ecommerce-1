@@ -155,7 +155,13 @@ must supply a conforming installer; a mismatch fails before publication.
 The `docker_client` and `terraform` tags both initialize their configured directories.
 The standalone Terraform gate checks the pinned executable and
 `TF_PLUGIN_CACHE_DIR` before init, invoking only Terraform reconciliation when either
-is missing or invalid. A warm gate avoids Ansible preparation entirely.
+is missing or invalid. Provider selection follows `first_conforming`: try the
+contracted OpenTofu pin first, then the contracted Terraform pin. A stale OpenTofu
+cannot mask a conforming or newly reconciled Terraform. Audit uses the same ordered
+policy, and the gate executes the absolute provider path it validated. If neither
+provider conforms after reconciliation, the gate refuses execution explicitly.
+System tools and the caller's plugin cache setting are preserved. A warm gate avoids
+Ansible preparation entirely.
 
 ### Second PR86 review
 

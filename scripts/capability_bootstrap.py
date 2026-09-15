@@ -143,7 +143,9 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
             alternative_key = alternative.get("version_key")
             if not alternative.get("command") or not alternative_key or not versions.get(alternative_key):
                 raise ValueError(f"{name}: alternative requires command and version authority")
-        if "selection_policy" in item and (item["selection_policy"] != "first_available" or not item.get("any_of")):
+        if "selection_policy" in item and (
+            item["selection_policy"] not in ("first_available", "first_conforming") or not item.get("any_of")
+        ):
             raise ValueError(f"{name}: invalid alternative selection policy")
         provision_authority = item.get("provision_authority")
         if provision_authority and not versions.get(provision_authority):
@@ -350,11 +352,12 @@ class Auditor:
             return Result("PASS", "dependencies ready")
         alternatives = item.get("any_of", [])
         if alternatives:
-            if item.get("selection_policy") == "first_available":
+            if item.get("selection_policy") in {"first_available", "first_conforming"}:
+                failures = []
                 for alternative in alternatives:
                     resolved = self.resolve_repoctl_runtime(alternative["command"])
                     if resolved:
-                        return self.check(
+                        result = self.check(
                             {
                                 **item,
                                 **alternative,
@@ -363,6 +366,11 @@ class Auditor:
                             },
                             capability_name,
                         )
+                        if result.state == "PASS" or item["selection_policy"] == "first_available":
+                            return result
+                        failures.append(f"{alternative['command']}: {result.detail}")
+                if failures:
+                    return Result("FAIL", "; ".join(failures))
                 return Result(
                     "FAIL", "alternatives absent: " + ", ".join(alternative["command"] for alternative in alternatives)
                 )
