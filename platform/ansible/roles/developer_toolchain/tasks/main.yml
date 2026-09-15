@@ -137,26 +137,63 @@
   changed_when: false
   tags: [toolchain, templ]
 
-- name: Compile missing or invalid pinned templ identity once
-  ansible.builtin.command:
-    argv:
-      - flock
-      - --timeout
-      - '300'
-      - "{{ local_cache }}/templ-{{ templ_version }}-linux-amd64.lock"
-      - "{{ resolved_executables.go | default(local_bin + '/go') }}"
-      - install
-      - "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"
-  environment:
-    GOBIN: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
-    # Empty makes the selected Go executable derive its own root instead of
-    # inheriting a version-manager GOROOT from the Ansible controller.
-    GOROOT: ""
-    GOMODCACHE: "{{ qualification_tool_home }}/cache/go/mod"
-    GOCACHE: "{{ qualification_tool_home }}/cache/go/{{ go_version }}/build"
-  when: templ_identity.rc != 0 or templ_version not in templ_identity.stdout
-  changed_when: true
+- name: Repair a missing or invalid pinned templ identity
+  when: >-
+    templ_identity.rc != 0 or
+    (templ_identity.stdout | trim) != ('v' ~ templ_version) or
+    (templ_identity.stderr | default('') | trim) != ''
   tags: [toolchain, templ]
+  block:
+    - name: Create a unique templ candidate directory
+      ansible.builtin.tempfile:
+        state: directory
+        path: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
+        prefix: .candidate-
+      register: templ_candidate
+
+    - name: Compile missing or invalid pinned templ identity once
+      ansible.builtin.command:
+        argv:
+          - flock
+          - --timeout
+          - '300'
+          - "{{ local_cache }}/templ-{{ templ_version }}-linux-amd64.lock"
+          - "{{ resolved_executables.go | default(local_bin + '/go') }}"
+          - install
+          - "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"
+      environment:
+        GOBIN: "{{ templ_candidate.path }}"
+        # Derive the root from the selected Go executable.
+        GOROOT: ""
+        GOMODCACHE: "{{ qualification_tool_home }}/cache/go/mod"
+        GOCACHE: "{{ qualification_tool_home }}/cache/go/{{ go_version }}/build"
+      changed_when: true
+
+    - name: Validate the pinned templ candidate
+      ansible.builtin.command:
+        argv: ["{{ templ_candidate.path }}/templ", version]
+      register: templ_candidate_probe
+      changed_when: false
+      failed_when: >-
+        templ_candidate_probe.rc != 0 or
+        (templ_candidate_probe.stdout | trim) != ('v' ~ templ_version) or
+        (templ_candidate_probe.stderr | default('') | trim) != ''
+
+    - name: Publish the validated templ candidate atomically
+      ansible.builtin.command:
+        argv:
+          - mv
+          - -f
+          - -T
+          - "{{ templ_candidate.path }}/templ"
+          - "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64/templ"
+      changed_when: true
+  always:
+    - name: Remove the unpublished templ candidate
+      ansible.builtin.file:
+        path: "{{ templ_candidate.path }}"
+        state: absent
+      when: templ_candidate.path is defined
 
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:

@@ -635,12 +635,14 @@ def developer_state_ready(tags: str) -> bool:
         if got.returncode or f"Docker version {pins.get('DOCKER_CLIENT_VERSION', '')}," not in got.stdout:
             return False
     if "templ" in wanted:
+        from capability_bootstrap import templ_version_matches
+
         version = pins.get("TEMPL_VERSION", "")
         templ = Path.home() / ".local/share/ecommerce-1/tools/templ" / version / "linux-amd64/templ"
         if not templ.is_file() or not os.access(templ, os.X_OK):
             return False
         got = run([str(templ), "version"], check=False, capture=True)
-        if got.returncode or version not in got.stdout:
+        if got.returncode or not templ_version_matches(got.stdout, got.stderr, version):
             return False
     if "quality_tools" in wanted:
         for command, key in (("oxlint", "OXLINT_VERSION"), ("oxfmt", "OXFMT_VERSION"), ("ruff", "RUFF_VERSION")):

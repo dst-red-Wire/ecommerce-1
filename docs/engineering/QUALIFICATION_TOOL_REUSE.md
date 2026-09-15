@@ -25,7 +25,11 @@ Standalone tools continue to resolve versions from `config/toolchain/versions.en
 checksums/provenance from the existing capability and Ansible contracts. Multiple versions
 occupy separate version/platform directories. In particular, templ is compiled once as
 `~/.local/share/ecommerce-1/tools/templ/<version>/linux-amd64/templ`; frontend gates invoke
-that binary rather than allowing `go run` to download or rebuild it. A checkout resolves
+that binary rather than allowing `go run` to download or rebuild it. Audit, readiness
+and Ansible repair accept only the complete `v<canonical-version>` stdout with no
+stderr diagnostics. A numeric suffix, extra version line or malformed output triggers
+repair into a validated candidate published with an atomic rename; a matching binary
+retains the warm path without recompilation. A checkout resolves
 its own pin explicitly and does not depend on a mutable `current` selector.
 
 ## Concurrency, recovery, and offline operation
