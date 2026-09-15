@@ -96,6 +96,46 @@ class DockerProductPreflightTests(unittest.TestCase):
         self.assertIn(["docker", "volume", "rm", "--force", "ecommerce-product-qualification-owned"], commands)
         self.assertFalse(any("prune" in command for command in commands))
 
+    def test_ryuk_digest_mismatch_fails_without_retagging(self):
+        image = "docker.io/testcontainers/ryuk:0.14.0@sha256:" + "a" * 64
+        with mock.patch.object(
+            REPOCTL,
+            "run",
+            side_effect=[
+                completed("sha256:" + "b" * 64),
+                completed("sha256:" + "c" * 64),
+            ],
+        ) as run:
+            with self.assertRaisesRegex(REPOCTL.DockerCapabilityError, "tag differs"):
+                REPOCTL.docker_ryuk_image_proof("docker", {}, image)
+        self.assertTrue(all(call.args[0][1:3] == ["image", "inspect"] for call in run.call_args_list))
+
+
+    def test_ryuk_missing_digest_is_pulled_and_verified_against_tag(self):
+        image = "docker.io/testcontainers/ryuk:0.14.0@sha256:" + "a" * 64
+        identity = "sha256:" + "b" * 64
+        with mock.patch.object(
+            REPOCTL,
+            "run",
+            side_effect=[
+                completed(returncode=1),
+                completed(),
+                completed(identity),
+                completed(identity),
+            ],
+        ) as run:
+            REPOCTL.docker_ryuk_image_proof("docker", {}, image)
+        self.assertEqual(["docker", "pull", image], run.call_args_list[1].args[0])
+        self.assertEqual(120, run.call_args_list[1].kwargs["timeout"])
+
+
+    def test_ryuk_unpinned_reference_fails_before_daemon_access(self):
+        with mock.patch.object(REPOCTL, "run") as run:
+            with self.assertRaisesRegex(REPOCTL.DockerCapabilityError, "immutable SHA-256"):
+                REPOCTL.docker_ryuk_image_proof("docker", {}, "testcontainers/ryuk:0.14.0")
+        run.assert_not_called()
+
+
     def test_endpoint_logging_removes_embedded_credentials(self):
         self.assertEqual(
             "tcp://daemon.example:2376", REPOCTL._safe_docker_endpoint("tcp://user:secret@daemon.example:2376")

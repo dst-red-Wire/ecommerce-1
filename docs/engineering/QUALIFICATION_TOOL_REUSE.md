@@ -13,7 +13,9 @@ ansible-lint, and their complete Python closure) identity includes
 the Python implementation and major/minor runtime, OS/architecture, complete lockfile
 SHA-256, and hash-enforcing pip parameters. A checkout's `.venv/qualification` is only an
 atomic local reference to that immutable environment; the venv is created directly at its
-final path because virtual environments contain absolute paths.
+final path because virtual environments contain absolute paths. The lock includes the
+conditional `ruamel-yaml-clib` dependency for Python below 3.14 and `typing-extensions`
+for Python below 3.13; its closure is installable under Ubuntu 24.04's Python 3.12.
 
 Standalone tools continue to resolve versions from `config/toolchain/versions.env` and
 checksums/provenance from the existing capability and Ansible contracts. Multiple versions
@@ -76,6 +78,14 @@ and published-port reachability. Cleanup addresses only the unique labelled cont
 and volume from that invocation and verifies they are absent. The Product integration
 test subsequently runs uncached with the race detector and uses the pinned Ryuk image;
 Ryuk, TLS, integrity checks, and Testcontainers cleanup remain enabled.
+
+Testcontainers Go 0.44.0 hardcodes its Ryuk tag and does not consume
+`RYUK_CONTAINER_IMAGE`. The preflight therefore acquires the pinned digest, checks
+that the upstream tag has the same local image ID, and fails on disagreement without
+retagging an existing image. The integration test also compares the running session's
+Ryuk image ID to `ECOMMERCE_RYUK_IMAGE`, supplied by the gate, before testing persistence.
+This detects tag drift between preflight and container creation and requires Ryuk to be
+running. Docker CLI and Testcontainers use the same resolved endpoint for these checks.
 
 To resume on a compatible runner, make a clean checkout at the exact commit, verify
 `git status --porcelain=v1` is empty, pass any Docker endpoint variables explicitly for

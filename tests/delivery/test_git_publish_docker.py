@@ -21,7 +21,8 @@ class DockerPublishBoundaryTest(unittest.TestCase):
         self.assertIn("Docker client reconciliation did not publish an executable", CONTROLLER)
         self.assertIn("docker_preflight(docker)", CONTROLLER)
         self.assertIn("docker_runtime_proof(docker, docker_env, postgres_image)", CONTROLLER)
-        self.assertIn("RYUK_CONTAINER_IMAGE", CONTROLLER)
+        self.assertIn("docker_ryuk_image_proof(docker, docker_env, ryuk_image)", CONTROLLER)
+        self.assertIn('env["ECOMMERCE_RYUK_IMAGE"] = ryuk_image', CONTROLLER)
         self.assertNotIn('sysctl", "-n", "net.ipv4.ip_forward', CONTROLLER)
         self.assertNotIn("ensure-docker-daemon.sh", CONTROLLER)
 

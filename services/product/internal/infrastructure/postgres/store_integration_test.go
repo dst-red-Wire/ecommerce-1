@@ -4,7 +4,11 @@ package postgres_test
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/application"
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
@@ -36,6 +40,8 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 			t.Errorf("terminate postgres: %v", err)
 		}
 	})
+
+	requirePinnedRyuk(t, container.SessionID())
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
@@ -139,4 +145,37 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	if more || len(items) != 1 || items[0].ID != sku.ID {
 		t.Fatalf("unexpected persisted SKU list: more=%v count=%d", more, len(items))
 	}
+}
+
+// Testcontainers Go 0.44 hardcodes Ryuk's tag and ignores RYUK_CONTAINER_IMAGE.
+// Check the running session's image ID too, so retagging after preflight cannot
+// produce a successful qualification with an unapproved reaper.
+func requirePinnedRyuk(t *testing.T, session string) {
+	t.Helper()
+	image := os.Getenv("ECOMMERCE_RYUK_IMAGE")
+	if image == "" {
+		image = "docker.io/testcontainers/ryuk:0.14.0@sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	docker := func(args ...string) string {
+		t.Helper()
+		output, err := exec.CommandContext(ctx, "docker", args...).Output()
+		if err != nil {
+			t.Fatalf("verify running Ryuk image: %v", err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	expected := docker("image", "inspect", image, "--format", "{{.Id}}")
+	if !strings.HasPrefix(expected, "sha256:") {
+		t.Fatal("pinned Ryuk image identity is absent")
+	}
+	ids := strings.Fields(docker("ps", "--quiet", "--filter", "label=org.testcontainers.sessionId="+session, "--filter", "label=org.testcontainers.ryuk=true"))
+	if len(ids) != 1 {
+		t.Fatalf("expected one running Ryuk for session %s, got %d", session, len(ids))
+	}
+	if actual := docker("inspect", ids[0], "--format", "{{.Image}}"); actual != expected {
+		t.Fatalf("running Ryuk image mismatch: got %s, want %s", actual, expected)
+	}
+	t.Logf("Ryuk running image matches pinned digest: %s", image)
 }

@@ -211,6 +211,42 @@ def docker_preflight(docker: str, base_env: dict[str, str] | None = None) -> tup
     return env, identity
 
 
+def docker_ryuk_image_proof(docker: str, env: dict[str, str], image: str) -> None:
+    """Bind Testcontainers Go's hardcoded Ryuk tag to the contracted digest."""
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image):
+        raise DockerCapabilityError("Ryuk image requires an immutable SHA-256 digest")
+    tag = image.split("@", 1)[0]
+
+    def inspect(reference: str) -> str:
+        result = run(
+            [docker, "image", "inspect", reference, "--format", "{{.Id}}"],
+            env=env,
+            capture=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode:
+            run([docker, "pull", reference], env=env, capture=True, timeout=120)
+            result = run(
+                [docker, "image", "inspect", reference, "--format", "{{.Id}}"],
+                env=env,
+                capture=True,
+                timeout=10,
+            )
+        identity = result.stdout.strip()
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity):
+            raise DockerCapabilityError("Docker returned an invalid Ryuk image identity")
+        return identity
+
+    try:
+        pinned_id = inspect(image)
+        if inspect(tag) != pinned_id:
+            raise DockerCapabilityError("Ryuk tag differs from the pinned digest; existing tag left unchanged")
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise DockerCapabilityError(f"Ryuk image proof failed: {exc}") from exc
+    print(f"PASS Ryuk image digest {image} image_id={pinned_id}")
+
+
 def docker_runtime_proof(docker: str, env: dict[str, str], image: str) -> None:
     """Prove pull/start, volume, published-port reachability, and owned cleanup."""
     token = uuid.uuid4().hex
@@ -958,6 +994,11 @@ def service_check(service: str) -> int:
             return fail("PLATFORM NOT CAPABLE: Docker client reconciliation did not publish an executable", 2)
         try:
             docker_env, docker_identity = docker_preflight(docker)
+            ryuk_image = (
+                "docker.io/testcontainers/ryuk:0.14.0@sha256:"
+                "7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
+            )
+            docker_ryuk_image_proof(docker, docker_env, ryuk_image)
             postgres_image = "docker.io/library/postgres:17.10-alpine3.22@sha256:b02d9b5bcf608c2719da32cdabee274a33841202487fd5dc9b065b63f886753f"
             docker_runtime_proof(docker, docker_env, postgres_image)
         except DockerCapabilityError as exc:
@@ -967,10 +1008,7 @@ def service_check(service: str) -> int:
     env = os.environ.copy()
     if needs_containers:
         env.update(docker_env)
-        env["RYUK_CONTAINER_IMAGE"] = (
-            "docker.io/testcontainers/ryuk:0.14.0@sha256:"
-            "7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0"
-        )
+        env["ECOMMERCE_RYUK_IMAGE"] = ryuk_image
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)

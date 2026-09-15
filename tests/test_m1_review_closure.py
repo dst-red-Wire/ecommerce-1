@@ -96,12 +96,14 @@ class M1ReviewClosureTests(unittest.TestCase):
                     return_value=({"DOCKER_HOST": "unix:///var/run/docker.sock"}, "mode=local"),
                 ),
                 mock.patch.object(REPOCTL, "docker_runtime_proof"),
+                mock.patch.object(REPOCTL, "docker_ryuk_image_proof") as ryuk_proof,
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))
                 expected_calls = [mock.call(expected)]
                 if service == "product":
                     expected_calls.insert(0, mock.call("docker_client"))
                 self.assertEqual(expected_calls, ensure.call_args_list)
+                self.assertEqual(service == "product", ryuk_proof.called)
 
     def test_site_builds_and_terminates_exact_binaries(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
