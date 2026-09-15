@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import platform
@@ -487,18 +488,31 @@ def seed_environment() -> int:
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
     python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    marker = SEED_VENV / ".requirements-lock.sha256"
+    lock_digest = hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest()
     if not python.is_file():
         subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
-        check=True,
-    )
+    ready = marker.is_file() and marker.read_text(encoding="utf-8").strip() == lock_digest
+    if ready:
+        ready = subprocess.run(
+            [str(python), "-m", "pip", "check"], text=True, capture_output=True, check=False
+        ).returncode == 0
+    if not ready:
+        subprocess.run(
+            [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
+            check=True,
+        )
+        check = subprocess.run([str(python), "-m", "pip", "check"], check=False)
+        if check.returncode:
+            marker.unlink(missing_ok=True)
+            raise RuntimeError("qualification seed dependency integrity check failed")
+        marker.write_text(lock_digest + "\n", encoding="utf-8")
     ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
     print(
-        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
+        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']} cache={'hit' if ready else 'reconciled'}"
     )
     return 0
 
