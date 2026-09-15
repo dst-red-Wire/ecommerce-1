@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+import copy
 import json
 import re
 import subprocess
@@ -490,7 +491,9 @@ def load_yaml(path):
     """Load YAML with Psych, reusing only byte-identical parse results."""
     path = Path(path)
     try:
-        return _load_yaml_with_psych(path.read_text())
+        # Validators may freely transform their result without poisoning the
+        # byte-keyed cache observed by later negative mutation cases.
+        return copy.deepcopy(_load_yaml_with_psych(path.read_text()))
     except ValueError as exc:
         raise ValueError(f"cannot parse {path}: {exc}") from exc
 
