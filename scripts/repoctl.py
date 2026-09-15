@@ -961,7 +961,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 4
+        evidence.get("schema_version", 0) < 5
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -969,7 +969,11 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_sha") != current_head
         or evidence.get("source_head_sha") != current_head
         or evidence.get("source_tree_sha") != current_tree
+        or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not isinstance(evidence.get("gates"), list)
@@ -1016,7 +1020,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     payload = copy.deepcopy(source)
     payload.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "evidence_kind": "exact_commit",
             "head_ref": requested,
             "head_sha": requested,

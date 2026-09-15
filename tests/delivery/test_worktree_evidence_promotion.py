@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -135,10 +136,10 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context), mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -146,6 +147,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
@@ -171,10 +175,10 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context), mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -182,6 +186,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
@@ -231,15 +238,18 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             base = self.init_repo(root)
             context = root / ".context"
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context), mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"):
                 tree = REPOCTL.worktree_tree_sha()
                 source = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_sha": base,
                     "head_sha": "f" * 40,
                     "source_head_sha": "f" * 40,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "status": "PASS",
                     "exact_commit_evidence": False,
                     "changed_paths": ["README.md"],
