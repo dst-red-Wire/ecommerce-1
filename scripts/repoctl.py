@@ -235,6 +235,12 @@ def developer_state_ready(tags: str) -> bool:
         got = run([go, "version"], check=False, capture=True)
         if got.returncode or f"go{pins.get('GO_VERSION', '')}" not in got.stdout:
             return False
+        templ = managed_bin / "templ"
+        if not templ.is_file():
+            return False
+        got = run([str(templ), "version"], check=False, capture=True)
+        if got.returncode or pins.get("TEMPL_VERSION", "") not in got.stdout:
+            return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
     if "quality_tools" in wanted:
