@@ -1153,12 +1153,18 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 2
+        evidence.get("schema_version", 0) < 5
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha
         or evidence.get("base_sha") != base_sha
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base, parent_sha)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
+        or time.time() < float(evidence.get("created_at_epoch", 0))
         or not isinstance(evidence.get("gates"), list)
+        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
         return None, None
     return parent_sha, evidence
