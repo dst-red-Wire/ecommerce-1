@@ -88,3 +88,44 @@ class FrontendTemplScopeTests(unittest.TestCase):
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         generation = [x for x in calls if x["args"][1] == "generate"]
         self.assertEqual([[str(templ), "generate"]], [x["args"] for x in generation])
+
+
+class FrontendAnsibleTagTests(unittest.TestCase):
+    def test_actual_playbook_excludes_templ_from_go_cgo_and_keeps_it_for_check(self):
+        # Use Ansible's actual tag selection on the production playbook. Listing
+        # tasks performs no host reconciliation and needs no network/provider.
+        for tags, needs_templ in [("go,cgo", False), ("go,cgo,templ", True)]:
+            with self.subTest(tags=tags):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "ansible.cli.playbook",
+                        "-i",
+                        "localhost,",
+                        "-c",
+                        "local",
+                        "platform/ansible/developer.yml",
+                        "--list-tasks",
+                        "--tags",
+                        tags,
+                    ],
+                    cwd=ctl.ROOT,
+                    env=dict(os.environ, GOPROXY="off", GOSUMDB="off", ANSIBLE_NOCOLOR="1"),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                selected = [
+                    line.split("TAGS:")[0].strip()
+                    for line in result.stdout.splitlines()
+                    if "developer_toolchain :" in line
+                ]
+                self.assertTrue(any("Download pinned Go archive" in task for task in selected))
+                self.assertTrue(any("CGO" in task for task in selected))
+                templ_tasks = [task for task in selected if "templ" in task.lower()]
+                if needs_templ:
+                    self.assertTrue(any("Compile missing or invalid pinned templ" in task for task in templ_tasks))
+                    self.assertTrue(any("Probe pinned templ" in task for task in templ_tasks))
+                else:
+                    self.assertEqual([], templ_tasks)

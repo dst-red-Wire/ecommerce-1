@@ -127,7 +127,7 @@
     path: "{{ local_share }}/tools/templ/{{ templ_version }}/linux-amd64"
     state: directory
     mode: '0755'
-  tags: [toolchain, go, templ]
+  tags: [toolchain, templ]
 
 - name: Probe pinned templ identity
   ansible.builtin.command:
@@ -135,7 +135,7 @@
   register: templ_identity
   failed_when: false
   changed_when: false
-  tags: [toolchain, go, templ]
+  tags: [toolchain, templ]
 
 - name: Compile missing or invalid pinned templ identity once
   ansible.builtin.command:
@@ -156,7 +156,7 @@
     GOCACHE: "{{ qualification_tool_home }}/cache/go/{{ go_version }}/build"
   when: templ_identity.rc != 0 or templ_version not in templ_identity.stdout
   changed_when: true
-  tags: [toolchain, go, templ]
+  tags: [toolchain, templ]
 
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:
