@@ -85,6 +85,28 @@ class DockerClientRepairReal(unittest.TestCase):
                 check(run())
                 before_archive = cached.stat().st_mtime_ns
                 print(f"PASS real Docker repair {case}")
+            # Never traverse an invalid destination into an unrelated directory.
+            binary.unlink()
+            external = root / "external"
+            external.mkdir()
+            marker = external / "keep"
+            marker.write_text("untouched")
+            binary.symlink_to(external, target_is_directory=True)
+            check(run())
+            self.assertFalse(binary.is_symlink())
+            self.assertEqual([marker], list(external.iterdir()))
+            binary.unlink()
+            binary.mkdir()
+            sentinel = binary / "keep"
+            sentinel.write_text("untouched")
+            refused = run()
+            self.assertNotEqual(0, refused.returncode)
+            self.assertEqual([sentinel], list(binary.iterdir()))
+            self.assertEqual([], list(binary.parent.glob(".candidate-*")))
+            sentinel.unlink()
+            binary.rmdir()
+            check(run())
+            print("PASS real Docker symlink replacement and safe directory refusal")
             before = binary.stat().st_ino
             check(run())
             self.assertEqual(before, binary.stat().st_ino)

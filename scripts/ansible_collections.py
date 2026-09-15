@@ -73,7 +73,9 @@ def selected_path() -> Path:
     legacy = paths()[1]
     selector = legacy.with_suffix(".current")
     if selector.is_symlink():
-        selected = selector.resolve(strict=True)
+        # A missing in-identity generation is an invalid cache, repairable from
+        # locked archives. Still resolve existing links before checking ownership.
+        selected = selector.resolve()
         if selected.parent != legacy.with_suffix(".generations").resolve():
             raise RuntimeError("collection selector escapes its identity")
         return selected

@@ -127,6 +127,17 @@ class CollectionIntegrityGenerationTests(unittest.TestCase):
                 self.assertTrue(old.is_dir())
                 self.assertTrue(collections.installed_ok(self.data, new))
 
+    def test_dangling_selector_repairs_offline_but_escape_is_rejected(self):
+        old = self.prepare()
+        shutil.rmtree(old)
+        self.assertEqual(old, collections.selected_path())
+        self.assertNotEqual(old, self.prepare())
+        selector = self.destination.with_suffix(".current")
+        selector.unlink()
+        selector.symlink_to(self.root / "missing-outside-identity")
+        with self.assertRaisesRegex(RuntimeError, "escapes its identity"):
+            self.prepare()
+
     def test_warm_reuse_does_not_acquire_or_install(self):
         old = self.prepare()
         with mock.patch.object(collections, "acquire") as acquire, mock.patch.object(collections, "install") as install:

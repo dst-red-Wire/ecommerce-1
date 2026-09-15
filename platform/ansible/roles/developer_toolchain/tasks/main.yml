@@ -749,6 +749,7 @@
         argv:
           - mv
           - -f
+          - -T
           - "{{ docker_client_candidate.path }}/docker"
           - "{{ local_share }}/tools/docker-{{ docker_client_version }}/docker"
       changed_when: true

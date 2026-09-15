@@ -189,12 +189,16 @@ resolves that selector to a concrete directory before launching Ansible. Legacy
 `<identity>` directories and previously published generations stay in place. Failed
 unpublished candidates are removed; interrupted candidates may remain and are never
 selected by directory scanning. No automatic destructive collection is performed.
+A dangling selector inside its identity is treated as an invalid cache and repaired
+from locked archives; selectors escaping that identity remain rejected.
 
 Docker client reconciliation probes presence, executability and the canonical version,
 extracts only the client into a unique candidate beside the destination, validates it,
 and publishes the file with a same-filesystem atomic rename. Concurrent preparations
 use independent candidates and only publish validated clients. A conforming destination
 is not reinstalled. The canonical checksum protects the retained official archive.
+Publication replaces destination symlinks without following them. An unexpected
+destination directory is safely refused and left intact for explicit reconciliation.
 The runtime capability audit uses the same selected executable as repoctl and compares
 only the client with DOCKER_CLIENT_VERSION; the environment owns the daemon version.
 Malformed Docker URL/port errors become redacted capability diagnostics before any
