@@ -137,6 +137,7 @@
     GOROOT: ""
     PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
   when: templ_current.rc != 0 or templ_version not in templ_current.stdout
+  changed_when: true
   tags: [toolchain, go]
 
 - name: Download pinned sqlc archive
