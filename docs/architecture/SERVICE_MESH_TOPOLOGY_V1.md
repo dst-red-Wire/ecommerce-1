@@ -12,6 +12,54 @@ This document describes the service-mesh dataplane assignment for every canonica
 
 The baseline is Cilium for Kubernetes networking and Istio Ambient for service-to-service mesh capabilities. Every service uses ztunnel with strict mTLS. A waypoint is added only when a versioned L7 routing, authorization, or traffic-policy requirement exists.
 
+## Current split
+
+The current architecture is intentionally stricter than a business-domain guess. `payment` is the only service with a versioned L7 requirement today, so it is the only service assigned to an Istio waypoint. All other canonical services remain `ztunnel-only` until a concrete L7 requirement is added and justified.
+
+```text
+catalog ────────────────┐
+product                 │
+inventory               │
+cart                    │
+checkout                │
+pricing                 │
+tax                     │
+order                   │
+fulfillment             │
+shipping                │
+tracking                ├─ ztunnel-only
+returns                 │
+billing                 │
+fraud-risk              │
+search                  │
+review                  │
+user-profile            │
+notification            │
+                        │
+payment ────────────────┼─ waypoint-required
+                        │
+                        ▼
+              Istio Ambient
+                        │
+                        ▼
+                 Cilium eBPF
+                        │
+                        ▼
+                      RKE2
+```
+
+`payment` still traverses the Ambient ztunnel transport; the waypoint adds L7 processing for the flows covered by its versioned policy. The waypoint does not replace ztunnel or Cilium.
+
+### Why checkout, order, and fraud-risk are not waypoint services yet
+
+These services are important to the commerce transaction path, but importance alone is not a qualifying reason. They remain `ztunnel-only` until at least one of the following is versioned for that service:
+
+- HTTP/gRPC routing that requires L7 inspection;
+- application-layer authorization based on method, path, headers, or claims;
+- application-layer traffic policy such as service-specific retries, timeouts, circuit breaking, or another explicitly approved L7 behavior.
+
+If such a requirement is introduced, the service moves to `waypoint-required` through the machine contract and must cite the source contract that created the requirement.
+
 ## Decision rule
 
 ```text
@@ -85,4 +133,4 @@ To remove a waypoint, remove the last versioned L7 requirement, set all three fl
 
 ## Governance
 
-`make governance` and `python3 scripts/repoctl.py governance` enforce the machine policy. They must fail if the dataplane conflicts with the L7 flags, if a true L7 capability lacks justification, or if the service set diverges from the canonical 19 services.
+`make governance` and `python3 scripts/repoctl.py governance` enforce the machine policy. They must fail if the dataplane conflicts with the L7 flags, if a true L7 capability lacks justification, if a referenced source contract is missing, or if the service set diverges from the canonical 19 services.
