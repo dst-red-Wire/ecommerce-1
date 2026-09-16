@@ -1149,9 +1149,7 @@ def _local_parallelism(gate_count: int) -> int:
     return max(1, min(configured, resource_bound))
 
 
-def _run_independent_gates(
-    gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]
-) -> bool:
+def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]) -> bool:
     """Run read-only local gates concurrently and stop siblings on first failure."""
     jobs = _local_parallelism(len(gates))
     pending = list(gates)
@@ -1208,7 +1206,10 @@ def _run_independent_gates(
                 records.append(record)
             print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
             if process.returncode:
-                print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
+                print(
+                    "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]),
+                    file=sys.stderr,
+                )
                 stop_all()
                 return False
         return True
@@ -1335,7 +1336,7 @@ def preflight(base: str, head: str) -> int:
     if any(component.startswith(("service:", "frontend:")) for component in components):
         required.update({"go", "gofmt"})
     if "platform:terraform" in components:
-        required.add("terraform")
+        required.add("tofu" if shutil.which("tofu") else "terraform")
     if "platform:ansible" in components:
         required.update({"ansible-playbook", "ansible-lint"})
     for executable in sorted(required):
@@ -1789,6 +1790,7 @@ def failure_context(gate: str, component: str) -> int:
         name = component.replace(":", "-")
     else:
         allowed = {
+            "preflight",
             "governance",
             "runtime-efficiency",
             "contracts",
