@@ -95,6 +95,96 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("replacement refs are forbidden", result.stdout)
 
+    def test_mode_only_change_is_rejected_by_external_controller(self):
+        target = self.repo / "platform/ansible/qualification-egress.yml"
+        self.assertEqual(0, self.admit().returncode)
+        target.chmod(0o755)
+        self.commit()
+        result = self.admit()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unapproved runner mode change", result.stdout)
+
+    def test_controller_revisions_are_required_and_checkout_mismatch_fails(self):
+        import yaml
+
+        play = yaml.safe_load((ROOT / "platform/ansible/qualification-runner.yml").read_text())[0]
+        defaults = yaml.safe_load(
+            (ROOT / "platform/ansible/roles/qualification_runner_host/defaults/main.yml").read_text()
+        )
+        self.assertNotIn("qualification_pr_head", defaults)
+        self.assertNotIn("qualification_pr_base", defaults)
+        post = play["post_tasks"]
+        verification = next(
+            task for task in post if task["name"] == "Require the checkout to match the admitted qualification head"
+        )
+        self.assertLess(
+            post.index(verification),
+            next(i for i, task in enumerate(post) if task["name"] == "Reconcile the hash-locked qualification seed"),
+        )
+        for name, variables, passes in (
+            (
+                "matching",
+                {
+                    "qualification_pr_head": "a" * 40,
+                    "qualification_pr_base": "b" * 40,
+                    "qualification_selected_head": {"stdout": "a" * 40},
+                },
+                True,
+            ),
+            ("missing", {}, False),
+            ("mutable", {"qualification_pr_head": "main", "qualification_pr_base": "b" * 40}, False),
+            (
+                "mismatch",
+                {
+                    "qualification_pr_head": "a" * 40,
+                    "qualification_pr_base": "b" * 40,
+                    "qualification_selected_head": {"stdout": "c" * 40},
+                },
+                False,
+            ),
+        ):
+            with self.subTest(name=name):
+                fixture = self.directory / "assertions.yml"
+                fixture.write_text(
+                    yaml.safe_dump(
+                        [
+                            {
+                                "name": "Local immutable revision regression",
+                                "hosts": "localhost",
+                                "gather_facts": False,
+                                "vars": variables,
+                                "tasks": play["pre_tasks"] + [verification],
+                            }
+                        ]
+                    )
+                )
+                result = subprocess.run(
+                    [shutil.which("ansible-playbook"), "-i", "localhost,", "-c", "local", str(fixture)],
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(passes, result.returncode == 0, result.stdout + result.stderr)
+
+    def test_both_runbooks_carry_admitted_revisions_through_provisioning_and_proof(self):
+        for relative in (
+            "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+            "platform/terraform/environments/qualification/README.md",
+        ):
+            with self.subTest(runbook=relative):
+                source = (ROOT / relative).read_text()
+                for marker in (
+                    "readonly QUALIFICATION_HEAD=FULL_HEAD_SHA QUALIFICATION_BASE=FULL_BASE_SHA",
+                    '--base "$QUALIFICATION_BASE" --head "$QUALIFICATION_HEAD"',
+                    '--extra-vars "qualification_pr_head=$QUALIFICATION_HEAD qualification_pr_base=$QUALIFICATION_BASE"',
+                    '"bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE"',
+                    'readonly qualification_head="$1" qualification_base="$2"',
+                    'test "$(git rev-parse HEAD)" = "$qualification_head"',
+                    'BASE="$qualification_base" make ci',
+                ):
+                    self.assertIn(marker, source)
+                self.assertNotIn("58e10fdb7122f9f3302e3fc5534b07021f7cc37f", source)
+
     def test_ansible_clone_fetches_head_reachable_only_through_pr_ref(self):
         import shlex
         from ansible.modules import git as ansible_git
