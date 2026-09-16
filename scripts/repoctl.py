@@ -1186,15 +1186,19 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
                 name, command = pending.pop(0)
                 log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
                 handle = log_path.open("w", encoding="utf-8")
-                process = subprocess.Popen(
-                    command,
-                    cwd=ROOT,
-                    env=child_env,
-                    text=True,
-                    stdout=handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=ROOT,
+                        env=child_env,
+                        text=True,
+                        stdout=handle,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                except BaseException:
+                    handle.close()
+                    raise
                 processes.append(process)
                 running[name] = (process, handle, log_path, time.monotonic(), command)
             finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)

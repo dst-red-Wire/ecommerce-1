@@ -75,6 +75,34 @@ class ParallelLocalGateTest(unittest.TestCase):
         self.assertEqual("FAIL", records[-1]["status"])
         self.assertFalse(verification["tree_stable"])
 
+    def test_spawn_failure_reaps_already_started_gate(self):
+        processes = []
+        original = REPOCTL.subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            if processes:
+                raise OSError("simulated process exhaustion")
+            process = original(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(REPOCTL, "CONTEXT", Path(directory)),
+            mock.patch.object(REPOCTL, "_local_parallelism", return_value=2),
+            mock.patch.object(REPOCTL.subprocess, "Popen", side_effect=spawn),
+        ):
+            with self.assertRaises(OSError):
+                REPOCTL._run_independent_gates(
+                    [
+                        ("one", [sys.executable, "-c", "import time; time.sleep(60)"]),
+                        ("two", [sys.executable, "-c", "pass"]),
+                    ],
+                    [],
+                    os.environ.copy(),
+                )
+        self.assertIsNotNone(processes[0].returncode)
+
     def test_failure_kills_descendant_after_its_gate_exits(self):
         with tempfile.TemporaryDirectory() as directory:
             context = Path(directory)
