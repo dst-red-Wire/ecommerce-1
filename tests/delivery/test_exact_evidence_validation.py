@@ -129,6 +129,126 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                     controller.write_bytes(b"# different gate implementation\n")
                     self.assertNotEqual(candidate, REPOCTL.qualification_identity())
 
+    def test_all_declared_gate_tools_and_provider_dependencies_are_bound(self):
+        commands, _probes = REPOCTL._qualification_toolchain()
+        contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+        declared = {name for names in contract["gate_requirements"].values() for name in names}
+        self.assertTrue(declared <= commands.keys())
+        for command in ("git", "cc", "docker", "sysctl", "ansible-galaxy", "diff", "tar", "ruby"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / command
+                executable.write_bytes(b"original tool")
+                with (
+                    mock.patch.object(
+                        REPOCTL.shutil, "which", side_effect=lambda name: str(executable) if name == command else None
+                    ),
+                    mock.patch.object(
+                        REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout='{"ServerVersion": "1"}', stderr="")
+                    ),
+                    mock.patch.object(REPOCTL, "output", return_value="version 1"),
+                ):
+                    original = REPOCTL.qualification_identity()
+                    executable.write_bytes(b"changed tool")
+                    self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_new_contract_tool_and_transitive_provider_are_discovered(self):
+        contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+        contract["gate_requirements"]["test"].append("new-tool")
+        contract["capabilities"] += [
+            {"name": "new-tool", "provider": "new-provider", "probe": ["launcher", "new-tool", "--version"]},
+            {"name": "new-provider", "command": "launcher", "version_args": ["version"], "requires": ["new-helper"]},
+            {"name": "new-helper", "command": "helper", "version_args": ["--version"]},
+        ]
+        with mock.patch.object(REPOCTL.json, "loads", return_value=contract):
+            commands, probes = REPOCTL._qualification_toolchain()
+        self.assertEqual(["version"], commands["launcher"])
+        self.assertIn("helper", commands)
+        self.assertIn((("launcher", "new-tool", "--version"), False), probes)
+
+    def test_interpreter_aliases_share_identity_but_environments_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory) / "python"
+            alias = Path(directory) / "python3"
+            interpreter.write_bytes(b"same interpreter")
+            alias.symlink_to(interpreter)
+            with mock.patch.object(REPOCTL.shutil, "which", return_value=None):
+                with mock.patch.object(REPOCTL.sys, "executable", str(interpreter)):
+                    original = REPOCTL.qualification_identity()
+                with mock.patch.object(REPOCTL.sys, "executable", str(alias)):
+                    self.assertEqual(original, REPOCTL.qualification_identity())
+                    with mock.patch.object(REPOCTL.sys, "prefix", str(Path(directory) / "different-env")):
+                        self.assertNotEqual(original, REPOCTL.qualification_identity())
+                    interpreter.write_bytes(b"changed interpreter")
+                    self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_git_hook_aliases_share_identity_only_for_same_installation_and_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "usr/bin/git"
+            hook = Path(directory) / "usr/lib/git-core/git"
+            for executable in (original, hook):
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(b"identical git binary")
+            selected = original
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(selected) if name == "git" else None
+                ),
+                mock.patch.object(
+                    REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout=str(hook.parent), stderr="")
+                ) as probe,
+            ):
+                initial = REPOCTL.qualification_identity()
+                selected = hook
+                self.assertEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(Path(directory) / "other-install")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(hook.parent)
+                hook.write_bytes(b"different git binary")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
+    def test_runtime_identity_binds_daemon_configuration_not_container_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config/toolchain/capabilities.json"
+            config.parent.mkdir(parents=True)
+            config.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                _commands, probes = REPOCTL._qualification_toolchain()
+                self.assertNotIn((("docker", "info"), True), probes)
+                service = root / "services/product"
+                service.mkdir(parents=True)
+                (service / "integration_test.go").write_text("// testcontainers\n")
+                _commands, probes = REPOCTL._qualification_toolchain()
+                self.assertIn((("docker", "info"), True), probes)
+                self.assertIn((("sysctl", "-n", "net.ipv4.ip_forward"), True), probes)
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "docker"
+            executable.write_bytes(b"docker client")
+            state = {"ServerVersion": "1", "ID": "daemon-a", "Containers": 1}
+
+            def run(command, **kwargs):
+                return mock.Mock(returncode=0, stdout=json.dumps(state) if "info" in command else "client 1", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL,
+                    "_qualification_toolchain",
+                    return_value=({"docker": ["--version"]}, {(("docker", "info"), True)}),
+                ),
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(executable) if name == "docker" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+            ):
+                original = REPOCTL.qualification_identity()
+                state["Containers"] = 2
+                self.assertEqual(original, REPOCTL.qualification_identity())
+                state["ServerVersion"] = "2"
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+                with mock.patch.object(REPOCTL, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="")):
+                    with self.assertRaisesRegex(RuntimeError, "runtime identity probe failed"):
+                        REPOCTL.qualification_identity()
+
     def test_requires_each_gate_once_and_does_not_skip_required_checks(self):
         gates = self.evidence()["gates"]
         for rows in (
