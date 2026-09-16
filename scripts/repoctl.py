@@ -69,6 +69,8 @@ os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 # Every service/frontend owns its go.mod; ambient workspaces are not gate inputs.
 os.environ["GOWORK"] = "off"
+# The declared native cc capability owns CGO compilation for qualification.
+os.environ["CC"] = "cc"
 # Every controller child inspects the objects that push will actually publish.
 os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
 CONTEXT = ROOT / ".context"
@@ -103,7 +105,7 @@ def run(
     if cmd and Path(cmd[0]).name in {"git", "git.exe"}:
         cmd = [cmd[0], "--no-replace-objects", *cmd[1:]]
     if cmd and Path(cmd[0]).name in {"go", "go.exe"}:
-        env = dict(os.environ if env is None else env, GOWORK="off")
+        env = dict(os.environ if env is None else env, GOWORK="off", CC="cc")
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,

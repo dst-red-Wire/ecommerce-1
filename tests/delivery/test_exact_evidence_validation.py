@@ -115,6 +115,14 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 self.assertNotEqual(original, REPOCTL.qualification_identity())
             self.assertEqual('{"collection_info":{"version":"1.0"}}', manifest.read_text())
 
+    def test_go_gates_use_the_bound_cc_instead_of_an_ambient_wrapper(self):
+        for compiler in ("missing-compiler", "/outside/compiler --extra-flag"):
+            env = dict(os.environ, CC=compiler)
+            with self.subTest(compiler=compiler):
+                result = REPOCTL.run(["go", "env", "CC"], env=env, capture=True)
+                self.assertEqual("cc", result.stdout.strip())
+                self.assertEqual(compiler, env["CC"])
+
     def test_go_gates_ignore_external_or_missing_workspaces(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
