@@ -126,7 +126,7 @@
   register: templ_current
   failed_when: false
   changed_when: false
-  tags: [toolchain, go]
+  tags: [toolchain, templ]
 
 - name: Install pinned templ generator
   ansible.builtin.command:
@@ -135,9 +135,12 @@
     GOBIN: "{{ local_bin }}"
     GOROOT: ""
     PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
-  when: templ_current.rc != 0 or templ_version not in templ_current.stdout
+  when: >-
+    templ_current.rc != 0 or
+    (templ_current.stdout | trim) != 'v' ~ templ_version or
+    (templ_current.stderr | trim) != ''
   changed_when: true
-  tags: [toolchain, go]
+  tags: [toolchain, templ]
 
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:

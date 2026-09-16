@@ -235,11 +235,14 @@ def developer_state_ready(tags: str) -> bool:
         got = run([go, "version"], check=False, capture=True)
         if got.returncode or f"go{pins.get('GO_VERSION', '')}" not in got.stdout:
             return False
-        templ = managed_bin / "templ"
-        if not templ.is_file():
+    if "templ" in wanted:
+        from capability_bootstrap import templ_version_matches
+
+        templ = Path.home() / ".local/bin/templ"
+        if not templ.is_file() or not os.access(templ, os.X_OK):
             return False
         got = run([str(templ), "version"], check=False, capture=True)
-        if got.returncode or pins.get("TEMPL_VERSION", "") not in got.stdout:
+        if got.returncode or not templ_version_matches(got.stdout, got.stderr, pins.get("TEMPL_VERSION", "")):
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
@@ -598,7 +601,7 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
-    ensure_developer("go,cgo")
+    ensure_developer("go,cgo,templ")
     managed_bin = Path.home() / ".local/bin"
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
@@ -1877,7 +1880,29 @@ def deliver(base: str, title: str, message: str) -> int:
 
 
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--").splitlines()
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        run(["git", "checkout-index", "--all", f"--prefix={snapshot}/"])
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", *python_files], cwd=snapshot)
+            run(["ruff", "check", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
