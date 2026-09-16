@@ -1,4 +1,4 @@
-version: 1
+version: 2
 status: active
 architecture_authority: architecture.lock.yaml
 
@@ -11,11 +11,46 @@ policy:
   monotonic-clock-for-durations: required
 
 runtime:
-  ntp_provider: unresolved-runtime-input
+  implementation: chrony
+  protocol: ntp
+  udp_port: 123
+  internal_sources:
+    status: exact
+    servers:
+      - ntp-01.internal.deployfrance.com
+      - ntp-02.internal.deployfrance.com
+      - ntp-03.internal.deployfrance.com
+  upstream_sources:
+    scope: ntp-servers-only
+    servers:
+      - 0.fr.pool.ntp.org
+      - 1.fr.pool.ntp.org
+      - 2.fr.pool.ntp.org
+      - 3.fr.pool.ntp.org
   fail_closed_when_missing: true
   public_ntp_fallback: forbidden
+
+network_policy:
+  clients:
+    allowed_source_scopes: [mgmt, preprod, prod]
+    allowed_destinations:
+      - ntp-01.internal.deployfrance.com
+      - ntp-02.internal.deployfrance.com
+      - ntp-03.internal.deployfrance.com
+    protocol: udp
+    port: 123
+    direct_public_ntp: forbidden
+  ntp_servers:
+    outbound_public_ntp: allowed
+    protocol: udp
+    port: 123
+    destination_scope: approved-upstreams-only
 
 rules:
   internal-ntp-addresses-must-be-versioned-before-real-provisioning: true
   time-source-must-be-identical-for-control-plane-and-workers: true
   clock-drift-must-be-observable: true
+  only-internal-ntp-servers-may-contact-public-ntp: true
+  preprod-and-prod-direct-public-ntp-forbidden: true
+  ntp-client-policy-must-be-generated-from-this-contract: true
+  at-least-three-internal-time-sources-required: true
