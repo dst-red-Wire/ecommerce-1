@@ -1,0 +1,34 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+
+authorities:
+  human_identity:
+    authority: keycloak
+    protocol: oidc
+    token: jwt
+  workload_identity:
+    authority: spire
+    identity_format: spiffe
+  edge_token_validation:
+    authority: kong
+  mesh_transport_identity:
+    authority: spire
+    consumer: istio-ambient
+
+propagation:
+  human_context:
+    preserve_across_internal_calls: true
+    trusted_source: validated-edge-token
+    must_not_be-used-as-workload-identity: true
+  workload_context:
+    required_for-service-to-service: true
+    must_not-impersonate-human-identity: true
+
+rules:
+  keycloak_is-only-human-identity-authority: true
+  spire_is-only-workload-identity-authority: true
+  kong_validates-public-user-jwt-before-mesh-entry: true
+  user-jwt-does-not-replace-spiffe-identity: true
+  spiffe-identity-does-not-authorize-human-actions-by-itself: true
+  services-must-not-trust-unvalidated-forwarded-identity-headers: true
