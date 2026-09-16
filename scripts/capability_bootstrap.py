@@ -500,6 +500,22 @@ def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> d
     return expected
 
 
+def seed_unlocked_distributions(lock_path: str) -> list[str]:
+    import importlib.metadata as metadata
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    # These are supplied by venv/ensurepip rather than the qualification lock.
+    allowed = set(expected) | {"pip", "setuptools", "wheel"}
+    installed = set()
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name", "")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
+            raise ValueError("invalid installed seed distribution name")
+        installed.add(canonicalize_name(name))
+    return sorted(installed - allowed)
+
+
 def validate_seed_lock(lock_path: str) -> bool:
     import importlib.metadata as metadata
 
@@ -508,6 +524,8 @@ def validate_seed_lock(lock_path: str) -> bool:
         if any(metadata.version(name) != version for name, version in expected.items()):
             return False
     except metadata.PackageNotFoundError:
+        return False
+    if seed_unlocked_distributions(lock_path):
         return False
     return (
         subprocess.run(
@@ -544,6 +562,19 @@ def seed_environment() -> int:
     if ready:
         ready = subprocess.run(verify, text=True, capture_output=True, check=False).returncode == 0
     if not ready:
+        # Reconcile only the project-owned venv, using that interpreter's inventory.
+        subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import runpy, sys, subprocess; module = runpy.run_path(sys.argv[1]); "
+                "extras = module['seed_unlocked_distributions'](sys.argv[2]); "
+                "subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '--yes', '--', *extras], check=True) if extras else None",
+                str(Path(__file__).resolve()),
+                str(SEED_LOCK),
+            ],
+            check=True,
+        )
         subprocess.run(
             [
                 str(python),

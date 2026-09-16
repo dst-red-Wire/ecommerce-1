@@ -44,9 +44,30 @@ class SeedFastPathContractTest(unittest.TestCase):
                 mock.patch.object(
                     importlib.metadata, "version", side_effect=lambda name: {"jinja2": "3.1.6", "pyyaml": "6.0.2"}[name]
                 ),
+                mock.patch.object(
+                    importlib.metadata,
+                    "distributions",
+                    return_value=[mock.Mock(metadata={"Name": name}) for name in ("Jinja2", "PyYAML", "pip")],
+                ),
                 mock.patch.object(module.subprocess, "run", return_value=mock.Mock(returncode=0)),
             ):
                 self.assertTrue(module.validate_seed_lock(str(lock)))
+            with (
+                mock.patch.object(
+                    importlib.metadata, "version", side_effect=lambda name: {"jinja2": "3.1.6", "pyyaml": "6.0.2"}[name]
+                ),
+                mock.patch.object(
+                    importlib.metadata,
+                    "distributions",
+                    return_value=[
+                        mock.Mock(metadata={"Name": name}) for name in ("Jinja2", "PyYAML", "pip", "extra-compatible")
+                    ],
+                ),
+                mock.patch.object(module.subprocess, "run") as run,
+            ):
+                self.assertEqual(["extra-compatible"], module.seed_unlocked_distributions(str(lock)))
+                self.assertFalse(module.validate_seed_lock(str(lock)))
+                run.assert_not_called()
             with mock.patch.object(importlib.metadata, "version", side_effect=importlib.metadata.PackageNotFoundError):
                 self.assertFalse(module.validate_seed_lock(str(lock)))
 
