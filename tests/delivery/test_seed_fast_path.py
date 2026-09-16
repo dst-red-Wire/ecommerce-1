@@ -49,6 +49,44 @@ class SeedFastPathContractTest(unittest.TestCase):
             self.assertTrue(marker.exists())
             self.assertTrue(selected.exists(), "use the contracted PATH interpreter, not a hard-coded OS path")
 
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixtures also simulate Windows PATH parsing")
+    def test_make_seed_excludes_relative_and_aliased_roots_with_platform_path_separator(self):
+        import shutil
+
+        make = shutil.which("make")
+        for windows in (False, True):
+            for alias in (False, True):
+                with self.subTest(windows=windows, alias=alias), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
+                    (root / "scripts").mkdir()
+                    (root / "scripts/capability_bootstrap.py").write_text(
+                        "from pathlib import Path; Path('validated').touch()\n"
+                    )
+                    cache = root / "cache"
+                    cache.mkdir()
+                    cached = cache / "python3"
+                    cached.write_text("invalid cached executable must never run")
+                    cached.chmod(0o755)
+                    (root / "alias").symlink_to(cache, target_is_directory=True)
+                    # A colon within one Windows entry must survive semicolon splitting.
+                    trusted = root / ("C:/trusted" if windows else "trusted")
+                    trusted.mkdir(parents=True)
+                    (trusted / "python3").symlink_to(getattr(sys, "_base_executable", sys.executable))
+                    separator = ";" if windows else ":"
+                    env = dict(
+                        os.environ,
+                        PATH=separator.join((str(cache), str(trusted))),
+                        ECOMMERCE_TOOL_HOME="alias" if alias else "cache",
+                    )
+                    if windows:
+                        env["OS"] = "Windows_NT"
+                    else:
+                        env.pop("OS", None)
+                    result = subprocess.run([make, "seed"], cwd=root, env=env, capture_output=True, text=True)
+                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertTrue((root / "validated").exists())
+
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")
         body = source.split("def seed_environment", 1)[1].split("\ndef main", 1)[0]

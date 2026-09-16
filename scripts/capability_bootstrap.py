@@ -612,7 +612,9 @@ def remove_seed_directory_reference(reference: Path) -> None:
 def replace_seed_directory_reference(temporary: Path, destination: Path) -> None:
     """Replace references and quarantine invalid directories, with rollback under lock."""
     if not destination.exists() or (
-        not seed_windows() and (not destination.is_dir() or seed_directory_reference(destination))
+        not seed_windows()
+        and seed_directory_reference(temporary)
+        and (not destination.is_dir() or seed_directory_reference(destination))
     ):
         os.replace(temporary, destination)
         return
@@ -914,19 +916,7 @@ def copy_seed_reference(wheels: Path, destination: Path, lock: str) -> bool:
 
 def publish_seed_reference(candidate: Path, wheels: Path) -> None:
     """Replace the whole reference under the identity lock, restoring on failure."""
-    previous = candidate.with_name(candidate.name + ".previous")
-    if wheels.exists():
-        os.replace(wheels, previous)
-    try:
-        os.replace(candidate, wheels)
-    except BaseException:
-        if previous.exists():
-            os.replace(previous, wheels)
-        raise
-    if previous.is_dir():
-        shutil.rmtree(previous)
-    else:
-        previous.unlink(missing_ok=True)
+    replace_seed_directory_reference(candidate, wheels)
 
 
 def check_seed_reference(wheels: Path, root: Path | None = None, *, copy_to: Path | None = None) -> bool:

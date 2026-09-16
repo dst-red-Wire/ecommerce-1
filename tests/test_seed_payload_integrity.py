@@ -486,6 +486,20 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.assertTrue(self.valid())
         self.assertFalse(candidate.exists())
 
+    def test_invalid_wheel_directory_is_quarantined_without_recursive_cleanup(self):
+        candidate = self.root / "candidate"
+        candidate.mkdir()
+        shutil.copyfile(self.wheel, candidate / self.wheel.name)
+        external = self.wheels / "mounted-child"
+        external.mkdir()
+        (external / "preserve").write_text("external mount contents")
+        with mock.patch.object(bootstrap.shutil, "rmtree", side_effect=AssertionError("mount traversal")):
+            bootstrap.publish_seed_reference(candidate, self.wheels)
+        self.assertTrue(self.valid())
+        quarantined = list(self.root.glob("*.quarantine"))
+        self.assertEqual(1, len(quarantined))
+        self.assertEqual("external mount contents", (quarantined[0] / "mounted-child/preserve").read_text())
+
     def test_failed_reference_publication_restores_previous_directory(self):
         candidate = self.root / "candidate"
         candidate.mkdir()

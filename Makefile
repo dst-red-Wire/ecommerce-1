@@ -2,9 +2,11 @@
 # An explicit SEED_PYTHON override must name a trusted provisioned interpreter.
 SEED_EMPTY :=
 SEED_SPACE := $(SEED_EMPTY) $(SEED_EMPTY)
-SEED_EXCLUDED_ROOTS := $(CURDIR)/.venv $(HOME)/.cache/ecommerce-1/qualification $(ECOMMERCE_TOOL_HOME)
-SEED_CANDIDATES := $(foreach entry,$(subst :,$(SEED_SPACE),$(PATH)),$(wildcard $(entry)/python3 $(entry)/python3.exe))
-SEED_TRUSTED_CANDIDATES := $(foreach entry,$(SEED_CANDIDATES),$(if $(filter $(addsuffix /%,$(SEED_EXCLUDED_ROOTS)),$(entry) $(realpath $(entry))),,$(realpath $(entry))))
+SEED_PATH_SEPARATOR := $(if $(filter Windows_NT,$(OS)),;,:)
+SEED_ROOTS := $(CURDIR)/.venv $(HOME)/.cache/ecommerce-1/qualification $(ECOMMERCE_TOOL_HOME)
+SEED_EXCLUDED_ROOTS := $(abspath $(SEED_ROOTS)) $(realpath $(SEED_ROOTS))
+SEED_CANDIDATES := $(foreach entry,$(subst $(SEED_PATH_SEPARATOR),$(SEED_SPACE),$(subst \,/,$(PATH))),$(wildcard $(entry)/python3 $(entry)/python3.exe))
+SEED_TRUSTED_CANDIDATES := $(foreach entry,$(SEED_CANDIDATES),$(if $(filter $(addsuffix /%,$(SEED_EXCLUDED_ROOTS)),$(abspath $(entry)) $(realpath $(entry))),,$(realpath $(entry))))
 SEED_PYTHON ?= $(or $(firstword $(SEED_TRUSTED_CANDIDATES)),$(error No trusted contracted python3 found; set SEED_PYTHON to its provisioned absolute path))
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
