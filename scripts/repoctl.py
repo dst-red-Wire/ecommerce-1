@@ -937,11 +937,11 @@ def test_all() -> int:
 
 def changed_paths(base: str, head: str) -> list[str]:
     if head == "WORKTREE":
-        tracked = git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, "--").splitlines()
-        untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+        tracked = git("diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--").split("\0")
+        untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
         return sorted(set(filter(None, tracked + untracked)))
     return sorted(
-        set(filter(None, git("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head, "--").splitlines()))
+        set(filter(None, git("diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--").split("\0")))
     )
 
 
@@ -1476,32 +1476,49 @@ def preflight(base: str, head: str) -> int:
     """Fail cheaply on missing runners and changed-source syntax before test gates."""
     if _reject_staged_symlinks():
         return 1
+    paths = changed_paths(base, head)
+    if any((ROOT / path).is_symlink() or not (ROOT / path).resolve().is_relative_to(ROOT.resolve()) for path in paths):
+        return fail("preflight refuses symbolic links or paths outside the checkout", 1)
     components = affected(base, head)
     contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
     requirements = contract["gate_requirements"]
     required = {"ruby", "gitleaks"}
     for gate in ("governance", "contracts", "automation", "security"):
         required.update(requirements[gate])
-    if any(component.startswith(("service:", "frontend:")) for component in components):
-        required.update({"go", "gofmt"})
+    if any(component.startswith("service:") for component in components):
+        required.update(requirements["service"])
+    if any(component.startswith("frontend:") for component in components):
+        required.update({"go", "gofmt", "templ", "cc"})
+    if "system" in components:
+        required.update(requirements["test"])
     if "platform:terraform" in components:
-        required.add("tofu" if shutil.which("tofu") else "terraform")
+        required.update(requirements["terraform"])
+        if shutil.which("tofu"):
+            required.discard("terraform")
+            required.add("tofu")
     if "platform:ansible" in components:
-        required.update({"ansible-playbook", "ansible-lint"})
+        required.update(requirements["ansible"])
     for executable in sorted(required):
         require(executable)
 
-    paths = changed_paths(base, head)
-    if any((ROOT / path).is_symlink() or not (ROOT / path).resolve().is_relative_to(ROOT.resolve()) for path in paths):
-        return fail("preflight refuses symbolic links or paths outside the checkout", 1)
     python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
     ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
+    syntax_commands = []
     if python_files:
         require("ruff")
-        run(["ruff", "check", "--", *python_files])
-        run([sys.executable, "-m", "py_compile", "--", *python_files])
-    for path in ruby_files:
-        run(["ruby", "-c", "--", path])
+        syntax_commands.extend(
+            [
+                ("Python lint", ["ruff", "check", "--", *python_files]),
+                ("Python syntax", [sys.executable, "-m", "py_compile", "--", *python_files]),
+            ]
+        )
+    syntax_commands.extend(("Ruby syntax", ["ruby", "-c", "--", path]) for path in ruby_files)
+    for label, command in syntax_commands:
+        # Syntax diagnostics can echo credentials before the redacting security gate.
+        # Keep raw output in memory only and emit a fixed, source-free failure message.
+        result = run(command, capture=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"preflight {label} failed; source diagnostics suppressed")
     print(f"PASS preflight capabilities/syntax ({len(paths)} changed paths)")
     return 0
 
