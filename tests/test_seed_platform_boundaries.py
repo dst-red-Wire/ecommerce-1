@@ -15,6 +15,41 @@ import capability_bootstrap as bootstrap
 
 
 class SeedPlatformBoundaries(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX ownership and simulated Darwin ACL discovery")
+    def test_discovery_checks_candidate_owner_and_extended_acl_without_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            untrusted = root / "untrusted"
+            untrusted.mkdir()
+            candidate = untrusted / "python3"
+            candidate.write_text("must never execute")
+            candidate.chmod(0o755)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            expected = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+            (trusted / "python3").symlink_to(expected)
+            environment = {"PATH": f"{untrusted}:{trusted}"}
+            original = Path.lstat
+
+            def foreign_owner(path):
+                info = original(path)
+                if path == candidate:
+                    values = list(info)
+                    values[4] = os.geteuid() + 10000
+                    return os.stat_result(values)
+                return info
+
+            with mock.patch.object(Path, "lstat", foreign_owner), mock.patch.object(bootstrap.subprocess, "run") as run:
+                self.assertEqual(str(expected), bootstrap.select_seed_python(root, environment))
+                run.assert_not_called()
+            with (
+                mock.patch.object(bootstrap.sys, "platform", "darwin"),
+                mock.patch.object(bootstrap, "seed_darwin_acl_is_private", side_effect=lambda path: path != candidate),
+                mock.patch.object(bootstrap.subprocess, "run") as run,
+            ):
+                self.assertEqual(str(expected), bootstrap.select_seed_python(root, environment))
+                run.assert_not_called()
+
     def test_system_directory_comes_from_secure_os_api(self):
         kernel = mock.Mock()
 
@@ -204,7 +239,10 @@ class SeedPlatformBoundaries(unittest.TestCase):
             self.skipTest("real canonical seed unavailable")
         expected = bootstrap.load_versions()["ANSIBLE_CORE_VERSION"]
         result = subprocess.run(
-            [str(python), "-I", "-m", "ansible.cli.adhoc", "--version"], check=True, text=True, capture_output=True
+            [str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"],
+            check=True,
+            text=True,
+            capture_output=True,
         )
         self.assertIn(f"[core {expected}]", result.stdout.splitlines()[0])
         bootstrap.verify_seed_ansible_version(python, expected)

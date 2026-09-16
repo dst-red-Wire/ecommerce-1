@@ -288,7 +288,7 @@ class SeedPayloadIntegrity(unittest.TestCase):
             bootstrap.subprocess, "run", return_value=mock.Mock(stdout="ansible [core 2.20.3]\n")
         ) as run:
             bootstrap.verify_seed_ansible_version(python, "2.20.3")
-        self.assertEqual([str(python), "-I", "-m", "ansible.cli.adhoc", "--version"], run.call_args.args[0])
+        self.assertEqual([str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"], run.call_args.args[0])
         self.assertTrue(run.call_args.kwargs["check"])
 
     def test_checkout_reference_repairs_ordinary_file_and_directory(self):
@@ -325,6 +325,31 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.assertEqual(self.seed, selector.resolve())
         self.assertEqual("external data", external.read_text())
         self.assertFalse(temporary.exists())
+
+    def test_cyclic_selectors_are_replaced_without_following_or_removing_targets(self):
+        generations = self.root / "identity.generations"
+        generations.mkdir()
+        candidate = generations / "candidate"
+        candidate.mkdir()
+        selector = self.root / "identity.current"
+        other = self.root / "cycle-partner"
+        for cycle in ("self", "pair"):
+            with self.subTest(cycle=cycle):
+                if cycle == "self":
+                    selector.symlink_to(selector.name)
+                else:
+                    selector.symlink_to(other.name)
+                    other.symlink_to(selector.name)
+                self.assertIsNone(bootstrap.resolved_seed_selector(selector, generations))
+                temporary = self.root / "candidate-reference"
+                temporary.symlink_to(candidate, target_is_directory=True)
+                bootstrap.replace_seed_directory_reference(temporary, selector)
+                self.assertEqual(candidate, bootstrap.resolved_seed_selector(selector, generations))
+                self.assertTrue(candidate.is_dir())
+                selector.unlink()
+                if cycle == "pair":
+                    self.assertTrue(other.is_symlink(), "do not delete another cycle entry")
+                    other.unlink()
 
     def test_invalid_selector_is_restored_when_publication_fails(self):
         selector = self.root / "identity.current"

@@ -12,20 +12,28 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def seed_fixture(root):
+    (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
+    (root / "scripts").mkdir()
+    (root / "scripts/capability_bootstrap.py").write_text(
+        "import sys; from pathlib import Path\n"
+        "assert sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode\n"
+        "if sys.argv[1] == 'select-seed-python':\n"
+        f"    sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+        "    from capability_bootstrap import main\n"
+        "    raise SystemExit(main(['select-seed-python']))\n"
+        "Path('validated').touch()\n"
+    )
+
+
 class SeedFastPathContractTest(unittest.TestCase):
-    @unittest.skipIf(os.name == "nt", "POSIX system interpreter regression")
+    @unittest.skipIf(os.name == "nt", "POSIX OS interpreter regression")
     def test_make_seed_never_executes_the_unvalidated_cached_python(self):
+        import shutil
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
-            scripts = root / "scripts"
-            scripts.mkdir()
-            marker = root / "validated"
-            (scripts / "capability_bootstrap.py").write_text(
-                "import sys; from pathlib import Path\n"
-                "assert sys.flags.isolated and sys.flags.no_site\n"
-                f"Path({str(marker)!r}).touch()\n"
-            )
+            seed_fixture(root)
             cached = root / ".venv/qualification/bin"
             cached.mkdir(parents=True)
             for name in ("python", "python3"):
@@ -42,89 +50,133 @@ class SeedFastPathContractTest(unittest.TestCase):
                 f"os.execv({base!r}, [{base!r}, *sys.argv[1:]])\n"
             )
             shim.chmod(0o755)
-            env = dict(os.environ, PATH=os.pathsep.join([str(cached), str(trusted), os.environ["PATH"]]))
+            env = dict(os.environ, PATH=os.pathsep.join([str(cached), str(trusted)]))
             env.pop("OS", None)
-            result = subprocess.run(["make", "seed"], cwd=root, env=env, capture_output=True, text=True)
+            result = subprocess.run([shutil.which("make"), "seed"], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertTrue(marker.exists())
-            self.assertTrue(selected.exists(), "use the contracted PATH interpreter, not a hard-coded OS path")
+            self.assertTrue((root / "validated").exists())
+            self.assertTrue(selected.exists(), "select the validated provisioned PATH interpreter")
 
-    @unittest.skipIf(os.name == "nt", "POSIX executable fixtures also simulate Windows PATH parsing")
-    def test_make_seed_excludes_relative_and_aliased_roots_with_platform_path_separator(self):
+    @unittest.skipIf(os.name == "nt", "POSIX executable fixtures")
+    def test_make_seed_excludes_relative_and_aliased_cache_roots(self):
         import shutil
 
-        make = shutil.which("make")
-        for windows in (False, True):
-            for alias in (False, True):
-                with self.subTest(windows=windows, alias=alias), tempfile.TemporaryDirectory() as directory:
-                    root = Path(directory)
-                    (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
-                    (root / "scripts").mkdir()
-                    (root / "scripts/capability_bootstrap.py").write_text(
-                        "from pathlib import Path; Path('validated').touch()\n"
-                    )
-                    cache = root / "cache"
-                    cache.mkdir()
-                    cached = cache / "python3"
-                    cached.write_text("invalid cached executable must never run")
-                    cached.chmod(0o755)
-                    (root / "alias").symlink_to(cache, target_is_directory=True)
-                    # A colon within one Windows entry must survive semicolon splitting.
-                    trusted = root / ("C:/trusted" if windows else "trusted")
-                    trusted.mkdir(parents=True)
-                    (trusted / "python3").symlink_to(getattr(sys, "_base_executable", sys.executable))
-                    separator = ";" if windows else ":"
-                    env = dict(
-                        os.environ,
-                        PATH=separator.join((str(cache), str(trusted))),
-                        ECOMMERCE_TOOL_HOME="alias" if alias else "cache",
-                    )
-                    if windows:
-                        env["OS"] = "Windows_NT"
-                    else:
-                        env.pop("OS", None)
-                    result = subprocess.run([make, "seed"], cwd=root, env=env, capture_output=True, text=True)
-                    self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-                    self.assertTrue((root / "validated").exists())
-
-    @unittest.skipIf(os.name == "nt", "POSIX fixtures simulate Windows case and executable discovery")
-    def test_windows_make_seed_excludes_mixed_case_cache_and_accepts_python_exe(self):
-        import shutil
-
-        make = shutil.which("make")
-        for explicit in (False, True):
-            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as directory:
+        for alias in (False, True):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
-                (root / "scripts").mkdir()
-                (root / "scripts/capability_bootstrap.py").write_text(
-                    "import sys; from pathlib import Path\n"
-                    "assert sys.flags.isolated and sys.flags.no_site\n"
-                    "Path('validated').touch()\n"
-                )
-                cache = root / ("caché" if explicit else "MixedCache")
+                seed_fixture(root)
+                cache = root / "cache"
                 cache.mkdir()
-                (cache / "python.exe").write_text("invalid cached executable must never run")
-                (cache / "python.exe").chmod(0o755)
+                cached = cache / "python3"
+                cached.write_text("invalid cached executable must never run")
+                cached.chmod(0o755)
+                (root / "alias").symlink_to(cache, target_is_directory=True)
                 trusted = root / "trusted"
                 trusted.mkdir()
-                provisioned = trusted / "python.exe"
-                provisioned.symlink_to(getattr(sys, "_base_executable", sys.executable))
-                env = dict(
-                    os.environ, OS="Windows_NT", PATH=f"{cache};{trusted}", ECOMMERCE_TOOL_HOME=str(cache).upper()
+                (trusted / "python3").symlink_to(getattr(sys, "_base_executable", sys.executable))
+                env = dict(os.environ, PATH=f"{cache}:{trusted}", ECOMMERCE_TOOL_HOME="alias" if alias else "cache")
+                env.pop("OS", None)
+                result = subprocess.run(
+                    [shutil.which("make"), "seed"], cwd=root, env=env, capture_output=True, text=True
                 )
-                command = [make, "seed"]
-                if explicit:
-                    command.append(f"SEED_PYTHON={provisioned}")
-                result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
                 self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                 self.assertTrue((root / "validated").exists())
-                if explicit:
-                    (root / "validated").unlink()
-                    refused = subprocess.run([make, "seed"], cwd=root, env=env, capture_output=True, text=True)
-                    self.assertNotEqual(0, refused.returncode)
-                    self.assertIn("Unsupported Windows seed path", refused.stderr)
-                    self.assertFalse((root / "validated").exists())
+
+    @unittest.skipIf(os.name == "nt", "Linux GNU Make fixture simulates Windows override; no native Windows claim")
+    def test_windows_make_requires_explicit_provisioned_python_exe(self):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_fixture(root)
+            cache = root / "MixedCache"
+            cache.mkdir()
+            (cache / "python.exe").write_text("untrusted executable must never run")
+            (cache / "python.exe").chmod(0o755)
+            trusted = root / "trusted"
+            trusted.mkdir()
+            provisioned = trusted / "python.exe"
+            provisioned.symlink_to(getattr(sys, "_base_executable", sys.executable))
+            env = dict(os.environ, OS="Windows_NT", PATH=f"{cache};{trusted}", ECOMMERCE_TOOL_HOME=str(cache).upper())
+            refused = subprocess.run([shutil.which("make"), "seed"], cwd=root, env=env, capture_output=True, text=True)
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("Automatic Windows seed discovery is unsupported", refused.stderr)
+            self.assertFalse((root / "validated").exists())
+            explicit = subprocess.run(
+                [shutil.which("make"), "seed", f"SEED_PYTHON={provisioned}"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, explicit.returncode, explicit.stdout + explicit.stderr)
+            self.assertTrue((root / "validated").exists())
+
+    @unittest.skipIf(os.name == "nt", "Native POSIX writable-path refusal")
+    def test_make_seed_skips_externally_writable_path_candidates_without_execution(self):
+        import shutil
+
+        for permission_target in ("directory", "sticky-directory", "ancestor", "file", "alias"):
+            with self.subTest(permission_target=permission_target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                seed_fixture(root)
+                external = root / "external"
+                untrusted = external / "bin"
+                untrusted.mkdir(parents=True)
+                marker = root / "untrusted-executed"
+                executable = untrusted / "python3"
+                executable.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
+                executable.chmod(0o755)
+                if permission_target == "file":
+                    executable.chmod(0o777)
+                elif permission_target == "ancestor":
+                    external.chmod(0o777)
+                else:
+                    untrusted.chmod(0o1777 if permission_target == "sticky-directory" else 0o777)
+                first = untrusted
+                if permission_target == "alias":
+                    first = root / "alias"
+                    first.symlink_to(untrusted, target_is_directory=True)
+                trusted = root / "trusted"
+                trusted.mkdir()
+                (trusted / "python3").symlink_to(getattr(sys, "_base_executable", sys.executable))
+                env = dict(os.environ, PATH=f"{first}:{trusted}")
+                env.pop("OS", None)
+                result = subprocess.run(
+                    [shutil.which("make"), "seed"], cwd=root, env=env, capture_output=True, text=True
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertTrue((root / "validated").exists())
+                self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name == "nt", "Native POSIX executability and directory checks")
+    def test_make_seed_skips_nonexecutables_directories_and_cyclic_candidates(self):
+        import shutil
+
+        for kind in ("nonexecutable", "directory", "cycle"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                seed_fixture(root)
+                first = root / "first"
+                first.mkdir()
+                unusable = first / "python3"
+                if kind == "nonexecutable":
+                    unusable.write_text("not executable")
+                    unusable.chmod(0o644)
+                elif kind == "directory":
+                    unusable.mkdir()
+                else:
+                    unusable.symlink_to(unusable.name)
+                trusted = root / "trusted"
+                trusted.mkdir()
+                (trusted / "python3").symlink_to(getattr(sys, "_base_executable", sys.executable))
+                env = dict(os.environ, PATH=f"{first}:{trusted}")
+                env.pop("OS", None)
+                result = subprocess.run(
+                    [shutil.which("make"), "seed"], cwd=root, env=env, capture_output=True, text=True
+                )
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertTrue((root / "validated").exists())
 
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")

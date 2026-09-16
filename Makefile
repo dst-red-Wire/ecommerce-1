@@ -1,20 +1,7 @@
-# Resolve the contracted python3 outside the ignored seed/cache before execution.
-# An explicit SEED_PYTHON override must name a trusted provisioned interpreter.
-SEED_EMPTY :=
-SEED_SPACE := $(SEED_EMPTY) $(SEED_EMPTY)
-SEED_PATH_SEPARATOR := $(if $(filter Windows_NT,$(OS)),;,:)
-# Windows automatic discovery accepts ASCII paths and compares their identity without case.
-# Non-ASCII/Make-special paths require an explicit trusted SEED_PYTHON instead of unsafe guessing.
-seed_lower = $(subst Z,z,$(subst Y,y,$(subst X,x,$(subst W,w,$(subst V,v,$(subst U,u,$(subst T,t,$(subst S,s,$(subst R,r,$(subst Q,q,$(subst P,p,$(subst O,o,$(subst N,n,$(subst M,m,$(subst L,l,$(subst K,k,$(subst J,j,$(subst I,i,$(subst H,h,$(subst G,g,$(subst F,f,$(subst E,e,$(subst D,d,$(subst C,c,$(subst B,b,$(subst A,a,$(1)))))))))))))))))))))))))))
-SEED_ASCII_PATH_CHARACTERS := a b c d e f g h i j k l m n o p q r s t u v w x y z A B C D E F G H I J K L M N O P Q R S T U V W X Y Z 0 1 2 3 4 5 6 7 8 9 / : . _ - + @ ~
-seed_remove_chars = $(if $(2),$(call seed_remove_chars,$(subst $(firstword $(2)),,$(1)),$(wordlist 2,$(words $(2)),$(2))),$(1))
-seed_path_key = $(if $(filter Windows_NT,$(OS)),$(if $(call seed_remove_chars,$(1),$(SEED_ASCII_PATH_CHARACTERS)),$(error Unsupported Windows seed path; set SEED_PYTHON to its trusted provisioned absolute path),$(call seed_lower,$(1))),$(1))
-SEED_ROOTS = $(CURDIR)/.venv $(HOME)/.cache/ecommerce-1/qualification $(ECOMMERCE_TOOL_HOME)
-SEED_EXCLUDED_ROOTS = $(foreach entry,$(abspath $(SEED_ROOTS)) $(realpath $(SEED_ROOTS)),$(call seed_path_key,$(entry)))
-SEED_EXECUTABLE_NAMES = $(if $(filter Windows_NT,$(OS)),python3 python3.exe python.exe,python3)
-SEED_CANDIDATES = $(foreach entry,$(subst $(SEED_PATH_SEPARATOR),$(SEED_SPACE),$(subst \,/,$(PATH))),$(foreach name,$(SEED_EXECUTABLE_NAMES),$(wildcard $(entry)/$(name))))
-SEED_TRUSTED_CANDIDATES = $(foreach entry,$(SEED_CANDIDATES),$(if $(filter $(addsuffix /%,$(SEED_EXCLUDED_ROOTS)),$(call seed_path_key,$(abspath $(entry))) $(call seed_path_key,$(realpath $(entry)))),,$(realpath $(entry))))
-SEED_PYTHON ?= $(or $(firstword $(SEED_TRUSTED_CANDIDATES)),$(error No trusted contracted Python executable found; set SEED_PYTHON to its provisioned absolute path))
+# The provisioned OS Python validates PATH candidates before any candidate executes.
+# Windows has no authenticated OS Python location: use an explicitly provisioned override.
+# SEED_PYTHON is an operator trust decision, never an automatically cached interpreter.
+SEED_PYTHON ?= $(if $(filter Windows_NT,$(OS)),$(error Automatic Windows seed discovery is unsupported; set SEED_PYTHON to its trusted provisioned absolute path),$(or $(shell /usr/bin/python3 -I -S -B scripts/capability_bootstrap.py select-seed-python),$(error No trusted contracted Python executable found; set SEED_PYTHON to its provisioned absolute path)))
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
@@ -32,7 +19,7 @@ ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/develo
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@"$(SEED_PYTHON)" -I -S scripts/capability_bootstrap.py seed
+	@"$(SEED_PYTHON)" -I -S -B scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static

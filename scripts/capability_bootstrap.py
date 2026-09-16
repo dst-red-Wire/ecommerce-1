@@ -659,6 +659,62 @@ def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
         return False
 
 
+def select_seed_python(root: Path | None = None, environment: dict[str, str] | None = None) -> str:
+    """Inspect candidates using an OS-provisioned interpreter; never execute a candidate to trust it."""
+    environment = os.environ if environment is None else environment
+    if os.name == "nt" or environment.get("OS") == "Windows_NT":
+        raise SeedGenerationBoundaryError("Windows seed requires an explicit provisioned SEED_PYTHON")
+    root = Path.cwd() if root is None else root
+    excluded = [root / ".venv", Path.home() / ".cache/ecommerce-1/qualification"]
+    if environment.get("ECOMMERCE_TOOL_HOME"):
+        excluded.append(root / environment["ECOMMERCE_TOOL_HOME"])
+    boundaries = []
+    for path in excluded:
+        boundaries.append(path.absolute())
+        try:
+            boundaries.append(path.resolve())
+        except (OSError, RuntimeError):
+            raise SeedGenerationBoundaryError("seed discovery cache boundary cannot be resolved safely") from None
+    for directory in environment.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = (root / directory / "python3").absolute()
+        try:
+            resolved = candidate.resolve(strict=True)
+            if any(path.is_relative_to(boundary) for path in (candidate, resolved) for boundary in boundaries):
+                continue
+            # Make receives one quoted path. Reject metacharacters instead of
+            # emitting text that a later recipe shell could interpret as code.
+            if not re.fullmatch(r"/[A-Za-z0-9/._+@~-]+", str(resolved)):
+                continue
+            if not resolved.is_file() or not os.access(resolved, os.X_OK):
+                continue
+            paths = set((candidate, *candidate.parents, resolved, *resolved.parents))
+            if not seed_paths_are_private([(path, True) for path in paths]):
+                continue
+            # A PATH directory itself must be private even if it is sticky.
+            # Sticky shared ancestors remain valid above an owned private directory.
+            if any(path.stat().st_mode & 0o022 for path in (candidate.parent, resolved.parent)):
+                continue
+            return str(resolved)
+        except (OSError, RuntimeError):
+            continue
+    raise SeedGenerationBoundaryError("no executable Python with trusted ownership, permissions and ACLs in PATH")
+
+
+def resolved_seed_selector(selector: Path, generations: Path) -> Path | None:
+    """Unresolvable selectors are replaceable corruption, never executable generations."""
+    if not seed_directory_reference(selector):
+        return None
+    try:
+        selected = selector.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if selected.parent != generations:
+        raise SeedGenerationBoundaryError("seed generation selector escapes its identity")
+    return selected
+
+
 def seed_directory_reference(path: Path) -> bool:
     return path.is_symlink() or path.is_junction()
 
@@ -1211,10 +1267,8 @@ def _seed_environment() -> int:
 
     with identity_lock(lock_path):
         validate_seed_generation_root(generations)
-        if seed_directory_reference(selector):
-            selected = selector.resolve()
-            if selected.parent != generations:
-                raise RuntimeError("seed generation selector escapes its identity")
+        selected = resolved_seed_selector(selector, generations)
+        if selected is not None:
             seed_root = selected
             metadata_path = seed_root / ".ecommerce-tool.json"
             python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -1305,7 +1359,7 @@ def _seed_environment() -> int:
                 replace_seed_directory_reference(temporary_selector, selector)
             except BaseException:
                 # Only discard this unpublished candidate; published readers retain their paths.
-                if not seed_directory_reference(selector) or selector.resolve() != seed_root:
+                if resolved_seed_selector(selector, generations) != seed_root:
                     shutil.rmtree(seed_root)
                 raise
             finally:
@@ -1322,7 +1376,7 @@ def verify_seed_ansible_version(python: Path, expected: str) -> None:
     # The module belongs to the authenticated seed payload on both platforms.
     # In particular, Windows PE console launchers are not Python source files.
     proc = subprocess.run(
-        [str(python), "-I", "-m", "ansible.cli.adhoc", "--version"],
+        [str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"],
         check=True,
         text=True,
         capture_output=True,
@@ -1404,14 +1458,17 @@ def publish_checkout_reference(seed_root: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("seed", "bootstrap", "env-check"))
+    parser.add_argument("mode", choices=("seed", "select-seed-python", "bootstrap", "env-check"))
     parser.add_argument("--contract", type=Path, default=CONTRACT)
     parser.add_argument("--os")
     parser.add_argument("--arch")
     parser.add_argument("--profile", choices=("static", "runtime"), default="static")
     args = parser.parse_args(argv)
-    if args.mode == "seed":
+    if args.mode in {"seed", "select-seed-python"}:
         try:
+            if args.mode == "select-seed-python":
+                print(select_seed_python())
+                return 0
             return seed_environment()
         except SeedGenerationBoundaryError as exc:
             print(f"FAIL {exc}", file=sys.stderr)
