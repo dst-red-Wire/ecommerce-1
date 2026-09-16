@@ -17,7 +17,8 @@ module ServicePolicyChainValidator
     slo: "config/contracts/service-slo.yaml",
     traffic: "config/contracts/traffic-class-policy.yaml",
     observability: "config/contracts/mesh-observability-policy.yaml",
-    public_api: "config/contracts/public-api-contracts.yaml"
+    public_api: "config/contracts/public-api-contracts.yaml",
+    edge_protocol: "config/contracts/edge-protocol-policy.yaml"
   }.freeze
 
   module_function
@@ -82,6 +83,46 @@ module ServicePolicyChainValidator
     end
     unless c[:authority].dig("rules", "single_l7_policy_authority_per_flow") == true
       errors << "single_l7_policy_authority_per_flow must be true"
+    end
+
+    # Public edge protocol policy: Caddy is the single HTTP/TLS/H3 authority.
+    edge = c[:edge_protocol]
+    errors << "edge public_http_authority must be caddy" unless edge["public_http_authority"] == "caddy"
+    errors << "edge public_tls_authority must be caddy" unless edge["public_tls_authority"] == "caddy"
+    errors << "edge public_http3_authority must be caddy" unless edge["public_http3_authority"] == "caddy"
+    errors << "Caddy HTTP/1 must be disabled" unless edge.dig("caddy", "protocols", "http1") == false
+    errors << "Caddy HTTP/2 must be enabled" unless edge.dig("caddy", "protocols", "http2") == true
+    errors << "Caddy HTTP/3 must be enabled" unless edge.dig("caddy", "protocols", "http3") == true
+    errors << "Caddy QUIC must use UDP" unless edge.dig("caddy", "quic", "transport") == "udp"
+    errors << "Caddy QUIC must listen on UDP/443" unless edge.dig("caddy", "quic", "port") == 443
+    errors << "QUIC path must terminate at Caddy" unless edge.dig("edge_chain", "quic", "termination") == "caddy"
+    errors << "HTTP/3 must not terminate at HAProxy" unless edge.dig("edge_chain", "quic", "haproxy_http3_termination") == false
+    unless edge.dig("edge_chain", "quic", "listener", "protocol") == "udp" && edge.dig("edge_chain", "quic", "listener", "port") == 443
+      errors << "HTTP/3 requires UDP/443 listener to Caddy"
+    end
+    quic_path = Array(edge.dig("edge_chain", "quic", "path")).map(&:to_s)
+    errors << "HTTP/3 QUIC path must end at caddy-coraza" unless quic_path.last == "caddy-coraza"
+    errors << "HTTP/3 QUIC path must not include haproxy as a terminating HTTP layer" if quic_path.include?("haproxy")
+    errors << "TCP edge listener must remain TCP/443 for HTTP/2" unless edge.dig("edge_chain", "tcp", "listener", "protocol") == "tcp" && edge.dig("edge_chain", "tcp", "listener", "port") == 443
+    errors << "TCP downstream HTTP/1 must be disabled" unless edge.dig("edge_chain", "tcp", "caddy_downstream", "http1") == false
+    errors << "TCP downstream HTTP/2 must be enabled" unless edge.dig("edge_chain", "tcp", "caddy_downstream", "http2") == true
+    errors << "QUIC downstream HTTP/3 must be enabled" unless edge.dig("edge_chain", "quic", "caddy_downstream", "http3") == true
+    errors << "HTTP/1 fallback must remain disabled" unless edge.dig("fallback", "http1_fallback_allowed") == false
+    errors << "HTTP/3 fallback must be HTTP/2" unless edge.dig("fallback", "http3_client_failure") == "http2"
+    errors << "internal HTTP/3 must remain not required" unless edge.dig("upstream", "internal_service_mesh", "http3_required") == false
+    %w[
+      only_one_public_http3_termination_authority
+      public_http3_termination_must_be_caddy
+      udp_443_must_reach_caddy_when_http3_enabled
+      no_http3_termination_before_caddy
+      public_http1_forbidden
+      public_http2_required
+      public_http3_required
+      internal_http3_not_required
+      quic_and_tcp_443_must_be_exposed_concurrently
+      coraza_must_protect_caddy_terminated_public_http
+    ].each do |rule|
+      errors << "edge protocol rule #{rule} must be true" unless edge.dig("rules", rule) == true
     end
 
     # Derive the exact internal caller matrix and external egress from dependency-map.
