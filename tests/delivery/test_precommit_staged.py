@@ -110,6 +110,31 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertFalse(any(command[:2] in (["git", "commit"], ["git", "push"]) for command in commands))
             verify.assert_not_called()
 
+    def test_publish_rejects_clean_committed_gitlink_before_verification(self):
+        with self.fixture() as (root, git):
+            git("checkout", "-b", "fixture-publish")
+            head = git("rev-parse", "HEAD")
+            git("update-ref", "refs/remotes/origin/main", head)
+            git("update-index", "--add", "--cacheinfo", f"160000,{head},external")
+            (root / "external").mkdir()
+            git("commit", "-m", "Add gitlink fixture")
+            original_run = REPOCTL.run
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if command[:2] == ["git", "fetch"]:
+                    return subprocess.CompletedProcess(command, 0)
+                return original_run(command, **kwargs)
+
+            with (
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+                mock.patch.object(REPOCTL, "verify_change") as verify,
+            ):
+                self.assertEqual(1, REPOCTL.publish("main", "Refuse committed gitlink"))
+            verify.assert_not_called()
+            self.assertFalse(any(command[:2] == ["git", "push"] for command in commands))
+
     def test_unstaged_attributes_cannot_convert_indexed_blobs(self):
         for tracked in (False, True):
             with self.subTest(tracked=tracked), self.fixture() as (root, git):

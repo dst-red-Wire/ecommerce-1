@@ -1142,6 +1142,11 @@ def qualification_identity() -> str:
         path = ROOT / relative
         digest.update(relative.encode())
         digest.update(path.read_bytes())
+    controller = Path(_controller_command()[1])
+    if not controller.is_absolute():
+        controller = ROOT / controller
+    digest.update(b"executed-controller")
+    digest.update(controller.read_bytes())
     digest.update(sys.version.encode())
     for command in (
         "ansible-playbook",
@@ -2283,8 +2288,8 @@ def deliver(base: str, title: str, message: str) -> int:
 
 def _reject_staged_symlinks() -> int:
     entries = git("ls-files", "--stage", "-z").split("\0")
-    if any(entry.startswith("120000 ") for entry in entries):
-        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    if any(entry.split(" ", 1)[0] not in {"100644", "100755"} for entry in entries if entry):
+        return fail("staged snapshot contains non-regular entries; refusing non-index content")
     return 0
 
 
