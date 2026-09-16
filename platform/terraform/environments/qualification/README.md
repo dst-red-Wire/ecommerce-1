@@ -64,7 +64,8 @@ only that verified gateway to scan and independently verify the private runner:
 ```text
 set -euo pipefail
 cd /trusted/ecommerce
-python3 -I scripts/qualification_runner_guard.py --repo /candidate/ecommerce --base FULL_BASE_SHA --head FULL_HEAD_SHA
+readonly QUALIFICATION_HEAD=FULL_HEAD_SHA QUALIFICATION_BASE=FULL_BASE_SHA
+python3 -I scripts/qualification_runner_guard.py --repo /candidate/ecommerce --base "$QUALIFICATION_BASE" --head "$QUALIFICATION_HEAD"
 export QUALIFICATION_GATEWAY_HOST=replace-from-qualification_gateway_ipv4
 export QUALIFICATION_GATEWAY_USER=replace-from-qualification_gateway_user
 export QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:replace-from-oob-source
@@ -102,7 +103,8 @@ mv "$staged_known_hosts" "$QUALIFICATION_KNOWN_HOSTS"
 export ANSIBLE_HOST_KEY_CHECKING=True
 export ANSIBLE_SSH_ARGS="-o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes -o ForwardAgent=no -o ClearAllForwardings=yes"
 ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-egress.yml
-ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml
+ansible-playbook -i /secure/path/qualification.ini platform/ansible/qualification-runner.yml \
+    --extra-vars "qualification_pr_head=$QUALIFICATION_HEAD qualification_pr_base=$QUALIFICATION_BASE"
 ```
 
 Only after both independently verified keys have been enrolled above, run the
@@ -126,8 +128,9 @@ ssh \
   -o ClearAllForwardings=yes \
   -o ProxyCommand="ssh -o UserKnownHostsFile=$QUALIFICATION_KNOWN_HOSTS -o GlobalKnownHostsFile=/dev/null -o KnownHostsCommand=none -o StrictHostKeyChecking=yes -o HostKeyAlias=$GATEWAY_HOST -o ForwardAgent=no -o ClearAllForwardings=yes -l $GATEWAY_USER -W %h:%p $GATEWAY_HOST" \
   "${QUALIFICATION_USER}@${RUNNER_PRIVATE_HOST}" \
-  'bash -se' <<'QUALIFICATION_RUNNER'
+  "bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE" <<'QUALIFICATION_RUNNER'
 set -euo pipefail
+readonly qualification_head="$1" qualification_base="$2"
 whoami
 hostname
 uname -a
@@ -137,17 +140,17 @@ sysctl -n net.ipv4.ip_forward
 
 cd "$HOME/ecommerce-1"
 git fetch origin \
-  58e10fdb7122f9f3302e3fc5534b07021f7cc37f \
-  45433013f97a94a8acf94c51a913ff071e6f74b2
-git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
-test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+  "$qualification_head" \
+  "$qualification_base"
+git checkout --detach "$qualification_head"
+test "$(git rev-parse HEAD)" = "$qualification_head"
 worktree_status="$(git status --porcelain=v1)"
 printf '%s' "$worktree_status"
 test -z "$worktree_status"
 make seed
 make bootstrap
 make env-check
-test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
+test "$(git rev-parse HEAD)" = "$qualification_head"
 post_bootstrap_status="$(git status --porcelain=v1)"
 printf '%s' "$post_bootstrap_status"
 test -z "$post_bootstrap_status"
@@ -155,7 +158,7 @@ test "$(sysctl -n net.ipv4.ip_forward)" = "1"
 cd services/product
 $HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1
 cd ../..
-BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci
+BASE="$qualification_base" make ci
 QUALIFICATION_RUNNER
 ```
 

@@ -26,20 +26,23 @@ RUNNER_SCOPES = (
     "platform/ansible/requirements.yml",
     "platform/ansible/inventories",
     "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+    "platform/terraform/environments/qualification/README.md",
     "tests/test_m1_qualification_runner.py",
 )
 
-# Exact base -> result pairs for the existing PR86 lint correction (1ff77652).
-# This exception permits only those reviewed bytes, never arbitrary runner changes.
+# Exact base -> result pairs for PR86 lint fixes and the owning PR103 runner fixes.
+# This controller policy requires independent review before use. No arbitrary edits
+# or Git mode transitions are admitted.
 APPROVED_RUNNER_CORRECTIONS = {
     "platform/ansible/qualification-runner.yml": [
         (
             "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
-            "f892477c58e6f4eab1f196a0a0a29a6be4196fa55f1b2ccc63c33efdf708b2f8",
+            "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857",
         ),
+        (None, "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857"),
         (
-            "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
             "f892477c58e6f4eab1f196a0a0a29a6be4196fa55f1b2ccc63c33efdf708b2f8",
+            "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857",
         ),
     ],
     "platform/ansible/roles/qualification_runner_host/handlers/main.yml": [
@@ -66,8 +69,38 @@ APPROVED_RUNNER_CORRECTIONS = {
     "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": [
         (
             "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
+            "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30",
+        ),
+        (None, "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30"),
+        (
             "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
-        )
+            "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30",
+        ),
+    ],
+    "platform/ansible/roles/qualification_runner_host/defaults/main.yml": [
+        (
+            "9792929d5e51a0aa643fa9dfe79cf39f4dd660280607eba7f2de30490915963e",
+            "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
+        ),
+        (None, "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c"),
+    ],
+    "platform/terraform/environments/qualification/README.md": [
+        (
+            "982a2e529d8ba7ca9c763b889f7b2fa7a6bd1703372a6b77a2471a52c72666c9",
+            "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
+        ),
+        (None, "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096"),
+        (
+            "271392b42e7c7397f0dc18aa4f727f962a4391beae15139204c233d0838ec959",
+            "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
+        ),
+    ],
+    "tests/test_m1_qualification_runner.py": [
+        (
+            "80bd9a9a87cfd0bbdfcc94e340fd8a949e8ae69adadb0c51c42fb39677a7c0cd",
+            "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985",
+        ),
+        (None, "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985"),
     ],
 }
 
@@ -126,6 +159,11 @@ def validate_repository(root: Path, base: str, head: str | None = None) -> None:
         current = root / path
         if current.is_symlink() or (current.exists() and not current.is_file()):
             raise AssertionError(f"unapproved runner file type: {path}")
+        tree_entry = git(root, "ls-tree", "-z", base, "--", f":(literal){path}").stdout
+        old_mode = tree_entry.split(b" ", 1)[0].decode() if tree_entry else None
+        new_mode = ("100755" if current.stat().st_mode & 0o100 else "100644") if current.is_file() else None
+        if old_mode != new_mode and (old_mode, new_mode) != (None, "100644"):
+            raise AssertionError(f"unapproved runner mode change: {path} ({old_mode} -> {new_mode})")
         after[path] = current.read_bytes() if current.is_file() else None
     validate_runner_changes(before, after)
 
