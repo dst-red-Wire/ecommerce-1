@@ -122,6 +122,8 @@ ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=
   "$QUALIFICATION_USER@$QUALIFICATION_HOST" "bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE" <<'QUALIFICATION_RUNNER'
 set -euo pipefail
 readonly qualification_head="$1" qualification_base="$2"
+export GIT_NO_REPLACE_OBJECTS=1
+readonly GIT_NO_REPLACE_OBJECTS
 whoami
 hostname
 uname -a
@@ -130,24 +132,26 @@ docker info
 sysctl -n net.ipv4.ip_forward
 
 if ! test -d "$HOME/ecommerce-1/.git"; then
-  git clone https://github.com/dst-red-Wire/ecommerce-1.git "$HOME/ecommerce-1"
+  git --no-replace-objects clone https://github.com/dst-red-Wire/ecommerce-1.git "$HOME/ecommerce-1"
 fi
 cd "$HOME/ecommerce-1"
-git fetch origin \
+git --no-replace-objects fetch origin \
   "$qualification_head" \
   "$qualification_base"
-git checkout --detach "$qualification_head"
-git rev-parse HEAD
-test "$(git rev-parse HEAD)" = "$qualification_head"
-worktree_status="$(git status --porcelain=v1)"
+git --no-replace-objects checkout --detach "$qualification_head"
+git --no-replace-objects rev-parse HEAD
+test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"
+worktree_status="$(git --no-replace-objects status --porcelain=v1)"
 printf '%s' "$worktree_status"
 test -z "$worktree_status"
+test -z "$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)"
 make seed
 make bootstrap
 make env-check
+test -z "$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)"
 # Bootstrap is PR-owned and must not change either the qualified commit or worktree.
-test "$(git rev-parse HEAD)" = "$qualification_head"
-post_bootstrap_status="$(git status --porcelain=v1)"
+test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"
+post_bootstrap_status="$(git --no-replace-objects status --porcelain=v1)"
 printf '%s' "$post_bootstrap_status"
 test -z "$post_bootstrap_status"
 # Final fail-closed host capability proof immediately precedes Product integration.
