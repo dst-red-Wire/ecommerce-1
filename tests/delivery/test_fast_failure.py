@@ -54,8 +54,54 @@ class FastFailureContractTest(unittest.TestCase):
                 {"gate": "system", "status": "PASS", "duration_seconds": 10},
             ]
         )
-        self.assertEqual(12, timing["global_branch_seconds"])
-        self.assertEqual(12, timing["critical_path_estimate_seconds"])
+        self.assertEqual(7, timing["preflight_serial_seconds"])
+        self.assertEqual(5, timing["global_branch_seconds"])
+        self.assertEqual(17, timing["critical_path_estimate_seconds"])
+
+    def test_recorded_preflight_is_counted_once_and_rejects_wrong_identity(self):
+        import json
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("preflight_record_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        executed = []
+
+        def gate(name, command, records, env):
+            executed.append(name)
+            records.append({"gate": name, "status": "PASS", "duration_seconds": 7 if name == "preflight" else 1})
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.dict(
+                module.os.environ, {"CI_PREFLIGHT_RUN_ID": "run-1", "CI_RUNNER_IMAGE": "runner@sha256:abc"}
+            ),
+            mock.patch.object(module, "_require_clean_exact_checkout", return_value=("head-sha", "head-sha")),
+            mock.patch.object(
+                module, "git", side_effect=lambda *args: "tree-sha" if args[-1].endswith("^{tree}") else "base-sha"
+            ),
+            mock.patch.object(module, "_run_gate", side_effect=gate),
+        ):
+            self.assertEqual(0, module.ci_preflight("base", "head", directory))
+            self.assertEqual(0, module.ci_global("base", "head", directory))
+            self.assertEqual(1, executed.count("preflight"))
+            records = json.loads((Path(directory) / "global.json").read_text())["records"]
+            self.assertEqual(1, sum(row["gate"] == "preflight" for row in records))
+            self.assertEqual(7, records[0]["duration_seconds"])
+            path = Path(directory) / "preflight.json"
+            original = json.loads(path.read_text())
+            for field in ("head_sha", "base_sha", "head_tree_sha", "pipeline_run_id", "runner_image"):
+                with self.subTest(field=field):
+                    path.write_text(json.dumps({**original, field: "wrong"}))
+                    executed.clear()
+                    self.assertEqual(1, module.ci_global("base", "head", directory))
+                    self.assertEqual([], executed)
+            path.write_text('{"records": null}')
+            self.assertEqual(1, module.ci_global("base", "head", directory))
+            path.unlink()
+            self.assertEqual(0, module.ci_global("base", "head", directory))
+            self.assertEqual(1, executed.count("preflight"))
 
 
 if __name__ == "__main__":

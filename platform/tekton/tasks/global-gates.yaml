@@ -45,6 +45,11 @@ spec:
           mountPath: /var/ecommerce-run
     - name: global-gates
       image: $(params.runner-image)
+      env:
+        - name: CI_PREFLIGHT_RUN_ID
+          value: $(params.record-dir)
+        - name: CI_RUNNER_IMAGE
+          value: $(params.runner-image)
       workingDir: /var/ecommerce-run/repository
       command: [python3, scripts/repoctl.py]
       args:
