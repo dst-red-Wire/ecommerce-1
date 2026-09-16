@@ -83,6 +83,33 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertNotIn("untracked_private_fixture", diagnostics.getvalue())
             self.assertNotIn(str(target), diagnostics.getvalue())
 
+    def test_publish_rejects_dirty_symlink_before_commit_even_without_hooks(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as external:
+            git("checkout", "-b", "fixture-publish")
+            head = git("rev-parse", "HEAD")
+            git("update-ref", "refs/remotes/origin/main", head)
+            target = Path(external) / "private.py"
+            target.write_text("untracked_private_fixture\n")
+            (root / "link.py").symlink_to(target)
+            original_run = REPOCTL.run
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if command[:2] == ["git", "fetch"]:
+                    return subprocess.CompletedProcess(command, 0)
+                return original_run(command, **kwargs)
+
+            with (
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+                mock.patch.object(REPOCTL, "_load_promotable_worktree_evidence", return_value=None),
+                mock.patch.object(REPOCTL, "verify_change") as verify,
+            ):
+                self.assertEqual(1, REPOCTL.publish("main", "Must reject symlink"))
+            self.assertEqual(head, git("rev-parse", "HEAD"))
+            self.assertFalse(any(command[:2] in (["git", "commit"], ["git", "push"]) for command in commands))
+            verify.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
