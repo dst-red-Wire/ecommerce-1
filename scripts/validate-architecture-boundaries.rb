@@ -68,10 +68,21 @@ module ArchitectureBoundariesValidator
     errors << "ESO must remain Kubernetes secret sync authority" unless secret.dig("authorities", "kubernetes_sync") == "external-secrets-operator"
     errors << "SPIRE must remain workload identity authority in secret policy" unless secret.dig("authorities", "workload_identity") == "spire"
 
-    errors << "PowerDNS must remain public authoritative DNS" unless dns.dig("authorities", "public_authoritative", "authority") == "powerdns-authoritative"
+    errors << "public DNS model must be hidden-primary-with-public-secondaries" unless dns.dig("public_dns_model", "mode") == "hidden-primary-with-public-secondaries"
+    errors << "PowerDNS must remain public zone source of truth" unless dns.dig("authorities", "public_zone_source", "authority") == "powerdns-authoritative"
+    errors << "PowerDNS public role must remain hidden-primary" unless dns.dig("authorities", "public_zone_source", "role") == "hidden-primary"
+    errors << "PowerDNS hidden primary must not be publicly delegated" unless dns.dig("authorities", "public_zone_source", "publicly-delegated") == false
+    errors << "ClouDNS must remain public authoritative secondary" unless dns.dig("authorities", "public_authoritative_secondaries", "authority") == "cloudns"
+    errors << "ClouDNS role must remain public-secondary" unless dns.dig("authorities", "public_authoritative_secondaries", "role") == "public-secondary"
+    errors << "ClouDNS secondaries must source zones from PowerDNS hidden primary" unless dns.dig("authorities", "public_authoritative_secondaries", "source") == "powerdns-hidden-primary"
+    errors << "public DNS transfer must support AXFR/IXFR" unless Array(dns.dig("public_dns_model", "transfer_protocols")).sort == %w[axfr ixfr]
+    errors << "ExternalDNS must remain controlled DNS writer" unless dns.dig("authorities", "kubernetes_record_writer", "authority") == "externaldns"
+    errors << "ExternalDNS must write PowerDNS hidden primary, not ClouDNS" unless dns.dig("authorities", "kubernetes_record_writer", "target_authority") == "powerdns-hidden-primary" && dns.dig("authorities", "kubernetes_record_writer", "writes_public-secondary-directly") == false
     errors << "CoreDNS must remain Kubernetes service discovery authority" unless dns.dig("authorities", "kubernetes_service_discovery", "authority") == "coredns"
     errors << "Unbound must remain recursive DNS authority" unless dns.dig("authorities", "recursive_resolution", "authority") == "unbound"
-    errors << "ExternalDNS must remain controlled DNS writer" unless dns.dig("authorities", "kubernetes_record_writer", "authority") == "externaldns"
+    errors << "exact ClouDNS nameserver set must be required before registrar delegation" unless dns.dig("public_dns_model", "public_nameservers", "exact_assigned_set_required_before-delegation") == true
+    errors << "DNS zone transfer must be monitored" unless dns.dig("rules", "zone-transfer-must-be-monitored") == true
+    errors << "direct ClouDNS primary editing must remain forbidden" unless dns.dig("rules", "cloudns-direct-primary-editing-forbidden") == true
 
     errors << "public NTP fallback must remain forbidden" unless time.dig("runtime", "public_ntp_fallback") == "forbidden"
     errors << "time policy must fail closed when internal source is missing" unless time.dig("runtime", "fail_closed_when_missing") == true
