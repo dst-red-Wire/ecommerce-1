@@ -84,6 +84,25 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 evidence["created_at_epoch"] = value
                 self.assertIsNone(self.validate(evidence))
 
+    def test_tool_identity_changes_with_provider_bytes_and_ansible_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "ansible-playbook"
+            executable.write_bytes(b"entrypoint")
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil,
+                    "which",
+                    side_effect=lambda name: str(executable) if name == "ansible-playbook" else None,
+                ),
+                mock.patch.object(REPOCTL, "output", return_value="ansible-playbook [core 2.20.3]") as output,
+            ):
+                initial = REPOCTL.qualification_identity()
+                output.return_value = "ansible-playbook [core 2.16.3]"
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+                output.return_value = "ansible-playbook [core 2.20.3]"
+                executable.write_bytes(b"changed entrypoint")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
     def test_prepush_requalifies_rejected_evidence(self):
         with (
             mock.patch.object(REPOCTL, "git", return_value="h"),
