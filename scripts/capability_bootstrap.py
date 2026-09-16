@@ -403,6 +403,8 @@ class Auditor:
             elif item.get("expected_output") is not None and detail != str(item["expected_output"]):
                 state = "BLOCKED" if item.get("external_failure") else "FAIL"
                 last = Result(state, f"expected output {item['expected_output']}; got {detail or 'empty'}")
+            elif command == "templ" and not templ_version_matches(proc.stdout, proc.stderr, expected or ""):
+                last = Result("FAIL", f"wrong templ version: expected exact v{expected}")
             elif expected and self.installed_version(
                 detail, item.get("version_parser", "first_semver")
             ) != expected.removeprefix("v"):
