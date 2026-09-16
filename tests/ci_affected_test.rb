@@ -196,6 +196,26 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+  def test_literal_newline_paths_survive_worktree_and_commit_classification
+    Dir.mktmpdir("ci-affected-literal") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "base.txt"), "base")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        name = "scripts/line\nbreak.py"
+        FileUtils.mkdir_p(File.join(dir, "scripts"))
+        File.write(File.join(dir, name), "def broken(\n")
+        assert_equal [name], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+        isolated_git("add", "--", name, chdir: dir)
+        isolated_git("commit", "-qm", "literal name", chdir: dir)
+        assert_equal [name], AffectedComponents.changed_paths(dir, base, "HEAD")
+        assert_equal %w[global system], classify(name)
+      end
+    end
+  end
+
   def test_changed_paths_reads_exact_git_range
     Dir.mktmpdir("ci-affected-git") do |dir|
       with_isolated_git_environment do
