@@ -25,6 +25,11 @@ spec:
   workspaces:
     - name: source
   steps:
+    - name: preflight
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args: [preflight, --base, $(params.base), --head, $(params.head)]
     - name: classify
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)

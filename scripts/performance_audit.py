@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 GLOBAL_GATES = (
+    "preflight",
     "governance",
     "runtime-efficiency",
     "contracts",
