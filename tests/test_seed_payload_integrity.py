@@ -45,8 +45,43 @@ class SeedPayloadIntegrity(unittest.TestCase):
         digest = hashlib.sha256(self.wheel.read_bytes()).hexdigest()
         self.lock = f"sample==1.0.0 \\\n    --hash=sha256:{digest}\n"
         self.payload.update({"sample-1.0.0.dist-info/INSTALLER": b"pip\n", "sample-1.0.0.dist-info/REQUESTED": b""})
+        for relative, trusted in bootstrap.seed_scaffold(self.seed).items():
+            path = self.seed / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(trusted, str):
+                path.symlink_to(trusted)
+            else:
+                path.write_bytes(trusted)
         self.install_payload()
         self.assertTrue(self.valid())
+
+    def test_activation_script_tampering_is_rejected(self):
+        (self.seed / "bin/activate").write_text("echo compromised\n")
+        self.assertFalse(self.valid())
+
+    def test_external_python_symlink_is_rejected(self):
+        python = self.seed / "bin/python"
+        python.unlink()
+        python.symlink_to(self.root / "untrusted-python")
+        self.assertFalse(self.valid())
+
+    def test_venv_configuration_tampering_is_rejected(self):
+        config = self.seed / "pyvenv.cfg"
+        config.write_text(
+            config.read_text().replace("include-system-site-packages = false", "include-system-site-packages = true")
+        )
+        self.assertFalse(self.valid())
+
+    def test_checkout_parent_symlink_cannot_write_outside(self):
+        checkout = self.root / "checkout"
+        checkout.mkdir()
+        external = self.root / "external"
+        external.mkdir()
+        (checkout / ".venv").symlink_to(external, target_is_directory=True)
+        with mock.patch.object(bootstrap, "LOCAL_SEED_VENV", checkout / ".venv/qualification"):
+            with self.assertRaises(bootstrap.SeedGenerationBoundaryError):
+                bootstrap.publish_checkout_reference(self.seed)
+        self.assertEqual([], list(external.iterdir()))
 
     def install_payload(self):
         from pip._internal.operations.install.wheel import PipScriptMaker
@@ -140,18 +175,10 @@ class SeedPayloadIntegrity(unittest.TestCase):
             self.install_payload()
             self.assertTrue(self.valid())
 
-    def test_python314_venv_alias_is_scaffold(self):
-        from collections import namedtuple
-
-        version = namedtuple("Version", "major minor micro releaselevel serial")(3, 14, 0, "final", 0)
-        alias = self.seed / "bin/𝜋thon"
+    def test_arbitrary_python_alias_is_not_scaffold(self):
+        alias = self.seed / "bin/untrusted-python"
         alias.symlink_to(sys.executable)
         self.assertFalse(self.valid())
-        with (
-            mock.patch.object(sys, "version_info", version),
-            mock.patch.object(sys, "getfilesystemencoding", return_value="utf-8"),
-        ):
-            self.assertTrue(self.valid())
 
     def test_wheel_tags_must_match_running_interpreter(self):
         incompatible = self.wheels / "sample-1.0.0-cp999-cp999-any.whl"

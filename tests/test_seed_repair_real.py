@@ -24,13 +24,20 @@ class SeedRepairReal(unittest.TestCase):
                 f"b.LOCAL_SEED_VENV = Path({str(reference)!r})\n"
                 "raise SystemExit(b.main(['seed']))\n"
             )
-            env = dict(os.environ, ECOMMERCE_TOOL_HOME=str(root / "tools"))
+            ambient = root / "ambient"
+            ambient.mkdir()
+            marker = root / "ambient-executed"
+            (ambient / "sitecustomize.py").write_text(f"from pathlib import Path; Path({str(marker)!r}).touch()\n")
+            env = dict(os.environ, ECOMMERCE_TOOL_HOME=str(root / "tools"), PYTHONPATH=str(ambient))
 
             def invoke(python):
-                return subprocess.run([str(python), str(runner)], env=env, text=True, capture_output=True, timeout=240)
+                return subprocess.run(
+                    [str(python), "-I", str(runner)], env=env, text=True, capture_output=True, timeout=240
+                )
 
             cold = invoke(sys.executable)
             self.assertEqual(0, cold.returncode, cold.stdout + cold.stderr)
+            self.assertFalse(marker.exists(), "seed child imported ambient sitecustomize")
             old = reference.resolve()
             # Exercise the public seed entry point before any candidate creation.
             # Every mutated path belongs to this dedicated temporary tool home.
@@ -95,17 +102,17 @@ class SeedRepairReal(unittest.TestCase):
             )
             generations_before = set(old.parent.iterdir())
             failed = subprocess.run(
-                [str(python), str(failed_runner)], env=env, capture_output=True, text=True, timeout=60
+                [str(python), "-I", str(failed_runner)], env=env, capture_output=True, text=True, timeout=60
             )
             self.assertNotEqual(0, failed.returncode)
             self.assertEqual(old, reference.resolve())
             self.assertTrue(python.exists())
             self.assertEqual(generations_before, set(old.parent.iterdir()))
             first = subprocess.Popen(
-                [str(python), str(runner)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                [str(python), "-I", str(runner)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             second = subprocess.Popen(
-                [str(python), str(runner)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                [str(python), "-I", str(runner)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             for process in (first, second):
                 output, error = process.communicate(timeout=240)
@@ -130,6 +137,7 @@ class SeedRepairReal(unittest.TestCase):
             warm = invoke(reference / "bin/python")
             self.assertEqual(0, warm.returncode, warm.stdout + warm.stderr)
             self.assertIn("REUSE qualification seed", warm.stdout)
+            self.assertFalse(marker.exists(), "seed child imported ambient sitecustomize")
             for command in (
                 [str(reference / "bin/python"), "-m", "pip", "check"],
                 [str(reference / "bin/ansible-playbook"), "--version"],

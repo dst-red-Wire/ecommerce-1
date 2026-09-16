@@ -572,6 +572,27 @@ def seed_launcher_matches(actual: bytes, expected: bytes) -> bool:
     return len(actual) == len(expected) and bytes(normalized) == expected
 
 
+def seed_scaffold(root: Path) -> dict[Path, bytes | str]:
+    """Rebuild venv-owned files with trusted stdlib, without executing the seed."""
+    import venv
+
+    with tempfile.TemporaryDirectory(prefix="seed-scaffold-") as temporary:
+        reference = Path(temporary) / root.name
+        builder = venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt")
+        context = builder.ensure_directories(str(reference))
+        builder.create_configuration(context)
+        builder.setup_python(context)
+        builder.setup_scripts(context)
+        expected = {}
+        for path in reference.rglob("*"):
+            relative = path.relative_to(reference)
+            if path.is_symlink():
+                expected[relative] = os.readlink(path).replace(str(reference), str(root))
+            elif path.is_file():
+                expected[relative] = path.read_bytes().replace(str(reference).encode(), str(root).encode())
+        return expected
+
+
 def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
     """Reconstruct payload authority from wheels, never from installed RECORD."""
     import base64
@@ -719,25 +740,15 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
                 continue
             if path not in allowed:
                 return False
-        # venv itself owns launchers/activation files; wheel entrypoints above
-        # are checked byte-for-byte. Other executables cannot join this seed.
-        venv_files = {
-            "activate",
-            "activate.csh",
-            "activate.fish",
-            "Activate.ps1",
-            "activate.bat",
-            "deactivate.bat",
-            "python",
-            "python3",
-            f"python{sys.version_info.major}.{sys.version_info.minor}",
-            "python.exe",
-            "pythonw.exe",
-            Path(getattr(sys, "_base_executable", sys.executable)).name,
-        }
-        if sys.version_info[:2] == (3, 14) and sys.getfilesystemencoding() == "utf-8":
-            venv_files.add("𝜋thon")
-        if any(path not in expected and path.name not in venv_files for path in scripts.iterdir()):
+        scaffold = seed_scaffold(root)
+        for relative, trusted in scaffold.items():
+            path = root / relative
+            if isinstance(trusted, str):
+                if not path.is_symlink() or os.readlink(path) != trusted:
+                    return False
+            elif path.is_symlink() or not path.is_file() or path.read_bytes() != trusted:
+                return False
+        if any(path not in expected and path.relative_to(root) not in scaffold for path in scripts.iterdir()):
             return False
         return True
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
@@ -841,7 +852,7 @@ def validate_seed_lock(lock_path: str) -> bool:
         return False
     return (
         subprocess.run(
-            [sys.executable, "-m", "pip", "check"],
+            [sys.executable, "-I", "-m", "pip", "check"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -909,6 +920,7 @@ def seed_environment() -> int:
             proc = subprocess.run(
                 [
                     str(python),
+                    "-I",
                     "-c",
                     "import sys; sys.path.insert(0, sys.argv[1]); "
                     "from capability_bootstrap import validate_seed_lock; "
@@ -944,6 +956,7 @@ def seed_environment() -> int:
             probe = subprocess.run(
                 [
                     bootstrap,
+                    "-I",
                     "-c",
                     "import json,platform,sys; print(json.dumps([platform.python_implementation(), list(sys.version_info[:2])]))",
                 ],
@@ -960,13 +973,14 @@ def seed_environment() -> int:
             python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
             temporary_selector = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
             try:
-                subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
+                subprocess.run([bootstrap, "-I", "-m", "venv", str(seed_root)], check=True)
                 if not check_seed_reference(wheels):
                     with tempfile.TemporaryDirectory(dir=generations, prefix="wheels-") as download:
                         if not check_seed_reference(wheels, copy_to=Path(download)):
                             subprocess.run(
                                 [
                                     str(python),
+                                    "-I",
                                     "-m",
                                     "pip",
                                     "download",
@@ -986,6 +1000,7 @@ def seed_environment() -> int:
                 subprocess.run(
                     [
                         str(python),
+                        "-I",
                         "-m",
                         "pip",
                         "install",
@@ -1019,7 +1034,7 @@ def seed_environment() -> int:
                 temporary_selector.unlink(missing_ok=True)
         publish_checkout_reference(seed_root)
     ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
-    proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
+    proc = subprocess.run([str(python), "-I", str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
     print(
@@ -1063,7 +1078,11 @@ def identity_lock(path: Path, timeout: float = 300.0):
 
 def publish_checkout_reference(seed_root: Path) -> None:
     """Atomically point this checkout at its compatible immutable seed."""
-    LOCAL_SEED_VENV.parent.mkdir(parents=True, exist_ok=True)
+    parent = LOCAL_SEED_VENV.parent
+    for ancestor in (parent, *parent.parents):
+        if ancestor.is_symlink() or (ancestor.exists() and not ancestor.is_dir()):
+            raise SeedGenerationBoundaryError("seed checkout reference has an unsafe parent")
+    parent.mkdir(parents=True, exist_ok=True)
     temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
     temporary.unlink(missing_ok=True)
     temporary.symlink_to(seed_root, target_is_directory=True)
