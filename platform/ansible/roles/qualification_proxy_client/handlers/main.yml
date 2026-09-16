@@ -1,0 +1,4 @@
+---
+- name: Reload systemd for the Docker proxy drop-in
+  ansible.builtin.systemd_service:
+    daemon_reload: true
