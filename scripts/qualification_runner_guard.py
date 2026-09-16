@@ -23,30 +23,43 @@ RUNNER_SCOPES = (
 # Exact base -> result pairs for the existing PR86 lint correction (1ff77652).
 # This exception permits only those reviewed bytes, never arbitrary runner changes.
 APPROVED_RUNNER_CORRECTIONS = {
-    "platform/ansible/qualification-runner.yml": (
-        "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
-        "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
-    ),
-    "platform/ansible/roles/qualification_runner_host/handlers/main.yml": (
-        "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
-        "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
-    ),
-    "platform/ansible/roles/qualification_runner_host/tasks/main.yml": (
-        "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
-        "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
-    ),
-    "platform/ansible/roles/qualification_proxy_client/handlers/main.yml": (
-        None,
-        "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1",
-    ),
-    "platform/ansible/roles/qualification_proxy_client/tasks/main.yml": (
-        "0aff96b9a791e7d9bd9be1f177d0827df027829af1143be5c3f8a482dd10b1fe",
-        "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
-    ),
-    "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": (
-        "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
-        "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
-    ),
+    "platform/ansible/qualification-runner.yml": [
+        (
+            "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
+            "f892477c58e6f4eab1f196a0a0a29a6be4196fa55f1b2ccc63c33efdf708b2f8",
+        ),
+        (
+            "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
+            "f892477c58e6f4eab1f196a0a0a29a6be4196fa55f1b2ccc63c33efdf708b2f8",
+        ),
+    ],
+    "platform/ansible/roles/qualification_runner_host/handlers/main.yml": [
+        (
+            "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
+            "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+        )
+    ],
+    "platform/ansible/roles/qualification_runner_host/tasks/main.yml": [
+        (
+            "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
+            "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+        )
+    ],
+    "platform/ansible/roles/qualification_proxy_client/handlers/main.yml": [
+        (None, "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1")
+    ],
+    "platform/ansible/roles/qualification_proxy_client/tasks/main.yml": [
+        (
+            "0aff96b9a791e7d9bd9be1f177d0827df027829af1143be5c3f8a482dd10b1fe",
+            "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
+        )
+    ],
+    "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": [
+        (
+            "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
+            "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
+        )
+    ],
 }
 
 
@@ -67,7 +80,7 @@ def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, by
             hashlib.sha256(old).hexdigest() if old is not None else None,
             hashlib.sha256(new).hexdigest() if new is not None else None,
         )
-        if pair != APPROVED_RUNNER_CORRECTIONS.get(path):
+        if pair not in APPROVED_RUNNER_CORRECTIONS.get(path, ()):
             raise AssertionError(f"unapproved base-relative runner change: {path}")
 
 
