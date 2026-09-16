@@ -1,0 +1,19 @@
+version: 1
+status: active
+service: payment
+owner: payment
+architecture_authority: architecture.lock.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+requirements:
+  service_specific_timeout_and_retry:
+    required: true
+    scope: internal-service-to-payment
+    layer: l7
+    capability: l7.traffic_policy
+    rationale: Payment calls require a service-specific timeout and retry policy enforced at the application traffic layer rather than by generic L3/L4 networking.
+    enforcement_authority: istio-waypoint
+    cilium_l7_authority: false
+    policy:
+      timeout: required
+      retry: required
+      retry_safety: idempotency-required
