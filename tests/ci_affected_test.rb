@@ -316,6 +316,38 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+  def test_non_utf8_git_paths_route_conservatively
+    Dir.mktmpdir("ci-affected-binary") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "base.txt"), "base")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        FileUtils.mkdir_p(File.join(dir, "scripts"))
+        path = "scripts/bad\xff.py".b
+        File.binwrite(File.join(dir.b, path), "pass\n")
+        assert_equal [path], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "head", chdir: dir)
+        paths = AffectedComponents.changed_paths(dir, base, "HEAD")
+        assert_equal [path], paths
+        assert_equal ["global", "system"], classify(*paths)
+      end
+    end
+  end
+
+  def test_retired_service_paths_keep_base_ownership
+    previous = [["cart", "product"], PUBLIC, "contracts/openapi/common.yaml"]
+    current = [["product"], PUBLIC, "contracts/openapi/common.yaml"]
+    AffectedComponents.stub(:load_project, ->(_root, ref) { ref == "base" ? previous : current }) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      affected = AffectedComponents.classify(["services/cart/main.go"],
+        services: services, public_contracts: contracts, common_openapi: common)
+      assert_includes affected, "service:cart"
+    end
+  end
+
   def test_unknown_service_path_fails_closed
     assert_raises(ArgumentError) { classify("services/warehouse/main.go") }
   end
