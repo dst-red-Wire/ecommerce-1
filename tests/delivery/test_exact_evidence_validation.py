@@ -58,6 +58,7 @@ class ExactEvidenceValidationTest(unittest.TestCase):
             ("created_at_epoch", time.time() - 90000),
             ("qualification_identity", "tampered"),
             ("head_tree_sha", "wrong"),
+            ("base_sha", "wrong"),
             ("gates", [{"status": "FAIL"}]),
         ):
             with self.subTest(field=field):
