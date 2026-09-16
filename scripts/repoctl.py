@@ -2151,7 +2151,7 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         return
     # --batch returns stored object bytes; checkout filters and worktree attributes never run.
     blobs = subprocess.run(
-        ["git", "cat-file", "--batch"],
+        ["git", "--no-replace-objects", "cat-file", "--batch"],
         cwd=ROOT,
         input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
         stdout=subprocess.PIPE,
@@ -2174,7 +2174,9 @@ def _materialize_staged_tree(snapshot: Path) -> None:
 
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
-    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    paths = git(
+        "--no-replace-objects", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"
+    ).split("\0")[:-1]
     if not paths:
         print("SKIP precommit: no staged files")
         return 0
@@ -2217,6 +2219,26 @@ def precommit() -> int:
             formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
             if formatted.stdout.strip():
                 return fail("staged Go format drift:\n" + formatted.stdout.strip())
+            go = require("go")
+            modules: set[Path] = set()
+            standalone: dict[Path, list[str]] = {}
+            for relative in go_files:
+                source = snapshot / relative
+                parent = source.parent
+                while parent != snapshot and not (parent / "go.mod").is_file():
+                    parent = parent.parent
+                if (parent / "go.mod").is_file():
+                    modules.add(parent)
+                else:
+                    standalone.setdefault(source.parent, []).append(str(source))
+            env = dict(os.environ, GOWORK="off")
+            env.pop("GOROOT", None)
+            env.pop("GOTOOLDIR", None)
+            for module in sorted(modules):
+                run([go, "vet", "./..."], cwd=module, env=env)
+            for parent, files in sorted(standalone.items()):
+                run([go, "vet", *files], cwd=parent, env=env)
+
     print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
     return 0
 

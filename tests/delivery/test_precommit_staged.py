@@ -62,6 +62,32 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("def invalid(\n", path.read_text())
 
+    def test_replacement_head_cannot_hide_invalid_staged_change(self):
+        with self.fixture() as (root, git):
+            (root / "invalid.py").write_text("undefined_name()\n")
+            git("add", "invalid.py")
+            original = git("rev-parse", "HEAD")
+            replacement = git("commit-tree", git("write-tree"), "-m", "Replacement fixture")
+            git("replace", original, replacement)
+            self.assertEqual("", git("diff", "--cached", "--name-only"))
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_replacement_blob_cannot_change_indexed_bytes(self):
+        with self.fixture() as (root, git):
+            path = root / "invalid.py"
+            path.write_text("undefined_name()\n")
+            git("add", path.name)
+            indexed = git("rev-parse", ":invalid.py")
+            path.write_text("value = 1\n")
+            replacement = git("hash-object", "-w", path.name)
+            git("replace", indexed, replacement)
+            with tempfile.TemporaryDirectory() as directory:
+                REPOCTL._materialize_staged_tree(Path(directory))
+                self.assertEqual("undefined_name()\n", (Path(directory) / path.name).read_text())
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
     def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
         with self.fixture() as (root, git):
             name = os.fsdecode(b"bad\xff.txt")
@@ -102,6 +128,17 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(0, REPOCTL.precommit())
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("[invalid YAML\n", playbook.read_text())
+
+    def test_staged_go_vet_failure_is_not_hidden_by_valid_worktree(self):
+        with self.fixture() as (root, git):
+            (root / "go.mod").write_text("module fixture\n\ngo 1.23.0\n")
+            source = root / "example.go"
+            invalid = 'package fixture\n\nimport "fmt"\n\nfunc message() {\n\tfmt.Printf("%d", "text")\n}\n'
+            source.write_text(invalid)
+            git("add", "go.mod", "example.go")
+            source.write_text(invalid.replace('"%d"', '"%s"'))
+            with self.assertRaisesRegex(RuntimeError, "vet"):
+                REPOCTL.precommit()
 
     def test_option_like_and_quoted_paths_are_checked(self):
         for name in ("--stdin-filename=x.py", "line\nbreak.py"):
