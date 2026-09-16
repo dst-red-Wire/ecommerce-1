@@ -77,6 +77,34 @@ repository does not yet implement a provisioner. `oapi-codegen` has no Go runtim
 Go and Ansible are only provisioning dependencies. Kind alone retains the real Docker
 runtime edge.
 
+## Staged Ansible execution boundary
+
+The optional `precommit-ansible` gate requires the Linux runner's `bwrap` command,
+pinned by `BWRAP_VERSION`. It is a platform-provided namespace primitive, not a
+project-installed tool or a prerequisite of unrelated gates. Unsupported platforms,
+missing or mismatched bubblewrap, and unavailable user namespaces fail this staged
+Ansible gate closed; there is no unsandboxed fallback. Runner provisioning remains
+responsible for this capability.
+
+Ansible can discover executable plugins next to candidate YAML even when lint rules
+and inventory are trusted. Staged lint therefore runs with private user, PID, IPC,
+network and other namespaces, disabled nested user namespaces, and no capabilities.
+Only indexed regular files, generated controller configuration, the installed
+isolated ansible-lint Python runtime, Git and system libraries are mounted read-only.
+The runtime is located through the installed console script and verified interpreter,
+never through candidate metadata. Its existing environment must contain the pinned
+project tools; the sandbox does not install or download dependencies. Candidate and
+host collection caches are not trusted runtime inputs. This repository's staged
+playbooks use builtin modules; unavailable third-party collections fail lint rather
+than being supplied from a host checkout. Home, temporary state and caches are private
+and writable; host credentials, ambient environment, sockets and network are absent.
+
+Regression evidence exercises malicious adjacent filter/lookup plugins and indexed
+`.ansible` collections, plus arbitrary staged Python execution that proves host file
+reads, writes, credential environment and host PID/network access remain unavailable.
+Ordinary valid and invalid staged YAML retain their lint checks. Rollback must restore
+an equivalent execution boundary or fail this optional gate closed.
+
 ## Consequences and rollback
 
 Audits report all reachable branches and return non-zero whenever the complete platform

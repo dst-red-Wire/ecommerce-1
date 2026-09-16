@@ -660,6 +660,22 @@
       "classification": "managed",
       "checksum_key": "GITLEAKS_SHA256_LINUX_AMD64",
       "requirement": "required-static"
+    },
+    {
+      "name": "staged-ansible-sandbox",
+      "requires": [],
+      "command": "bwrap",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "BWRAP_VERSION",
+      "classification": "platform-provided",
+      "requirement": "optional-runtime",
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "justification": "Linux host namespace boundary required only for staged Ansible lint. Supplied by the host; unavailable or unsupported sandboxes fail this gate closed."
     }
   ],
   "provision_owners": {
@@ -840,6 +856,12 @@
       "gh",
       "oras",
       "cosign"
+    ],
+    "precommit-ansible": [
+      "python3",
+      "ansible-lint",
+      "bwrap",
+      "git"
     ]
   },
   "command_capabilities": {
