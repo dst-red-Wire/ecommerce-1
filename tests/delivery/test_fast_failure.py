@@ -80,11 +80,38 @@ class FastFailureContractTest(unittest.TestCase):
                     mock.patch.object(module, "affected", return_value=["frontend:all"]),
                     mock.patch.object(module, "changed_paths", return_value=[]),
                     mock.patch.object(module, "require") as require,
+                    mock.patch.object(module, "run", return_value=mock.Mock(returncode=0)),
                 ):
                     self.assertEqual(0, module.preflight("base", "head"))
                 commands = {call.args[0] for call in require.call_args_list}
                 self.assertEqual(standalone, "templ" in commands)
                 self.assertTrue({"go", "gofmt", "cc"}.issubset(commands))
+
+    def test_corepack_pnpm_provider_does_not_require_a_pnpm_executable(self):
+        spec = importlib.util.spec_from_file_location("preflight_provider_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def require(name):
+            if name == "pnpm":
+                raise RuntimeError("no standalone pnpm")
+            return name
+
+        for code in (0, 1):
+            with (
+                self.subTest(code=code),
+                mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                mock.patch.object(module, "affected", return_value=["global"]),
+                mock.patch.object(module, "changed_paths", return_value=[]),
+                mock.patch.object(module, "require", side_effect=require),
+                mock.patch.object(module, "run", return_value=mock.Mock(returncode=code)) as probe,
+            ):
+                if code:
+                    with self.assertRaisesRegex(RuntimeError, "through its provider"):
+                        module.preflight("base", "head")
+                else:
+                    self.assertEqual(0, module.preflight("base", "head"))
+                self.assertTrue(any(call.args[0] == ["corepack", "pnpm", "--version"] for call in probe.call_args_list))
 
     def test_changed_paths_preserve_literal_newlines(self):
         spec = importlib.util.spec_from_file_location("preflight_nul_test", ROOT / "scripts/repoctl.py")

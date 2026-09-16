@@ -1225,8 +1225,16 @@ def preflight(base: str, head: str) -> int:
             required.add("tofu")
     if "platform:ansible" in components:
         required.update(requirements["ansible"])
+    capabilities = {item["name"]: item for item in contract["capabilities"]}
     for executable in sorted(required):
-        require(executable)
+        capability = capabilities.get(executable, {})
+        probe = capability.get("probe") if capability.get("provider") else None
+        if probe:
+            require(probe[0])
+            if run(probe, capture=True, check=False).returncode:
+                raise RuntimeError(f"preflight capability {executable} is unavailable through its provider")
+        else:
+            require(executable)
 
     python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
     ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
