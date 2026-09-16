@@ -193,7 +193,7 @@
       "command": "templ",
       "version_args": ["version"],
       "version_key": "TEMPL_VERSION",
-      "provision": {"type": "ansible", "tags": "go"},
+      "provision": {"type": "ansible", "tags": "go,templ"},
       "classification": "managed",
       "requirement": "required-static"
     },

@@ -36,6 +36,11 @@ class Result:
     detail: str = ""
 
 
+def templ_version_matches(stdout: str, stderr: str, expected: str) -> bool:
+    """templ version emits one v-prefixed version on stdout, with no diagnostics."""
+    return bool(expected) and stdout.strip() == f"v{expected}" and not stderr.strip()
+
+
 def load_versions(path: Path = VERSIONS) -> dict[str, str]:
     values = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
