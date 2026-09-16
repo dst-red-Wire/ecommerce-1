@@ -26,7 +26,8 @@ RUNNER_SCOPES = (
     "platform/ansible/requirements.yml",
     "platform/ansible/inventories",
     "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
-    "platform/terraform/environments/qualification/README.md",
+    "platform/terraform/environments/qualification",
+    "platform/terraform/modules/hcloud-qualification",
     "tests/test_m1_qualification_runner.py",
 )
 
@@ -44,37 +45,64 @@ APPROVED_RUNNER_CORRECTIONS = {
             "f892477c58e6f4eab1f196a0a0a29a6be4196fa55f1b2ccc63c33efdf708b2f8",
             "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857",
         ),
+        (
+            "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857",
+            "bf9d0b99872464c135809bc02df001357ff107e6cc84d9c21e543cdda4b10857",
+        ),
     ],
     "platform/ansible/roles/qualification_runner_host/handlers/main.yml": [
         (
             "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
             "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
-        )
+        ),
+        (None, "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474"),
+        (
+            "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+            "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+        ),
     ],
     "platform/ansible/roles/qualification_runner_host/tasks/main.yml": [
         (
             "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
             "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
-        )
+        ),
+        (None, "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3"),
+        (
+            "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+            "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+        ),
     ],
     "platform/ansible/roles/qualification_proxy_client/handlers/main.yml": [
-        (None, "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1")
+        (None, "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1"),
+        (
+            "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1",
+            "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1",
+        ),
     ],
     "platform/ansible/roles/qualification_proxy_client/tasks/main.yml": [
         (
             "0aff96b9a791e7d9bd9be1f177d0827df027829af1143be5c3f8a482dd10b1fe",
             "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
-        )
+        ),
+        (None, "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635"),
+        (
+            "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
+            "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
+        ),
     ],
     "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": [
         (
             "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
-            "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30",
+            "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
         ),
-        (None, "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30"),
+        (None, "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1"),
         (
             "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
+            "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
+        ),
+        (
             "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30",
+            "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
         ),
     ],
     "platform/ansible/roles/qualification_runner_host/defaults/main.yml": [
@@ -83,28 +111,58 @@ APPROVED_RUNNER_CORRECTIONS = {
             "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
         ),
         (None, "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c"),
+        (
+            "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
+            "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
+        ),
     ],
     "platform/terraform/environments/qualification/README.md": [
         (
             "982a2e529d8ba7ca9c763b889f7b2fa7a6bd1703372a6b77a2471a52c72666c9",
-            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
+            "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
         ),
-        (None, "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32"),
+        (None, "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51"),
         (
             "271392b42e7c7397f0dc18aa4f727f962a4391beae15139204c233d0838ec959",
-            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
+            "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
         ),
         (
             "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
-            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
+            "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
         ),
     ],
     "tests/test_m1_qualification_runner.py": [
         (
             "80bd9a9a87cfd0bbdfcc94e340fd8a949e8ae69adadb0c51c42fb39677a7c0cd",
-            "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985",
+            "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de",
         ),
-        (None, "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985"),
+        (None, "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de"),
+        (
+            "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985",
+            "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de",
+        ),
+    ],
+    "platform/terraform/environments/qualification/main.tf": [
+        (
+            "4888ab6014aafa5a161b0ba41ff118b1a8ee98e5ae836012e5687290f293ad01",
+            "8c9b00b4b30c4e12bea1efa4a34860ec2d6d19eece906d26e49a549ad22e9237",
+        ),
+        (None, "8c9b00b4b30c4e12bea1efa4a34860ec2d6d19eece906d26e49a549ad22e9237"),
+        (
+            "8c9b00b4b30c4e12bea1efa4a34860ec2d6d19eece906d26e49a549ad22e9237",
+            "8c9b00b4b30c4e12bea1efa4a34860ec2d6d19eece906d26e49a549ad22e9237",
+        ),
+    ],
+    "platform/terraform/modules/hcloud-qualification/main.tf": [
+        (
+            "222441ee7c7d7a521a5eff4ce11281686387ad7691fb4c48cd70e49e262c7068",
+            "11f36ebbebf24bbb407a728c1dffcf66abfc6ee62df4d7de3daaed7815f2f1c2",
+        ),
+        (None, "11f36ebbebf24bbb407a728c1dffcf66abfc6ee62df4d7de3daaed7815f2f1c2"),
+        (
+            "11f36ebbebf24bbb407a728c1dffcf66abfc6ee62df4d7de3daaed7815f2f1c2",
+            "11f36ebbebf24bbb407a728c1dffcf66abfc6ee62df4d7de3daaed7815f2f1c2",
+        ),
     ],
 }
 

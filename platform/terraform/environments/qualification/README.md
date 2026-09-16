@@ -53,7 +53,15 @@ must come from that trusted checkout, never the candidate or a consumed runner.
 Keep the candidate in a separate controller-owned checkout and repeat admission
 when retaining the final evidence.
 
-After a separately authorized apply, record the non-secret Terraform outputs
+Before any separately authorized Terraform plan or apply, use the same independently
+reviewed `/trusted/ecommerce` checkout for both
+`platform/terraform/environments/qualification` and its local
+`platform/terraform/modules/hcloud-qualification` module. Complete the external
+admission below first; its exact-byte scope includes both Terraform directories.
+Never plan or apply candidate-owned Terraform or execute its validation scripts on
+the credentialed controller. The admission step is not apply authorization.
+
+After a separately authorized apply of that trusted Terraform, record the non-secret Terraform outputs
 for gateway public address/user, runner private address/user, ProxyJump, and
 both inventory lines. Obtain each server's ED25519 SHA256 fingerprint from the
 provider console or another authenticated out-of-band source. Never use the
@@ -133,6 +141,8 @@ ssh \
   "bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE" <<'QUALIFICATION_RUNNER'
 set -euo pipefail
 readonly qualification_head="$1" qualification_base="$2"
+export GIT_NO_REPLACE_OBJECTS=1
+readonly GIT_NO_REPLACE_OBJECTS
 whoami
 hostname
 uname -a
@@ -141,19 +151,21 @@ docker info
 sysctl -n net.ipv4.ip_forward
 
 cd "$HOME/ecommerce-1"
-git fetch origin \
+git --no-replace-objects fetch origin \
   "$qualification_head" \
   "$qualification_base"
-git checkout --detach "$qualification_head"
-test "$(git rev-parse HEAD)" = "$qualification_head"
-worktree_status="$(git status --porcelain=v1)"
+git --no-replace-objects checkout --detach "$qualification_head"
+test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"
+worktree_status="$(git --no-replace-objects status --porcelain=v1)"
 printf '%s' "$worktree_status"
 test -z "$worktree_status"
+test -z "$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)"
 make seed
 make bootstrap
 make env-check
-test "$(git rev-parse HEAD)" = "$qualification_head"
-post_bootstrap_status="$(git status --porcelain=v1)"
+test -z "$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)"
+test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"
+post_bootstrap_status="$(git --no-replace-objects status --porcelain=v1)"
 printf '%s' "$post_bootstrap_status"
 test -z "$post_bootstrap_status"
 test "$(sysctl -n net.ipv4.ip_forward)" = "1"

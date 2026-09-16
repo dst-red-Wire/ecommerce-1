@@ -113,6 +113,46 @@ class TrustedRunnerGuardTest(unittest.TestCase):
                 self.commit()
                 self.assertEqual(0, self.admit().returncode)
 
+    def test_candidate_terraform_execution_closure_is_rejected(self):
+        for relative in (
+            "platform/terraform/environments/qualification/unapproved.tf",
+            "platform/terraform/modules/hcloud-qualification/unapproved.tf",
+        ):
+            with self.subTest(path=relative):
+                self.write(
+                    relative,
+                    'resource "terraform_data" "attack" { provisioner "local-exec" { command = "echo unapproved" } }\n',
+                )
+                self.commit()
+                self.assertNotEqual(0, self.admit().returncode)
+                (self.repo / relative).unlink()
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_remote_proof_rejects_replacement_refs_after_candidate_bootstrap(self):
+        check = "test -z \"$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)\""
+        for relative in (
+            "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+            "platform/terraform/environments/qualification/README.md",
+        ):
+            source = (ROOT / relative).read_text()
+            self.assertIn("readonly GIT_NO_REPLACE_OBJECTS", source)
+            self.assertIn(check, source[source.index("make env-check") :])
+            remote = source[source.index("<<'QUALIFICATION_RUNNER'") : source.index("\nQUALIFICATION_RUNNER")]
+            self.assertNotIn("git rev-parse", remote)
+            self.assertNotIn("git status", remote)
+        clean = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertEqual(0, clean.returncode)
+        self.write("substituted-tree.txt", "untrusted replacement\n")
+        self.commit()
+        replacement = self.git("rev-parse", "HEAD").strip()
+        self.git("replace", self.base, replacement)
+        self.git("reset", "--hard", self.base)
+        self.assertEqual(self.base, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual("", self.git("status", "--porcelain"))
+        refused = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertNotEqual(0, refused.returncode)
+
     def test_mode_only_change_is_rejected_by_external_controller(self):
         target = self.repo / "platform/ansible/qualification-egress.yml"
         self.assertEqual(0, self.admit().returncode)
@@ -197,7 +237,7 @@ class TrustedRunnerGuardTest(unittest.TestCase):
                     '--extra-vars "qualification_pr_head=$QUALIFICATION_HEAD qualification_pr_base=$QUALIFICATION_BASE"',
                     '"bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE"',
                     'readonly qualification_head="$1" qualification_base="$2"',
-                    'test "$(git rev-parse HEAD)" = "$qualification_head"',
+                    'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"',
                     'BASE="$qualification_base" make ci',
                 ):
                     self.assertIn(marker, source)
