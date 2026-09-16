@@ -610,8 +610,10 @@ def remove_seed_directory_reference(reference: Path) -> None:
 
 
 def replace_seed_directory_reference(temporary: Path, destination: Path) -> None:
-    """POSIX atomic replacement; Windows junction rename with rollback under lock."""
-    if not seed_windows() or not destination.exists():
+    """Replace references and quarantine invalid directories, with rollback under lock."""
+    if not destination.exists() or (
+        not seed_windows() and (not destination.is_dir() or seed_directory_reference(destination))
+    ):
         os.replace(temporary, destination)
         return
     backup = destination.with_name(f".{destination.name}.{os.getpid()}.previous")
@@ -623,7 +625,10 @@ def replace_seed_directory_reference(temporary: Path, destination: Path) -> None
     except BaseException:
         os.replace(backup, destination)
         raise
-    remove_seed_directory_reference(backup)
+    if backup.is_dir() and not seed_directory_reference(backup):
+        shutil.rmtree(backup)
+    else:
+        remove_seed_directory_reference(backup)
 
 
 # Reused from PR92 (46997184): trusted wheel authority and seed recovery.
@@ -1294,8 +1299,6 @@ def publish_checkout_reference(seed_root: Path) -> None:
     temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
     remove_seed_directory_reference(temporary)
     create_seed_directory_reference(temporary, seed_root)
-    if LOCAL_SEED_VENV.exists() and not seed_directory_reference(LOCAL_SEED_VENV):
-        shutil.rmtree(LOCAL_SEED_VENV)
     try:
         replace_seed_directory_reference(temporary, LOCAL_SEED_VENV)
     finally:

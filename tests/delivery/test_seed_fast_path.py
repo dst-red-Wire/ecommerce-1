@@ -2,6 +2,8 @@ import importlib.util
 import importlib.metadata
 from pathlib import Path
 import tempfile
+import os
+import subprocess
 from unittest import mock
 import unittest
 
@@ -10,6 +12,30 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SeedFastPathContractTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX system interpreter regression")
+    def test_make_seed_never_executes_the_unvalidated_cached_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
+            scripts = root / "scripts"
+            scripts.mkdir()
+            marker = root / "validated"
+            (scripts / "capability_bootstrap.py").write_text(
+                "import sys; from pathlib import Path\n"
+                "assert sys.flags.isolated and sys.flags.no_site\n"
+                f"Path({str(marker)!r}).touch()\n"
+            )
+            cached = root / ".venv/qualification/bin"
+            cached.mkdir(parents=True)
+            for name in ("python", "python3"):
+                (cached / name).write_text("invalid executable must never run")
+                (cached / name).chmod(0o755)
+            env = dict(os.environ, PATH=str(cached) + os.pathsep + os.environ["PATH"])
+            env.pop("OS", None)
+            result = subprocess.run(["make", "seed"], cwd=root, env=env, capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertTrue(marker.exists())
+
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")
         body = source.split("def seed_environment", 1)[1].split("\ndef main", 1)[0]

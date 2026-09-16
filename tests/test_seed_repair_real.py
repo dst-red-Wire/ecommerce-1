@@ -49,6 +49,22 @@ class SeedRepairReal(unittest.TestCase):
             self.assertFalse(marker.exists(), "seed child imported ambient sitecustomize")
             self.assertFalse(pip_external.exists(), "pip wrote outside its candidate generation")
             old = reference.resolve()
+            selector = next((root / "tools/python").glob("*.current"))
+            selector.unlink()
+            selector.mkdir()
+            (selector / "stale").write_text("invalid selector")
+            selector_repair = invoke(sys.executable)
+            self.assertEqual(0, selector_repair.returncode, selector_repair.stdout + selector_repair.stderr)
+            self.assertTrue(selector.is_symlink())
+            self.assertNotEqual(old, reference.resolve())
+            self.assertTrue(old.is_dir(), "published readers retain the original generation")
+            old = reference.resolve()
+            reference.unlink()
+            reference.write_text("stale checkout reference")
+            checkout_repair = invoke(sys.executable)
+            self.assertEqual(0, checkout_repair.returncode, checkout_repair.stdout + checkout_repair.stderr)
+            self.assertIn("REUSE qualification seed", checkout_repair.stdout)
+            self.assertEqual(old, reference.resolve())
             # Exercise the public seed entry point before any candidate creation.
             # Every mutated path belongs to this dedicated temporary tool home.
             external = root / "external"

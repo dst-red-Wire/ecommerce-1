@@ -215,6 +215,54 @@ class SeedPayloadIntegrity(unittest.TestCase):
         with mock.patch.object(bootstrap.subprocess, "run", side_effect=OSError("unavailable ACL probe")):
             self.assertFalse(bootstrap.seed_windows_paths_are_private(paths))
 
+    def test_checkout_reference_repairs_ordinary_file_and_directory(self):
+        reference = self.root / "checkout/.venv/qualification"
+        reference.parent.mkdir(parents=True)
+        with mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference):
+            for kind in ("file", "directory"):
+                with self.subTest(kind=kind):
+                    if kind == "file":
+                        reference.write_text("stale bootstrap")
+                    else:
+                        reference.mkdir()
+                        (reference / "stale").write_text("old environment")
+                    bootstrap.publish_checkout_reference(self.seed)
+                    self.assertEqual(self.seed, reference.resolve())
+                    reference.unlink()
+        self.assertEqual([], list(reference.parent.iterdir()))
+
+    def test_invalid_selector_directory_is_replaced_without_following_contents(self):
+        selector = self.root / "identity.current"
+        selector.mkdir()
+        external = self.root / "keep"
+        external.write_text("external data")
+        (selector / "external").symlink_to(external)
+        temporary = self.root / "candidate"
+        temporary.symlink_to(self.seed, target_is_directory=True)
+        bootstrap.replace_seed_directory_reference(temporary, selector)
+        self.assertEqual(self.seed, selector.resolve())
+        self.assertEqual("external data", external.read_text())
+        self.assertFalse(temporary.exists())
+
+    def test_invalid_selector_is_restored_when_publication_fails(self):
+        selector = self.root / "identity.current"
+        selector.mkdir()
+        (selector / "stale").write_text("recoverable")
+        temporary = self.root / "candidate"
+        temporary.symlink_to(self.seed, target_is_directory=True)
+        original = os.replace
+
+        def replace(source, destination):
+            if source == temporary:
+                raise OSError("publication failed")
+            return original(source, destination)
+
+        with mock.patch.object(bootstrap.os, "replace", side_effect=replace):
+            with self.assertRaisesRegex(OSError, "publication failed"):
+                bootstrap.replace_seed_directory_reference(temporary, selector)
+        self.assertEqual("recoverable", (selector / "stale").read_text())
+        self.assertTrue(temporary.is_symlink())
+
     def test_windows_junction_publication_needs_no_symlink_privilege(self):
         import types
 

@@ -1,3 +1,6 @@
+# Seed validation must start outside the environment it authenticates.
+# Override only with a trusted base interpreter (for example a managed Python install).
+SEED_PYTHON ?= $(if $(filter Windows_NT,$(OS)),py -3,/usr/bin/python3)
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
@@ -15,7 +18,7 @@ ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/develo
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@$(PYTHON) -I -S scripts/capability_bootstrap.py seed
+	@$(SEED_PYTHON) -I -S scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
