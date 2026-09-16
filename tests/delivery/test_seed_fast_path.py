@@ -13,10 +13,11 @@ class SeedFastPathContractTest(unittest.TestCase):
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")
         body = source.split("def seed_environment", 1)[1].split("\ndef main", 1)[0]
-        self.assertIn(".requirements-lock.sha256", body)
+        self.assertIn("lock_sha256", body)
+        self.assertIn("check_seed_reference(wheels, seed_root)", body)
         self.assertIn("validate_seed_lock", body)
         self.assertIn('"--require-hashes"', body)
-        self.assertLess(body.index("if ready:"), body.index('"install"'))
+        self.assertLess(body.index("if valid():"), body.index('"install"'))
 
     def test_context_tools_parent_is_created_by_ansible(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
