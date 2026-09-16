@@ -1,0 +1,64 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+dependency_map: config/contracts/dependency-map.yaml
+
+defaults:
+  external_egress: deny
+  dns: internal-resolvers-only
+  ntp: internal-time-sources-only
+  proxy_required_when_configured: true
+  wildcard_destinations_forbidden: true
+  direct_internet_egress_forbidden: true
+
+services:
+  catalog: {external_destinations: []}
+  product: {external_destinations: []}
+  inventory: {external_destinations: []}
+  cart: {external_destinations: []}
+  checkout: {external_destinations: []}
+  pricing: {external_destinations: []}
+  tax: {external_destinations: []}
+  order: {external_destinations: []}
+  payment:
+    external_destinations:
+      - id: stripe
+        class: payment-service-provider
+        protocol: https
+        source: config/contracts/dependency-map.yaml
+        secrets_authority: openbao-eso
+  fulfillment: {external_destinations: []}
+  shipping:
+    external_destinations:
+      - id: carrier-adapters
+        class: shipping-carrier
+        protocol: https
+        source: config/contracts/dependency-map.yaml
+        secrets_authority: openbao-eso
+  tracking: {external_destinations: []}
+  returns: {external_destinations: []}
+  billing:
+    external_destinations:
+      - id: qonto-pa
+        class: banking-accounting
+        protocol: https
+        source: config/contracts/dependency-map.yaml
+        secrets_authority: openbao-eso
+  fraud-risk: {external_destinations: []}
+  search: {external_destinations: []}
+  review: {external_destinations: []}
+  user-profile:
+    external_destinations:
+      - id: keycloak-reference
+        class: identity-reference
+        protocol: https
+        source: config/contracts/dependency-map.yaml
+        secrets_authority: openbao-eso
+  notification: {external_destinations: []}
+
+rules:
+  external_destination_must_be-declared-in-dependency-map: true
+  service_without-declared-external-dependency-has-zero-business-egress: true
+  destination_hostnames-and-ports-must-be-versioned-before-runtime-enforcement: true
+  credentials_must-not-live-in-this-contract: true
+  all_external-egress_must-be-observable: true
