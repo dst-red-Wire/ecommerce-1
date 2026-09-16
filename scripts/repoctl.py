@@ -69,6 +69,7 @@ os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 # Every service/frontend owns its go.mod; ambient workspaces are not gate inputs.
 os.environ["GOWORK"] = "off"
+os.environ["GOENV"] = "off"
 # The declared native cc capability owns CGO compilation for qualification.
 os.environ["CC"] = "cc"
 # Every controller child inspects the objects that push will actually publish.
@@ -105,7 +106,7 @@ def run(
     if cmd and Path(cmd[0]).name in {"git", "git.exe"}:
         cmd = [cmd[0], "--no-replace-objects", *cmd[1:]]
     if cmd and Path(cmd[0]).name in {"go", "go.exe"}:
-        env = dict(os.environ if env is None else env, GOWORK="off", CC="cc")
+        env = dict(os.environ if env is None else env, GOWORK="off", GOENV="off", CC="cc")
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -200,6 +201,16 @@ def ansible_collections_ready() -> bool:
     )
 
 
+def qualification_ansible_environment() -> dict[str, str]:
+    """Exclude ambient plugin, role and configuration overrides from qualification."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+    env.update(
+        ANSIBLE_CONFIG=str(ROOT / "platform" / "ansible" / "ansible.cfg"),
+        ANSIBLE_COLLECTIONS_PATH=str(PROJECT_COLLECTIONS),
+    )
+    return env
+
+
 def reconcile_ansible_collections() -> None:
     """Reconcile the checkout-local pinned Galaxy collections only when missing or drifted."""
     if ansible_collections_ready():
@@ -218,7 +229,8 @@ def reconcile_ansible_collections() -> None:
             f"repo_root={ROOT}",
             "--tags",
             "ansible_collections",
-        ]
+        ],
+        env=qualification_ansible_environment(),
     )
     if not ansible_collections_ready():
         drift = []
@@ -753,7 +765,8 @@ def ensure_developer(tags: str) -> None:
             f"repo_root={ROOT}",
             "--tags",
             tags,
-        ]
+        ],
+        env=qualification_ansible_environment(),
     )
     if not developer_state_ready(tags):
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
@@ -864,6 +877,7 @@ def terraform_check() -> int:
 
 
 def ansible_check() -> int:
+    env = qualification_ansible_environment()
     reconcile_ansible_collections()
     require("ansible-lint")
     files = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yml"))
@@ -871,7 +885,7 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+    run(["ansible-lint", *files], env=env)
     run(
         [
             "ansible-playbook",
@@ -883,7 +897,8 @@ def ansible_check() -> int:
             "--syntax-check",
             "-e",
             f"repo_root={ROOT}",
-        ]
+        ],
+        env=env,
     )
     if ansible_collections_check():
         return 1
@@ -1107,17 +1122,32 @@ def _supported_evidence_schema(evidence: dict, minimum: int) -> bool:
     return type(version) is int and minimum <= version <= 5
 
 
-def _fresh_evidence(evidence: dict) -> bool:
-    if not isinstance(evidence, dict):
-        return False
-    value = evidence.get("created_at_epoch")
+def _fresh_execution_timestamp(value: object, now: float, *, envelope: float | None = None) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
     try:
-        created = float(value)
+        executed = float(value)
     except (ValueError, OverflowError):
         return False
-    return math.isfinite(created) and 0 <= time.time() - created <= 86400
+    return math.isfinite(executed) and 0 <= now - executed <= 86400 and (envelope is None or executed <= envelope)
+
+
+def _fresh_evidence(evidence: dict) -> bool:
+    """The envelope cannot renew the lifetime of an older underlying gate result."""
+    if not isinstance(evidence, dict):
+        return False
+    now = time.time()
+    created = evidence.get("created_at_epoch")
+    if not _fresh_execution_timestamp(created, now):
+        return False
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    return all(
+        row.get("status") != "PASS"
+        or _fresh_execution_timestamp(row.get("original_execution_at_epoch"), now, envelope=created)
+        for row in records
+    )
 
 
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
@@ -1281,7 +1311,12 @@ def qualification_identity(gates: tuple[str, ...] = ()) -> str:
             with Path(executable).open("rb") as handle:
                 digest.update(hashlib.file_digest(handle, "sha256").digest())
             if version_args is not None:
-                result = run([executable, *version_args], check=False, capture=True)
+                result = run(
+                    [executable, *version_args],
+                    check=False,
+                    capture=True,
+                    env=qualification_ansible_environment() if command.startswith("ansible") else None,
+                )
                 digest.update(json.dumps([result.returncode, result.stdout, result.stderr]).encode())
     for command, runtime in sorted(probes):
         executable = shutil.which(command[0])
@@ -1292,7 +1327,12 @@ def qualification_identity(gates: tuple[str, ...] = ()) -> str:
         args = list(command)
         if command == ("docker", "info"):
             args += ["--format", "{{json .}}"]
-        result = run([executable, *args[1:]], check=False, capture=True)
+        result = run(
+            [executable, *args[1:]],
+            check=False,
+            capture=True,
+            env=qualification_ansible_environment() if command[0].startswith("ansible") else None,
+        )
         if runtime and result.returncode:
             raise RuntimeError("qualification runtime identity probe failed")
         value = result.stdout
@@ -1323,9 +1363,11 @@ def qualification_identity(gates: tuple[str, ...] = ()) -> str:
                 sort_keys=True,
             )
         digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
-    for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+    digest.update(b"GOENV=off")
+    effective = qualification_ansible_environment()
+    for name in ("GOFLAGS", "GOEXPERIMENT", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
         digest.update(name.encode())
-        digest.update(os.environ.get(name, "").encode())
+        digest.update(effective.get(name, "").encode())
     ruby = shutil.which("ruby") or ""
     digest.update(ruby.encode())
     if ruby:
@@ -1346,6 +1388,7 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+    executed_at = time.time()
     start = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
         p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
@@ -1356,6 +1399,7 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
             "status": "PASS" if p.returncode == 0 else "FAIL",
             "exit_code": p.returncode,
             "duration_seconds": duration,
+            "original_execution_at_epoch": executed_at,
             "command": command,
             "log": str(log_path.relative_to(ROOT)),
         }
@@ -1407,7 +1451,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
 
 def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list[dict]) -> bool:
     source = next((gate for gate in parent_evidence.get("gates", []) if gate.get("gate") == name), None)
-    if not source or source.get("status") != "PASS":
+    if not source or source.get("status") != "PASS" or not _fresh_evidence(parent_evidence):
         return False
     if any(not _valid_gate_seconds(source.get(key, 0)) for key in ("duration_seconds", "source_duration_seconds")):
         return False
@@ -1421,6 +1465,7 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "duration_seconds": 0.0,
             "reused_from_sha": parent_sha,
             "original_execution_sha": original_execution_sha,
+            "original_execution_at_epoch": source["original_execution_at_epoch"],
             "source_duration_seconds": source_duration,
             "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
         }

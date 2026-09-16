@@ -36,7 +36,10 @@ class ExactEvidenceValidationTest(unittest.TestCase):
             "changed_paths": ["x"],
             "qualification_identity": "identity",
             "created_at_epoch": time.time(),
-            "gates": [{"gate": name, "status": "PASS"} for name, _ in REPOCTL._global_gate_commands("base", "h")],
+            "gates": [
+                {"gate": name, "status": "PASS", "original_execution_at_epoch": time.time() - 1}
+                for name, _ in REPOCTL._global_gate_commands("base", "h")
+            ],
         }
 
     def validate(self, evidence):
@@ -114,6 +117,111 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 plugin.unlink()
                 self.assertNotEqual(original, REPOCTL.qualification_identity())
             self.assertEqual('{"collection_info":{"version":"1.0"}}', manifest.read_text())
+
+    def test_goenv_files_cannot_change_gate_flags_or_evidence_identity(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            identities = []
+            for tag in ("qualified", "changed"):
+                config = Path(directory) / tag
+                config.write_text(f"GOFLAGS=-tags={tag}\n")
+                env = {key: value for key, value in os.environ.items() if key not in {"GOFLAGS", "GOEXPERIMENT"}}
+                env["GOENV"] = str(config)
+                raw = subprocess.run(["go", "env", "GOFLAGS"], env=env, text=True, capture_output=True, check=True)
+                self.assertEqual(f"-tags={tag}", raw.stdout.strip())
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual("", REPOCTL.run(["go", "env", "GOFLAGS"], capture=True).stdout.strip())
+                    self.assertEqual("", REPOCTL.run(["go", "env", "GOENV"], env=env, capture=True).stdout.strip())
+                    with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+                        identities.append(REPOCTL.qualification_identity())
+                self.assertEqual(str(config), env["GOENV"], "caller environment must remain unchanged")
+            self.assertEqual(*identities)
+
+    def test_ansible_gate_and_reconciliation_strip_ambient_plugin_overrides(self):
+        overrides = {
+            name: "/untrusted/plugins"
+            for name in (
+                "ANSIBLE_LIBRARY",
+                "ANSIBLE_ROLES_PATH",
+                "ANSIBLE_ACTION_PLUGINS",
+                "ANSIBLE_FILTER_PLUGINS",
+                "ANSIBLE_LOOKUP_PLUGINS",
+                "ANSIBLE_CALLBACK_PLUGINS",
+                "ANSIBLE_CONFIG",
+                "ANSIBLE_COLLECTIONS_PATH",
+                "ANSIBLE_INVENTORY_PLUGINS",
+            )
+        }
+        calls = []
+        with (
+            mock.patch.dict(os.environ, overrides),
+            mock.patch.object(REPOCTL, "require", side_effect=lambda name: name),
+            mock.patch.object(REPOCTL, "run", side_effect=lambda command, **kw: calls.append((command, kw["env"]))),
+            mock.patch.object(REPOCTL, "ansible_collections_ready", side_effect=[False, True]),
+            mock.patch.object(REPOCTL, "ansible_collections_check", return_value=0),
+        ):
+            self.assertEqual(0, REPOCTL.ansible_check())
+        self.assertEqual(["ansible-playbook", "ansible-lint", "ansible-playbook"], [command[0] for command, _ in calls])
+        expected = {
+            "ANSIBLE_CONFIG": str(REPOCTL.ROOT / "platform/ansible/ansible.cfg"),
+            "ANSIBLE_COLLECTIONS_PATH": str(REPOCTL.PROJECT_COLLECTIONS),
+        }
+        for _, env in calls:
+            self.assertEqual(expected, {key: value for key, value in env.items() if key.startswith("ANSIBLE_")})
+
+    def test_ignored_ansible_overrides_do_not_change_effective_identity(self):
+        with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+            before = REPOCTL.qualification_identity()
+            with mock.patch.dict(os.environ, {"ANSIBLE_LIBRARY": "/outside", "ANSIBLE_CONFIG": "/outside/config"}):
+                self.assertEqual(before, REPOCTL.qualification_identity())
+
+    def test_fresh_envelope_cannot_renew_expired_original_gate_execution(self):
+        evidence = self.evidence()
+        evidence["gates"][0]["original_execution_at_epoch"] = time.time() - 86401
+        self.assertIsNone(self.validate(evidence))
+        records = []
+        self.assertFalse(REPOCTL._reuse_gate(evidence["gates"][0]["gate"], "parent", evidence, records))
+        self.assertEqual([], records)
+
+    def test_missing_malformed_or_future_execution_age_fails_closed(self):
+        for value in (None, True, "123", {}, [], float("nan"), float("inf"), 10**400, time.time() + 30):
+            evidence = self.evidence()
+            evidence["gates"][0]["original_execution_at_epoch"] = value
+            self.assertIsNone(self.validate(evidence))
+        evidence = self.evidence()
+        del evidence["gates"][0]["original_execution_at_epoch"]
+        self.assertIsNone(self.validate(evidence))
+
+    def test_gate_records_its_actual_execution_time_before_evidence_publication(self):
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = []
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", root / ".context"),
+                mock.patch.object(REPOCTL.time, "time", return_value=123456.0),
+            ):
+                self.assertTrue(REPOCTL._run_gate("gate", [sys.executable, "-c", "pass"], records))
+            self.assertEqual(123456.0, records[0]["original_execution_at_epoch"])
+
+    def test_successive_reuse_preserves_age_until_original_result_expires(self):
+        started = 100000.0
+        parent = {
+            "created_at_epoch": started,
+            "gates": [{"gate": "service:product", "status": "PASS", "original_execution_at_epoch": started}],
+        }
+        for age in (0, 30000, 60000, 86400):
+            now = started + age
+            with mock.patch.object(REPOCTL.time, "time", return_value=now):
+                records = []
+                self.assertTrue(REPOCTL._reuse_gate("service:product", "parent", parent, records))
+                self.assertEqual(started, records[0]["original_execution_at_epoch"])
+                parent = {"created_at_epoch": now, "gates": records}
+        with mock.patch.object(REPOCTL.time, "time", return_value=started + 86401):
+            self.assertFalse(REPOCTL._reuse_gate("service:product", "parent", parent, []))
 
     def test_go_gates_use_the_bound_cc_instead_of_an_ambient_wrapper(self):
         for compiler in ("missing-compiler", "/outside/compiler --extra-flag"):
@@ -404,10 +512,28 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 )
             )
             (records / "global.json").write_text(
-                json.dumps({"head_sha": "h", "records": [{"gate": "governance", "status": "PASS"}]})
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "records": [
+                            {"gate": "governance", "status": "PASS", "original_execution_at_epoch": time.time() - 1}
+                        ],
+                    }
+                )
             )
             (records / "component-product.json").write_text(
-                json.dumps({"head_sha": "h", "records": [{"gate": "service:product", "status": "PASS"}]})
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "records": [
+                            {
+                                "gate": "service:product",
+                                "status": "PASS",
+                                "original_execution_at_epoch": time.time() - 1,
+                            }
+                        ],
+                    }
+                )
             )
 
             def git(*args):
@@ -445,7 +571,7 @@ class ExactEvidenceValidationTest(unittest.TestCase):
             [],
             gates[:-1],
             gates + [gates[0]],
-            gates + [{"gate": "unexpected", "status": "PASS"}],
+            gates + [{"gate": "unexpected", "status": "PASS", "original_execution_at_epoch": time.time() - 1}],
             [{**row, "status": "SKIP"} for row in gates],
             [None],
         ):

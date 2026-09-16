@@ -12,6 +12,8 @@ evidence:
   dirty_worktree_reuse: forbidden
   content_cache_authorizes_pass_reuse: false
   maximum_local_age_seconds: 86400
+  original_gate_execution_timestamp_required: true
+  reused_gate_age_refresh: forbidden
   qualification_identity_required: true
   runtime_identity_scope: represented-gates
   unobserved_runtime_identity_reuse: forbidden

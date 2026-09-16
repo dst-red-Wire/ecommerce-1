@@ -36,12 +36,12 @@ class IncrementalDeliveryTests(unittest.TestCase):
             "qualification_identity": REPOCTL.qualification_identity(),
             "created_at_epoch": time.time(),
             "gates": [
-                {"gate": "frontend:storefront", "status": "PASS"},
-                {"gate": "platform:terraform", "status": "PASS"},
-                {"gate": "system", "status": "PASS"},
+                {"gate": "frontend:storefront", "status": "PASS", "original_execution_at_epoch": time.time() - 1},
+                {"gate": "platform:terraform", "status": "PASS", "original_execution_at_epoch": time.time() - 1},
+                {"gate": "system", "status": "PASS", "original_execution_at_epoch": time.time() - 1},
             ]
             + [
-                {"gate": name, "status": "PASS"}
+                {"gate": name, "status": "PASS", "original_execution_at_epoch": time.time() - 1}
                 for name, _ in REPOCTL._global_gate_commands("origin/main", "feature-head")
             ],
         }
@@ -95,7 +95,15 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
             def fake_run_gate(name, command, records, env=None):
                 executed.append(name)
-                records.append({"gate": name, "status": "PASS", "exit_code": 0, "duration_seconds": 0.01})
+                records.append(
+                    {
+                        "gate": name,
+                        "status": "PASS",
+                        "original_execution_at_epoch": time.time() - 1,
+                        "exit_code": 0,
+                        "duration_seconds": 0.01,
+                    }
+                )
                 return True
 
             def fake_write(base, head, paths, components, records, verification=None):
@@ -207,7 +215,14 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
             def fake_run_gate(name, command, records, env=None):
                 executed.append(name)
-                records.append({"gate": name, "status": "PASS", "duration_seconds": 0.01})
+                records.append(
+                    {
+                        "gate": name,
+                        "status": "PASS",
+                        "original_execution_at_epoch": time.time() - 1,
+                        "duration_seconds": 0.01,
+                    }
+                )
                 return True
 
             def fake_write(base, head, paths, components, records, verification=None):

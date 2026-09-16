@@ -32,8 +32,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         self.addCleanup(affected.stop)
 
     def global_records(self, duration):
-        return [{"gate": "governance", "status": "PASS", "duration_seconds": duration}] + [
-            {"gate": name, "status": "PASS", "duration_seconds": 0.0}
+        return [
+            {
+                "gate": "governance",
+                "status": "PASS",
+                "original_execution_at_epoch": time.time() - 1,
+                "duration_seconds": duration,
+            }
+        ] + [
+            {"gate": name, "status": "PASS", "original_execution_at_epoch": time.time() - 1, "duration_seconds": 0.0}
             for name, _ in REPOCTL._global_gate_commands("base", "head")
             if name != "governance"
         ]
@@ -276,7 +283,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 candidate = REPOCTL._load_promotable_worktree_evidence(base)
                 self.assertIsNotNone(candidate)
-                for field in ("duration_seconds", "source_duration_seconds"):
+                for field in ("duration_seconds", "source_duration_seconds", "original_execution_at_epoch"):
                     malformed = json.loads(json.dumps(candidate))
                     malformed["gates"][0][field] = {}
                     (evidence_dir / "worktree.json").write_text(json.dumps(malformed), encoding="utf-8")
@@ -285,7 +292,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-                for field in ("duration_seconds", "source_duration_seconds"):
+                for field in ("duration_seconds", "source_duration_seconds", "original_execution_at_epoch"):
                     malformed = json.loads(json.dumps(candidate))
                     malformed["gates"][0][field] = {}
                     self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, malformed))
@@ -302,6 +309,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 self.assertEqual(len(self.global_records(0)), promoted["metrics"]["reused_gates"])
                 self.assertEqual(12.5, promoted["metrics"]["estimated_saved_seconds"])
                 gate = promoted["gates"][0]
+                self.assertEqual(
+                    candidate["gates"][0]["original_execution_at_epoch"], gate["original_execution_at_epoch"]
+                )
                 self.assertTrue(gate["promoted_from_worktree"])
                 self.assertEqual(0.0, gate["duration_seconds"])
                 self.assertEqual(12.5, gate["source_duration_seconds"])
@@ -332,7 +342,14 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "exact_commit_evidence": False,
                     "changed_paths": ["README.md"],
                     "affected_components": ["global"],
-                    "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 1.0}],
+                    "gates": [
+                        {
+                            "gate": "governance",
+                            "status": "PASS",
+                            "original_execution_at_epoch": time.time() - 1,
+                            "duration_seconds": 1.0,
+                        }
+                    ],
                 }
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
