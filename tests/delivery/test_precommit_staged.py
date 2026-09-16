@@ -62,6 +62,15 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("def invalid(\n", path.read_text())
 
+    def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
+        with self.fixture() as (root, git):
+            name = os.fsdecode(b"bad\xff.txt")
+            (root / name).write_text("value = 1\n")
+            git("add", "--", name)
+            index = git("write-tree")
+            self.assertEqual(0, REPOCTL.precommit())
+            self.assertEqual(index, git("write-tree"))
+
     def test_option_like_and_quoted_paths_are_checked(self):
         for name in ("--stdin-filename=x.py", "line\nbreak.py"):
             with self.subTest(name=name), self.fixture() as (root, git):
