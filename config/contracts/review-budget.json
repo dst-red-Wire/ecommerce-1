@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "default_poll_interval_seconds": 900,
+  "maximum_poll_interval_seconds": 3600,
+  "state_directory": ".context/review-budget",
+  "reasoning_depths": {
+    "status": "FAST",
+    "bounded_change": "NORMAL",
+    "final_candidate": "DEEP"
+  },
+  "ai_triggers": [
+    "initial_review",
+    "head_changed",
+    "new_finding",
+    "review_completed",
+    "final_candidate"
+  ],
+  "non_triggers": [
+    "time_elapsed",
+    "poll_timestamp_changed",
+    "unchanged_status",
+    "exact_sha_cache_hit"
+  ],
+  "cache_key": "pr/head_sha/review_kind",
+  "max_failure_summary_lines": 80,
+  "max_failure_summary_bytes": 12000
+}
