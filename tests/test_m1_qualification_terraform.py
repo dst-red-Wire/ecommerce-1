@@ -13,44 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV = ROOT / "platform/terraform/environments/qualification"
 MODULE = ROOT / "platform/terraform/modules/hcloud-qualification"
 ANSIBLE = ROOT / "platform/ansible"
-RUNNER_PATHS = (
-    ROOT / "platform/ansible/qualification-runner.yml",
-    ROOT / "platform/ansible/roles/qualification_runner_host",
-    ROOT / "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
-    ROOT / "tests/test_m1_qualification_runner.py",
+import sys
+
+sys.path.insert(0, str(ROOT / "scripts"))
+from qualification_runner_guard import (
+    RUNNER_SCOPES,
+    validate_runner_changes,
+    validate_runner_index,
+    validate_repository,
 )
 
-
-# Exact base -> result pairs for the existing PR86 lint correction (1ff77652).
-# This exception permits only those reviewed bytes, never arbitrary runner changes.
-APPROVED_RUNNER_CORRECTIONS = {
-    "platform/ansible/qualification-runner.yml": (
-        "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
-        "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
-    ),
-    "platform/ansible/roles/qualification_runner_host/handlers/main.yml": (
-        "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
-        "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
-    ),
-    "platform/ansible/roles/qualification_runner_host/tasks/main.yml": (
-        "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
-        "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
-    ),
-}
-
-
-def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> None:
-    for path in before.keys() | after.keys():
-        old, new = before.get(path), after.get(path)
-        if old == new:
-            continue
-        pair = (
-            (hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest())
-            if old is not None and new is not None
-            else None
-        )
-        if pair is None or pair != APPROVED_RUNNER_CORRECTIONS.get(path):
-            raise AssertionError(f"unapproved base-relative runner change: {path}")
+RUNNER_PATHS = tuple(ROOT / path for path in RUNNER_SCOPES)
 
 
 def terraform_output_block(source: str, name: str) -> str:
@@ -71,7 +44,7 @@ def resolve_base(value: str) -> str | None:
         candidate = value
     else:
         result = subprocess.run(
-            ["git", "rev-parse", "--verify", f"{value}^{{commit}}"],
+            ["git", "--no-replace-objects", "rev-parse", "--verify", f"{value}^{{commit}}"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -79,7 +52,7 @@ def resolve_base(value: str) -> str | None:
         if result.returncode:
             raise AssertionError(f"BASE is not a resolvable local Git ref: {value}")
         candidate = result.stdout.strip()
-    exists = subprocess.run(["git", "cat-file", "-e", f"{candidate}^{{commit}}"], cwd=ROOT)
+    exists = subprocess.run(["git", "--no-replace-objects", "cat-file", "-e", f"{candidate}^{{commit}}"], cwd=ROOT)
     if exists.returncode:
         raise AssertionError("the immutable BASE commit must exist")
     return candidate
@@ -472,10 +445,12 @@ class QualificationTerraformContractTest(unittest.TestCase):
             self.assertTrue(cidr.endswith("/0"))
 
     def test_base_resolution_modes(self):
-        expected = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        expected = subprocess.check_output(
+            ["git", "--no-replace-objects", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
         developer_ref = "refs/heads/test-m1-base-ref"
         developer_ref_before = subprocess.run(
-            ["git", "rev-parse", "--verify", developer_ref],
+            ["git", "--no-replace-objects", "rev-parse", "--verify", developer_ref],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -497,7 +472,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
             0, subprocess.run(["git", "show-ref", "--verify", "--quiet", test_ref], cwd=ROOT).returncode
         )
         developer_ref_after = subprocess.run(
-            ["git", "rev-parse", "--verify", developer_ref],
+            ["git", "--no-replace-objects", "rev-parse", "--verify", developer_ref],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -516,21 +491,15 @@ class QualificationTerraformContractTest(unittest.TestCase):
         base = resolve_base(os.environ.get("BASE", ""))
         if base is None:
             self.skipTest("BASE absent: only the base-relative #78 comparison is skipped")
-        scopes = [str(path.relative_to(ROOT)) for path in RUNNER_PATHS]
-        changed = subprocess.check_output(
-            ["git", "diff", "--name-only", "-z", base, "--", *scopes], cwd=ROOT, text=True
-        )
-        untracked = subprocess.check_output(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *scopes], cwd=ROOT, text=True
-        )
-        before, after = {}, {}
-        for path in set(filter(None, (changed + untracked).split("\0"))):
-            original = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True)
-            before[path] = original.stdout if original.returncode == 0 else None
-            current = ROOT / path
-            self.assertFalse(current.is_symlink(), f"unapproved runner symlink: {path}")
-            after[path] = current.read_bytes() if current.is_file() else None
-        validate_runner_changes(before, after)
+        validate_repository(ROOT, base)
+
+    def test_runner_index_rejects_gitlinks_even_when_worktree_payload_is_missing(self):
+        path = "platform/ansible/roles/qualification_runner_host/vars"
+        for mode, stage in (("160000", "0"), ("120000", "0"), ("100644", "2")):
+            with self.subTest(mode=mode, stage=stage):
+                with self.assertRaisesRegex(AssertionError, "unapproved runner index entry"):
+                    validate_runner_index(f"{mode} {'a' * 40} {stage}\t{path}\0")
+        validate_runner_index(f"100644 {'a' * 40} 0\ttasks/main.yml\0")
 
     def test_runner_allowlist_rejects_additions_modifications_and_deletions(self):
         path = "platform/ansible/qualification-runner.yml"
