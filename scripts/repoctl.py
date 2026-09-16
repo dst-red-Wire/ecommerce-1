@@ -1494,7 +1494,7 @@ def preflight(base: str, head: str) -> int:
     if any(component.startswith("service:") for component in components):
         required.update(requirements["service"])
     if any(component.startswith("frontend:") for component in components):
-        required.update({"go", "gofmt", "templ", "cc"})
+        required.update(requirements.get("frontend", ["go", "gofmt", "cc"]))
     if "system" in components:
         required.update(requirements["test"])
     if "platform:terraform" in components:
