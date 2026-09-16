@@ -113,6 +113,59 @@ class FastFailureContractTest(unittest.TestCase):
                     self.assertEqual(0, module.preflight("base", "head"))
                 self.assertTrue(any(call.args[0] == ["corepack", "pnpm", "--version"] for call in probe.call_args_list))
 
+    def test_service_prerequisites_follow_sqlc_and_container_usage(self):
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("preflight_service_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for sqlc, containers in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(sqlc=sqlc, containers=containers), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config = root / "config/toolchain/capabilities.json"
+                config.parent.mkdir(parents=True)
+                config.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
+                service = root / "services/billing"
+                service.mkdir(parents=True)
+                (service / "go.mod").touch()
+                if sqlc:
+                    (service / "sqlc.yaml").touch()
+                if containers:
+                    (service / "container_test.go").write_text("// testcontainers\n")
+                with (
+                    mock.patch.object(module, "ROOT", root),
+                    mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                    mock.patch.object(module, "affected", return_value=["service:billing"]),
+                    mock.patch.object(module, "changed_paths", return_value=[]),
+                    mock.patch.object(module, "run", return_value=mock.Mock(returncode=0)),
+                    mock.patch.object(module, "require") as require,
+                ):
+                    self.assertEqual(0, module.preflight("base", "head"))
+                required = {call.args[0] for call in require.call_args_list}
+                for name in ("sqlc", "diff"):
+                    self.assertEqual(sqlc, name in required)
+                for name in ("docker", "sysctl"):
+                    self.assertEqual(containers, name in required)
+
+    def test_diff_context_serializes_non_utf8_paths_and_output(self):
+        import os
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("binary_context_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        raw = os.fsdecode(b"scripts/bad\xff.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                mock.patch.object(module, "ROOT", root),
+                mock.patch.object(module, "CONTEXT", root / ".context"),
+                mock.patch.object(module, "changed_paths", return_value=[raw]),
+                mock.patch.object(module, "git", return_value=raw),
+            ):
+                self.assertEqual(0, module.diff_context("base"))
+            self.assertIn("\\udcff", (root / ".context/diff.md").read_text(encoding="utf-8"))
+
     def test_changed_paths_preserve_literal_newlines(self):
         spec = importlib.util.spec_from_file_location("preflight_nul_test", ROOT / "scripts/repoctl.py")
         module = importlib.util.module_from_spec(spec)
