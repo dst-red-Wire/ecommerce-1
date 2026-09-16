@@ -156,7 +156,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 	@$(PYTHON) scripts/repoctl.py evidence-compare --full "$(FULL_EVIDENCE)" --incremental "$(INCREMENTAL_EVIDENCE)"
 
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
-	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
+	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_CAMPAIGN),--campaign "$(PERF_CAMPAIGN)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
 .PHONY: context diff-context failure-context nx-graph bazel-verify
 

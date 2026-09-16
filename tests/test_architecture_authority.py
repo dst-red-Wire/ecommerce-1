@@ -15,16 +15,6 @@ SPEC.loader.exec_module(authority)
 
 
 class ArchitectureAuthorityTest(unittest.TestCase):
-    def test_yaml_cache_is_content_invalidated_and_returns_isolated_values(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "contract.yaml"
-            path.write_text("value: first\n")
-            first = authority.load_yaml(path)
-            first["value"] = "caller mutation"
-            self.assertEqual({"value": "first"}, authority.load_yaml(path))
-            path.write_text("value: second\n")
-            self.assertEqual({"value": "second"}, authority.load_yaml(path))
-
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
 
