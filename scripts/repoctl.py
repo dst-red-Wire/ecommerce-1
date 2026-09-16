@@ -1116,6 +1116,46 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     return path
 
 
+def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
+    """Conservatively bind all declared gates and their transitive tool providers."""
+    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+    capabilities = {item["name"]: item for item in contract["capabilities"]}
+    aliases = contract.get("command_capabilities", {})
+    required = {name for names in contract["gate_requirements"].values() for name in names}
+    # These native invocations supplement older contracts without a frontend gate.
+    required.update({"templ", "gofmt", "sysctl", "tofu"})
+    runtime = any(
+        "testcontainers" in path.read_text(encoding="utf-8") for path in (ROOT / "services").rglob("*_test.go")
+    )
+    commands: dict[str, list[str] | None] = {sys.executable: ["--version"]}
+    probes: set[tuple[tuple[str, ...], bool]] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        capability = capabilities.get(aliases.get(name, name), {})
+        direct = capability.get("command")
+        if direct:
+            commands[direct] = capability.get("version_args", ["--version"])
+        if name in required:
+            commands.setdefault(name, {"gofmt": ["-h"], "tofu": ["version"]}.get(name, ["--version"]))
+        probe = capability.get("probe")
+        is_runtime = capability.get("requirement") == "optional-runtime"
+        if probe and (runtime or not is_runtime):
+            probes.add((tuple(probe), is_runtime))
+            commands.setdefault(probe[0], None)
+        for dependency in capability.get("requires", []):
+            visit(dependency)
+        if capability.get("provider"):
+            visit(capability["provider"])
+
+    for name in sorted(required):
+        visit(name)
+    return commands, probes
+
+
 def qualification_identity() -> str:
     """Bind reusable evidence to validator/configuration and actual core runners."""
     digest = hashlib.sha256()
@@ -1136,46 +1176,57 @@ def qualification_identity() -> str:
     digest.update(b"executed-controller")
     digest.update(controller.read_bytes())
     digest.update(sys.version.encode())
-    for command in (
-        "ansible-playbook",
-        "ansible-lint",
-        "go",
-        "gofmt",
-        "templ",
-        "terraform",
-        "tofu",
-        "gitleaks",
-        "ruff",
-        "oapi-codegen",
-        "sqlc",
-        "yq",
-        "oasdiff",
-        "node",
-        "pnpm",
-        "oxlint",
-        "oxfmt",
-    ):
+    commands, probes = _qualification_toolchain()
+    for command, version_args in sorted(commands.items()):
         executable = shutil.which(command)
         digest.update(command.encode())
         digest.update((executable or "missing").encode())
         if executable:
             with Path(executable).open("rb") as handle:
                 digest.update(hashlib.file_digest(handle, "sha256").digest())
-            # Dispatcher/entrypoint bytes alone do not identify their selected package.
-            # Query the actual validator too (including pyenv and Corepack launchers).
-            version_args = {
-                "go": ["version"],
-                "gofmt": ["-h"],
-                "templ": ["version"],
-                "terraform": ["version"],
-                "tofu": ["version"],
-                "gitleaks": ["version"],
-                "sqlc": ["version"],
-            }.get(command, ["--version"])
-            probe = run([executable, *version_args], check=False, capture=True)
-            digest.update(str(probe.returncode).encode())
-            digest.update(probe.stdout.encode())
-            digest.update(probe.stderr.encode())
+            if version_args is not None:
+                result = run([executable, *version_args], check=False, capture=True)
+                digest.update(json.dumps([result.returncode, result.stdout, result.stderr]).encode())
+    for command, runtime in sorted(probes):
+        executable = shutil.which(command[0])
+        digest.update(json.dumps(command).encode())
+        if not executable:
+            digest.update(b"missing-probe")
+            continue
+        args = list(command)
+        if command == ("docker", "info"):
+            args += ["--format", "{{json .}}"]
+        result = run([executable, *args[1:]], check=False, capture=True)
+        if runtime and result.returncode:
+            raise RuntimeError("qualification runtime identity probe failed")
+        value = result.stdout
+        if command == ("docker", "info"):
+            # Container counts, timestamps and resource usage change during tests.
+            # Bind the daemon and its execution configuration, not live workload data.
+            info = json.loads(value)
+            value = json.dumps(
+                {
+                    key: info.get(key)
+                    for key in (
+                        "ID",
+                        "ServerVersion",
+                        "Driver",
+                        "DockerRootDir",
+                        "OSType",
+                        "Architecture",
+                        "KernelVersion",
+                        "OperatingSystem",
+                        "CgroupDriver",
+                        "CgroupVersion",
+                        "SecurityOptions",
+                        "Runtimes",
+                        "DefaultRuntime",
+                        "DriverStatus",
+                    )
+                },
+                sort_keys=True,
+            )
+        digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
     for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
         digest.update(name.encode())
         digest.update(os.environ.get(name, "").encode())
