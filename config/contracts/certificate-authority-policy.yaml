@@ -1,0 +1,27 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+
+certificates:
+  public_edge:
+    consumer: caddy
+    issuance: acme-automatic
+    renewal: caddy
+    private_key_location: caddy-managed-secret-storage
+    issuer_provider: configurable
+  mesh_workload:
+    identity_authority: spire
+    transport_consumer: istio-ambient
+    issuance: automatic
+    renewal: automatic
+  internal_non_mesh:
+    default: forbidden-unless-explicitly-declared
+    authority: none
+
+rules:
+  one-certificate-authority-per-scope: true
+  public-certificates-must-not-be-managed-by-istio: true
+  mesh-certificates-must-not-be-managed-by-caddy: true
+  private-keys-must-not-be-versioned-in-git: true
+  renewal-must-be-automatic: true
+  internal-non-mesh-certificate-requires-explicit-contract: true
