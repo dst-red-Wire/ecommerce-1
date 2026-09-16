@@ -1540,6 +1540,34 @@ def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
     return 0
 
 
+def ci_preflight(base: str, head: str, record_dir: str) -> int:
+    exact = _require_clean_exact_checkout("ci-preflight", head)
+    if exact is None:
+        return 2
+    requested, _ = exact
+    run_id = os.environ.get("CI_PREFLIGHT_RUN_ID", "")
+    runner_image = os.environ.get("CI_RUNNER_IMAGE", "")
+    if not run_id or not runner_image:
+        return fail("Tekton preflight recording requires PipelineRun and runner image identity", 1)
+    records: list[dict] = []
+    ok = _run_gate(
+        "preflight", _controller_command("preflight", "--base", base, "--head", head), records, os.environ.copy()
+    )
+    _write_record(
+        _record_path(Path(record_dir), "preflight"),
+        {
+            "head_sha": requested,
+            "base_sha": git("rev-parse", base).strip(),
+            "head_tree_sha": git("rev-parse", f"{requested}^{{tree}}").strip(),
+            "created_at_epoch": time.time(),
+            "pipeline_run_id": run_id,
+            "runner_image": runner_image,
+            "records": records,
+        },
+    )
+    return 0 if ok else 1
+
+
 def ci_global(base: str, head: str, record_dir: str) -> int:
     exact = _require_clean_exact_checkout("ci-global", head)
     if exact is None:
@@ -1549,7 +1577,36 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
     env = os.environ.copy()
     env.update({"BASE": base, "HEAD": head})
     rc = 0
+    preflight_path = Path(record_dir) / "preflight.json"
+    if preflight_path.is_file():
+        try:
+            prior = json.loads(preflight_path.read_text(encoding="utf-8"))
+            rows = prior["records"]
+            age = time.time() - prior["created_at_epoch"]
+            valid = (
+                bool(os.environ.get("CI_PREFLIGHT_RUN_ID"))
+                and prior["pipeline_run_id"] == os.environ["CI_PREFLIGHT_RUN_ID"]
+                and bool(os.environ.get("CI_RUNNER_IMAGE"))
+                and prior["runner_image"] == os.environ["CI_RUNNER_IMAGE"]
+                and prior["head_sha"] == requested
+                and prior["base_sha"] == git("rev-parse", base).strip()
+                and prior["head_tree_sha"] == git("rev-parse", f"{requested}^{{tree}}").strip()
+                and 0 <= age <= 3600
+                and len(rows) == 1
+                and rows[0]["gate"] == "preflight"
+                and rows[0]["status"] == "PASS"
+                and type(rows[0]["duration_seconds"]) in (int, float)
+                and math.isfinite(rows[0]["duration_seconds"])
+                and rows[0]["duration_seconds"] >= 0
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            return fail("Tekton preflight record is invalid for this exact base/head", 1)
+        records.extend(rows)
     for name, command in _global_gate_commands(base, head):
+        if name == "preflight" and records:
+            continue
         if not _run_gate(name, command, records, env):
             rc = 1
             break
@@ -2221,6 +2278,7 @@ def main() -> int:
     pf = sub.add_parser("preflight")
     pf.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pf.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    pf.add_argument("--record-dir")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -2300,6 +2358,8 @@ def main() -> int:
         if args.cmd == "governance":
             return governance()
         if args.cmd == "preflight":
+            if args.record_dir:
+                return ci_preflight(args.base, args.head, args.record_dir)
             return preflight(args.base, args.head)
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
