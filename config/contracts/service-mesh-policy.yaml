@@ -87,8 +87,17 @@ services:
     l7: {routing: false, authorization: false, traffic_policy: false}
     dataplane: ztunnel-only
   payment:
-    l7: {routing: false, authorization: false, traffic_policy: false}
-    dataplane: ztunnel-only
+    l7: {routing: false, authorization: true, traffic_policy: true}
+    dataplane: waypoint-required
+    justification:
+      - owner: payment
+        capability: l7.authorization
+        reason: method-aware authorization required
+        source_contract: contracts/payment-security.yaml
+      - owner: payment
+        capability: l7.traffic_policy
+        reason: service-specific timeout and retry policy required
+        source_contract: contracts/payment-runtime.yaml
   fulfillment:
     l7: {routing: false, authorization: false, traffic_policy: false}
     dataplane: ztunnel-only
