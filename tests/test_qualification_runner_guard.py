@@ -76,6 +76,17 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unapproved base-relative runner change", result.stdout)
 
+    def test_candidate_filename_is_not_disclosed_by_admission(self):
+        sensitive = "credential-shaped-private-filename"
+        suffix = "\x1b[31m\n" if os.name != "nt" else ""
+        self.write(f"platform/ansible/roles/qualification_proxy_client/{sensitive}{suffix}.txt", "candidate")
+        self.commit()
+        result = self.admit()
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("FAIL trusted runner admission: unapproved base-relative runner change\n", result.stdout)
+        self.assertNotIn(sensitive, result.stdout + result.stderr)
+        self.assertNotIn("\x1b", result.stdout + result.stderr)
+
     def test_candidate_head_cannot_be_substituted_for_trusted_base(self):
         self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
         self.commit()

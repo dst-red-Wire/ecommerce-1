@@ -53,23 +53,23 @@ APPROVED_RUNNER_CORRECTIONS = {
     "platform/ansible/roles/qualification_runner_host/handlers/main.yml": [
         (
             "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
-            "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+            "5b1f36eb524e1a06a95717c89ebce3546dcacfe55ea598e4c6e2edd0429fab3b",
         ),
-        (None, "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474"),
+        (None, "5b1f36eb524e1a06a95717c89ebce3546dcacfe55ea598e4c6e2edd0429fab3b"),
         (
             "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
-            "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+            "5b1f36eb524e1a06a95717c89ebce3546dcacfe55ea598e4c6e2edd0429fab3b",
         ),
     ],
     "platform/ansible/roles/qualification_runner_host/tasks/main.yml": [
         (
             "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
-            "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+            "23e41a18759b2ed0d218ee3a998e9c789c7c7db613de598dbf161f7d06a64cfc",
         ),
-        (None, "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3"),
+        (None, "23e41a18759b2ed0d218ee3a998e9c789c7c7db613de598dbf161f7d06a64cfc"),
         (
             "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
-            "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+            "23e41a18759b2ed0d218ee3a998e9c789c7c7db613de598dbf161f7d06a64cfc",
         ),
     ],
     "platform/ansible/roles/qualification_proxy_client/handlers/main.yml": [
@@ -93,27 +93,31 @@ APPROVED_RUNNER_CORRECTIONS = {
     "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": [
         (
             "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
-            "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
+            "94e8d667b7b12fbb41ee3ebef17d6165428297ba706e45a3d4998dc396d28669",
         ),
-        (None, "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1"),
+        (None, "94e8d667b7b12fbb41ee3ebef17d6165428297ba706e45a3d4998dc396d28669"),
         (
             "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
-            "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
+            "94e8d667b7b12fbb41ee3ebef17d6165428297ba706e45a3d4998dc396d28669",
         ),
         (
             "94c0c79304ee7edbdc193b5089f6de83e42757c0cc6c5cd8f8ff6b08a0609e30",
+            "94e8d667b7b12fbb41ee3ebef17d6165428297ba706e45a3d4998dc396d28669",
+        ),
+        (
             "a836d47a92e90a50eb7bc48b8de51deef07da2711f495288ed91fc0821d313b1",
+            "94e8d667b7b12fbb41ee3ebef17d6165428297ba706e45a3d4998dc396d28669",
         ),
     ],
     "platform/ansible/roles/qualification_runner_host/defaults/main.yml": [
         (
             "9792929d5e51a0aa643fa9dfe79cf39f4dd660280607eba7f2de30490915963e",
-            "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
+            "790b38a52afda8e29978b6cbeb437a72258b9754d11204a98a4b3119a69d1dbc",
         ),
-        (None, "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c"),
+        (None, "790b38a52afda8e29978b6cbeb437a72258b9754d11204a98a4b3119a69d1dbc"),
         (
             "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
-            "32e619002923f76754b721baf692d08ef023f244b368ec3fe5fd38abe9c3838c",
+            "790b38a52afda8e29978b6cbeb437a72258b9754d11204a98a4b3119a69d1dbc",
         ),
     ],
     "platform/terraform/environments/qualification/README.md": [
@@ -130,16 +134,24 @@ APPROVED_RUNNER_CORRECTIONS = {
             "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
             "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
         ),
+        (
+            "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
+            "cf0017b53677d9151894c33a2ca1c226c191b448644acc3caa6c397357a64e51",
+        ),
     ],
     "tests/test_m1_qualification_runner.py": [
         (
             "80bd9a9a87cfd0bbdfcc94e340fd8a949e8ae69adadb0c51c42fb39677a7c0cd",
-            "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de",
+            "91d70b5824af58ed65abd32857f019a5a1221ae61f591aa055457a3e5deedea3",
         ),
-        (None, "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de"),
+        (None, "91d70b5824af58ed65abd32857f019a5a1221ae61f591aa055457a3e5deedea3"),
         (
             "d6e97151939aaf0131e42460c1f582d3233063c5fcef96e0f051e54676572985",
+            "91d70b5824af58ed65abd32857f019a5a1221ae61f591aa055457a3e5deedea3",
+        ),
+        (
             "1c7eabbfff8d2c759ff32777c5014ace4ae747cd6a6f55bcbc745a013e5ef6de",
+            "91d70b5824af58ed65abd32857f019a5a1221ae61f591aa055457a3e5deedea3",
         ),
     ],
     "platform/terraform/environments/qualification/main.tf": [
@@ -172,7 +184,7 @@ def validate_runner_index(entries: str) -> None:
         metadata, path = entry.split("\t", 1)
         mode, _object_id, stage = metadata.split()
         if mode not in {"100644", "100755"} or stage != "0":
-            raise AssertionError(f"unapproved runner index entry: {path} ({mode}, stage {stage})")
+            raise AssertionError("unapproved runner index entry")
 
 
 def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> None:
@@ -185,7 +197,7 @@ def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, by
             hashlib.sha256(new).hexdigest() if new is not None else None,
         )
         if pair not in APPROVED_RUNNER_CORRECTIONS.get(path, ()):
-            raise AssertionError(f"unapproved base-relative runner change: {path}")
+            raise AssertionError("unapproved base-relative runner change")
 
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -211,7 +223,7 @@ def validate_repository(root: Path, base: str, head: str | None = None) -> None:
     for entry in filter(None, entries.split("\0")):
         _metadata, path = entry.split("\t", 1)
         if any(scope.startswith(path + "/") for scope in RUNNER_SCOPES):
-            raise AssertionError(f"unapproved runner ancestor index entry: {path}")
+            raise AssertionError("unapproved runner ancestor index entry")
         if any(path == scope or path.startswith(scope + "/") for scope in RUNNER_SCOPES):
             validate_runner_index(entry)
 
@@ -228,15 +240,15 @@ def validate_repository(root: Path, base: str, head: str | None = None) -> None:
         for component in Path(path).parts[:-1]:
             parent = parent / component
             if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
-                raise AssertionError(f"unapproved runner path ancestor: {parent}")
+                raise AssertionError("unapproved runner path ancestor")
         current = root / path
         if current.is_symlink() or (current.exists() and not current.is_file()):
-            raise AssertionError(f"unapproved runner file type: {path}")
+            raise AssertionError("unapproved runner file type")
         tree_entry = git(root, "ls-tree", "-z", base, "--", f":(literal){path}").stdout
         old_mode = tree_entry.split(b" ", 1)[0].decode() if tree_entry else None
         new_mode = ("100755" if current.stat().st_mode & 0o100 else "100644") if current.is_file() else None
         if old_mode != new_mode and (old_mode, new_mode) != (None, "100644"):
-            raise AssertionError(f"unapproved runner mode change: {path} ({old_mode} -> {new_mode})")
+            raise AssertionError("unapproved runner mode change")
         after[path] = current.read_bytes() if current.is_file() else None
     validate_runner_changes(before, after)
 
@@ -252,7 +264,8 @@ def main() -> int:
             raise AssertionError("base revision is not admitted by trusted controller policy")
         validate_repository(args.repo, args.base, args.head)
     except (AssertionError, OSError, subprocess.CalledProcessError) as error:
-        print(f"FAIL trusted runner admission: {error}")
+        reason = str(error) if isinstance(error, AssertionError) else "repository inspection failed"
+        print(f"FAIL trusted runner admission: {reason}")
         return 1
     print(f"PASS trusted runner admission base={args.base} head={args.head}")
     return 0

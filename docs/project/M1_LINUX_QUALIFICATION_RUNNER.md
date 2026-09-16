@@ -106,6 +106,15 @@ only the named account normal Docker socket access, and persists
 membership and passwordless sudo are root-equivalent; use a dedicated ephemeral qualification
 account and destroy the host after evidence is retained.
 
+On Ubuntu 24.04, the role installs the snapshot-pinned AppArmor package and loads
+`/etc/apparmor.d/ecommerce-qualification-python`. This profile permits `userns` for
+`/usr/bin/python3.12`, the canonical interpreter used by qualification virtualenvs.
+It preserves the system-wide unprivileged-user-namespace restriction; it does not
+disable AppArmor. Before repository bootstrap, a non-root isolated Python probe
+must create the private user, mount and PID namespaces used by parallel gates.
+A denied capability stops provisioning. This host prerequisite does not establish
+trusted execution provenance after root-equivalent candidate code has run.
+
 ## Qualify the admitted immutable head
 
 Record the live PR head and base before provisioning. The playbook reconciles the exact checkout

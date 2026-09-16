@@ -11,6 +11,7 @@ RUNBOOK = ROOT / "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md"
 
 def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) -> None:
     for package in (
+        "apparmor",
         "docker.io",
         "build-essential",
         "curl",
@@ -52,6 +53,36 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
             raise AssertionError(f"missing qualification contract marker: {marker}")
     if "qualification_sysctl_file: /etc/sysctl.d/" not in defaults:
         raise AssertionError("persistent repository-owned sysctl file is missing")
+    # Inspect the scoped capability and its non-root probe as distinct task blocks.
+    profile = tasks.split("- name: Permit qualification Python", 1)[-1].split("\n- name:", 1)[0]
+    for marker in (
+        "dest: /etc/apparmor.d/ecommerce-qualification-python",
+        "owner: root",
+        'mode: "0644"',
+        "profile ecommerce-qualification-python /usr/bin/python3.12 flags=(unconfined)",
+        "userns,",
+        "notify: Load qualification Python AppArmor profile",
+    ):
+        if marker not in profile:
+            raise AssertionError(f"missing scoped namespace capability: {marker}")
+    probe_name = "- name: Verify private namespace creation as the qualification user"
+    probe = tasks.split(probe_name, 1)[-1].split("\n- name:", 1)[0]
+    for marker in (
+        "- /usr/bin/python3",
+        "- -I",
+        "- -S",
+        "os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWPID)",
+        'become_user: "{{ qualification_user }}"',
+        "changed_when: false",
+    ):
+        if marker not in probe:
+            raise AssertionError(f"missing non-root namespace probe: {marker}")
+    if not (
+        tasks.index("notify: Load qualification Python AppArmor profile")
+        < tasks.find("ansible.builtin.meta: flush_handlers")
+        < tasks.index(probe_name)
+    ):
+        raise AssertionError("namespace probe must follow profile loading")
     lowered_playbook = playbook.lower()
     for future_platform in ("tekton", "harbor", "buildkit", "cosign"):
         if future_platform in lowered_playbook:
@@ -186,6 +217,24 @@ class QualificationRunnerContractTest(unittest.TestCase):
         values.update(replacements)
         with self.assertRaises(AssertionError):
             validate_contract(**values)
+
+    def test_namespace_capability_fails_closed(self):
+        for original, replacement in (
+            ("userns,", ""),
+            ("os.CLONE_NEWPID", "0"),
+            ("/usr/bin/python3.12 flags=(unconfined)", "/usr/bin/other flags=(unconfined)"),
+            ('become_user: "{{ qualification_user }}"', "become_user: root"),
+        ):
+            with self.subTest(original=original):
+                self.assert_mutation_rejected(tasks=self.tasks.replace(original, replacement))
+        self.assert_mutation_rejected(defaults=self.defaults.replace('  - "apparmor=', '  - "missing='))
+
+    def test_namespace_profile_loads_before_probe(self):
+        self.assert_mutation_rejected(
+            tasks=self.tasks.replace("ansible.builtin.meta: flush_handlers", "ansible.builtin.meta: noop")
+        )
+        handlers = (TASKS.parent.parent / "handlers/main.yml").read_text(encoding="utf-8")
+        self.assertIn("argv: [apparmor_parser, --replace, /etc/apparmor.d/ecommerce-qualification-python]", handlers)
 
     def test_mutation_remove_docker_server_verification(self):
         self.assert_mutation_rejected(

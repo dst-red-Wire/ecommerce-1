@@ -86,6 +86,26 @@
     selection: hold
   loop: "{{ qualification_packages }}"
 
+- name: Enable and start AppArmor
+  ansible.builtin.systemd_service:
+    name: apparmor
+    enabled: true
+    state: started
+
+- name: Permit qualification Python to create private user namespaces
+  ansible.builtin.copy:
+    dest: /etc/apparmor.d/ecommerce-qualification-python
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      abi <abi/4.0>,
+      include <tunables/global>
+      profile ecommerce-qualification-python /usr/bin/python3.12 flags=(unconfined) {
+        userns,
+      }
+  notify: Load qualification Python AppArmor profile
+
 - name: Persist container network forwarding
   ansible.builtin.copy:
     dest: "{{ qualification_sysctl_file }}"
@@ -107,7 +127,7 @@
     groups: docker
     append: true
 
-- name: Apply persistent network configuration before verification
+- name: Apply persistent host configuration before verification
   ansible.builtin.meta: flush_handlers
 
 - name: Read live IPv4 forwarding state before reconciliation
@@ -143,6 +163,18 @@
 - name: Verify Docker daemon information as qualification user without sudo
   ansible.builtin.command:
     argv: [docker, info]
+  become: true
+  become_user: "{{ qualification_user }}"
+  changed_when: false
+
+- name: Verify private namespace creation as the qualification user
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -I
+      - -S
+      - -c
+      - "import os; os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWPID)"
   become: true
   become_user: "{{ qualification_user }}"
   changed_when: false
