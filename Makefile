@@ -1,6 +1,11 @@
-# Seed validation must start outside the environment it authenticates.
-# Override only with a trusted base interpreter (for example a managed Python install).
-SEED_PYTHON ?= $(if $(filter Windows_NT,$(OS)),py -3,/usr/bin/python3)
+# Resolve the contracted python3 outside the ignored seed/cache before execution.
+# An explicit SEED_PYTHON override must name a trusted provisioned interpreter.
+SEED_EMPTY :=
+SEED_SPACE := $(SEED_EMPTY) $(SEED_EMPTY)
+SEED_EXCLUDED_ROOTS := $(CURDIR)/.venv $(HOME)/.cache/ecommerce-1/qualification $(ECOMMERCE_TOOL_HOME)
+SEED_CANDIDATES := $(foreach entry,$(subst :,$(SEED_SPACE),$(PATH)),$(wildcard $(entry)/python3 $(entry)/python3.exe))
+SEED_TRUSTED_CANDIDATES := $(foreach entry,$(SEED_CANDIDATES),$(if $(filter $(addsuffix /%,$(SEED_EXCLUDED_ROOTS)),$(entry) $(realpath $(entry))),,$(realpath $(entry))))
+SEED_PYTHON ?= $(or $(firstword $(SEED_TRUSTED_CANDIDATES)),$(error No trusted contracted python3 found; set SEED_PYTHON to its provisioned absolute path))
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python

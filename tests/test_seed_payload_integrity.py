@@ -229,7 +229,9 @@ class SeedPayloadIntegrity(unittest.TestCase):
                     bootstrap.publish_checkout_reference(self.seed)
                     self.assertEqual(self.seed, reference.resolve())
                     reference.unlink()
-        self.assertEqual([], list(reference.parent.iterdir()))
+        quarantined = list(reference.parent.glob("*.quarantine"))
+        self.assertEqual(1, len(quarantined))
+        self.assertEqual("old environment", (quarantined[0] / "stale").read_text())
 
     def test_invalid_selector_directory_is_replaced_without_following_contents(self):
         selector = self.root / "identity.current"
@@ -239,7 +241,11 @@ class SeedPayloadIntegrity(unittest.TestCase):
         (selector / "external").symlink_to(external)
         temporary = self.root / "candidate"
         temporary.symlink_to(self.seed, target_is_directory=True)
-        bootstrap.replace_seed_directory_reference(temporary, selector)
+        with mock.patch.object(bootstrap.shutil, "rmtree", side_effect=AssertionError("unsafe recursive cleanup")):
+            bootstrap.replace_seed_directory_reference(temporary, selector)
+        quarantined = list(self.root.glob("*.quarantine"))
+        self.assertEqual(1, len(quarantined))
+        self.assertTrue((quarantined[0] / "external").is_symlink())
         self.assertEqual(self.seed, selector.resolve())
         self.assertEqual("external data", external.read_text())
         self.assertFalse(temporary.exists())

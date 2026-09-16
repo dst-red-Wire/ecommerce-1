@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import os
 import subprocess
+import sys
 from unittest import mock
 import unittest
 
@@ -30,11 +31,23 @@ class SeedFastPathContractTest(unittest.TestCase):
             for name in ("python", "python3"):
                 (cached / name).write_text("invalid executable must never run")
                 (cached / name).chmod(0o755)
-            env = dict(os.environ, PATH=str(cached) + os.pathsep + os.environ["PATH"])
+            trusted = root / "provisioned-python"
+            trusted.mkdir()
+            selected = root / "selected-provisioned-python"
+            base = getattr(sys, "_base_executable", sys.executable)
+            shim = trusted / "python3"
+            shim.write_text(
+                f"#!{base}\nimport os, sys\nfrom pathlib import Path\n"
+                f"Path({str(selected)!r}).touch()\n"
+                f"os.execv({base!r}, [{base!r}, *sys.argv[1:]])\n"
+            )
+            shim.chmod(0o755)
+            env = dict(os.environ, PATH=os.pathsep.join([str(cached), str(trusted), os.environ["PATH"]]))
             env.pop("OS", None)
             result = subprocess.run(["make", "seed"], cwd=root, env=env, capture_output=True, text=True)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
             self.assertTrue(marker.exists())
+            self.assertTrue(selected.exists(), "use the contracted PATH interpreter, not a hard-coded OS path")
 
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")

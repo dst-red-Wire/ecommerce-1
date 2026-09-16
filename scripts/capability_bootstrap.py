@@ -616,7 +616,7 @@ def replace_seed_directory_reference(temporary: Path, destination: Path) -> None
     ):
         os.replace(temporary, destination)
         return
-    backup = destination.with_name(f".{destination.name}.{os.getpid()}.previous")
+    backup = destination.with_name(f".{destination.name}.{os.getpid()}.{time.time_ns()}.quarantine")
     if backup.exists() or seed_directory_reference(backup):
         raise SeedGenerationBoundaryError("seed reference backup already exists")
     os.replace(destination, backup)
@@ -625,9 +625,9 @@ def replace_seed_directory_reference(temporary: Path, destination: Path) -> None
     except BaseException:
         os.replace(backup, destination)
         raise
-    if backup.is_dir() and not seed_directory_reference(backup):
-        shutil.rmtree(backup)
-    else:
+    # An invalid directory may contain mount points. Keep it quarantined: no
+    # recursive cleanup is safe solely from the selector's ownership or mode.
+    if not backup.is_dir() or seed_directory_reference(backup):
         remove_seed_directory_reference(backup)
 
 
