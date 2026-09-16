@@ -7,6 +7,7 @@ qualification_ubuntu_codename: noble
 qualification_architecture: x86_64
 qualification_ubuntu_snapshot: "20250601T000000Z"
 qualification_packages:
+  - "apparmor=4.0.1really4.0.1-0ubuntu0.24.04.4"
   - "docker.io=27.5.1-0ubuntu3~24.04.1"
   - "build-essential=12.10ubuntu1"
   - "curl=8.5.0-2ubuntu10.6"
@@ -23,5 +24,3 @@ qualification_sysctl_file: /etc/sysctl.d/60-ecommerce-m1-qualification.conf
 qualification_repository_url: https://github.com/dst-red-Wire/ecommerce-1.git
 qualification_repository_path: "/home/{{ qualification_user }}/ecommerce-1"
 qualification_consumed_marker: /var/lib/ecommerce-m1-qualification-runner-consumed
-qualification_pr_head: 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
-qualification_pr_base: 45433013f97a94a8acf94c51a913ff071e6f74b2

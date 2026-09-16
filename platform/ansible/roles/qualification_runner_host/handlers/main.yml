@@ -3,3 +3,8 @@
   ansible.builtin.command:
     argv: [sysctl, --system]
   changed_when: true
+
+- name: Load qualification Python AppArmor profile
+  ansible.builtin.command:
+    argv: [apparmor_parser, --replace, /etc/apparmor.d/ecommerce-qualification-python]
+  changed_when: true
