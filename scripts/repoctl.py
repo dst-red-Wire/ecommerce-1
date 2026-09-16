@@ -37,6 +37,8 @@ def _missing_repository_delivery(*_args, **_kwargs):
 
 
 try:
+    import repository_delivery as evidence_delivery_module
+
     from repository_delivery import (
         bundle_deliver as isolated_bundle_deliver,
         compare_evidence,
@@ -49,6 +51,7 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "repository_delivery":
         raise
+    evidence_delivery_module = None
     isolated_bundle_deliver = _missing_repository_delivery
     compare_evidence = _missing_repository_delivery
     evidence_metrics = _missing_repository_delivery
@@ -974,7 +977,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("source_tree_sha") != current_tree
         or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
-        or evidence.get("qualification_identity") != qualification_identity()
+        or not _evidence_identity_matches(evidence)
         or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
@@ -1002,7 +1005,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or len(parents) != 2
         or parents[1] != source_head
         or commit_tree != source_tree
-        or source.get("qualification_identity") != qualification_identity()
+        or not _evidence_identity_matches(source)
         or not _fresh_evidence(source)
         or not _complete_gate_inventory(source, base_ref, head)
     ):
@@ -1108,7 +1111,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
         or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
         or evidence.get("changed_paths") != changed_paths(base_ref, head)
-        or evidence.get("qualification_identity") != qualification_identity()
+        or not _evidence_identity_matches(evidence)
         or not _fresh_evidence(evidence)
         or not _complete_gate_inventory(evidence, base_ref, head)
     ):
@@ -1116,17 +1119,48 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     return path
 
 
-def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
+def _runtime_identity_required(gates: tuple[str, ...]) -> bool:
+    for gate in gates:
+        if not gate.startswith("service:"):
+            continue
+        name = gate.split(":", 1)[1]
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+            continue
+        module = ROOT / "services" / name
+        if (module / "go.mod").is_file() and any(
+            "testcontainers" in path.read_text(encoding="utf-8") for path in module.rglob("*_test.go")
+        ):
+            return True
+    return False
+
+
+def _evidence_identity_matches(evidence: dict) -> bool:
+    records = evidence.get("gates")
+    if (
+        evidence.get("reuse_identity_complete", True) is not True
+        or not isinstance(evidence.get("qualification_identity"), str)
+        or not isinstance(records, list)
+        or any(not isinstance(row, dict) or not isinstance(row.get("gate"), str) for row in records)
+    ):
+        return False
+    try:
+        return evidence["qualification_identity"] == qualification_identity(tuple(row["gate"] for row in records))
+    except (OSError, RuntimeError, ValueError):
+        # An unavailable current runtime cannot authorize an old PASS.
+        return False
+
+
+def _qualification_toolchain(
+    gates: tuple[str, ...] = (),
+) -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
     """Conservatively bind all declared gates and their transitive tool providers."""
     contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
     required = {name for names in contract["gate_requirements"].values() for name in names}
     # These native invocations supplement older contracts without a frontend gate.
-    required.update({"templ", "gofmt", "sysctl", "tofu"})
-    runtime = any(
-        "testcontainers" in path.read_text(encoding="utf-8") for path in (ROOT / "services").rglob("*_test.go")
-    )
+    required.update({"templ", "gofmt", "sysctl", "tofu", "psych"})
+    runtime = _runtime_identity_required(gates)
     commands: dict[str, list[str] | None] = {}
     probes: set[tuple[tuple[str, ...], bool]] = set()
     visited: set[str] = set()
@@ -1139,6 +1173,8 @@ def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[t
         direct = capability.get("command")
         if direct:
             commands[direct] = capability.get("version_args", ["--version"])
+            if direct != name and capability.get("version_args"):
+                probes.add((tuple([direct, *capability["version_args"]]), False))
         if name in required:
             commands.setdefault(name, {"gofmt": ["-h"], "tofu": ["version"]}.get(name, ["--version"]))
         probe = capability.get("probe")
@@ -1156,7 +1192,7 @@ def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[t
     return commands, probes
 
 
-def qualification_identity() -> str:
+def qualification_identity(gates: tuple[str, ...] = ()) -> str:
     """Bind reusable evidence to validator/configuration and actual core runners."""
     digest = hashlib.sha256()
     for relative in (
@@ -1175,6 +1211,11 @@ def qualification_identity() -> str:
         controller = ROOT / controller
     digest.update(b"executed-controller")
     digest.update(controller.read_bytes())
+    digest.update(b"executed-evidence-helper")
+    if evidence_delivery_module is None:
+        digest.update(b"unavailable")
+    else:
+        digest.update(Path(evidence_delivery_module.__file__).read_bytes())
     digest.update(sys.version.encode())
     # python and python3 are equivalent aliases inside one environment; separate
     # virtualenvs and changed interpreter bytes must still invalidate evidence.
@@ -1182,7 +1223,7 @@ def qualification_identity() -> str:
     digest.update(json.dumps([str(interpreter), sys.prefix, sys.base_prefix]).encode())
     with interpreter.open("rb") as handle:
         digest.update(hashlib.file_digest(handle, "sha256").digest())
-    commands, probes = _qualification_toolchain()
+    commands, probes = _qualification_toolchain(gates)
     for command, version_args in sorted(commands.items()):
         executable = shutil.which(command)
         digest.update(command.encode())
@@ -1312,7 +1353,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         or evidence.get("base_sha") != base_sha
         or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
         or evidence.get("changed_paths") != changed_paths(base, parent_sha)
-        or evidence.get("qualification_identity") != qualification_identity()
+        or not _evidence_identity_matches(evidence)
         or not _fresh_evidence(evidence)
         or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
@@ -1564,6 +1605,7 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
         list(plan.get("affected_components", [])),
         [by_gate[name] for name in sorted(expected)],
         dict(plan.get("verification", {"mode": "full"})),
+        capture_runtime_identity=False,
     )
     if os.environ.get("CI_EVIDENCE_REPOSITORY", "").strip():
         published = publish_evidence(ROOT, evidence)
@@ -1623,7 +1665,14 @@ def github_exact_ci_status(gh: str, head_sha: str) -> str:
 
 
 def write_evidence(
-    base: str, head: str, paths: list[str], components: list[str], records: list[dict], verification: dict | None = None
+    base: str,
+    head: str,
+    paths: list[str],
+    components: list[str],
+    records: list[dict],
+    verification: dict | None = None,
+    *,
+    capture_runtime_identity: bool = True,
 ) -> Path:
     base_sha = git("rev-parse", base).strip()
     current_head_sha = git("rev-parse", "HEAD").strip()
@@ -1631,6 +1680,14 @@ def write_evidence(
     clean = not git("status", "--porcelain", "--untracked-files=all").strip()
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
+    gates = tuple(row["gate"] for row in records)
+    identity_complete = capture_runtime_identity or not _runtime_identity_required(gates)
+    try:
+        identity = qualification_identity(gates if identity_complete else ())
+    except (OSError, RuntimeError, ValueError):
+        # Preserve a gate failure report even if its runtime is inaccessible.
+        identity_complete = False
+        identity = qualification_identity(())
     payload = {
         "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
@@ -1644,7 +1701,8 @@ def write_evidence(
             else git("rev-parse", f"{head_sha}^{{tree}}").strip()
         ),
         "created_at_epoch": time.time(),
-        "qualification_identity": qualification_identity(),
+        "qualification_identity": identity,
+        "reuse_identity_complete": identity_complete,
         "exact_commit_evidence": exact,
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,

@@ -13,6 +13,8 @@ evidence:
   content_cache_authorizes_pass_reuse: false
   maximum_local_age_seconds: 86400
   qualification_identity_required: true
+  runtime_identity_scope: represented-gates
+  unobserved_runtime_identity_reuse: forbidden
   commit_tree_required: true
 
 remote_store:

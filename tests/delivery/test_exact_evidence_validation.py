@@ -217,8 +217,13 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 self.assertNotIn((("docker", "info"), True), probes)
                 service = root / "services/product"
                 service.mkdir(parents=True)
+                (service / "go.mod").touch()
                 (service / "integration_test.go").write_text("// testcontainers\n")
-                _commands, probes = REPOCTL._qualification_toolchain()
+                _commands, probes = REPOCTL._qualification_toolchain(("governance", "system"))
+                self.assertNotIn((("docker", "info"), True), probes)
+                _commands, probes = REPOCTL._qualification_toolchain(("service:other",))
+                self.assertNotIn((("docker", "info"), True), probes)
+                _commands, probes = REPOCTL._qualification_toolchain(("service:product",))
                 self.assertIn((("docker", "info"), True), probes)
                 self.assertIn((("sysctl", "-n", "net.ipv4.ip_forward"), True), probes)
         with tempfile.TemporaryDirectory() as directory:
@@ -248,6 +253,123 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 with mock.patch.object(REPOCTL, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="")):
                     with self.assertRaisesRegex(RuntimeError, "runtime identity probe failed"):
                         REPOCTL.qualification_identity()
+
+    def test_actual_imported_evidence_helper_bytes_invalidate_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "repository_delivery.py"
+            helper.write_text("# original imported trust helper\n")
+            with (
+                mock.patch.object(REPOCTL.evidence_delivery_module, "__file__", str(helper)),
+                mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+            ):
+                original = REPOCTL.qualification_identity()
+                helper.write_text("# strengthened signature verification\n")
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_global_identity_works_with_docker_cli_but_no_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_bytes(b"docker CLI")
+            calls = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                return mock.Mock(returncode=1 if "info" in command else 0, stdout="client version", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(docker) if name == "docker" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+            ):
+                REPOCTL.qualification_identity(("governance", "contracts"))
+                self.assertFalse(any("info" in command for command in calls))
+                with self.assertRaisesRegex(RuntimeError, "runtime identity probe failed"):
+                    REPOCTL.qualification_identity(("service:product",))
+                self.assertFalse(
+                    REPOCTL._evidence_identity_matches(
+                        {
+                            "qualification_identity": "old-PASS",
+                            "gates": [{"gate": "service:product"}],
+                        }
+                    )
+                )
+
+    def test_psych_version_changes_identity_with_unchanged_ruby(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ruby = Path(directory) / "ruby"
+            ruby.write_bytes(b"unchanged ruby executable")
+            psych = "5.0.1"
+
+            def run(command, **kwargs):
+                return mock.Mock(returncode=0, stdout=psych if "-rpsych" in command else "ruby 3.2.3", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(ruby) if name == "ruby" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+                mock.patch.object(REPOCTL, "output", return_value="ruby 3.2.3"),
+            ):
+                original = REPOCTL.qualification_identity()
+                psych = "5.1.0"
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_finalizer_publishes_without_daemon_and_does_not_claim_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = root / "services/product"
+            service.mkdir(parents=True)
+            (service / "go.mod").touch()
+            (service / "integration_test.go").write_text("// testcontainers\n")
+            records = root / "records"
+            records.mkdir()
+            (records / "plan.json").write_text(
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "base_sha": "b",
+                        "component_gates": ["service:product"],
+                        "changed_paths": [],
+                        "affected_components": ["service:product"],
+                    }
+                )
+            )
+            (records / "global.json").write_text(
+                json.dumps({"head_sha": "h", "records": [{"gate": "governance", "status": "PASS"}]})
+            )
+            (records / "component-product.json").write_text(
+                json.dumps({"head_sha": "h", "records": [{"gate": "service:product", "status": "PASS"}]})
+            )
+
+            def git(*args):
+                if args[0] == "status":
+                    return ""
+                return "b" if args == ("rev-parse", "base") else "tree" if "^{tree}" in args[-1] else "h"
+
+            def identity(gates=()):
+                self.assertEqual((), gates, "finalizer must not probe another task's Docker runtime")
+                return "static-identity"
+
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", root / ".context"),
+                mock.patch.object(REPOCTL, "git", side_effect=git),
+                mock.patch.object(REPOCTL, "_require_clean_exact_checkout", return_value=("h", "h")),
+                mock.patch.object(REPOCTL, "_global_gate_commands", return_value=[("governance", [])]),
+                mock.patch.object(REPOCTL, "qualification_identity", side_effect=identity),
+                mock.patch.object(
+                    REPOCTL, "publish_evidence", return_value={"digest_reference": "fixture-digest"}
+                ) as publish,
+                mock.patch.object(REPOCTL, "publish_remote_status"),
+                mock.patch.dict(os.environ, {"CI_EVIDENCE_REPOSITORY": "fixture"}),
+            ):
+                self.assertEqual(0, REPOCTL.ci_finalize("base", "h", str(records)))
+                publish.assert_called_once()
+                evidence = json.loads((root / ".context/evidence/h.json").read_text())
+                self.assertEqual("PASS", evidence["status"])
+                self.assertFalse(evidence["reuse_identity_complete"])
+                self.assertFalse(REPOCTL._evidence_identity_matches(evidence))
 
     def test_requires_each_gate_once_and_does_not_skip_required_checks(self):
         gates = self.evidence()["gates"]
