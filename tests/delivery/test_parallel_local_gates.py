@@ -1,4 +1,9 @@
 import importlib.util
+import os
+import signal
+import sys
+import tempfile
+import time
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -13,16 +18,102 @@ SPEC.loader.exec_module(REPOCTL)
 
 class ParallelLocalGateTest(unittest.TestCase):
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
-        with mock.patch.object(REPOCTL.os, "cpu_count", return_value=32), mock.patch.object(
-            REPOCTL.os, "sysconf", side_effect=[8 * 1024**3 // 4096, 4096]
+        with (
+            mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[8 * 1024**3 // 4096, 4096]),
         ):
             self.assertLessEqual(REPOCTL._local_parallelism(20), 4)
 
     def test_invalid_override_cannot_exceed_resource_bound(self):
-        with mock.patch.dict(REPOCTL.os.environ, {"REPOCTL_LOCAL_JOBS": "99"}), mock.patch.object(
-            REPOCTL.os, "cpu_count", return_value=2
-        ), mock.patch.object(REPOCTL.os, "sysconf", side_effect=[4 * 1024**3 // 4096, 4096]):
+        with (
+            mock.patch.dict(REPOCTL.os.environ, {"REPOCTL_LOCAL_JOBS": "99"}),
+            mock.patch.object(REPOCTL.os, "cpu_count", return_value=2),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[4 * 1024**3 // 4096, 4096]),
+        ):
             self.assertEqual(2, REPOCTL._local_parallelism(5))
+
+    def test_cgroup_quota_and_available_memory_bound_jobs(self):
+        values = {
+            "/proc/self/cgroup": "0::/\n",
+            "/sys/fs/cgroup/cpu.max": "100000 100000",
+            "/sys/fs/cgroup/memory.max": str(2 * 1024**3),
+            "/sys/fs/cgroup/memory.current": str(1024**3),
+        }
+
+        def read(path, *args, **kwargs):
+            if str(path) in values:
+                return values[str(path)]
+            raise FileNotFoundError(path)
+
+        with (
+            mock.patch.object(Path, "read_text", read),
+            mock.patch.object(REPOCTL.os, "cpu_count", return_value=64),
+            mock.patch.object(REPOCTL.os, "sched_getaffinity", return_value=set(range(64))),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[32 * 1024**3 // 4096, 4096]),
+        ):
+            self.assertEqual(1, REPOCTL._local_parallelism(10))
+
+    def test_mutation_is_recorded_as_failure_before_evidence_write(self):
+        captured = []
+        with (
+            mock.patch.object(REPOCTL, "git", return_value="head"),
+            mock.patch.object(REPOCTL, "worktree_tree_sha", side_effect=["before", "before", "after"]),
+            mock.patch.object(REPOCTL, "changed_paths", return_value=[]),
+            mock.patch.object(REPOCTL, "affected", return_value=[]),
+            mock.patch.object(REPOCTL, "_global_gate_commands", return_value=[]),
+            mock.patch.object(REPOCTL, "_run_independent_gates", return_value=True),
+            mock.patch.object(
+                REPOCTL,
+                "write_evidence",
+                side_effect=lambda base, head, paths, components, records, verification: captured.append(
+                    (records, verification)
+                ),
+            ),
+        ):
+            self.assertEqual(1, REPOCTL.verify_change("base", "WORKTREE"))
+        records, verification = captured[0]
+        self.assertEqual("FAIL", records[-1]["status"])
+        self.assertFalse(verification["tree_stable"])
+
+    def test_failure_kills_descendant_after_its_gate_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            pidfile = context / "child.pid"
+            child = (
+                "import os, signal, time; from pathlib import Path; "
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                f"Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)"
+            )
+            parent = (
+                "import subprocess, sys, time; from pathlib import Path; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                f"p=Path({str(pidfile)!r}); "
+                "exec('while not p.exists(): time.sleep(0.01)'); sys.exit(1)"
+            )
+            pid = None
+            try:
+                with mock.patch.object(REPOCTL, "CONTEXT", context), mock.patch.object(REPOCTL, "ROOT", context):
+                    self.assertFalse(
+                        REPOCTL._run_independent_gates(
+                            [("failed-parent", [sys.executable, "-c", parent])], [], os.environ.copy()
+                        )
+                    )
+                pid = int(pidfile.read_text())
+                for _ in range(100):
+                    stat = Path(f"/proc/{pid}/stat")
+                    if not stat.exists() or stat.read_text().split()[2] == "Z":
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("gate descendant survived cancellation")
+            finally:
+                if pid is None and pidfile.exists():
+                    pid = int(pidfile.read_text())
+                if pid is not None:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
 
 if __name__ == "__main__":

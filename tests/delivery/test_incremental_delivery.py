@@ -94,6 +94,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
@@ -202,6 +209,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
