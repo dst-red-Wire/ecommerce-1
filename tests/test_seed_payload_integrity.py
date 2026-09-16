@@ -215,6 +215,78 @@ class SeedPayloadIntegrity(unittest.TestCase):
         with mock.patch.object(bootstrap.subprocess, "run", side_effect=OSError("unavailable ACL probe")):
             self.assertFalse(bootstrap.seed_windows_paths_are_private(paths))
 
+    def test_checkout_reference_rejects_writable_checkout_and_venv(self):
+        reference = self.root / "checkout/.venv/qualification"
+        reference.parent.mkdir(parents=True)
+        for directory in (reference.parent, reference.parent.parent):
+            for mode in (0o770, 0o777):
+                with self.subTest(directory=directory.name, mode=mode):
+                    directory.chmod(mode)
+                    with (
+                        mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference),
+                        self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+                    ):
+                        bootstrap.publish_checkout_reference(self.seed)
+                    self.assertFalse(reference.exists())
+                    self.assertEqual([], list(reference.parent.iterdir()))
+                    directory.chmod(0o700)
+
+    def test_checkout_reference_allows_safe_sticky_shared_ancestor(self):
+        shared = self.root / "shared"
+        shared.mkdir(mode=0o1777)
+        shared.chmod(0o1777)
+        reference = shared / "owned-checkout/.venv/qualification"
+        with mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference):
+            bootstrap.publish_checkout_reference(self.seed)
+        self.assertEqual(self.seed, reference.resolve())
+        self.assertEqual(0o700, reference.parent.stat().st_mode & 0o777)
+        self.assertEqual(0o700, reference.parent.parent.stat().st_mode & 0o777)
+
+    def test_checkout_reference_rejects_competing_writable_directory_creator(self):
+        reference = self.root / "checkout/.venv/qualification"
+        reference.parent.parent.mkdir()
+        original = os.mkdir
+
+        def create(path, mode=0o777, **kwargs):
+            original(path, mode, **kwargs)
+            if Path(path) == reference.parent:
+                reference.parent.chmod(0o777)
+                raise FileExistsError("competing checkout parent creator")
+
+        with (
+            mock.patch.object(bootstrap.os, "mkdir", side_effect=create),
+            mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference),
+            self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+        ):
+            bootstrap.publish_checkout_reference(self.seed)
+        self.assertEqual([], list(reference.parent.iterdir()))
+
+    def test_checkout_reference_applies_acl_policy_before_publishing(self):
+        reference = self.root / "checkout/.venv/qualification"
+        reference.parent.mkdir(parents=True)
+        with (
+            mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference),
+            mock.patch.object(bootstrap, "seed_paths_are_private", return_value=False) as permissions,
+            mock.patch.object(bootstrap, "create_seed_directory_reference") as publish,
+            self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+        ):
+            bootstrap.publish_checkout_reference(self.seed)
+        self.assertIn((reference.parent, False), permissions.call_args.args[0])
+        self.assertIn((reference.parent.parent, True), permissions.call_args.args[0])
+        publish.assert_not_called()
+
+    def test_windows_pe_launcher_is_not_interpreted_as_python_source(self):
+        scripts = self.root / "windows-fixture/Scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "ansible.exe").write_bytes(b"MZ\x00\x00PE console launcher fixture")
+        python = scripts / "python.exe"
+        with mock.patch.object(
+            bootstrap.subprocess, "run", return_value=mock.Mock(stdout="ansible [core 2.20.3]\n")
+        ) as run:
+            bootstrap.verify_seed_ansible_version(python, "2.20.3")
+        self.assertEqual([str(python), "-I", "-m", "ansible.cli.adhoc", "--version"], run.call_args.args[0])
+        self.assertTrue(run.call_args.kwargs["check"])
+
     def test_checkout_reference_repairs_ordinary_file_and_directory(self):
         reference = self.root / "checkout/.venv/qualification"
         reference.parent.mkdir(parents=True)

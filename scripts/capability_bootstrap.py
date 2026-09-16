@@ -1236,14 +1236,25 @@ def _seed_environment() -> int:
             finally:
                 remove_seed_directory_reference(temporary_selector)
         publish_checkout_reference(seed_root)
-    ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
-    proc = subprocess.run([str(python), "-I", str(ansible), "--version"], check=True, text=True, capture_output=True)
-    if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
-        raise RuntimeError("seed Ansible version verification failed")
+    verify_seed_ansible_version(python, versions["ANSIBLE_CORE_VERSION"])
     print(
         f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
+
+
+def verify_seed_ansible_version(python: Path, expected: str) -> None:
+    # The module belongs to the authenticated seed payload on both platforms.
+    # In particular, Windows PE console launchers are not Python source files.
+    proc = subprocess.run(
+        [str(python), "-I", "-m", "ansible.cli.adhoc", "--version"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    lines = proc.stdout.splitlines()
+    if not lines or expected not in lines[0]:
+        raise RuntimeError("seed Ansible version verification failed")
 
 
 @contextlib.contextmanager
@@ -1281,15 +1292,15 @@ def identity_lock(path: Path, timeout: float = 300.0):
 
 def publish_checkout_reference(seed_root: Path) -> None:
     """Atomically point this checkout at its compatible immutable seed."""
-    parent = LOCAL_SEED_VENV.parent
-    for ancestor in (parent, *parent.parents):
-        if seed_directory_reference(ancestor) or (ancestor.exists() and not ancestor.is_dir()):
-            raise SeedGenerationBoundaryError("seed checkout reference has an unsafe parent")
-    parent.mkdir(parents=True, exist_ok=True)
+    # The checkout reference is an executable entry point too. Apply the same
+    # ownership, POSIX permissions/Windows ACL and atomic creation checks as the
+    # tool-home hierarchy, including revalidation after a competing creator.
+    parent = create_seed_tool_home(LOCAL_SEED_VENV.parent)
     temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
     remove_seed_directory_reference(temporary)
     create_seed_directory_reference(temporary, seed_root)
     try:
+        validated_seed_tool_home(parent)
         replace_seed_directory_reference(temporary, LOCAL_SEED_VENV)
     finally:
         remove_seed_directory_reference(temporary)
