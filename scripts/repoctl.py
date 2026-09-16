@@ -1186,7 +1186,12 @@ def qualification_identity() -> str:
     for command, version_args in sorted(commands.items()):
         executable = shutil.which(command)
         digest.update(command.encode())
-        digest.update((executable or "missing").encode())
+        location = executable or "missing"
+        if executable and command == "git":
+            # Git prepends its exec-path to PATH for hooks. Distributions may
+            # ship an identical copy there instead of a symlink to /usr/bin/git.
+            location = run([executable, "--exec-path"], capture=True).stdout.strip()
+        digest.update(location.encode())
         if executable:
             with Path(executable).open("rb") as handle:
                 digest.update(hashlib.file_digest(handle, "sha256").digest())

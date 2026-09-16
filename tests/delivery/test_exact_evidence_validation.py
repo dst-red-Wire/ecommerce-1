@@ -181,6 +181,31 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                     interpreter.write_bytes(b"changed interpreter")
                     self.assertNotEqual(original, REPOCTL.qualification_identity())
 
+    def test_git_hook_aliases_share_identity_only_for_same_installation_and_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "usr/bin/git"
+            hook = Path(directory) / "usr/lib/git-core/git"
+            for executable in (original, hook):
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(b"identical git binary")
+            selected = original
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(selected) if name == "git" else None
+                ),
+                mock.patch.object(
+                    REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout=str(hook.parent), stderr="")
+                ) as probe,
+            ):
+                initial = REPOCTL.qualification_identity()
+                selected = hook
+                self.assertEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(Path(directory) / "other-install")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(hook.parent)
+                hook.write_bytes(b"different git binary")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
     def test_runtime_identity_binds_daemon_configuration_not_container_counts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
