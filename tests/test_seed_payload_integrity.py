@@ -63,6 +63,16 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.assertEqual(2, path.stat().st_nlink)
         self.assertFalse(self.valid())
 
+    def test_hardlinked_wheel_is_rejected_before_it_can_define_payload(self):
+        external = self.root / "external-wheel"
+        os.link(self.wheel, external)
+        self.assertEqual(2, self.wheel.stat().st_nlink)
+        with self.assertRaisesRegex(ValueError, "regular single-link"):
+            bootstrap.seed_wheels(self.wheels, self.lock)
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            bootstrap.seed_wheels(self.wheels, self.lock, strict=False)
+        self.assertFalse(self.valid())
+
     def test_symlinked_tool_home_or_ancestor_is_rejected_before_writes(self):
         external = self.root / "external-cache"
         external.mkdir()
