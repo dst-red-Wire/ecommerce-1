@@ -1,0 +1,44 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+public_api_registry: config/contracts/public-api-contracts.yaml
+
+defaults:
+  exposure: internal-only
+  direct_internet_exposure: false
+  edge_chain_required_for_public: true
+  edge_chain: [haproxy, caddy-coraza, kong, istio-gateway]
+
+services:
+  catalog: {exposure: internal-only}
+  product:
+    exposure: admin-only
+    public_contract: contracts/openapi/product.v1.yaml
+    audience: admin
+    direct_internet_exposure: false
+  inventory: {exposure: internal-only}
+  cart: {exposure: internal-only}
+  checkout: {exposure: internal-only}
+  pricing: {exposure: internal-only}
+  tax: {exposure: internal-only}
+  order: {exposure: internal-only}
+  payment: {exposure: internal-only}
+  fulfillment: {exposure: internal-only}
+  shipping: {exposure: internal-only}
+  tracking: {exposure: internal-only}
+  returns: {exposure: internal-only}
+  billing: {exposure: internal-only}
+  fraud-risk: {exposure: internal-only}
+  search: {exposure: internal-only}
+  review: {exposure: internal-only}
+  user-profile: {exposure: internal-only}
+  notification:
+    exposure: async-only
+    synchronous_ingress: false
+
+rules:
+  edge_exposed_requires_registered-public-api-contract: true
+  admin_only_requires_admin_audience: true
+  direct_service_internet_exposure_forbidden: true
+  async_only_service_must_not-require-public-http-route: true
+  future_storefront_public_apis_must_be-versioned-before-exposure-change: true
