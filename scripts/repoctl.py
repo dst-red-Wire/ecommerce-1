@@ -1823,10 +1823,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1954,6 +1956,13 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    if any(entry.startswith("120000 ") for entry in entries):
+        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    return 0
+
+
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
     paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
@@ -1962,9 +1971,8 @@ def precommit() -> int:
         return 0
     with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
         snapshot = Path(directory)
-        entries = git("ls-files", "--stage", "-z").split("\0")
-        if any(entry.startswith("120000 ") for entry in entries):
-            return fail("staged snapshot contains symbolic links; refusing non-index content")
+        if _reject_staged_symlinks():
+            return 1
         run(["git", "checkout-index", "--all", f"--prefix={snapshot}/"])
         require("gitleaks")
         run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
