@@ -1,0 +1,49 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+egress_policy: config/contracts/egress-policy.yaml
+
+resolution:
+  source_of_truth: config/contracts/egress-policy.yaml
+  concrete-runtime-endpoints-required-before-provisioning: true
+  unresolved-endpoint-behavior: fail-closed
+
+services:
+  payment:
+    stripe:
+      fqdn: unresolved-runtime-input
+      port: 443
+      protocol: https
+      tls_sni: required
+  shipping:
+    carrier-adapters:
+      fqdn: unresolved-runtime-input
+      port: 443
+      protocol: https
+      tls_sni: required
+  billing:
+    qonto-pa:
+      fqdn: unresolved-runtime-input
+      port: 443
+      protocol: https
+      tls_sni: required
+  user-profile:
+    keycloak-reference:
+      fqdn: unresolved-runtime-input
+      port: 443
+      protocol: https
+      tls_sni: required
+
+network_enforcement:
+  default: deny
+  dns_resolution: internal-resolvers-only
+  proxy_or_egress_gateway: required-when-runtime-design-declares-one
+  network_policy_generation: automatic-from-this-contract
+
+rules:
+  wildcard-fqdn: forbidden
+  wildcard-port: forbidden
+  cleartext-external-egress: forbidden
+  unresolved-fqdn-blocks-real-provisioning: true
+  destination-set-must-match-logical-egress-policy: true
+  runtime-network-policy-must-be-generated-not-hand-maintained: true
