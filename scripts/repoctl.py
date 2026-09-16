@@ -1127,7 +1127,7 @@ def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[t
     runtime = any(
         "testcontainers" in path.read_text(encoding="utf-8") for path in (ROOT / "services").rglob("*_test.go")
     )
-    commands: dict[str, list[str] | None] = {sys.executable: ["--version"]}
+    commands: dict[str, list[str] | None] = {}
     probes: set[tuple[tuple[str, ...], bool]] = set()
     visited: set[str] = set()
 
@@ -1176,6 +1176,12 @@ def qualification_identity() -> str:
     digest.update(b"executed-controller")
     digest.update(controller.read_bytes())
     digest.update(sys.version.encode())
+    # python and python3 are equivalent aliases inside one environment; separate
+    # virtualenvs and changed interpreter bytes must still invalidate evidence.
+    interpreter = Path(sys.executable).resolve()
+    digest.update(json.dumps([str(interpreter), sys.prefix, sys.base_prefix]).encode())
+    with interpreter.open("rb") as handle:
+        digest.update(hashlib.file_digest(handle, "sha256").digest())
     commands, probes = _qualification_toolchain()
     for command, version_args in sorted(commands.items()):
         executable = shutil.which(command)

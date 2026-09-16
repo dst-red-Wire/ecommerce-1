@@ -165,6 +165,22 @@ class ExactEvidenceValidationTest(unittest.TestCase):
         self.assertIn("helper", commands)
         self.assertIn((("launcher", "new-tool", "--version"), False), probes)
 
+    def test_interpreter_aliases_share_identity_but_environments_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory) / "python"
+            alias = Path(directory) / "python3"
+            interpreter.write_bytes(b"same interpreter")
+            alias.symlink_to(interpreter)
+            with mock.patch.object(REPOCTL.shutil, "which", return_value=None):
+                with mock.patch.object(REPOCTL.sys, "executable", str(interpreter)):
+                    original = REPOCTL.qualification_identity()
+                with mock.patch.object(REPOCTL.sys, "executable", str(alias)):
+                    self.assertEqual(original, REPOCTL.qualification_identity())
+                    with mock.patch.object(REPOCTL.sys, "prefix", str(Path(directory) / "different-env")):
+                        self.assertNotEqual(original, REPOCTL.qualification_identity())
+                    interpreter.write_bytes(b"changed interpreter")
+                    self.assertNotEqual(original, REPOCTL.qualification_identity())
+
     def test_runtime_identity_binds_daemon_configuration_not_container_counts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
