@@ -68,9 +68,12 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     ):
         if marker not in combined:
             raise AssertionError(f"Ansible does not own runner reconciliation: {marker}")
-    if 'git checkout --detach "$qualification_head"' not in runbook:
+    if 'git --no-replace-objects checkout --detach "$qualification_head"' not in runbook:
         raise AssertionError("qualification checkout is not pinned to the audited SHA")
-    if "git checkout milestone/" in runbook or "git checkout infra/" in runbook:
+    if (
+        "git --no-replace-objects checkout milestone/" in runbook
+        or "git --no-replace-objects checkout infra/" in runbook
+    ):
         raise AssertionError("qualification checkout uses a mutable branch tip")
 
     if "set -euo pipefail\nreadonly QUALIFICATION_HEAD=" not in runbook:
@@ -112,9 +115,9 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "docker version",
         "docker info",
         "sysctl -n net.ipv4.ip_forward",
-        "git rev-parse HEAD",
+        "git --no-replace-objects rev-parse HEAD",
         "$qualification_base",
-        "git status --porcelain=v1",
+        "git --no-replace-objects status --porcelain=v1",
         'test -z "$worktree_status"',
         "make seed",
         "make bootstrap",
@@ -153,7 +156,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     product_start = remote_sequence.find("cd services/product")
     post_bootstrap = remote_sequence.find("make env-check")
     final_head = remote_sequence.find(
-        'test "$(git rev-parse HEAD)" = "$qualification_head"',
+        'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"',
         post_bootstrap,
     )
     final_clean = remote_sequence.find('test -z "$post_bootstrap_status"', post_bootstrap)
@@ -217,7 +220,8 @@ class QualificationRunnerContractTest(unittest.TestCase):
     def test_mutation_checkout_branch_tip(self):
         self.assert_mutation_rejected(
             runbook=self.runbook.replace(
-                'git checkout --detach "$qualification_head"', "git checkout milestone/m1-monorepo-bootstrap"
+                'git --no-replace-objects checkout --detach "$qualification_head"',
+                "git --no-replace-objects checkout milestone/m1-monorepo-bootstrap",
             )
         )
 
@@ -272,9 +276,11 @@ class QualificationRunnerContractTest(unittest.TestCase):
         )
 
     def test_mutation_remove_post_bootstrap_exact_head_check(self):
-        marker = 'test "$(git rev-parse HEAD)" = "$qualification_head"'
+        marker = 'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"'
         position = self.runbook.index(marker, self.runbook.index("make env-check"))
-        mutated = self.runbook[:position] + "git rev-parse HEAD" + self.runbook[position + len(marker) :]
+        mutated = (
+            self.runbook[:position] + "git --no-replace-objects rev-parse HEAD" + self.runbook[position + len(marker) :]
+        )
         self.assert_mutation_rejected(runbook=mutated)
 
     def test_mutation_replace_final_ip_forward_assertion_with_print(self):

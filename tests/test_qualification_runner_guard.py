@@ -27,6 +27,8 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.git("config", "user.email", "fixture@example.invalid")
         self.write("platform/ansible/qualification-egress.yml", "---\n[]\n")
         self.write("platform/ansible/roles/qualification_proxy_client/tasks/main.yml", "---\n[]\n")
+        self.write("docs/project/M1_LINUX_QUALIFICATION_RUNNER.md", "trusted fixture runbook\n")
+        self.write("platform/terraform/environments/qualification/README.md", "trusted fixture runbook\n")
         self.write("scripts/qualification_runner_guard.py", "raise SystemExit(0)\n")
         self.commit()
         self.base = self.git("rev-parse", "HEAD").strip()
@@ -94,6 +96,62 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         result = self.admit()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("replacement refs are forbidden", result.stdout)
+
+    def test_symlinked_scope_ancestors_cannot_redirect_byte_identical_files(self):
+        for relative in ("platform", "platform/ansible", "platform/ansible/roles", "platform/terraform", "docs"):
+            with self.subTest(ancestor=relative):
+                target = self.repo / relative
+                shadow = self.repo / "unscoped-shadow"
+                target.rename(shadow)
+                target.symlink_to(os.path.relpath(shadow, target.parent), target_is_directory=True)
+                self.commit()
+                result = self.admit()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("unapproved runner ancestor", result.stdout)
+                target.unlink()
+                shadow.rename(target)
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_candidate_terraform_execution_closure_is_rejected(self):
+        for relative in (
+            "platform/terraform/environments/qualification/unapproved.tf",
+            "platform/terraform/modules/hcloud-qualification/unapproved.tf",
+        ):
+            with self.subTest(path=relative):
+                self.write(
+                    relative,
+                    'resource "terraform_data" "attack" { provisioner "local-exec" { command = "echo unapproved" } }\n',
+                )
+                self.commit()
+                self.assertNotEqual(0, self.admit().returncode)
+                (self.repo / relative).unlink()
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_remote_proof_rejects_replacement_refs_after_candidate_bootstrap(self):
+        check = "test -z \"$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)\""
+        for relative in (
+            "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+            "platform/terraform/environments/qualification/README.md",
+        ):
+            source = (ROOT / relative).read_text()
+            self.assertIn("readonly GIT_NO_REPLACE_OBJECTS", source)
+            self.assertIn(check, source[source.index("make env-check") :])
+            remote = source[source.index("<<'QUALIFICATION_RUNNER'") : source.index("\nQUALIFICATION_RUNNER")]
+            self.assertNotIn("git rev-parse", remote)
+            self.assertNotIn("git status", remote)
+        clean = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertEqual(0, clean.returncode)
+        self.write("substituted-tree.txt", "untrusted replacement\n")
+        self.commit()
+        replacement = self.git("rev-parse", "HEAD").strip()
+        self.git("replace", self.base, replacement)
+        self.git("reset", "--hard", self.base)
+        self.assertEqual(self.base, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual("", self.git("status", "--porcelain"))
+        refused = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertNotEqual(0, refused.returncode)
 
     def test_mode_only_change_is_rejected_by_external_controller(self):
         target = self.repo / "platform/ansible/qualification-egress.yml"
@@ -179,11 +237,18 @@ class TrustedRunnerGuardTest(unittest.TestCase):
                     '--extra-vars "qualification_pr_head=$QUALIFICATION_HEAD qualification_pr_base=$QUALIFICATION_BASE"',
                     '"bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE"',
                     'readonly qualification_head="$1" qualification_base="$2"',
-                    'test "$(git rev-parse HEAD)" = "$qualification_head"',
+                    'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"',
                     'BASE="$qualification_base" make ci',
                 ):
                     self.assertIn(marker, source)
                 self.assertNotIn("58e10fdb7122f9f3302e3fc5534b07021f7cc37f", source)
+                original = (self.repo / relative).read_text()
+                self.write(relative, "unapproved candidate provisioning commands\n")
+                self.commit()
+                self.assertNotEqual(0, self.admit().returncode)
+                self.write(relative, original)
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
 
     def test_ansible_clone_fetches_head_reachable_only_through_pr_ref(self):
         import shlex

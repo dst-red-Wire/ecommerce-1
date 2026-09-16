@@ -252,11 +252,11 @@ def validate_contract(files: dict[str, str]) -> None:
         "docker version",
         "docker info",
         "sysctl -n net.ipv4.ip_forward",
-        'git checkout --detach "$qualification_head"',
+        'git --no-replace-objects checkout --detach "$qualification_head"',
         "make seed",
         "make bootstrap",
         "make env-check",
-        "git status --porcelain=v1",
+        "git --no-replace-objects status --porcelain=v1",
         "$HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1",
         'BASE="$qualification_base" make ci',
     ):
