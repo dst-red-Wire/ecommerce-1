@@ -8,6 +8,32 @@ daemon access, base packages, and persistent kernel configuration. The checked-o
 its hash-locked Python/Ansible seed and managed qualification toolchain; the provisioning
 playbook reconciles both on the runner before proof execution.
 
+## Trusted controller admission
+
+The controller must use a separate clean checkout at an independently reviewed, full
+`TRUSTED_RUNNER_REVISION` SHA. Select that revision through review policy, never from
+PR-owned configuration or output. Both the guard and the Ansible execution closure
+come from that trusted checkout. Do not run candidate Python, Make, bootstrap, Ansible
+configuration, inventory, roles or plugins on the controller.
+
+Before provisioning, use the trusted system Python to execute:
+
+```text
+python3 -I /trusted/ecommerce/scripts/qualification_runner_guard.py --repo /candidate/ecommerce --base FULL_BASE_SHA --head FULL_HEAD_SHA
+```
+
+`/candidate/ecommerce` is a clean controller-owned checkout fetched from the forge,
+not a checkout or evidence file copied back from a tainted runner. The guard compares
+real Git objects with replacement refs disabled, rejects replacement refs, and permits
+only independently reviewed byte changes. Its source and allowlist are those in the
+trusted checkout; a candidate copy cannot grant itself permission. A guard change
+requires a separately reviewed trusted-controller revision before use.
+
+Run the provisioning commands below with `/trusted/ecommerce` as the working directory,
+using its pinned toolchain and external inventory. Repeat this trusted admission check
+when retaining qualification evidence. PR-owned `make ci` remains a regression check,
+not independent authentication of runner changes or remote CI provenance.
+
 ## Provision a clean host
 
 One runner instance is valid for exactly one qualification attempt. Supply a fresh,
