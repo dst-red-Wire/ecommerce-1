@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "pathname"
 require "yaml"
 
 module ServiceMeshPolicyValidator
@@ -85,6 +86,20 @@ module ServiceMeshPolicyValidator
             end
           end
           justified_caps << item["capability"] if item["capability"].is_a?(String)
+
+          source_contract = item["source_contract"]
+          if source_contract.is_a?(String) && !source_contract.strip.empty?
+            source_path = Pathname.new(source_contract)
+            if source_path.absolute? || source_contract.include?("..")
+              errors << "#{service}: justification[#{index}].source_contract must stay repository-relative"
+            else
+              resolved = File.expand_path(source_contract, root)
+              repository_root = File.expand_path(root)
+              unless resolved.start_with?("#{repository_root}#{File::SEPARATOR}") && File.file?(resolved)
+                errors << "#{service}: justification[#{index}].source_contract does not exist: #{source_contract}"
+              end
+            end
+          end
         end
 
         missing_justifications = true_caps - justified_caps
