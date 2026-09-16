@@ -126,6 +126,75 @@ class SeedPayloadIntegrity(unittest.TestCase):
         finally:
             os.umask(previous)
 
+    def test_missing_tool_home_is_created_private_and_reused(self):
+        configured = self.root / "new-parent/cache"
+        self.assertEqual(configured, bootstrap.create_seed_tool_home(configured))
+        identity = configured.stat().st_ino
+        self.assertEqual(0o700, configured.stat().st_mode & 0o777)
+        self.assertEqual(0o700, configured.parent.stat().st_mode & 0o777)
+        self.assertEqual(configured, bootstrap.create_seed_tool_home(configured))
+        self.assertEqual(identity, configured.stat().st_ino)
+
+    def test_racing_tool_home_creator_is_checked_before_descendant_writes(self):
+        configured = self.root / "raced-cache"
+        original = os.mkdir
+
+        def create(path, mode=0o777, **kwargs):
+            if Path(path) == configured:
+                original(path, mode, **kwargs)
+                configured.chmod(0o777)
+                raise FileExistsError("simulated competing root creation")
+            return original(path, mode, **kwargs)
+
+        with (
+            mock.patch.object(bootstrap.os, "mkdir", side_effect=create),
+            mock.patch.dict(os.environ, {"ECOMMERCE_TOOL_HOME": str(configured)}),
+            self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+        ):
+            bootstrap.seed_environment()
+        self.assertEqual([], list(configured.iterdir()))
+
+    def test_racing_tool_home_symlink_is_rejected_without_writing_through_it(self):
+        configured = self.root / "raced-alias"
+        external = self.root / "external-root"
+        external.mkdir()
+        original = os.mkdir
+
+        def create(path, mode=0o777, **kwargs):
+            if Path(path) == configured:
+                configured.symlink_to(external, target_is_directory=True)
+                raise FileExistsError("simulated symlink replacement")
+            return original(path, mode, **kwargs)
+
+        with (
+            mock.patch.object(bootstrap.os, "mkdir", side_effect=create),
+            mock.patch.dict(os.environ, {"ECOMMERCE_TOOL_HOME": str(configured)}),
+            self.assertRaises(bootstrap.SeedGenerationBoundaryError),
+        ):
+            bootstrap.seed_environment()
+        self.assertEqual([], list(external.iterdir()))
+
+    def test_racing_tool_home_owner_is_rechecked_after_creation(self):
+        configured = self.root / "foreign-root"
+        original_mkdir = os.mkdir
+        uid = os.geteuid()
+        created = False
+
+        def create(path, mode=0o777, **kwargs):
+            nonlocal created
+            original_mkdir(path, mode, **kwargs)
+            if Path(path) == configured:
+                created = True
+                raise FileExistsError("simulated another UID winning creation")
+
+        with (
+            mock.patch.object(bootstrap.os, "mkdir", side_effect=create),
+            mock.patch.object(bootstrap.os, "geteuid", side_effect=lambda: uid + 1 if created else uid),
+            self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+        ):
+            bootstrap.create_seed_tool_home(configured)
+        self.assertEqual([], list(configured.iterdir()))
+
     def test_windows_acl_probe_fails_closed_and_passes_paths_only_as_data(self):
         import json
 

@@ -1049,6 +1049,31 @@ def seed_environment() -> int:
         os.umask(previous)
 
 
+def create_seed_tool_home(value: str | Path) -> Path:
+    """Create private components atomically before any cache or lock writes."""
+    configured = Path(value).absolute()
+    if validated_seed_tool_home(configured) != configured:
+        raise SeedGenerationBoundaryError("seed tool home changed during initial validation")
+    missing = []
+    current = configured
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            # A competing creator must pass the same ownership/link checks.
+            pass
+        validated_seed_tool_home(path)
+    before = configured.lstat()
+    validated_seed_tool_home(configured)
+    after = configured.lstat()
+    if not stat.S_ISDIR(after.st_mode) or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise SeedGenerationBoundaryError("seed tool home identity changed during creation")
+    return configured
+
+
 def _seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -1069,7 +1094,7 @@ def _seed_environment() -> int:
         sort_keys=True,
     ).encode()
     identity = hashlib.sha256(identity_input).hexdigest()
-    tool_home = validated_seed_tool_home(
+    tool_home = create_seed_tool_home(
         os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")
     )
     seed_root = tool_home / "python" / identity
