@@ -19,6 +19,25 @@ class FastFailureContractTest(unittest.TestCase):
         for marker in ('"gitleaks"', '"go"', '"terraform"', '"ansible-playbook"', '"py_compile"', '"ruby", "-c"'):
             self.assertIn(marker, body)
 
+    def test_missing_global_contract_tool_fails_before_source_checks(self):
+        spec = importlib.util.spec_from_file_location("preflight_closure_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def require(name):
+            if name == "oasdiff":
+                raise RuntimeError("missing oasdiff")
+
+        with (
+            mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+            mock.patch.object(module, "affected", return_value=["global"]),
+            mock.patch.object(module, "require", side_effect=require),
+            mock.patch.object(module, "changed_paths") as paths,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing oasdiff"):
+                module.preflight("base", "head")
+            paths.assert_not_called()
+
     def test_tofu_only_runner_passes_preflight(self):
         spec = importlib.util.spec_from_file_location("preflight_test", ROOT / "scripts/repoctl.py")
         module = importlib.util.module_from_spec(spec)
@@ -112,6 +131,9 @@ class FastFailureContractTest(unittest.TestCase):
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as external:
             root = Path(directory)
+            contract = root / "config/toolchain/capabilities.json"
+            contract.parent.mkdir(parents=True)
+            contract.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
             for name, content in (("-eexit;#.rb", "def broken(\n"), ("--stdin-filename=x.py", "undefined_name()\n")):
                 with self.subTest(name=name):
                     (root / name).write_text(content)
