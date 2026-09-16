@@ -975,7 +975,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 5
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -1006,7 +1006,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     source_tree = str(source.get("source_tree_sha", ""))
     commit_tree = git("rev-parse", f"{requested}^{{tree}}").strip()
     if (
-        source.get("schema_version", 0) < 4
+        not _supported_evidence_schema(source, 4)
         or source.get("status") != "PASS"
         or source.get("exact_commit_evidence") is not False
         or source.get("base_sha") != base_sha
@@ -1082,6 +1082,11 @@ def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
     return True
 
 
+def _supported_evidence_schema(evidence: dict, minimum: int) -> bool:
+    version = evidence.get("schema_version")
+    return type(version) is int and minimum <= version <= 5
+
+
 def _fresh_evidence(evidence: dict) -> bool:
     value = evidence.get("created_at_epoch")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1107,7 +1112,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("schema_version", 0) < 5
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
@@ -1380,7 +1385,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 5
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha

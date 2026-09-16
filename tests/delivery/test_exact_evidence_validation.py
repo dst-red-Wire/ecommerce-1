@@ -85,6 +85,15 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 evidence["created_at_epoch"] = value
                 self.assertIsNone(self.validate(evidence))
 
+    def test_rejects_malformed_schema_without_aborting_validation(self):
+        for value in (None, "5", {}, [], True, False, 5.0, float("nan"), float("inf"), 10**400, 6):
+            with self.subTest(value=value):
+                evidence = self.evidence()
+                evidence["schema_version"] = value
+                self.assertIsNone(self.validate(evidence))
+                self.assertFalse(REPOCTL._supported_evidence_schema(evidence, 4))
+                self.assertFalse(REPOCTL._supported_evidence_schema(evidence, 5))
+
     def test_tool_identity_changes_with_provider_bytes_and_ansible_version(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "ansible-playbook"
