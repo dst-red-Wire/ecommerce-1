@@ -29,7 +29,7 @@ services:
       tls_sni: required
   user-profile:
     keycloak-reference:
-      fqdn: unresolved-runtime-input
+      fqdn: keycloak.internal.deployfrance.com
       port: 443
       protocol: https
       tls_sni: required
