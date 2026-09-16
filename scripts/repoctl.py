@@ -1363,9 +1363,19 @@ def qualification_identity(gates: tuple[str, ...] = ()) -> str:
                 sort_keys=True,
             )
         digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
-    digest.update(b"GOENV=off")
+    # GOENV/GOWORK/CC are forced for every Go command. All other ambient Go
+    # target, compiler, linker and runtime switches remain effective gate inputs.
+    # Bind prefixes rather than a fixed list so new architecture knobs cannot
+    # silently inherit evidence from a different native build configuration.
+    go_environment = {
+        name: value
+        for name, value in os.environ.items()
+        if (name.startswith(("GO", "CGO_")) or name in {"CXX", "FC", "PKG_CONFIG"}) and name not in {"GOENV", "GOWORK"}
+    }
+    go_environment.update(GOENV="off", GOWORK="off", CC="cc")
+    digest.update(json.dumps(go_environment, sort_keys=True).encode())
     effective = qualification_ansible_environment()
-    for name in ("GOFLAGS", "GOEXPERIMENT", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+    for name in ("ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
         digest.update(name.encode())
         digest.update(effective.get(name, "").encode())
     ruby = shutil.which("ruby") or ""

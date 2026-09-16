@@ -138,6 +138,45 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 self.assertEqual(str(config), env["GOENV"], "caller environment must remain unchanged")
             self.assertEqual(*identities)
 
+    def test_effective_go_targets_and_native_flags_invalidate_evidence(self):
+        overrides = {
+            "GOOS": "windows",
+            "GOARCH": "arm64",
+            "GOAMD64": "v3",
+            "GOARM64": "v8.2",
+            "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1",
+            "CGO_LDFLAGS": "-Wl,--as-needed",
+            "CGO_CFLAGS_ALLOW": ".*",
+            "GODEBUG": "cgocheck=0",
+            "CXX": "different-cxx",
+            "FC": "different-fortran",
+            "PKG_CONFIG": "different-pkg-config",
+        }
+        original_env = {key: value for key, value in os.environ.items() if key not in overrides}
+        with (
+            mock.patch.dict(os.environ, original_env, clear=True),
+            mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])),
+            mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+        ):
+            identity = REPOCTL.qualification_identity()
+            evidence = {"qualification_identity": identity, "gates": [{"gate": "frontend:all"}]}
+            self.assertTrue(REPOCTL._evidence_identity_matches(evidence))
+            for key, value in overrides.items():
+                with self.subTest(variable=key), mock.patch.dict(os.environ, {key: value}):
+                    self.assertNotEqual(identity, REPOCTL.qualification_identity())
+                    self.assertFalse(REPOCTL._evidence_identity_matches(evidence))
+            self.assertTrue(REPOCTL._evidence_identity_matches(evidence))
+
+    def test_native_go_observes_the_configuration_bound_by_identity(self):
+        with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+            identity = REPOCTL.qualification_identity()
+            with mock.patch.dict(os.environ, {"GOOS": "windows", "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1"}):
+                observed = REPOCTL.run(["go", "env", "-json", "GOOS", "CGO_CFLAGS"], capture=True)
+                self.assertEqual(
+                    {"GOOS": "windows", "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1"}, json.loads(observed.stdout)
+                )
+                self.assertNotEqual(identity, REPOCTL.qualification_identity())
+
     def test_ansible_gate_and_reconciliation_strip_ambient_plugin_overrides(self):
         overrides = {
             name: "/untrusted/plugins"
