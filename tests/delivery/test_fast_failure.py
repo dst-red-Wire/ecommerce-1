@@ -57,6 +57,35 @@ class FastFailureContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "missing ansible-galaxy"):
                 module.preflight("base", "head")
 
+    def test_frontend_preflight_uses_declared_runner_contract(self):
+        import json
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("preflight_frontend_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for standalone in (False, True):
+            with self.subTest(standalone=standalone), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+                contract["gate_requirements"].pop("frontend", None)
+                if standalone:
+                    contract["gate_requirements"]["frontend"] = ["go", "gofmt", "cc", "templ"]
+                path = root / "config/toolchain/capabilities.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(contract))
+                with (
+                    mock.patch.object(module, "ROOT", root),
+                    mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                    mock.patch.object(module, "affected", return_value=["frontend:all"]),
+                    mock.patch.object(module, "changed_paths", return_value=[]),
+                    mock.patch.object(module, "require") as require,
+                ):
+                    self.assertEqual(0, module.preflight("base", "head"))
+                commands = {call.args[0] for call in require.call_args_list}
+                self.assertEqual(standalone, "templ" in commands)
+                self.assertTrue({"go", "gofmt", "cc"}.issubset(commands))
+
     def test_changed_paths_preserve_literal_newlines(self):
         spec = importlib.util.spec_from_file_location("preflight_nul_test", ROOT / "scripts/repoctl.py")
         module = importlib.util.module_from_spec(spec)
