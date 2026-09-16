@@ -17,6 +17,94 @@ SPEC.loader.exec_module(REPOCTL)
 
 
 class ParallelLocalGateTest(unittest.TestCase):
+    def test_windows_resources_use_affinity_and_available_memory_without_sysconf(self):
+        import ctypes
+
+        def memory(pointer):
+            pointer._obj.available_phys = 6 * 1024**3
+            return 1
+
+        def affinity(process, mask, system):
+            mask._obj.value = 0b1010
+            return 1
+
+        kernel = mock.Mock()
+        kernel.GlobalMemoryStatusEx.side_effect = memory
+        kernel.GetProcessAffinityMask.side_effect = affinity
+        kernel.GetCurrentProcess.return_value = 1
+        with (
+            mock.patch.object(REPOCTL.sys, "platform", "win32"),
+            mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=AssertionError("POSIX API on Windows")),
+            mock.patch.object(REPOCTL.os, "cpu_count", return_value=8),
+        ):
+            self.assertEqual((2, 6 * 1024**3), REPOCTL._local_resources())
+
+    def test_windows_jobs_terminate_descendants_even_after_leader_exit(self):
+        import ctypes
+
+        kernel = mock.Mock()
+        kernel.CreateJobObjectW.return_value = 123
+        kernel.SetInformationJobObject.return_value = 1
+        kernel.AssignProcessToJobObject.return_value = 1
+        kernel.TerminateJobObject.return_value = 1
+        kernel.CloseHandle.return_value = 1
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True):
+            job = REPOCTL._WindowsJob()
+            process = mock.Mock(_handle=456, returncode=1)
+            job.attach(process)
+            job.close()
+            job.close()
+        kernel.AssignProcessToJobObject.assert_called_once_with(123, 456)
+        kernel.TerminateJobObject.assert_called_once_with(123, 1)
+        kernel.CloseHandle.assert_called_once_with(123)
+        limits = kernel.SetInformationJobObject.call_args.args[2]._obj
+        self.assertEqual(0x2000, limits.basic.flags)
+
+    def test_windows_dispatch_never_calls_killpg(self):
+        for code in (0, 1):
+            with tempfile.TemporaryDirectory() as directory:
+                job = mock.Mock()
+                with (
+                    self.subTest(exit_code=code),
+                    mock.patch.object(REPOCTL.sys, "platform", "win32"),
+                    mock.patch.object(REPOCTL, "_WindowsJob", return_value=job),
+                    mock.patch.object(REPOCTL, "_local_resources", return_value=(2, 4 * 1024**3)),
+                    mock.patch.object(REPOCTL, "CONTEXT", Path(directory)),
+                    mock.patch.object(REPOCTL, "ROOT", Path(directory)),
+                    mock.patch.object(REPOCTL.os, "killpg", side_effect=AssertionError("POSIX killpg on Windows")),
+                ):
+                    self.assertEqual(
+                        code == 0,
+                        REPOCTL._run_independent_gates(
+                            [("windows", [sys.executable, "-c", f"raise SystemExit({code})"])],
+                            [],
+                            os.environ.copy(),
+                        ),
+                    )
+                job.attach.assert_called_once()
+                job.close.assert_called_once()
+
+    def test_windows_job_assignment_failure_cannot_start_the_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "gate-started"
+            job = mock.Mock()
+            job.attach.side_effect = OSError("assignment refused")
+            with (
+                mock.patch.object(REPOCTL.sys, "platform", "win32"),
+                mock.patch.object(REPOCTL, "_WindowsJob", return_value=job),
+                open(os.devnull, "w") as output,
+            ):
+                with self.assertRaisesRegex(OSError, "assignment refused"):
+                    REPOCTL._start_gate_process(
+                        [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"],
+                        output,
+                        os.environ.copy(),
+                    )
+            self.assertFalse(marker.exists())
+            job.close.assert_called_once()
+            self.assertIsNotNone(job.attach.call_args.args[0].returncode)
+
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
         with (
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),

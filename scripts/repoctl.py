@@ -1096,13 +1096,146 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     return p.returncode == 0
 
 
+def _windows_resources() -> tuple[int, int]:
+    """Read Windows affinity and available memory without POSIX interfaces."""
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+            (name, ctypes.c_uint64)
+            for name in (
+                "total_phys",
+                "available_phys",
+                "total_page",
+                "available_page",
+                "total_virtual",
+                "available_virtual",
+                "available_extended",
+            )
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatus)]
+    kernel.GlobalMemoryStatusEx.restype = ctypes.c_int
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.GetProcessAffinityMask.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel.GetProcessAffinityMask.restype = ctypes.c_int
+    memory = MemoryStatus()
+    memory.length = ctypes.sizeof(memory)
+    available = memory.available_phys if kernel.GlobalMemoryStatusEx(ctypes.byref(memory)) else 1024**3
+    process_mask, system_mask = ctypes.c_size_t(), ctypes.c_size_t()
+    cpu = 1
+    if kernel.GetProcessAffinityMask(kernel.GetCurrentProcess(), ctypes.byref(process_mask), ctypes.byref(system_mask)):
+        cpu = max(1, process_mask.value.bit_count())
+    return min(max(1, os.cpu_count() or 1), cpu), available
+
+
+class _WindowsJob:
+    """Own a complete gate process tree, including children of exited leaders."""
+
+    def __init__(self):
+        import ctypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_int64),
+                ("job_time", ctypes.c_int64),
+                ("flags", ctypes.c_uint32),
+                ("minimum_working_set", ctypes.c_size_t),
+                ("maximum_working_set", ctypes.c_size_t),
+                ("active_processes", ctypes.c_uint32),
+                ("affinity", ctypes.c_size_t),
+                ("priority", ctypes.c_uint32),
+                ("scheduling", ctypes.c_uint32),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("basic", BasicLimits),
+                ("io_counters", ctypes.c_uint64 * 6),
+                ("process_memory", ctypes.c_size_t),
+                ("job_memory", ctypes.c_size_t),
+                ("peak_process_memory", ctypes.c_size_t),
+                ("peak_job_memory", ctypes.c_size_t),
+            ]
+
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name, args, result in (
+            ("CreateJobObjectW", [ctypes.c_void_p, ctypes.c_wchar_p], ctypes.c_void_p),
+            (
+                "SetInformationJobObject",
+                [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32],
+                ctypes.c_int,
+            ),
+            ("AssignProcessToJobObject", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
+            ("TerminateJobObject", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_int),
+            ("CloseHandle", [ctypes.c_void_p], ctypes.c_int),
+        ):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = args, result
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("CreateJobObjectW failed")
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+            raise OSError("SetInformationJobObject failed")
+
+    def attach(self, process):
+        if not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
+            raise OSError("AssignProcessToJobObject failed before gate execution")
+
+    def close(self):
+        if self.handle is not None:
+            handle, self.handle = self.handle, None
+            try:
+                if not self.kernel.TerminateJobObject(handle, 1):
+                    raise OSError("TerminateJobObject failed")
+            finally:
+                if not self.kernel.CloseHandle(handle):
+                    raise OSError("CloseHandle failed for gate job")
+
+
+def _start_gate_process(command: list[str], handle, env: dict[str, str]):
+    options = dict(cwd=ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
+    if sys.platform != "win32":
+        return subprocess.Popen(command, start_new_session=True, **options), None
+    job = _WindowsJob()
+    process = None
+    try:
+        # Wait before launching the gate so no descendant can escape assignment.
+        wrapper = "import subprocess,sys; token=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[1:]) if token==b'1' else 125)"
+        process = subprocess.Popen([sys.executable, "-c", wrapper, *command], stdin=subprocess.PIPE, **options)
+        job.attach(process)
+        process.stdin.write("1")
+        process.stdin.close()
+        return process, job
+    except BaseException:
+        try:
+            if process is not None:
+                process.kill()
+                process.wait()
+                process.stdin.close()
+        finally:
+            job.close()
+        raise
+
+
 def _local_resources() -> tuple[int, int]:
+    if sys.platform == "win32":
+        return _windows_resources()
     cpu = max(1, os.cpu_count() or 1)
     if hasattr(os, "sched_getaffinity"):
         cpu = min(cpu, max(1, len(os.sched_getaffinity(0))))
     try:
         memory = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         memory = 1024**3
     root = Path("/sys/fs/cgroup")
     directories = [root]
@@ -1161,6 +1294,7 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
         child_env[setting] = str(min(ceiling, inherited) if inherited > 0 else ceiling)
 
     processes: list[subprocess.Popen] = []
+    windows_jobs: list[_WindowsJob] = []
 
     def signal_groups(sig):
         alive = False
@@ -1173,6 +1307,22 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
         return alive
 
     def stop_all():
+        if sys.platform == "win32":
+            try:
+                errors = []
+                for job in windows_jobs:
+                    try:
+                        job.close()
+                    except OSError as exc:
+                        errors.append(exc)
+                if errors:
+                    raise errors[0]
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+            return
         # A group may outlive its leader, including the gate that failed.
         signal_groups(signal.SIGTERM)
         deadline = time.monotonic() + 3
@@ -1193,15 +1343,9 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
                 log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
                 handle = log_path.open("w", encoding="utf-8")
                 try:
-                    process = subprocess.Popen(
-                        command,
-                        cwd=ROOT,
-                        env=child_env,
-                        text=True,
-                        stdout=handle,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
+                    process, job = _start_gate_process(command, handle, child_env)
+                    if job is not None:
+                        windows_jobs.append(job)
                 except BaseException:
                     handle.close()
                     raise
