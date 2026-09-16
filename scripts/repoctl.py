@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -234,6 +235,15 @@ def developer_state_ready(tags: str) -> bool:
             return False
         got = run([go, "version"], check=False, capture=True)
         if got.returncode or f"go{pins.get('GO_VERSION', '')}" not in got.stdout:
+            return False
+    if "templ" in wanted:
+        from capability_bootstrap import templ_version_matches
+
+        templ = Path.home() / ".local/bin/templ"
+        if not templ.is_file() or not os.access(templ, os.X_OK):
+            return False
+        got = run([str(templ), "version"], check=False, capture=True)
+        if got.returncode or not templ_version_matches(got.stdout, got.stderr, pins.get("TEMPL_VERSION", "")):
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
@@ -592,7 +602,7 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
-    ensure_developer("go,cgo")
+    ensure_developer("go,cgo,templ")
     managed_bin = Path.home() / ".local/bin"
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
@@ -601,8 +611,9 @@ def frontend(action: str, scope: str = "") -> int:
     env.pop("GOTOOLDIR", None)
     go = managed_bin / "go"
     gofmt = managed_bin / "gofmt"
-    if not go.is_file() or not gofmt.is_file():
-        raise RuntimeError("validated managed Go provider is unavailable")
+    templ = managed_bin / "templ"
+    if not go.is_file() or not gofmt.is_file() or not templ.is_file():
+        raise RuntimeError("validated managed Go/templ provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
@@ -617,12 +628,13 @@ def frontend(action: str, scope: str = "") -> int:
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
                 generated_root = Path(temp_dir) / "frontend"
-                shutil.copytree(frontend_root, generated_root)
-                run(
-                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
-                    cwd=generated_root,
-                    env=env,
-                )
+                template_inputs = sorted(frontend_root.rglob("*.templ"))
+                for source in template_inputs:
+                    relative = source.relative_to(frontend_root)
+                    destination = generated_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                run([str(templ), "generate"], cwd=generated_root, env=env)
                 committed = sorted(frontend_root.rglob("*_templ.go"))
                 generated = sorted(generated_root.rglob("*_templ.go"))
                 relative_committed = [path.relative_to(frontend_root) for path in committed]
@@ -636,9 +648,8 @@ def frontend(action: str, scope: str = "") -> int:
             run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
     if action in {"check", "test"}:
         env = dict(env, CGO_ENABLED="1")
-        # One module-wide invocation runs shared package tests exactly once as well as
-        # the independently deployable application packages.
-        run([str(go), "test", "-race", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "test", "-race", *packages], cwd=frontend_root, env=env)
     if action in {"check", "build"}:
         with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-build-") as output_dir:
             for target in targets:
@@ -648,7 +659,8 @@ def frontend(action: str, scope: str = "") -> int:
                     env=env,
                 )
     if action == "check":
-        run([str(go), "vet", "./..."], cwd=frontend_root, env=env)
+        packages = ["./..."] if scope == "all" else [f"./apps/{scope}", "./internal/..."]
+        run([str(go), "vet", *packages], cwd=frontend_root, env=env)
     print(f"PASS frontend {scope} {action} checks completed")
     return 0
 
@@ -776,7 +788,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -890,14 +902,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -1737,10 +1749,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,8 +1882,75 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    if any(entry.startswith("120000 ") for entry in entries):
+        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
