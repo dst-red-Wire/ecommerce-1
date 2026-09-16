@@ -1,0 +1,54 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+observability_stack:
+  telemetry: opentelemetry
+  infrastructure_collector: opentelemetry-collector
+  application_gateway: rotel
+  metrics: victoriametrics
+  infrastructure_logs: victorialogs
+  application_store: clickhouse
+  application_ui: hyperdx
+
+baseline:
+  ztunnel_metrics: required
+  mtls_identity_metrics: required
+  network_visibility: hubble
+  distributed_tracing: application-otel
+  l7_access_logs: waypoint-only
+  l7_http_metrics: waypoint-only
+  l7_observability_alone_justifies_waypoint: false
+
+services:
+  catalog: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  product: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  inventory: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  cart: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  checkout: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  pricing: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  tax: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  order: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  payment:
+    mesh_mode: waypoint-required
+    l7_http_metrics: true
+    l7_access_logs: true
+    trace_sampling: policy-controlled
+    justification: existing-waypoint-may-export-l7-telemetry
+  fulfillment: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  shipping: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  tracking: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  returns: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  billing: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  fraud-risk: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  search: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  review: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  user-profile: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+  notification: {mesh_mode: ztunnel-only, l7_http_metrics: false, l7_access_logs: false}
+
+rules:
+  mesh_mode_must_match-service-mesh-policy: true
+  do_not-add-waypoint-solely-for-generic-telemetry: true
+  application-tracing-must-not-depend-on-waypoint: true
+  sensitive-fields-must-not-be-recorded-in-access-logs: true
+  payment-authorization-data-must-be-redacted: true
+  telemetry-failure-must-not-break-business-traffic: true
