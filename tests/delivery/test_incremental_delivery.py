@@ -99,7 +99,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
         self.assertEqual(
-            ["governance", "runtime-efficiency", "contracts", "automation", "security"],
+            ["preflight", "governance", "runtime-efficiency", "contracts", "automation", "security"],
             executed,
         )
         records = {record["gate"]: record for record in captured["records"]}
