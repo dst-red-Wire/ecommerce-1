@@ -1138,14 +1138,49 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     return p.returncode == 0
 
 
-def _local_parallelism(gate_count: int) -> int:
+def _local_resources() -> tuple[int, int]:
     cpu = max(1, os.cpu_count() or 1)
+    if hasattr(os, "sched_getaffinity"):
+        cpu = min(cpu, max(1, len(os.sched_getaffinity(0))))
     try:
-        memory_gib = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // (1024**3)
+        memory = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError):
-        memory_gib = 1
-    resource_bound = max(1, min(cpu, max(1, memory_gib // 2), gate_count, 4))
-    configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+        memory = 1024**3
+    root = Path("/sys/fs/cgroup")
+    directories = [root]
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                relative = line.split("::", 1)[1].lstrip("/")
+                candidate = (root / relative).resolve()
+                if candidate.is_relative_to(root):
+                    directories += [candidate, *[p for p in candidate.parents if p.is_relative_to(root)]]
+    except OSError:
+        pass
+    for directory in set(directories):
+        try:
+            quota, period = (directory / "cpu.max").read_text().split()
+            if quota != "max" and int(period) > 0:
+                cpu = min(cpu, max(1, int(quota) // int(period)))
+        except (OSError, ValueError):
+            pass
+        try:
+            maximum = (directory / "memory.max").read_text().strip()
+            if maximum != "max":
+                current = int((directory / "memory.current").read_text())
+                memory = min(memory, max(0, int(maximum) - current))
+        except (OSError, ValueError):
+            pass
+    return cpu, memory
+
+
+def _local_parallelism(gate_count: int) -> int:
+    cpu, memory = _local_resources()
+    resource_bound = max(1, min(cpu, max(1, memory // (2 * 1024**3)), gate_count, 4))
+    try:
+        configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+    except ValueError:
+        configured = 1
     return max(1, min(configured, resource_bound))
 
 
@@ -1157,20 +1192,36 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
     lock = threading.Lock()
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
+    effective_cpu, _ = _local_resources()
     child_env = dict(env)
-    child_env.setdefault("GOMAXPROCS", str(max(1, (os.cpu_count() or 1) // jobs)))
-    child_env.setdefault("ANSIBLE_FORKS", str(max(1, (os.cpu_count() or 1) // jobs)))
+    child_env.setdefault("GOMAXPROCS", str(max(1, effective_cpu // jobs)))
+    child_env.setdefault("ANSIBLE_FORKS", str(max(1, effective_cpu // jobs)))
+
+    processes: list[subprocess.Popen] = []
+
+    def signal_groups(sig):
+        alive = False
+        for process in processes:
+            try:
+                os.killpg(process.pid, sig)
+                alive = True
+            except ProcessLookupError:
+                pass
+        return alive
 
     def stop_all():
-        for process, *_ in running.values():
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGTERM)
+        # A group may outlive its leader, including the gate that failed.
+        signal_groups(signal.SIGTERM)
         deadline = time.monotonic() + 3
-        for process, *_ in running.values():
-            try:
-                process.wait(timeout=max(0.1, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
+        while time.monotonic() < deadline:
+            for process in processes:
+                process.poll()
+            if not signal_groups(0):
+                break
+            time.sleep(0.05)
+        signal_groups(signal.SIGKILL)
+        for process in processes:
+            process.wait()
 
     try:
         while pending or running:
@@ -1187,6 +1238,7 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                processes.append(process)
                 running[name] = (process, handle, log_path, time.monotonic(), command)
             finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
             if finished is None:
@@ -1210,13 +1262,10 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
                     "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]),
                     file=sys.stderr,
                 )
-                stop_all()
                 return False
         return True
-    except (KeyboardInterrupt, SystemExit):
-        stop_all()
-        raise
     finally:
+        stop_all()
         for _process, handle, *_rest in running.values():
             handle.close()
 
@@ -1702,6 +1751,16 @@ def verify_change(base: str, head: str) -> int:
         write_evidence(base, head, paths, components, records, verification)
         return 1
     if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
+        verification["tree_stable"] = False
+        records.append(
+            {
+                "gate": "worktree-stability",
+                "status": "FAIL",
+                "exit_code": 1,
+                "duration_seconds": 0.0,
+                "reason": "parallel global gates mutated worktree",
+            }
+        )
         write_evidence(base, head, paths, components, records, verification)
         return fail("parallel global gates mutated the worktree", 1)
 

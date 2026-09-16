@@ -28,7 +28,11 @@ class IncrementalDeliveryTests(unittest.TestCase):
             "status": "PASS",
             "exact_commit_evidence": True,
             "head_tree_sha": "4" * 40,
-            "changed_paths": ["frontend/apps/storefront/app/page.tsx", "platform/terraform/main.tf", "scripts/resource-sizing.rb"],
+            "changed_paths": [
+                "frontend/apps/storefront/app/page.tsx",
+                "platform/terraform/main.tf",
+                "scripts/resource-sizing.rb",
+            ],
             "qualification_identity": REPOCTL.qualification_identity(),
             "created_at_epoch": time.time(),
             "gates": [
@@ -101,6 +105,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
@@ -211,6 +222,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
