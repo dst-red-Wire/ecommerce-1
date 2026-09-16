@@ -62,6 +62,144 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("def invalid(\n", path.read_text())
 
+    def test_replacement_head_cannot_hide_invalid_staged_change(self):
+        with self.fixture() as (root, git):
+            (root / "invalid.py").write_text("undefined_name()\n")
+            git("add", "invalid.py")
+            original = git("rev-parse", "HEAD")
+            replacement = git("commit-tree", git("write-tree"), "-m", "Replacement fixture")
+            git("replace", original, replacement)
+            self.assertEqual("", git("diff", "--cached", "--name-only"))
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_replacement_blob_cannot_change_indexed_bytes(self):
+        with self.fixture() as (root, git):
+            path = root / "invalid.py"
+            path.write_text("undefined_name()\n")
+            git("add", path.name)
+            indexed = git("rev-parse", ":invalid.py")
+            path.write_text("value = 1\n")
+            replacement = git("hash-object", "-w", path.name)
+            git("replace", indexed, replacement)
+            with tempfile.TemporaryDirectory() as directory:
+                REPOCTL._materialize_staged_tree(Path(directory))
+                self.assertEqual("undefined_name()\n", (Path(directory) / path.name).read_text())
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_filesystem_equivalent_index_paths_cannot_overwrite_a_blob(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as directory:
+            (root / "first").write_text("first indexed content")
+            (root / "second").write_text("second indexed content")
+            first = git("hash-object", "-w", "first")
+            second = git("hash-object", "-w", "second")
+            git("update-index", "--add", "--cacheinfo", f"100644,{first},CASE.txt")
+            git("update-index", "--add", "--cacheinfo", f"100644,{second},case.txt")
+            snapshot = Path(directory)
+            original_open = Path.open
+            original_chmod = Path.chmod
+
+            def case_insensitive_chmod(path, *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_chmod(path, *args, **kwargs)
+
+            def case_insensitive_open(path, mode="r", *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", case_insensitive_open),
+                mock.patch.object(Path, "chmod", case_insensitive_chmod),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "indexed paths collide"):
+                    REPOCTL._materialize_staged_tree(snapshot)
+            self.assertEqual("first indexed content", (snapshot / "case.txt").read_text())
+            self.assertEqual(first, git("rev-parse", ":CASE.txt"))
+            self.assertEqual(second, git("rev-parse", ":case.txt"))
+
+    def test_directory_aliases_cannot_redirect_staged_linter_configuration(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as directory:
+            (root / "config").write_text('[tool.ruff.lint]\nignore = ["F821"]\n')
+            (root / "bad").write_text("undefined_name()\n")
+            config = git("hash-object", "-w", "config")
+            bad = git("hash-object", "-w", "bad")
+            git("update-index", "--add", "--cacheinfo", f"100644,{config},CASE/pyproject.toml")
+            git("update-index", "--add", "--cacheinfo", f"100644,{bad},case/bad.py")
+            snapshot = Path(directory)
+            original_mkdir, original_stat = Path.mkdir, Path.stat
+
+            def folded(path):
+                if path.is_relative_to(snapshot):
+                    return snapshot.joinpath(*(part.lower() for part in path.relative_to(snapshot).parts))
+                return path
+
+            def mkdir(path, *args, **kwargs):
+                return original_mkdir(folded(path), *args, **kwargs)
+
+            def stat(path, *args, **kwargs):
+                return original_stat(folded(path), *args, **kwargs)
+
+            with mock.patch.object(Path, "mkdir", mkdir), mock.patch.object(Path, "stat", stat):
+                with self.assertRaisesRegex(RuntimeError, "directory aliases collide"):
+                    REPOCTL._materialize_staged_tree(snapshot)
+            self.assertEqual([], list(snapshot.rglob("*.py")))
+            self.assertEqual([], list(snapshot.rglob("*.toml")))
+
+    def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
+        with self.fixture() as (root, git):
+            name = os.fsdecode(b"bad\xff.txt")
+            (root / name).write_text("value = 1\n")
+            git("add", "--", name)
+            index = git("write-tree")
+            self.assertEqual(0, REPOCTL.precommit())
+            self.assertEqual(index, git("write-tree"))
+
+    def test_staged_terraform_format_drift_is_rejected(self):
+        with self.fixture() as (root, git):
+            path = root / "main.tf"
+            path.write_text('locals {\nvalue= "example"\n}\n')
+            git("add", "main.tf")
+            path.write_text('locals {\n  value = "example"\n}\n')
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_staged_ansible_syntax_is_rejected_despite_valid_worktree(self):
+        with self.fixture() as (root, git):
+            path = root / "playbook.yml"
+            path.write_text("---\n- hosts: localhost\n  tasks: [\n")
+            git("add", "playbook.yml")
+            path.write_text("---\n- name: Valid unstaged playbook\n  hosts: localhost\n  tasks: []\n")
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_valid_staged_terraform_and_ansible_ignore_unstaged_invalid_content(self):
+        with self.fixture() as (root, git):
+            terraform = root / "main.tf"
+            playbook = root / "playbook.yml"
+            terraform.write_text('locals {\n  value = "example"\n}\n')
+            playbook.write_text("---\n- name: Valid staged playbook\n  hosts: localhost\n  tasks: []\n")
+            git("add", "main.tf", "playbook.yml")
+            index = git("write-tree")
+            terraform.write_text("invalid Terraform\n")
+            playbook.write_text("[invalid YAML\n")
+            self.assertEqual(0, REPOCTL.precommit())
+            self.assertEqual(index, git("write-tree"))
+            self.assertEqual("[invalid YAML\n", playbook.read_text())
+
+    def test_staged_go_vet_failure_is_not_hidden_by_valid_worktree(self):
+        with self.fixture() as (root, git):
+            (root / "go.mod").write_text("module fixture\n\ngo 1.23.0\n")
+            source = root / "example.go"
+            invalid = 'package fixture\n\nimport "fmt"\n\nfunc message() {\n\tfmt.Printf("%d", "text")\n}\n'
+            source.write_text(invalid)
+            git("add", "go.mod", "example.go")
+            source.write_text(invalid.replace('"%d"', '"%s"'))
+            with self.assertRaisesRegex(RuntimeError, "vet"):
+                REPOCTL.precommit()
+
     def test_option_like_and_quoted_paths_are_checked(self):
         for name in ("--stdin-filename=x.py", "line\nbreak.py"):
             with self.subTest(name=name), self.fixture() as (root, git):
@@ -109,6 +247,35 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(head, git("rev-parse", "HEAD"))
             self.assertFalse(any(command[:2] in (["git", "commit"], ["git", "push"]) for command in commands))
             verify.assert_not_called()
+
+    def test_publish_rejects_clean_committed_gitlink_before_verification(self):
+        with self.fixture() as (root, git):
+            git("checkout", "-b", "fixture-publish")
+            head = git("rev-parse", "HEAD")
+            git("update-ref", "refs/remotes/origin/main", head)
+            git("update-index", "--add", "--cacheinfo", f"160000,{head},external")
+            (root / "external").mkdir()
+            git("commit", "-m", "Add gitlink fixture")
+            original_run = REPOCTL.run
+            commands = []
+
+            def run(command, **kwargs):
+                commands.append(command)
+                if command[:2] == ["git", "fetch"]:
+                    return subprocess.CompletedProcess(command, 0)
+                return original_run(command, **kwargs)
+
+            with (
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+                mock.patch.object(REPOCTL, "verify_change") as verify,
+            ):
+                self.assertEqual(1, REPOCTL.publish("main", "Refuse committed gitlink"))
+            verify.assert_not_called()
+            self.assertFalse(any(command[:2] == ["git", "push"] for command in commands))
+
+    def test_guard_rejects_unresolved_regular_index_entries(self):
+        with mock.patch.object(REPOCTL, "git", return_value=f"100644 {'a' * 40} 2\tconflicted.py\0"):
+            self.assertNotEqual(0, REPOCTL._reject_staged_symlinks())
 
     def test_unstaged_attributes_cannot_convert_indexed_blobs(self):
         for tracked in (False, True):
