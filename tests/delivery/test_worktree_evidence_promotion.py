@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,12 @@ MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 class WorktreeEvidencePromotionTests(unittest.TestCase):
     def setUp(self):
+        # Commit hooks export Git-local paths; fixtures must own their repositories.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        environment = mock.patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         affected = mock.patch.object(REPOCTL, "affected", return_value=["global"])
         self.affected = affected.start()
         self.addCleanup(affected.stop)
