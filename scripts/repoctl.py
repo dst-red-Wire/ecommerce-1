@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import shutil
 import subprocess
@@ -56,11 +57,19 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
-PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
-# Every Ansible subprocess resolves collections from the project-owned path only.
-# This prevents a user or distro installation from silently changing execution.
-os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
+REPOSITORY_BIN = ROOT / ".tools" / "bin"
+
+
+def execution_path(inherited: str) -> str:
+    """Keep the locked seed ahead of managed tools, then inherited commands."""
+    seed = ROOT / ".venv/qualification/bin"
+    prefixes = [str(seed)] if (seed / "python").is_file() else []
+    prefixes.extend([str(REPOSITORY_BIN), str(Path.home() / ".local/bin")])
+    return os.pathsep.join(dict.fromkeys([*prefixes, *inherited.split(os.pathsep)]))
+
+
+os.environ["PATH"] = execution_path(os.environ.get("PATH", ""))
+COLLECTIONS_LOCK = ROOT / "platform" / "ansible" / "collections.lock.json"
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
 
@@ -91,6 +100,21 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if cmd and Path(cmd[0]).name in {"ansible-playbook", "ansible-lint", "ansible-galaxy"}:
+        from ansible_collections import load_lock, installer_provenance, selected_path
+
+        effective = os.environ if env is None else env
+        env = {key: value for key, value in effective.items() if not key.startswith("ANSIBLE_")}
+        env.update(
+            ANSIBLE_CONFIG=str(ROOT / "platform/ansible/ansible.cfg"),
+            ANSIBLE_COLLECTIONS_PATH=str(selected_path()),
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        installer_provenance(
+            load_lock(),
+            env=env,
+            playbook_command=cmd[0] if Path(cmd[0]).name == "ansible-playbook" else "ansible-playbook",
+        )
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -133,8 +157,11 @@ def pinned_versions() -> dict[str, str]:
 
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
-    """Read the canonical Ansible collection lock without duplicating its pins."""
-    source = requirements or ROOT / "platform" / "ansible" / "requirements.yml"
+    """Read the complete canonical Ansible collection lock."""
+    if requirements is None:
+        data = json.loads(COLLECTIONS_LOCK.read_text(encoding="utf-8"))
+        return {item["name"]: str(item["version"]) for item in data["collections"]}
+    source = requirements
     result: dict[str, str] = {}
     name: str | None = None
     for raw in source.read_text(encoding="utf-8").splitlines():
@@ -152,8 +179,13 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
     return result
 
 
-def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
+def resolved_ansible_collection_version(name: str, collections_root: Path | None = None) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
+    if collections_root is None:
+        from ansible_collections import load_lock, selected_path
+
+        load_lock()
+        collections_root = selected_path()
     namespace, collection = name.split(".", 1)
     manifest = collections_root / "ansible_collections" / namespace / collection / "MANIFEST.json"
     if not manifest.is_file():
@@ -185,25 +217,33 @@ def ansible_collections_ready() -> bool:
     )
 
 
+def qualification_collections_path() -> Path:
+    from ansible_collections import selected_path
+
+    return selected_path()
+
+
+def qualification_ansible_environment() -> dict[str, str]:
+    """Use controller configuration and immutable collections without ambient plugins."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+    env.update(
+        ANSIBLE_CONFIG=str(ROOT / "platform/ansible/ansible.cfg"),
+        ANSIBLE_COLLECTIONS_PATH=str(qualification_collections_path()),
+        PYTHONDONTWRITEBYTECODE="1",
+    )
+    return env
+
+
 def reconcile_ansible_collections() -> None:
-    """Reconcile the checkout-local pinned Galaxy collections only when missing or drifted."""
-    if ansible_collections_ready():
-        return
-    require("ansible-playbook")
+    """Prepare the verified closure once; warm runs do not start Galaxy or Ansible."""
     require("ansible-galaxy")
     run(
         [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            "platform/ansible/developer.yml",
-            "-e",
-            f"repo_root={ROOT}",
-            "--tags",
-            "ansible_collections",
-        ]
+            sys.executable,
+            "scripts/ansible_collections.py",
+            "prepare",
+        ],
+        env=qualification_ansible_environment(),
     )
     if not ansible_collections_ready():
         drift = []
@@ -1884,6 +1924,7 @@ def _reject_staged_symlinks() -> int:
 
 def _materialize_staged_tree(snapshot: Path) -> None:
     entries = []
+    directories: dict[tuple[int, int], tuple[str, ...]] = {}
     for entry in git("ls-files", "--stage", "-z").split("\0"):
         if not entry:
             continue
@@ -1892,6 +1933,17 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         target = snapshot / path
         if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
             raise RuntimeError("unsupported or unsafe indexed entry")
+        parent = snapshot
+        parts = Path(path).parts[:-1]
+        for index, component in enumerate(parts):
+            parent = parent / component
+            parent.mkdir(exist_ok=True)
+            identity = parent.stat()
+            key = (identity.st_dev, identity.st_ino)
+            spelling = parts[: index + 1]
+            previous = directories.setdefault(key, spelling)
+            if previous != spelling:
+                raise RuntimeError("filesystem-equivalent indexed directory aliases collide")
         entries.append((mode, oid, target))
     if not entries:
         return
@@ -1924,6 +1976,321 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         target.chmod(0o755 if mode == "100755" else 0o644)
 
 
+def _run_staged_ansible_sandbox(command: list[str], *, timeout: int = 120) -> None:
+    """Bound the complete untrusted process tree; discard its terminal channels."""
+    if sys.platform != "linux":
+        raise RuntimeError("staged Ansible resource containment requires Linux")
+    runtime = Path("/run/user") / str(os.getuid())
+    info = runtime.stat()
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("staged Ansible requires a private user systemd runtime")
+    runner = Path(require("systemd-run")).resolve(strict=True)
+    control = Path(require("systemctl")).resolve(strict=True)
+    if any(path.is_relative_to(ROOT.resolve()) for path in (runner, control)):
+        raise RuntimeError("staged Ansible refuses candidate-owned resource controls")
+    env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "XDG_RUNTIME_DIR": str(runtime)}
+    unit = "ecommerce-staged-ansible-" + secrets.token_hex(12) + ".scope"
+    limit = (
+        "import os,resource,sys; "
+        "resource.setrlimit(resource.RLIMIT_CPU,(90,90)); "
+        "resource.setrlimit(resource.RLIMIT_AS,(536870912,536870912)); "
+        "resource.setrlimit(resource.RLIMIT_FSIZE,(16777216,16777216)); "
+        "resource.setrlimit(resource.RLIMIT_NOFILE,(128,128)); "
+        "resource.setrlimit(resource.RLIMIT_CORE,(0,0)); "
+        "os.execv(sys.argv[1],sys.argv[1:])"
+    )
+    # Verify delegation actually enforced each requested cgroup controller before
+    # any candidate byte executes; a manager warning is not adequate containment.
+    verify = (
+        "import os,sys,pathlib; "
+        "membership=pathlib.Path('/proc/self/cgroup').read_text().strip().split('0::',1)[1]; "
+        "group=pathlib.Path('/sys/fs/cgroup')/membership.lstrip('/'); "
+        "assert group.name==sys.argv[1]; "
+        "assert int((group/'memory.max').read_text())<=805306368; "
+        "assert int((group/'memory.swap.max').read_text())==0; "
+        "assert int((group/'pids.max').read_text())<=32; "
+        "cpu=(group/'cpu.max').read_text().split(); assert int(cpu[0])<=int(cpu[1]); "
+        "os.execv(sys.argv[2],sys.argv[2:])"
+    )
+    argv = [
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        limit,
+        str(runner),
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--unit=" + unit,
+        "--property=MemoryMax=805306368",
+        "--property=MemorySwapMax=0",
+        "--property=TasksMax=32",
+        "--property=CPUQuota=100%",
+        "--property=RuntimeMaxSec=" + str(timeout),
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        verify,
+        unit,
+        *command,
+    ]
+    process = subprocess.Popen(
+        argv,
+        cwd=ROOT,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        try:
+            result = process.wait(timeout=timeout + 5)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("staged Ansible sandbox exceeded its execution limit") from exc
+        if result:
+            # Candidate diagnostics may contain secrets or terminal escape codes.
+            # No candidate-controlled text crosses this boundary.
+            raise RuntimeError("staged Ansible lint failed inside its bounded sandbox")
+    finally:
+        # Stop only the random unit owned by this invocation, including detached
+        # descendants. Namespace PID 1 teardown is an independent second boundary.
+        try:
+            subprocess.run(
+                [str(control), "--user", "stop", unit],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+def _staged_ansible_sandbox(snapshot: Path, control: Path) -> tuple[list[str], Path]:
+    """Build a Linux sandbox exposing only indexed input and installed runtime bytes."""
+    if sys.platform != "linux":
+        raise RuntimeError("staged Ansible lint requires the supported Linux bubblewrap sandbox")
+    minimal = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    sandbox = Path(require("bwrap")).resolve(strict=True)
+    expected = pinned_versions().get("BWRAP_VERSION")
+    indexed = snapshot / "config/toolchain/versions.env"
+    indexed_pins = dict(
+        line.strip().split("=", 1)
+        for line in indexed.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#") and "=" in line
+    )
+    if indexed_pins.get("BWRAP_VERSION") != expected:
+        raise RuntimeError("indexed sandbox pin differs from the trusted controller pin")
+    if sandbox.is_relative_to(ROOT.resolve()) or sandbox.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible refuses a candidate-owned sandbox executable")
+    version = run([str(sandbox), "--version"], capture=True, env=minimal).stdout.strip()
+    if not expected or version != f"bubblewrap {expected}":
+        raise RuntimeError("staged Ansible sandbox version does not match its declared pin")
+    launcher = Path(require("ansible-lint")).resolve(strict=True)
+    prefix = launcher.parent.parent
+    # Console-script metadata belongs to the installed tool, never to the index.
+    if prefix.is_relative_to(ROOT.resolve()) or prefix.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible lint refuses a candidate-owned runtime")
+    first = launcher.read_text(encoding="utf-8").splitlines()[0]
+    interpreter = Path(first.removeprefix("#!"))
+    if not first.startswith("#!/") or interpreter.parent != launcher.parent or not (prefix / "pyvenv.cfg").is_file():
+        raise RuntimeError("staged Ansible lint requires an installed isolated Python console script")
+    python = interpreter.resolve(strict=True)
+    if python.is_relative_to(ROOT.resolve()) or python.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible refuses a candidate-owned base interpreter")
+    probe = run(
+        [
+            str(interpreter),
+            "-I",
+            "-B",
+            "-c",
+            "import json,sys,sysconfig,importlib.metadata; print(json.dumps({'prefix':sys.prefix,'executable':sys.executable,"
+            "'base_prefix':sys.base_prefix,'stdlib':sysconfig.get_path('stdlib'),"
+            "'platstdlib':sysconfig.get_path('platstdlib'),'libdir':sysconfig.get_config_var('LIBDIR'),"
+            "'shared':sysconfig.get_config_var('DESTSHARED'),'lint_version':importlib.metadata.version('ansible-lint')}))",
+        ],
+        cwd=control,
+        env=minimal,
+        capture=True,
+    )
+    identity = json.loads(probe.stdout)
+    if identity.get("lint_version") != pinned_versions().get("ANSIBLE_LINT_VERSION"):
+        raise RuntimeError("staged Ansible lint runtime differs from the trusted controller pin")
+    runtime_prefix, runtime_python = Path(identity["prefix"]), Path(identity["executable"])
+    if runtime_prefix.resolve() != prefix or runtime_python.parent.resolve() != launcher.parent:
+        raise RuntimeError("staged Ansible Python runtime identity is inconsistent")
+    python = interpreter.resolve(strict=True)
+    if python.is_relative_to(ROOT.resolve()) or python.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible refuses a candidate-owned base interpreter")
+    from ansible_collections import load_lock, selected_path, installed_ok
+
+    collection_lock = load_lock()
+    collections = selected_path()
+    if collections.is_relative_to(ROOT.resolve()) or collections.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible refuses candidate-owned collection runtime")
+    if not installed_ok(collection_lock, collections):
+        raise RuntimeError("staged Ansible requires the prepared checksum-locked collection closure")
+    # Ansible-lint sizes its pool from this standard cgroup view. Expose only
+    # the verified one-CPU budget, not the host's cgroup hierarchy or CPU count.
+    (control / "cpu.max").write_text("100000 100000\n", encoding="ascii")
+    command = [
+        str(sandbox),
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--die-with-parent",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+    ]
+    # Bind libraries, not /usr or the host filesystem. The virtualenv's metadata,
+    # home directories, credentials, checkout caches and sockets stay outside.
+    for directory in ("/usr/lib", "/usr/lib64", "/lib", "/lib64"):
+        if Path(directory).is_dir():
+            command += ["--ro-bind", directory, directory]
+    # Preserve external interpreter aliases referenced by virtualenv symlinks.
+    target = interpreter
+    while target.is_symlink():
+        if not target.is_relative_to(prefix):
+            command += ["--ro-bind", str(python), str(target)]
+        link = Path(os.readlink(target))
+        target = link if link.is_absolute() else target.parent / link
+    command += ["--ro-bind", str(python), str(python)]
+    # Isolated virtualenvs depend on their installed base Python's stdlib and
+    # shared runtime, which can live under /usr/local, /opt or a version manager.
+    base = Path(identity["base_prefix"]).resolve(strict=True)
+    for key in ("stdlib", "platstdlib", "libdir", "shared"):
+        value = identity.get(key)
+        if not value:
+            continue
+        path = Path(value).resolve(strict=True)
+        if (
+            not (path.is_relative_to(base) or path.is_relative_to(prefix))
+            or path.is_relative_to(ROOT.resolve())
+            or path.is_relative_to(snapshot.resolve())
+        ):
+            raise RuntimeError("staged Ansible base runtime path escapes its installed prefix")
+        command += ["--ro-bind", str(path), str(path)]
+    git_executable = Path(require("git")).resolve(strict=True)
+    command += ["--ro-bind", str(git_executable), "/usr/bin/git"]
+    for name in ("bin", "lib", "lib64", "pyvenv.cfg"):
+        source = prefix / name
+        if source.exists():
+            command += ["--ro-bind", str(source), str(source)]
+    command += [
+        "--ro-bind",
+        str(snapshot),
+        "/staged",
+        "--ro-bind",
+        str(control),
+        "/control",
+        "--ro-bind",
+        str(collections),
+        "/control/collections",
+        "--ro-bind",
+        str(control / "cpu.max"),
+        "/sys/fs/cgroup/cpu.max",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--size",
+        "67108864",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/home",
+        "--size",
+        "16777216",
+        "--tmpfs",
+        "/home/sandbox",
+        "--dir",
+        "/tmp/ansible",
+        "--dir",
+        "/tmp/cache",
+        "--dir",
+        "/etc",
+        "--ro-bind",
+        str(control / "passwd"),
+        "/etc/passwd",
+        "--ro-bind",
+        str(control / "group"),
+        "/etc/group",
+        "--chdir",
+        "/control",
+    ]
+    environment = {
+        "PATH": str(prefix / "bin") + ":/usr/bin",
+        "HOME": "/home/sandbox",
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "XDG_CACHE_HOME": "/tmp/cache",
+        "ANSIBLE_CONFIG": "/control/ansible.cfg",
+        "ANSIBLE_INVENTORY_ENABLED": "ini",
+        "ANSIBLE_COLLECTIONS_PATH": "/control/collections",
+        "ANSIBLE_LOCAL_TEMP": "/tmp/ansible",
+    }
+    for name, value in environment.items():
+        command += ["--setenv", name, value]
+    return command, interpreter
+
+
+def _lint_staged_ansible(snapshot: Path, yaml_files: list[str]) -> None:
+    # Only this controller supplies execution configuration. Candidate plugins may
+    # be discovered by Ansible; the sandbox, not a lint option, contains their code.
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as directory:
+        control = Path(directory)
+        (control / "inventory.ini").write_text("localhost ansible_connection=local\n", encoding="utf-8")
+        (control / "ansible.cfg").write_text(
+            "[defaults]\ninventory = /control/inventory.ini\ncollections_scan_sys_path = False\n"
+            "collections_path = /control/collections\nroles_path = /staged/platform/ansible/roles:/staged/roles\n",
+            encoding="utf-8",
+        )
+        (control / "lint.yml").write_text(
+            '---\nkinds:\n  - yaml: "**/platform/tekton/**/*.yaml"\n  - yaml: "**/platform/tekton/**/*.yml"\n'
+            'skip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+            encoding="utf-8",
+        )
+        (control / "rules").mkdir()
+        (control / "collections").mkdir()
+        (control / "ignore.txt").write_text("", encoding="utf-8")
+        (control / "passwd").write_text(f"sandbox:x:{os.getuid()}:{os.getgid()}:sandbox:/home/sandbox:/nonexistent\n")
+        (control / "group").write_text(f"sandbox:x:{os.getgid()}:\n")
+        command, interpreter = _staged_ansible_sandbox(snapshot, control)
+        launcher = interpreter.parent / "ansible-lint"
+        command += [
+            str(interpreter),
+            "-I",
+            "-B",
+            str(launcher),
+            "--offline",
+            "--config-file",
+            "/control/lint.yml",
+            "--project-dir",
+            "/control",
+            "--ignore-file",
+            "/control/ignore.txt",
+            "--rules-dir",
+            "/control/rules",
+            "-R",
+            "--",
+            *(str(Path("/staged") / Path(path).relative_to(snapshot)) for path in yaml_files),
+        ]
+        # No host environment (including credentials and Python startup hooks)
+        # reaches bubblewrap or its children. Namespace failure has no fallback.
+        _run_staged_ansible_sandbox(command)
+
+
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
     paths = git(
@@ -1952,9 +2319,7 @@ def precommit() -> int:
             terraform = shutil.which("tofu") or require("terraform")
             run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
         if yaml_files:
-            require("ansible-lint")
-            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
-            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+            _lint_staged_ansible(snapshot, yaml_files)
         if ruby_files:
             require("ruby")
             for path in ruby_files:
