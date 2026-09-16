@@ -1,0 +1,129 @@
+version: 1
+status: active
+provider: istio
+mode: ambient
+baseline:
+  cni: cilium
+  transport: ztunnel
+  mtls: strict
+  default_dataplane: ztunnel-only
+  default_waypoint: false
+
+waypoint_policy:
+  rule: waypoint-only-if-l7-capability-is-required
+  decision:
+    waypoint_required_if_any:
+      - l7.routing
+      - l7.authorization
+      - l7.traffic_policy
+    waypoint_forbidden_if_all_false:
+      - l7.routing
+      - l7.authorization
+      - l7.traffic_policy
+  justification_required: true
+  justification_fields:
+    - owner
+    - capability
+    - reason
+    - source_contract
+  allowed_capabilities:
+    l7.routing:
+      description: HTTP/gRPC routing that cannot be satisfied by L3/L4 networking alone.
+      examples:
+        - header-based-routing
+        - path-based-routing
+        - host-based-routing
+        - weighted-service-routing
+    l7.authorization:
+      description: Application-layer authorization requiring HTTP/gRPC attributes.
+      examples:
+        - method-aware-authorization
+        - path-aware-authorization
+        - jwt-claim-aware-policy
+        - request-header-aware-policy
+    l7.traffic_policy:
+      description: Application-layer traffic behavior requiring a waypoint proxy.
+      examples:
+        - retries
+        - timeouts
+        - circuit-breaking
+        - fault-injection
+        - l7-telemetry-policy
+  non_qualifying_reasons:
+    - service-is-business-critical
+    - service-handles-sensitive-data
+    - service-is-public
+    - service-has-high-traffic
+    - service-may-need-l7-later
+  safeguards:
+    - no-waypoint-by-default
+    - no-waypoint-without-versioned-requirement
+    - no-duplicate-l7-policy-authority-between-cilium-and-istio
+    - remove-waypoint-when-last-l7-requirement-is-removed
+
+services:
+  catalog:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  product:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  inventory:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  cart:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  checkout:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  pricing:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  tax:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  order:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  payment:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  fulfillment:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  shipping:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  tracking:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  returns:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  billing:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  fraud-risk:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  search:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  review:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  user-profile:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+  notification:
+    l7: {routing: false, authorization: false, traffic_policy: false}
+    dataplane: ztunnel-only
+
+validation:
+  invariants:
+    - every-business-service-must-be-declared
+    - dataplane-must-equal-waypoint-required-when-any-l7-flag-is-true
+    - dataplane-must-equal-ztunnel-only-when-all-l7-flags-are-false
+    - every-true-l7-flag-must-have-versioned-justification
+    - cilium-and-istio-must-not-own-the-same-l7-policy-for-the-same-flow
