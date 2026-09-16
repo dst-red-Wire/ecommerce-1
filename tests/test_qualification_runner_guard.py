@@ -84,3 +84,65 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         result = self.admit()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("replacement refs are forbidden", result.stdout)
+
+    def test_ansible_clone_fetches_head_reachable_only_through_pr_ref(self):
+        import shlex
+        from ansible.modules import git as ansible_git
+        import yaml
+
+        tasks = yaml.safe_load((ROOT / "platform/ansible/qualification-runner.yml").read_text())[0]["post_tasks"]
+        parameters = next(task["ansible.builtin.git"] for task in tasks if "ansible.builtin.git" in task)
+        self.assertEqual("{{ qualification_pr_head }}", parameters["refspec"])
+        remote = self.directory / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], env=self.env, capture_output=True, check=True)
+        self.git("remote", "add", "origin", remote.as_uri())
+        self.git("push", "origin", "HEAD:refs/heads/main")
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=remote, env=self.env, check=True)
+        self.write("private-head.txt", "PR-only content\n")
+        self.commit()
+        head = self.git("rev-parse", "HEAD").strip()
+        self.git("push", "origin", "HEAD:refs/pull/1/head")
+        env = self.env
+        commands = []
+
+        class LocalGitModule:
+            def run_command(module, command, check_rc=False, cwd=None):
+                argv = shlex.split(command) if isinstance(command, str) else command
+                commands.append(argv)
+                result = subprocess.run(
+                    argv,
+                    cwd=cwd if cwd and Path(cwd).exists() else remote.parent,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                if check_rc and result.returncode:
+                    raise AssertionError(result.stderr)
+                return result.returncode, result.stdout, result.stderr
+
+            def fail_json(module, **kwargs):
+                raise AssertionError(kwargs)
+
+        destination = self.directory / "module-clone"
+        module = LocalGitModule()
+        ansible_git.clone(
+            shutil.which("git"),
+            module,
+            remote.as_uri(),
+            str(destination),
+            "origin",
+            None,
+            head,
+            False,
+            None,
+            head,
+            None,
+            False,
+            None,
+            {},
+            [],
+            False,
+        )
+        self.assertTrue(any(command[1:4] == ["fetch", "origin", head] for command in commands))
+        subprocess.run(["git", "checkout", "--detach", head], cwd=destination, env=env, capture_output=True, check=True)
+        self.assertEqual("PR-only content\n", (destination / "private-head.txt").read_text())

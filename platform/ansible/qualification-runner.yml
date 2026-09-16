@@ -39,6 +39,7 @@
         repo: "{{ qualification_repository_url }}"
         dest: "{{ qualification_repository_path }}"
         version: "{{ qualification_pr_head }}"
+        refspec: "{{ qualification_pr_head }}"
         update: false
       become: true
       become_user: "{{ qualification_user }}"
