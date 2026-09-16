@@ -69,6 +69,8 @@ os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 # Every service/frontend owns its go.mod; ambient workspaces are not gate inputs.
 os.environ["GOWORK"] = "off"
+# Every controller child inspects the objects that push will actually publish.
+os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
 CONTEXT = ROOT / ".context"
 
 
@@ -98,6 +100,8 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if cmd and Path(cmd[0]).name in {"git", "git.exe"}:
+        cmd = [cmd[0], "--no-replace-objects", *cmd[1:]]
     if cmd and Path(cmd[0]).name in {"go", "go.exe"}:
         env = dict(os.environ if env is None else env, GOWORK="off")
     p = subprocess.run(
@@ -983,7 +987,8 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("base_sha") != base_sha
         or not _evidence_identity_matches(evidence)
         or not _fresh_evidence(evidence)
-        or evidence.get("verification", {}).get("tree_stable") is not True
+        or not isinstance(evidence.get("verification"), dict)
+        or evidence["verification"].get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
     ):
@@ -992,6 +997,8 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
 
 
 def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path | None:
+    if not isinstance(source, dict):
+        return None
     requested = git("rev-parse", head).strip()
     current = git("rev-parse", "HEAD").strip()
     if requested != current or git("status", "--porcelain", "--untracked-files=all").strip():
@@ -1064,6 +1071,8 @@ def _valid_gate_seconds(value) -> bool:
 
 
 def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
+    if not isinstance(evidence, dict):
+        return False
     records = evidence.get("gates")
     if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
         return False
@@ -1090,11 +1099,15 @@ def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
 
 
 def _supported_evidence_schema(evidence: dict, minimum: int) -> bool:
+    if not isinstance(evidence, dict):
+        return False
     version = evidence.get("schema_version")
     return type(version) is int and minimum <= version <= 5
 
 
 def _fresh_evidence(evidence: dict) -> bool:
+    if not isinstance(evidence, dict):
+        return False
     value = evidence.get("created_at_epoch")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
@@ -1150,6 +1163,8 @@ def _runtime_identity_required(gates: tuple[str, ...]) -> bool:
 
 
 def _evidence_identity_matches(evidence: dict) -> bool:
+    if not isinstance(evidence, dict):
+        return False
     records = evidence.get("gates")
     if (
         evidence.get("reuse_identity_complete", True) is not True
@@ -1231,6 +1246,18 @@ def qualification_identity(gates: tuple[str, ...] = ()) -> str:
         digest.update(b"unavailable")
     else:
         digest.update(Path(evidence_delivery_module.__file__).read_bytes())
+    digest.update(b"installed-ansible-collections")
+    for path in sorted(PROJECT_COLLECTIONS.rglob("*")):
+        digest.update(os.fsencode(path.relative_to(PROJECT_COLLECTIONS)))
+        if path.is_symlink():
+            digest.update(b"symlink:" + os.fsencode(os.readlink(path)))
+            if path.is_dir() and not path.resolve().is_relative_to(PROJECT_COLLECTIONS.resolve()):
+                raise RuntimeError("collection directory symlink escapes the bound collection contents")
+        if path.is_file():
+            with path.open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+        elif not path.is_dir():
+            digest.update(b"missing-or-nonregular")
     digest.update(sys.version.encode())
     # python and python3 are equivalent aliases inside one environment; separate
     # virtualenvs and changed interpreter bytes must still invalidate evidence.

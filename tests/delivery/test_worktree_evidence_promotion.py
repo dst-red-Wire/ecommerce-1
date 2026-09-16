@@ -48,6 +48,42 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
 
+    def test_replacement_commit_cannot_supply_the_qualified_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.init_repo(root)
+            original_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+            (root / "README.md").write_text("benign replacement")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "replacement"], cwd=root, check=True)
+            replacement = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            subprocess.run(["git", "reset", "--hard", base], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "replace", base, replacement], cwd=root, check=True)
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=root, check=True, capture_output=True)
+            self.assertEqual("benign replacement", (root / "README.md").read_text())
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                self.assertEqual(original_tree, REPOCTL.git("rev-parse", "HEAD^{tree}").strip())
+                self.assertIsNone(REPOCTL._valid_exact_evidence(base, "HEAD"))
+                with mock.patch.object(REPOCTL, "_run_gate") as gate:
+                    self.assertEqual(2, REPOCTL.verify_change(base, "HEAD"))
+                    gate.assert_not_called()
+
+    def test_non_object_parent_and_worktree_evidence_is_a_cache_miss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.init_repo(root)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "child"], cwd=root, check=True)
+            context = root / ".context"
+            evidence = context / "evidence"
+            evidence.mkdir(parents=True)
+            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+                for value in (None, [], [1], True, 1, "cached"):
+                    with self.subTest(value=value):
+                        for name in ("worktree", base):
+                            (evidence / f"{name}.json").write_text(json.dumps(value))
+                        self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                        self.assertEqual((None, None), REPOCTL._incremental_parent_evidence(base, "HEAD"))
+
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
             'ci: ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE',

@@ -16,6 +16,15 @@ SPEC.loader.exec_module(REPOCTL)
 
 
 class ExactEvidenceValidationTest(unittest.TestCase):
+    def setUp(self):
+        # Each identity regression owns its collection fixture; hashing the host
+        # collections repeatedly adds unrelated I/O to tool-identity tests.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        patch = mock.patch.object(REPOCTL, "PROJECT_COLLECTIONS", Path(temporary.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def evidence(self):
         return {
             "schema_version": 5,
@@ -78,6 +87,33 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                     records = []
                     self.assertFalse(REPOCTL._reuse_gate(evidence["gates"][0]["gate"], "parent", evidence, records))
                     self.assertEqual([], records)
+
+    def test_non_object_json_is_a_cache_miss(self):
+        for value in (None, [], [1], True, 1, "cached"):
+            with self.subTest(value=value):
+                self.assertIsNone(self.validate(value))
+                self.assertIsNone(REPOCTL._promote_worktree_evidence("base", "h", value))
+
+    def test_installed_collection_bytes_invalidate_same_version_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collections = Path(directory)
+            plugin = collections / "ansible_collections/demo/example/plugins/modules/module.py"
+            plugin.parent.mkdir(parents=True)
+            manifest = plugin.parents[2] / "MANIFEST.json"
+            manifest.write_text('{"collection_info":{"version":"1.0"}}')
+            plugin.write_text("original implementation")
+            with (
+                mock.patch.object(REPOCTL, "PROJECT_COLLECTIONS", collections),
+                mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+            ):
+                original = REPOCTL.qualification_identity()
+                plugin.write_text("modified implementation")
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+                plugin.write_text("original implementation")
+                self.assertEqual(original, REPOCTL.qualification_identity())
+                plugin.unlink()
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+            self.assertEqual('{"collection_info":{"version":"1.0"}}', manifest.read_text())
 
     def test_go_gates_ignore_external_or_missing_workspaces(self):
         with tempfile.TemporaryDirectory() as directory:
