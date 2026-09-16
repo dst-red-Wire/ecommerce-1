@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
+import shlex
 import os
 from pathlib import Path
 import subprocess
@@ -70,6 +73,52 @@ def _is_reused(record: dict[str, Any]) -> bool:
     return any(bool(record.get(field)) for field in REUSE_FIELDS)
 
 
+def _finite_seconds(value: Any) -> bool:
+    try:
+        return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
+def _campaign_metadata(campaign: dict[str, Any]) -> tuple[dict, list[str]]:
+    environment = campaign["environment"]
+    commands = campaign["commands"]
+    if not isinstance(environment, dict) or not isinstance(commands, list):
+        raise ValueError("campaign metadata must be an environment object and command list")
+    safe_environment = {}
+    for key in ("cpus", "memory_bytes"):
+        value = environment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            safe_environment[key] = value
+    for key, allowed in {"os": {"linux", "darwin", "windows"}, "arch": {"amd64", "arm64", "x86_64", "aarch64"}}.items():
+        if isinstance(environment.get(key), str) and environment[key] in allowed:
+            safe_environment[key] = environment[key]
+    safe_commands = []
+    targets = {
+        "ci",
+        "verify-change",
+        "seed",
+        "bootstrap",
+        "governance",
+        "contracts",
+        "ansible",
+        "terraform",
+        "test",
+        "lint",
+        "format-check",
+        "security",
+        "perf-audit",
+    }
+    for command in commands:
+        try:
+            parts = shlex.split(command) if isinstance(command, str) else []
+        except ValueError:
+            parts = []
+        safe = len(parts) == 2 and parts[0] == "make" and parts[1] in targets
+        safe_commands.append(" ".join(parts) if safe else "[redacted command]")
+    return safe_environment, safe_commands
+
+
 def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
     """Validate and summarize an externally measured, bounded campaign.
 
@@ -86,6 +135,9 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
         if field not in campaign:
             raise ValueError(f"campaign must document {field}")
 
+    if not isinstance(campaign["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", campaign["head_sha"]):
+        raise ValueError("campaign head_sha must be a full lowercase commit SHA")
+    safe_environment, safe_commands = _campaign_metadata(campaign)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     observed_scenarios: set[str] = set()
     for index, run in enumerate(runs):
@@ -102,23 +154,27 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
         if run.get("result") not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
             raise ValueError(f"campaign run {index} has invalid result")
         phases = run.get("phases")
-        if not isinstance(phases, dict):
+        if not isinstance(phases, dict) or not phases:
             raise ValueError(f"campaign run {index} must contain phase measurements")
         unknown_phases = sorted(set(phases) - set(CAMPAIGN_PHASES))
         if unknown_phases:
             raise ValueError(f"campaign run {index} has unknown phases: {', '.join(unknown_phases)}")
         for phase, seconds in phases.items():
-            if not isinstance(seconds, (int, float)) or seconds < 0:
+            if not _finite_seconds(seconds):
                 raise ValueError(f"campaign run {index} phase {phase} must be non-negative seconds")
         for field in ("wall_seconds", "task_duration_sum_seconds", "estimated_saved_seconds"):
-            if not isinstance(run.get(field), (int, float)) or run[field] < 0:
+            if not _finite_seconds(run.get(field)):
                 raise ValueError(f"campaign run {index} {field} must be non-negative seconds")
         observed_scenarios.add(scenario)
         grouped.setdefault((scenario, cache_state), []).append(run)
 
-    missing = sorted(set(CAMPAIGN_SCENARIOS) - observed_scenarios)
+    missing = sorted(
+        {(scenario, cache) for scenario in CAMPAIGN_SCENARIOS for cache in ("cold-isolated", "warm")} - set(grouped)
+    )
     if missing:
-        raise ValueError("campaign is missing required scenarios: " + ", ".join(missing))
+        raise ValueError(
+            "campaign is missing required scenarios: " + ", ".join(f"{scenario}/{cache}" for scenario, cache in missing)
+        )
 
     summaries = []
     for (scenario, cache_state), samples in sorted(grouped.items()):
@@ -141,16 +197,39 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
                 "wall_seconds_range": _round(max(walls) - min(walls)),
                 "task_duration_sum_seconds_median": _round(statistics.median(task_sums)),
                 "estimated_saved_seconds_median": _round(statistics.median(saved)),
-                "phase_seconds_median": {
-                    phase: _round(statistics.median([float(sample["phases"].get(phase, 0.0)) for sample in samples]))
-                    for phase in CAMPAIGN_PHASES
+                **{
+                    f"{field}_{metric}": _round(operation(values))
+                    for field, values in (("task_duration_sum_seconds", task_sums), ("estimated_saved_seconds", saved))
+                    for metric, operation in (
+                        ("min", min),
+                        ("max", max),
+                        ("range", lambda items: max(items) - min(items)),
+                    )
+                },
+                **{
+                    f"phase_seconds_{metric}": {
+                        phase: (_round(operation(values)) if values else None)
+                        for phase in CAMPAIGN_PHASES
+                        for values in [
+                            [float(sample["phases"][phase]) for sample in samples if phase in sample["phases"]]
+                        ]
+                    }
+                    for metric, operation in (
+                        ("median", statistics.median),
+                        ("min", min),
+                        ("max", max),
+                        ("range", lambda items: max(items) - min(items)),
+                    )
+                },
+                "phase_sample_counts": {
+                    phase: sum(phase in sample["phases"] for sample in samples) for phase in CAMPAIGN_PHASES
                 },
             }
         )
     return {
         "head_sha": campaign["head_sha"],
-        "environment": campaign["environment"],
-        "commands": campaign["commands"],
+        "environment": safe_environment,
+        "commands": safe_commands,
         "limitations": campaign["limitations"],
         "scenario_count": len(observed_scenarios),
         "run_count": len(runs),
@@ -515,7 +594,10 @@ def audit(
     if baseline is not None:
         report["comparison"] = compare_baseline(evidence, baseline)
     if campaign is not None:
-        report["campaign"] = campaign_summary(campaign)
+        summary = campaign_summary(campaign)
+        if summary["head_sha"] != evidence.get("head_sha"):
+            raise ValueError("campaign head_sha differs from audited evidence")
+        report["campaign"] = summary
     return report
 
 

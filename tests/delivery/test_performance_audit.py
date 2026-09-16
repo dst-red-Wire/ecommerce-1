@@ -182,6 +182,55 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(1, warm["executed_runs"])
         self.assertFalse(summary["safety"]["authorizes_pass"])
 
+    def test_campaign_rejects_wrong_sha_nonfinite_and_missing_observations(self):
+        campaign = self.campaign()
+        campaign["head_sha"] = "3" * 40
+        with self.assertRaises(ValueError):
+            AUDIT.audit(self.evidence(), root=ROOT, campaign=campaign)
+        for value in (True, float("nan"), float("inf"), -1, 10**400):
+            for field in ("wall_seconds", "task_duration_sum_seconds", "estimated_saved_seconds"):
+                campaign = self.campaign()
+                campaign["runs"][0][field] = value
+                with self.assertRaises(ValueError):
+                    AUDIT.campaign_summary(campaign)
+            campaign = self.campaign()
+            campaign["runs"][0]["phases"]["tests"] = value
+            with self.assertRaises(ValueError):
+                AUDIT.campaign_summary(campaign)
+        campaign = self.campaign()
+        campaign["runs"][0]["phases"] = {}
+        with self.assertRaises(ValueError):
+            AUDIT.campaign_summary(campaign)
+        campaign = self.campaign()
+        campaign["runs"] = [run for run in campaign["runs"] if run["cache_state"] == "warm"]
+        with self.assertRaises(ValueError):
+            AUDIT.campaign_summary(campaign)
+
+    def test_campaign_redacts_metadata_and_reports_all_ranges(self):
+        campaign = self.campaign()
+        campaign["environment"]["TOKEN"] = "sensitive-fixture"
+        campaign["commands"] += ["curl --token sensitive-fixture", "TOKEN=sensitive-fixture make ci"]
+        sample = dict(
+            campaign["runs"][0],
+            wall_seconds=12,
+            task_duration_sum_seconds=20,
+            estimated_saved_seconds=4,
+            phases={"tests": 9},
+        )
+        campaign["runs"].append(sample)
+        summary = AUDIT.campaign_summary(campaign)
+        self.assertNotIn("sensitive-fixture", json.dumps(summary))
+        group = next(
+            group
+            for group in summary["groups"]
+            if group["scenario"] == sample["scenario"] and group["cache_state"] == "cold-isolated"
+        )
+        self.assertEqual(6, group["task_duration_sum_seconds_range"])
+        self.assertEqual(4, group["estimated_saved_seconds_range"])
+        self.assertEqual(4, group["phase_seconds_range"]["tests"])
+        self.assertIsNone(group["phase_seconds_median"]["compilation"])
+        self.assertEqual(1, group["phase_sample_counts"]["tool-preparation"])
+
     def test_campaign_requires_all_bounded_scenarios(self):
         campaign = self.campaign()
         campaign["runs"] = [run for run in campaign["runs"] if run["scenario"] != "ansible"]
