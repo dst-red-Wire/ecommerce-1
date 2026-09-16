@@ -1,0 +1,21 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+
+policy:
+  node_time_source: internal-only
+  kubernetes_nodes_must_not_require_public_ntp: true
+  bootstrap_requires-reachable-internal-time-source: true
+  application-time-authority: host-kernel
+  timezone_storage: utc
+  monotonic-clock-for-durations: required
+
+runtime:
+  ntp_provider: unresolved-runtime-input
+  fail_closed_when_missing: true
+  public_ntp_fallback: forbidden
+
+rules:
+  internal-ntp-addresses-must-be-versioned-before-real-provisioning: true
+  time-source-must-be-identical-for-control-plane-and-workers: true
+  clock-drift-must-be-observable: true
