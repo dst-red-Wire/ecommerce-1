@@ -35,7 +35,7 @@ class ParallelLocalGateTest(unittest.TestCase):
         with (
             mock.patch.object(REPOCTL.sys, "platform", "win32"),
             mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True),
-            mock.patch.object(REPOCTL.os, "sysconf", side_effect=AssertionError("POSIX API on Windows")),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=AssertionError("POSIX API on Windows"), create=True),
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=8),
         ):
             self.assertEqual((2, 6 * 1024**3), REPOCTL._local_resources())
@@ -72,7 +72,9 @@ class ParallelLocalGateTest(unittest.TestCase):
                     mock.patch.object(REPOCTL, "_local_resources", return_value=(2, 4 * 1024**3)),
                     mock.patch.object(REPOCTL, "CONTEXT", Path(directory)),
                     mock.patch.object(REPOCTL, "ROOT", Path(directory)),
-                    mock.patch.object(REPOCTL.os, "killpg", side_effect=AssertionError("POSIX killpg on Windows")),
+                    mock.patch.object(
+                        REPOCTL.os, "killpg", side_effect=AssertionError("POSIX killpg on Windows"), create=True
+                    ),
                 ):
                     self.assertEqual(
                         code == 0,
@@ -149,15 +151,14 @@ class ParallelLocalGateTest(unittest.TestCase):
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
         with (
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),
-            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[8 * 1024**3 // 4096, 4096]),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[8 * 1024**3 // 4096, 4096], create=True),
         ):
             self.assertLessEqual(REPOCTL._local_parallelism(20), 4)
 
     def test_invalid_override_cannot_exceed_resource_bound(self):
         with (
             mock.patch.dict(REPOCTL.os.environ, {"REPOCTL_LOCAL_JOBS": "99"}),
-            mock.patch.object(REPOCTL.os, "cpu_count", return_value=2),
-            mock.patch.object(REPOCTL.os, "sysconf", side_effect=[4 * 1024**3 // 4096, 4096]),
+            mock.patch.object(REPOCTL, "_local_resources", return_value=(2, 4 * 1024**3)),
         ):
             self.assertEqual(2, REPOCTL._local_parallelism(5))
 
@@ -183,6 +184,7 @@ class ParallelLocalGateTest(unittest.TestCase):
                 self.assertTrue(REPOCTL._run_independent_gates([("workers", command)], [], env))
                 self.assertEqual(inherited, env["GOMAXPROCS"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux cgroup resource contract")
     def test_cgroup_quota_and_available_memory_bound_jobs(self):
         values = {
             "/proc/self/cgroup": "0::/\n",
@@ -254,6 +256,7 @@ class ParallelLocalGateTest(unittest.TestCase):
                 )
         self.assertIsNotNone(processes[0].returncode)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux PID namespace regression")
     def test_failure_kills_descendant_after_its_gate_exits(self):
         self._check_descendant_cleanup(new_session=False)
 
@@ -272,7 +275,8 @@ class ParallelLocalGateTest(unittest.TestCase):
             child = (
                 "import os, signal, time; from pathlib import Path; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                f"Path({str(pidfile)!r}).write_text(os.readlink('/proc/self/ns/pid')); time.sleep(60)"
+                f"p=Path({str(pidfile)!r}); t=p.with_suffix('.ready'); "
+                "t.write_text(os.readlink('/proc/self/ns/pid')); t.replace(p); time.sleep(60)"
             )
             parent = (
                 "import os, signal, subprocess, sys, time; from pathlib import Path; "
@@ -287,6 +291,7 @@ class ParallelLocalGateTest(unittest.TestCase):
                 if not pidfile.exists():
                     return []
                 namespace = pidfile.read_text()
+                self.assertRegex(namespace, r"^pid:\[\d+\]$")
                 result = []
                 for entry in Path("/proc").iterdir():
                     if not entry.name.isdigit():
