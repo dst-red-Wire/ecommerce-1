@@ -97,6 +97,7 @@ def run(
         cwd=cwd or ROOT,
         env=env,
         text=True,
+        errors="surrogateescape",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )

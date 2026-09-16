@@ -67,6 +67,18 @@ class FastFailureContractTest(unittest.TestCase):
                 self.assertEqual([name], module.changed_paths("base", head))
                 self.assertTrue(all("-z" in call.args for call in git.call_args_list))
 
+    def test_subprocess_preserves_non_utf8_git_path_bytes(self):
+        import os
+        import sys
+
+        spec = importlib.util.spec_from_file_location("preflight_binary_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        raw = b"scripts/bad\xff.py\0"
+        result = module.run([sys.executable, "-c", f"import sys; sys.stdout.buffer.write({raw!r})"], capture=True)
+        with mock.patch.object(module, "git", return_value=result.stdout):
+            self.assertEqual([raw[:-1]], [os.fsencode(path) for path in module.changed_paths("base", "WORKTREE")])
+
     def test_source_diagnostics_never_escape_preflight(self):
         import subprocess
         import sys
