@@ -1273,13 +1273,14 @@ def _linux_gate_supervisor():
 
 def _start_gate_process(command: list[str], handle, env: dict[str, str]):
     options = dict(cwd=ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
-    if sys.platform != "win32":
-        if sys.platform.startswith("linux"):
-            import inspect
+    if sys.platform.startswith("linux"):
+        import inspect
 
-            supervisor = inspect.getsource(_linux_gate_supervisor) + "\n_linux_gate_supervisor()\n"
-            command = [sys.executable, "-I", "-S", "-c", supervisor, *command]
+        supervisor = inspect.getsource(_linux_gate_supervisor) + "\n_linux_gate_supervisor()\n"
+        command = [sys.executable, "-I", "-S", "-c", supervisor, *command]
         return subprocess.Popen(command, start_new_session=True, **options), None
+    if sys.platform != "win32":
+        raise RuntimeError("local gate descendant containment is supported only on Linux and Windows")
     job = _WindowsJob()
     process = None
     try:

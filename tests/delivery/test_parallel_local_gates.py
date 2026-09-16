@@ -17,6 +17,20 @@ SPEC.loader.exec_module(REPOCTL)
 
 
 class ParallelLocalGateTest(unittest.TestCase):
+    def test_unsupported_posix_hosts_fail_before_launching_any_gate(self):
+        for platform in ("darwin", "freebsd14", "openbsd7"):
+            with (
+                self.subTest(platform=platform),
+                mock.patch.object(REPOCTL.sys, "platform", platform),
+                mock.patch.object(REPOCTL.subprocess, "Popen") as spawn,
+                mock.patch.object(REPOCTL, "_WindowsJob") as job,
+                open(os.devnull, "w") as output,
+                self.assertRaisesRegex(RuntimeError, "supported only on Linux and Windows"),
+            ):
+                REPOCTL._start_gate_process([sys.executable, "-c", "import os; os.setsid()"], output, os.environ.copy())
+            spawn.assert_not_called()
+            job.assert_not_called()
+
     def test_windows_resources_use_affinity_and_available_memory_without_sysconf(self):
         import ctypes
 
