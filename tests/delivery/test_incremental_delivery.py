@@ -28,13 +28,21 @@ class IncrementalDeliveryTests(unittest.TestCase):
             "status": "PASS",
             "exact_commit_evidence": True,
             "head_tree_sha": "4" * 40,
-            "changed_paths": ["frontend/apps/storefront/app/page.tsx", "platform/terraform/main.tf", "scripts/resource-sizing.rb"],
+            "changed_paths": [
+                "frontend/apps/storefront/app/page.tsx",
+                "platform/terraform/main.tf",
+                "scripts/resource-sizing.rb",
+            ],
             "qualification_identity": REPOCTL.qualification_identity(),
             "created_at_epoch": time.time(),
             "gates": [
                 {"gate": "frontend:storefront", "status": "PASS"},
                 {"gate": "platform:terraform", "status": "PASS"},
                 {"gate": "system", "status": "PASS"},
+            ]
+            + [
+                {"gate": name, "status": "PASS"}
+                for name, _ in REPOCTL._global_gate_commands("origin/main", "feature-head")
             ],
         }
 
@@ -179,6 +187,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
             evidence_dir.mkdir()
             parent = self.parent_evidence()
             parent["changed_paths"] = ["platform/terraform/main.tf", "scripts/resource-sizing.rb"]
+            parent["gates"] = [row for row in parent["gates"] if row["gate"] != "frontend:storefront"]
             (evidence_dir / f"{self.PARENT}.json").write_text(json.dumps(parent), encoding="utf-8")
 
             def fake_changed_paths(base, head):

@@ -976,8 +976,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
-        or not isinstance(evidence.get("gates"), list)
-        or any(record.get("status") not in {"PASS", "SKIP"} for record in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
     ):
         return None
     return evidence
@@ -1001,6 +1000,9 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or len(parents) != 2
         or parents[1] != source_head
         or commit_tree != source_tree
+        or source.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(source)
+        or not _complete_gate_inventory(source, base_ref, head)
     ):
         return None
 
@@ -1043,6 +1045,30 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    global_names = {name for name, _ in _global_gate_commands(base, head)}
+    component_names = set(_normalized_component_gates(affected(base, head)))
+    names = [row.get("gate") for row in records]
+    if any(not isinstance(name, str) for name in names):
+        return False
+    if len(names) != len(set(names)) or set(names) != global_names | component_names:
+        return False
+    for row in records:
+        if row.get("status") == "PASS":
+            if row.get("exit_code", 0) != 0:
+                return False
+        elif row.get("status") == "SKIP" and row["gate"] in component_names:
+            command, _ = _component_command(row["gate"])
+            if command is not None:
+                return False
+        else:
+            return False
+    return True
+
+
 def _fresh_evidence(evidence: dict) -> bool:
     value = evidence.get("created_at_epoch")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1077,8 +1103,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         or evidence.get("changed_paths") != changed_paths(base_ref, head)
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
-        or not isinstance(evidence.get("gates"), list)
-        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
     return path
@@ -1124,9 +1149,21 @@ def qualification_identity() -> str:
         if executable:
             with Path(executable).open("rb") as handle:
                 digest.update(hashlib.file_digest(handle, "sha256").digest())
-            # Python entrypoint bytes alone do not identify the installed package.
-            if command in {"ansible-playbook", "ansible-lint"}:
-                digest.update(output([executable, "--version"]).encode())
+            # Dispatcher/entrypoint bytes alone do not identify their selected package.
+            # Query the actual validator too (including pyenv and Corepack launchers).
+            version_args = {
+                "go": ["version"],
+                "gofmt": ["-h"],
+                "templ": ["version"],
+                "terraform": ["version"],
+                "tofu": ["version"],
+                "gitleaks": ["version"],
+                "sqlc": ["version"],
+            }.get(command, ["--version"])
+            probe = run([executable, *version_args], check=False, capture=True)
+            digest.update(str(probe.returncode).encode())
+            digest.update(probe.stdout.encode())
+            digest.update(probe.stderr.encode())
     for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
         digest.update(name.encode())
         digest.update(os.environ.get(name, "").encode())
@@ -1203,8 +1240,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         or evidence.get("changed_paths") != changed_paths(base, parent_sha)
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
-        or not isinstance(evidence.get("gates"), list)
-        or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
     return parent_sha, evidence
