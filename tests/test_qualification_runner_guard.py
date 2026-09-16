@@ -30,6 +30,9 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.write("scripts/qualification_runner_guard.py", "raise SystemExit(0)\n")
         self.commit()
         self.base = self.git("rev-parse", "HEAD").strip()
+        # The fixture controller independently pins its trusted base; the candidate
+        # cannot edit this external policy or supply a replacement through argv.
+        self.guard.write_text(self.guard.read_text().replace("91c636997a3d62595c65f815319c1342c93ea956", self.base))
 
     def git(self, *args):
         return subprocess.check_output(
@@ -45,7 +48,7 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 
-    def admit(self):
+    def admit(self, base=None):
         return subprocess.run(
             [
                 sys.executable,
@@ -54,7 +57,7 @@ class TrustedRunnerGuardTest(unittest.TestCase):
                 "--repo",
                 str(self.repo),
                 "--base",
-                self.base,
+                base or self.base,
                 "--head",
                 self.git("rev-parse", "HEAD").strip(),
             ],
@@ -70,6 +73,13 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         result = self.admit()
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unapproved base-relative runner change", result.stdout)
+
+    def test_candidate_head_cannot_be_substituted_for_trusted_base(self):
+        self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
+        self.commit()
+        result = self.admit(base=self.git("rev-parse", "HEAD").strip())
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("base revision is not admitted", result.stdout)
 
     def test_proxy_role_change_is_in_controller_execution_closure(self):
         self.write("platform/ansible/roles/qualification_proxy_client/tasks/main.yml", "---\n- shell: unapproved\n")
