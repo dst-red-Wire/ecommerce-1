@@ -84,7 +84,8 @@ class FastFailureContractTest(unittest.TestCase):
             mock.patch.object(module, "_run_gate", side_effect=gate),
         ):
             self.assertEqual(0, module.ci_preflight("base", "head", directory))
-            self.assertEqual(0, module.ci_global("base", "head", directory))
+            with mock.patch.object(module.time, "time", return_value=-36000):
+                self.assertEqual(0, module.ci_global("base", "head", directory))
             self.assertEqual(1, executed.count("preflight"))
             records = json.loads((Path(directory) / "global.json").read_text())["records"]
             self.assertEqual(1, sum(row["gate"] == "preflight" for row in records))
@@ -102,6 +103,38 @@ class FastFailureContractTest(unittest.TestCase):
             path.unlink()
             self.assertEqual(0, module.ci_global("base", "head", directory))
             self.assertEqual(1, executed.count("preflight"))
+
+    def test_syntax_paths_are_literal_and_external_symlinks_are_rejected(self):
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("preflight_paths_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as external:
+            root = Path(directory)
+            for name, content in (("-eexit;#.rb", "def broken(\n"), ("--stdin-filename=x.py", "undefined_name()\n")):
+                with self.subTest(name=name):
+                    (root / name).write_text(content)
+                    with (
+                        mock.patch.object(module, "ROOT", root),
+                        mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                        mock.patch.object(module, "affected", return_value=["global"]),
+                        mock.patch.object(module, "changed_paths", return_value=[name]),
+                    ):
+                        with self.assertRaises(RuntimeError):
+                            module.preflight("base", "head")
+            target = Path(external) / "private.py"
+            target.write_text("private_fixture\n")
+            (root / "link.py").symlink_to(target)
+            with (
+                mock.patch.object(module, "ROOT", root),
+                mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                mock.patch.object(module, "affected", return_value=["global"]),
+                mock.patch.object(module, "changed_paths", return_value=["link.py"]),
+                mock.patch.object(module, "run") as run,
+            ):
+                self.assertEqual(1, module.preflight("base", "head"))
+                run.assert_not_called()
 
 
 if __name__ == "__main__":
