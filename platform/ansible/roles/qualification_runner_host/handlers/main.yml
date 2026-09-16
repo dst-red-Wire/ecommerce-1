@@ -3,4 +3,3 @@
   ansible.builtin.command:
     argv: [sysctl, --system]
   changed_when: true
-

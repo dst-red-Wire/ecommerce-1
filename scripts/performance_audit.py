@@ -21,6 +21,7 @@ import sys
 from typing import Any
 
 GLOBAL_GATES = (
+    "preflight",
     "governance",
     "runtime-efficiency",
     "contracts",
@@ -111,23 +112,26 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Model the canonical affected Pipeline after classification.
+    """Model the canonical affected Pipeline including its early preflight.
 
     The current Pipeline runs one sequential global-gates Task in parallel with a
-    matrix of independent component TaskRuns, then joins in the finalizer. Classify,
+    matrix of independent component TaskRuns, after a serial preflight, then joins in the finalizer. Classify,
     pod scheduling and finalizer overhead are not represented in per-gate evidence,
     so this is an execution-gate estimate rather than observed wall clock.
     """
     active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
-    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
+    preflight_seconds = sum(
+        _seconds(record.get("duration_seconds")) for record in active if record.get("gate") == "preflight"
+    )
+    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES and record.get("gate") != "preflight"]
     components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
     global_seconds = sum(_seconds(record.get("duration_seconds")) for record in globals_)
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
-    serial_seconds = global_seconds + sum(seconds for _, seconds in component_durations)
-    critical_seconds = max(global_seconds, component_parallel_seconds)
+    serial_seconds = preflight_seconds + global_seconds + sum(seconds for _, seconds in component_durations)
+    critical_seconds = preflight_seconds + max(global_seconds, component_parallel_seconds)
 
     if global_seconds >= component_parallel_seconds and globals_:
         branch = "global-gates"
@@ -145,8 +149,9 @@ def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "model": "tekton-affected-v1",
-        "assumption": "global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
+        "assumption": "preflight runs once before classify; global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
         "aggregate_executed_gate_seconds": _round(serial_seconds),
+        "preflight_serial_seconds": _round(preflight_seconds),
         "global_branch_seconds": _round(global_seconds),
         "component_matrix_branch_seconds": _round(component_parallel_seconds),
         "critical_path_estimate_seconds": _round(critical_seconds),
