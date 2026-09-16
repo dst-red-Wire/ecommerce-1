@@ -39,6 +39,14 @@ APPROVED_RUNNER_CORRECTIONS = {
 }
 
 
+def validate_runner_index(entries: str) -> None:
+    for entry in filter(None, entries.split("\0")):
+        metadata, path = entry.split("\t", 1)
+        mode, _object_id, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            raise AssertionError(f"unapproved runner index entry: {path} ({mode}, stage {stage})")
+
+
 def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> None:
     for path in before.keys() | after.keys():
         old, new = before.get(path), after.get(path)
@@ -517,6 +525,9 @@ class QualificationTerraformContractTest(unittest.TestCase):
         if base is None:
             self.skipTest("BASE absent: only the base-relative #78 comparison is skipped")
         scopes = [str(path.relative_to(ROOT)) for path in RUNNER_PATHS]
+        validate_runner_index(
+            subprocess.check_output(["git", "ls-files", "--stage", "-z", "--", *scopes], cwd=ROOT, text=True)
+        )
         changed = subprocess.check_output(
             ["git", "diff", "--name-only", "-z", base, "--", *scopes], cwd=ROOT, text=True
         )
@@ -529,8 +540,17 @@ class QualificationTerraformContractTest(unittest.TestCase):
             before[path] = original.stdout if original.returncode == 0 else None
             current = ROOT / path
             self.assertFalse(current.is_symlink(), f"unapproved runner symlink: {path}")
+            self.assertFalse(current.exists() and not current.is_file(), f"unapproved runner file type: {path}")
             after[path] = current.read_bytes() if current.is_file() else None
         validate_runner_changes(before, after)
+
+    def test_runner_index_rejects_gitlinks_even_when_worktree_payload_is_missing(self):
+        path = "platform/ansible/roles/qualification_runner_host/vars"
+        for mode, stage in (("160000", "0"), ("120000", "0"), ("100644", "2")):
+            with self.subTest(mode=mode, stage=stage):
+                with self.assertRaisesRegex(AssertionError, "unapproved runner index entry"):
+                    validate_runner_index(f"{mode} {'a' * 40} {stage}\t{path}\0")
+        validate_runner_index(f"100644 {'a' * 40} 0\ttasks/main.yml\0")
 
     def test_runner_allowlist_rejects_additions_modifications_and_deletions(self):
         path = "platform/ansible/qualification-runner.yml"
