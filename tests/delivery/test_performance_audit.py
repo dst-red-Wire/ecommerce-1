@@ -48,6 +48,23 @@ class PerformanceAuditTests(unittest.TestCase):
             "runs": runs,
         }
 
+    def test_invalid_phase_diagnostic_does_not_echo_untrusted_content(self):
+        campaign = self.campaign()
+        sensitive = "credential-shaped-private-phase"
+        campaign["runs"][0]["phases"] = {sensitive: 1.0}
+        with self.assertRaises(ValueError) as failure:
+            AUDIT.campaign_summary(campaign)
+        self.assertEqual("campaign run 0 has unknown phases", str(failure.exception))
+        self.assertNotIn(sensitive, str(failure.exception))
+
+    def test_cold_cache_root_must_be_a_bounded_nonempty_string(self):
+        for value in (True, 12, {"path": "/tmp/cache"}, [], " ", "x" * 4097):
+            with self.subTest(value_type=type(value).__name__):
+                campaign = self.campaign()
+                campaign["runs"][0]["cache_root"] = value
+                with self.assertRaisesRegex(ValueError, "isolated cache_root"):
+                    AUDIT.campaign_summary(campaign)
+
     def test_invalid_scenario_diagnostic_does_not_echo_untrusted_content(self):
         campaign = self.campaign()
         sensitive = "credential-shaped-private-diagnostic"

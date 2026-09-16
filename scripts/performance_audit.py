@@ -172,7 +172,10 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
         cache_state = str(run.get("cache_state", ""))
         if cache_state not in {"cold-isolated", "warm"}:
             raise ValueError(f"campaign run {index} has invalid cache_state")
-        if cache_state == "cold-isolated" and not str(run.get("cache_root", "")).strip():
+        cache_root = run.get("cache_root")
+        if cache_state == "cold-isolated" and (
+            not isinstance(cache_root, str) or not cache_root.strip() or len(cache_root) > 4096
+        ):
             raise ValueError(f"campaign run {index} cold cache must name its isolated cache_root")
         if run.get("result") not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
             raise ValueError(f"campaign run {index} has invalid result")
@@ -181,7 +184,7 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"campaign run {index} must contain phase measurements")
         unknown_phases = sorted(set(phases) - set(CAMPAIGN_PHASES))
         if unknown_phases:
-            raise ValueError(f"campaign run {index} has unknown phases: {', '.join(unknown_phases)}")
+            raise ValueError(f"campaign run {index} has unknown phases")
         for phase, seconds in phases.items():
             if not _finite_seconds(seconds):
                 raise ValueError(f"campaign run {index} phase {phase} must be non-negative seconds")
