@@ -33,6 +33,7 @@ env-check-runtime: ## Audit and require optional external runtime capabilities
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
+	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
@@ -100,7 +101,7 @@ frontend-check: ## Run complete Storefront + Admin frontend gate
 frontend-storefront: ## Run complete Storefront gate
 	@$(PYTHON) scripts/repoctl.py frontend check storefront
 
-frontend-admin: ## Run complete Admin gate
+frontend-admin: ## Run complete Admin frontend gate
 	@$(PYTHON) scripts/repoctl.py frontend check admin
 
 service-check: ## Run generic Go service gate; use SERVICE=product
@@ -158,7 +159,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
-.PHONY: context diff-context failure-context nx-graph bazel-verify
+.PHONY: context diff-context failure-context review-budget nx-graph bazel-verify
 
 context: ## Build bounded task-aware context pack; use TASK="..."
 	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
@@ -168,6 +169,11 @@ diff-context: ## Build compact diff-only context pack
 
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
+
+review-budget: ## Decide whether Codex/Work should run; PR and SNAPSHOT required
+	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
+	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
+	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph
