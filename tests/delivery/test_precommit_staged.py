@@ -71,6 +71,38 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(0, REPOCTL.precommit())
             self.assertEqual(index, git("write-tree"))
 
+    def test_staged_terraform_format_drift_is_rejected(self):
+        with self.fixture() as (root, git):
+            path = root / "main.tf"
+            path.write_text('locals {\nvalue= "example"\n}\n')
+            git("add", "main.tf")
+            path.write_text('locals {\n  value = "example"\n}\n')
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_staged_ansible_syntax_is_rejected_despite_valid_worktree(self):
+        with self.fixture() as (root, git):
+            path = root / "playbook.yml"
+            path.write_text("---\n- hosts: localhost\n  tasks: [\n")
+            git("add", "playbook.yml")
+            path.write_text("---\n- name: Valid unstaged playbook\n  hosts: localhost\n  tasks: []\n")
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_valid_staged_terraform_and_ansible_ignore_unstaged_invalid_content(self):
+        with self.fixture() as (root, git):
+            terraform = root / "main.tf"
+            playbook = root / "playbook.yml"
+            terraform.write_text('locals {\n  value = "example"\n}\n')
+            playbook.write_text("---\n- name: Valid staged playbook\n  hosts: localhost\n  tasks: []\n")
+            git("add", "main.tf", "playbook.yml")
+            index = git("write-tree")
+            terraform.write_text("invalid Terraform\n")
+            playbook.write_text("[invalid YAML\n")
+            self.assertEqual(0, REPOCTL.precommit())
+            self.assertEqual(index, git("write-tree"))
+            self.assertEqual("[invalid YAML\n", playbook.read_text())
+
     def test_option_like_and_quoted_paths_are_checked(self):
         for name in ("--stdin-filename=x.py", "line\nbreak.py"):
             with self.subTest(name=name), self.fixture() as (root, git):
@@ -143,6 +175,10 @@ class PrecommitStagedContractTest(unittest.TestCase):
                 self.assertEqual(1, REPOCTL.publish("main", "Refuse committed gitlink"))
             verify.assert_not_called()
             self.assertFalse(any(command[:2] == ["git", "push"] for command in commands))
+
+    def test_guard_rejects_unresolved_regular_index_entries(self):
+        with mock.patch.object(REPOCTL, "git", return_value=f"100644 {'a' * 40} 2\tconflicted.py\0"):
+            self.assertNotEqual(0, REPOCTL._reject_staged_symlinks())
 
     def test_unstaged_attributes_cannot_convert_indexed_blobs(self):
         for tracked in (False, True):

@@ -2288,8 +2288,11 @@ def deliver(base: str, title: str, message: str) -> int:
 
 def _reject_staged_symlinks() -> int:
     entries = git("ls-files", "--stage", "-z").split("\0")
-    if any(entry.split(" ", 1)[0] not in {"100644", "100755"} for entry in entries if entry):
-        return fail("staged snapshot contains non-regular entries; refusing non-index content")
+    for entry in filter(None, entries):
+        metadata, _path = entry.split("\t", 1)
+        mode, _oid, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            return fail("staged snapshot contains non-regular or unresolved entries; refusing non-index content")
     return 0
 
 
@@ -2344,6 +2347,27 @@ def precommit() -> int:
         run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
         python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
         go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        terraform_files = [
+            str(snapshot / path) for path in paths if path.endswith((".tf", ".tfvars")) and (snapshot / path).is_file()
+        ]
+        yaml_files = [
+            str(snapshot / path) for path in paths if path.endswith((".yaml", ".yml")) and (snapshot / path).is_file()
+        ]
+        ruby_files = [str(snapshot / path) for path in paths if path.endswith(".rb") and (snapshot / path).is_file()]
+        if terraform_files:
+            terraform = shutil.which("tofu") or require("terraform")
+            run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
+        if yaml_files:
+            require("ansible-lint")
+            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
+            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+        if ruby_files:
+            require("ruby")
+            for path in ruby_files:
+                run(["ruby", "-c", "--", path], cwd=snapshot)
+        for path in paths:
+            if path.endswith(".json") and (snapshot / path).is_file():
+                json.loads((snapshot / path).read_bytes())
         if python_files:
             require("ruff")
             run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
