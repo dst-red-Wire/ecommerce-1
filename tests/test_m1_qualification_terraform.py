@@ -252,13 +252,13 @@ def validate_contract(files: dict[str, str]) -> None:
         "docker version",
         "docker info",
         "sysctl -n net.ipv4.ip_forward",
-        "git checkout --detach 58e10fdb7122f9f3302e3fc5534b07021f7cc37f",
+        'git checkout --detach "$qualification_head"',
         "make seed",
         "make bootstrap",
         "make env-check",
         "git status --porcelain=v1",
         "$HOME/.local/bin/go test -race -tags=integration ./internal/infrastructure/postgres -count=1",
-        "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci",
+        'BASE="$qualification_base" make ci',
     ):
         if marker not in final_proof:
             raise AssertionError(f"final private-runner proof is incomplete: {marker}")

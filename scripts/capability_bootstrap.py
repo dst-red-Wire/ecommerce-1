@@ -536,7 +536,9 @@ def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path
                 raise ValueError("unexpected or duplicate seed wheel")
             if not tags & supported:
                 raise ValueError("seed wheel is incompatible with this interpreter")
-            if wheel.is_symlink() or hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
+            if wheel.is_symlink() or not wheel.is_file() or wheel.stat().st_nlink != 1:
+                raise ValueError("seed wheel must be a regular single-link file")
+            if hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
                 raise ValueError("seed wheel differs from locked digest")
             selected[name] = wheel
         except (OSError, ValueError):
