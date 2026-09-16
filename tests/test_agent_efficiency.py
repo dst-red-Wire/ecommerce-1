@@ -37,8 +37,8 @@ class AgentEfficiencyContractTest(unittest.TestCase):
 
     def test_prepush_reuses_evidence_only_for_current_base(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)
-        self.assertIn('data.get("base_sha") == base_sha', text)
+        self.assertIn('_valid_exact_evidence("origin/main", head)', text)
+        self.assertIn('evidence.get("base_sha") != git("rev-parse", base_ref).strip()', text)
 
     def test_ansible_first_replaces_shell_automation(self):
         self.assertFalse(list((ROOT / "scripts").glob("*.sh")))
