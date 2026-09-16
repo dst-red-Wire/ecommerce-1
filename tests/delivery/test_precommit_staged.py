@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -48,7 +49,11 @@ class PrecommitStagedContractTest(unittest.TestCase):
             (root / ".gitleaks.toml").write_bytes((ROOT / ".gitleaks.toml").read_bytes())
             git("add", ".gitleaks.toml")
             git("commit", "-m", "Initialize fixture")
-            with mock.patch.object(REPOCTL, "ROOT", root):
+            versions = REPOCTL.pinned_versions()
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "pinned_versions", return_value=versions),
+            ):
                 yield root, git
 
     def test_partial_commit_preserves_index_and_unstaged_content(self):
@@ -188,6 +193,110 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertFalse(rule_marker.exists())
             self.assertEqual(index, git("write-tree"))
+
+    def test_staged_ansible_sandbox_executes_untrusted_code_without_host_access(self):
+        with self.fixture() as (root, _), tempfile.TemporaryDirectory() as directory:
+            private = Path(directory)
+            sentinel = private / "host-private-sentinel"
+            marker = private / "host-write-marker"
+            sentinel.write_text("private-fixture-content")
+            snapshot, control = root / "snapshot", root / "control"
+            snapshot.mkdir()
+            control.mkdir()
+            (control / "passwd").write_text(f"sandbox:x:{os.getuid()}:{os.getgid()}::/home/sandbox:/nonexistent\n")
+            (control / "group").write_text(f"sandbox:x:{os.getgid()}:\n")
+            probe = snapshot / "probe.py"
+            probe.write_text(
+                "import json, os, pathlib, socket\n"
+                f"sentinel = pathlib.Path({str(sentinel)!r})\n"
+                f"marker = pathlib.Path({str(marker)!r})\n"
+                "result = {'read_blocked': not sentinel.exists(), 'environment_clean': 'HOST_PRIVATE_TOKEN' not in os.environ}\n"
+                "try:\n    marker.write_text('escaped')\n    result['write_blocked'] = False\n"
+                "except OSError:\n    result['write_blocked'] = True\n"
+                "result['private_pid'] = os.getpid() <= 2\n"
+                "result['private_network'] = socket.if_nameindex() == [(1, 'lo')]\n"
+                "print(json.dumps(result))\n"
+            )
+            with mock.patch.dict(os.environ, {"HOST_PRIVATE_TOKEN": "private-environment-fixture"}):
+                command, interpreter = REPOCTL._staged_ansible_sandbox(snapshot, control)
+                result = REPOCTL.run(command + [str(interpreter), "-I", "/staged/probe.py"], capture=True)
+            observed = json.loads(result.stdout)
+            self.assertEqual(
+                dict(
+                    read_blocked=True,
+                    environment_clean=True,
+                    write_blocked=True,
+                    private_pid=True,
+                    private_network=True,
+                ),
+                observed,
+            )
+            self.assertFalse(marker.exists())
+
+    def test_adjacent_and_candidate_collection_plugins_cannot_escape_staged_lint(self):
+        plugin_paths = (
+            "filter_plugins/probe.py",
+            "lookup_plugins/probe.py",
+            ".ansible/collections/ansible_collections/host/probe/plugins/filter/probe.py",
+        )
+        for plugin_path in plugin_paths:
+            with (
+                self.subTest(plugin=plugin_path),
+                self.fixture() as (root, git),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                private = Path(directory)
+                sentinel, marker = private / "host-sentinel", private / "host-marker"
+                sentinel.write_text("private-fixture-content")
+                plugin = root / plugin_path
+                plugin.parent.mkdir(parents=True)
+                plugin.write_text(
+                    "import os\nfrom pathlib import Path\n\n"
+                    f"assert not Path({str(sentinel)!r}).exists()\n"
+                    "assert 'HOST_PRIVATE_TOKEN' not in os.environ\n"
+                    f"try:\n    Path({str(marker)!r}).write_text('escaped')\n"
+                    "except OSError:\n    pass\n"
+                    "else:\n    raise RuntimeError('host write escaped')\n\n"
+                    "class FilterModule:\n    def filters(self):\n        return {'probe': lambda value: value}\n\n"
+                    "class LookupModule:\n    def run(self, terms, variables=None, **kwargs):\n        return ['localhost']\n"
+                )
+                hosts = "{{ lookup('probe') }}" if "lookup_plugins" in plugin_path else "{{ 'localhost' | probe }}"
+                if ".ansible/" in plugin_path:
+                    hosts = "{{ 'localhost' | host.probe.probe }}"
+                (root / "playbook.yml").write_text(
+                    f'---\n- name: Candidate plugin playbook\n  hosts: "{hosts}"\n  tasks: []\n'
+                )
+                git("add", "--force", plugin_path, "playbook.yml")
+                index = git("write-tree")
+                # Either lint result is legitimate: unavailable filters may be
+                # rejected. The real executable sandbox test above prevents a
+                # vacuous pass if this Ansible version defers plugin loading.
+                with mock.patch.dict(os.environ, {"HOST_PRIVATE_TOKEN": "private-environment-fixture"}):
+                    try:
+                        REPOCTL.precommit()
+                    except RuntimeError as error:
+                        self.assertNotIn("private-fixture-content", str(error))
+                        self.assertNotIn("private-environment-fixture", str(error))
+                self.assertFalse(marker.exists())
+                self.assertEqual(index, git("write-tree"))
+
+    def test_staged_ansible_missing_or_unsupported_sandbox_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(REPOCTL.sys, "platform", "darwin"), mock.patch.object(REPOCTL, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "supported Linux"):
+                    REPOCTL._staged_ansible_sandbox(root, root)
+                run.assert_not_called()
+            with (
+                mock.patch.object(REPOCTL, "require", side_effect=RuntimeError("missing bwrap")),
+                mock.patch.object(REPOCTL, "run") as run,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "missing bwrap"):
+                    REPOCTL._staged_ansible_sandbox(root, root)
+                run.assert_not_called()
+            with mock.patch.object(REPOCTL, "pinned_versions", return_value={"BWRAP_VERSION": "0.0.0"}):
+                with self.assertRaisesRegex(RuntimeError, "declared pin"):
+                    REPOCTL._staged_ansible_sandbox(root, root)
 
     def test_staged_ansible_syntax_is_rejected_despite_valid_worktree(self):
         with self.fixture() as (root, git):

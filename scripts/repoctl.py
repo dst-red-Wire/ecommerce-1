@@ -1936,6 +1936,158 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         target.chmod(0o755 if mode == "100755" else 0o644)
 
 
+def _staged_ansible_sandbox(snapshot: Path, control: Path) -> tuple[list[str], Path]:
+    """Build a Linux sandbox exposing only indexed input and installed runtime bytes."""
+    if sys.platform != "linux":
+        raise RuntimeError("staged Ansible lint requires the supported Linux bubblewrap sandbox")
+    minimal = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    sandbox = Path(require("bwrap")).resolve(strict=True)
+    expected = pinned_versions().get("BWRAP_VERSION")
+    version = run([str(sandbox), "--version"], capture=True, env=minimal).stdout.strip()
+    if not expected or version != f"bubblewrap {expected}":
+        raise RuntimeError("staged Ansible sandbox version does not match its declared pin")
+    launcher = Path(require("ansible-lint")).resolve(strict=True)
+    prefix = launcher.parent.parent
+    # Console-script metadata belongs to the installed tool, never to the index.
+    if prefix.is_relative_to(ROOT.resolve()) or prefix.is_relative_to(snapshot.resolve()):
+        raise RuntimeError("staged Ansible lint refuses a candidate-owned runtime")
+    first = launcher.read_text(encoding="utf-8").splitlines()[0]
+    interpreter = Path(first.removeprefix("#!"))
+    if not first.startswith("#!/") or interpreter.parent != launcher.parent or not (prefix / "pyvenv.cfg").is_file():
+        raise RuntimeError("staged Ansible lint requires an installed isolated Python console script")
+    probe = run(
+        [str(interpreter), "-I", "-c", "import json,sys; print(json.dumps([sys.prefix,sys.executable]))"],
+        cwd=control,
+        env=minimal,
+        capture=True,
+    )
+    runtime_prefix, runtime_python = map(Path, json.loads(probe.stdout))
+    if runtime_prefix.resolve() != prefix or runtime_python.parent.resolve() != launcher.parent:
+        raise RuntimeError("staged Ansible Python runtime identity is inconsistent")
+    python = interpreter.resolve(strict=True)
+    command = [
+        str(sandbox),
+        "--unshare-all",
+        "--unshare-user",
+        "--disable-userns",
+        "--die-with-parent",
+        "--new-session",
+        "--cap-drop",
+        "ALL",
+        "--clearenv",
+    ]
+    # Bind libraries, not /usr or the host filesystem. The virtualenv's metadata,
+    # home directories, credentials, checkout caches and sockets stay outside.
+    for directory in ("/usr/lib", "/usr/lib64", "/lib", "/lib64"):
+        if Path(directory).is_dir():
+            command += ["--ro-bind", directory, directory]
+    # Preserve external interpreter aliases referenced by virtualenv symlinks.
+    target = interpreter
+    while target.is_symlink():
+        if not target.is_relative_to(prefix):
+            command += ["--ro-bind", str(python), str(target)]
+        link = Path(os.readlink(target))
+        target = link if link.is_absolute() else target.parent / link
+    command += ["--ro-bind", str(python), str(python)]
+    git_executable = Path(require("git")).resolve(strict=True)
+    command += ["--ro-bind", str(git_executable), "/usr/bin/git"]
+    for name in ("bin", "lib", "lib64", "pyvenv.cfg"):
+        source = prefix / name
+        if source.exists():
+            command += ["--ro-bind", str(source), str(source)]
+    command += [
+        "--ro-bind",
+        str(snapshot),
+        "/staged",
+        "--ro-bind",
+        str(control),
+        "/control",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/home",
+        "--tmpfs",
+        "/home/sandbox",
+        "--dir",
+        "/tmp/ansible",
+        "--dir",
+        "/tmp/cache",
+        "--dir",
+        "/etc",
+        "--ro-bind",
+        str(control / "passwd"),
+        "/etc/passwd",
+        "--ro-bind",
+        str(control / "group"),
+        "/etc/group",
+        "--chdir",
+        "/control",
+    ]
+    environment = {
+        "PATH": str(prefix / "bin") + ":/usr/bin",
+        "HOME": "/home/sandbox",
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "XDG_CACHE_HOME": "/tmp/cache",
+        "ANSIBLE_CONFIG": "/control/ansible.cfg",
+        "ANSIBLE_INVENTORY_ENABLED": "ini",
+        "ANSIBLE_COLLECTIONS_PATH": "/control/collections",
+        "ANSIBLE_LOCAL_TEMP": "/tmp/ansible",
+    }
+    for name, value in environment.items():
+        command += ["--setenv", name, value]
+    return command, interpreter
+
+
+def _lint_staged_ansible(snapshot: Path, yaml_files: list[str]) -> None:
+    # Only this controller supplies execution configuration. Candidate plugins may
+    # be discovered by Ansible; the sandbox, not a lint option, contains their code.
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as directory:
+        control = Path(directory)
+        (control / "inventory.ini").write_text("localhost ansible_connection=local\n", encoding="utf-8")
+        (control / "ansible.cfg").write_text(
+            "[defaults]\ninventory = /control/inventory.ini\ncollections_scan_sys_path = False\n"
+            "collections_path = /control/collections\nroles_path = /staged/platform/ansible/roles:/staged/roles\n",
+            encoding="utf-8",
+        )
+        (control / "lint.yml").write_text(
+            '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+            encoding="utf-8",
+        )
+        (control / "rules").mkdir()
+        (control / "collections").mkdir()
+        (control / "ignore.txt").write_text("", encoding="utf-8")
+        (control / "passwd").write_text(f"sandbox:x:{os.getuid()}:{os.getgid()}:sandbox:/home/sandbox:/nonexistent\n")
+        (control / "group").write_text(f"sandbox:x:{os.getgid()}:\n")
+        command, interpreter = _staged_ansible_sandbox(snapshot, control)
+        launcher = interpreter.parent / "ansible-lint"
+        command += [
+            str(interpreter),
+            "-I",
+            str(launcher),
+            "--offline",
+            "--config-file",
+            "/control/lint.yml",
+            "--project-dir",
+            "/control",
+            "--ignore-file",
+            "/control/ignore.txt",
+            "--rules-dir",
+            "/control/rules",
+            "-R",
+            "--",
+            *(str(Path("/staged") / Path(path).relative_to(snapshot)) for path in yaml_files),
+        ]
+        # No host environment (including credentials and Python startup hooks)
+        # reaches bubblewrap or its children. Namespace failure has no fallback.
+        run(command, cwd=control, env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}, capture=True)
+
+
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
     paths = git(
@@ -1964,49 +2116,7 @@ def precommit() -> int:
             terraform = shutil.which("tofu") or require("terraform")
             run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
         if yaml_files:
-            require("ansible-lint")
-            # Execution configuration belongs to this controller, not the index.
-            # Retain only the existing canonical data-only lint exceptions.
-            with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as config_directory:
-                control = Path(config_directory)
-                inventory = control / "inventory.ini"
-                inventory.write_text("localhost ansible_connection=local\n", encoding="utf-8")
-                config = control / "ansible.cfg"
-                config.write_text(f"[defaults]\ninventory = {inventory}\n", encoding="utf-8")
-                lint_config = control / "lint.yml"
-                lint_config.write_text(
-                    '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
-                    encoding="utf-8",
-                )
-                rules = control / "rules"
-                rules.mkdir()
-                ignore = control / "ignore.txt"
-                ignore.write_text("", encoding="utf-8")
-                env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
-                env.update(
-                    ANSIBLE_CONFIG=str(config),
-                    ANSIBLE_INVENTORY_ENABLED="ini",
-                    ANSIBLE_COLLECTIONS_PATH=str(ROOT / ".ansible/collections"),
-                )
-                run(
-                    [
-                        "ansible-lint",
-                        "--offline",
-                        "--config-file",
-                        str(lint_config),
-                        "--project-dir",
-                        str(control),
-                        "--ignore-file",
-                        str(ignore),
-                        "--rules-dir",
-                        str(rules),
-                        "-R",
-                        "--",
-                        *yaml_files,
-                    ],
-                    cwd=control,
-                    env=env,
-                )
+            _lint_staged_ansible(snapshot, yaml_files)
         if ruby_files:
             require("ruby")
             for path in ruby_files:
