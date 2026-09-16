@@ -893,6 +893,14 @@ def validate_seed_generation_root(generations: Path) -> None:
         )
 
 
+def validated_seed_tool_home(value: str | Path) -> Path:
+    configured = Path(value).absolute()
+    for path in (configured, *configured.parents):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise SeedGenerationBoundaryError("seed tool home has an unsafe root or ancestor")
+    return configured.resolve()
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -913,7 +921,9 @@ def seed_environment() -> int:
         sort_keys=True,
     ).encode()
     identity = hashlib.sha256(identity_input).hexdigest()
-    tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")).resolve()
+    tool_home = validated_seed_tool_home(
+        os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")
+    )
     seed_root = tool_home / "python" / identity
     lock_path = tool_home / "locks" / f"python-{identity}.lock"
     wheels = tool_home / "python" / f"{identity}.wheels"
@@ -923,6 +933,8 @@ def seed_environment() -> int:
     validate_seed_generation_root(generations)
     metadata_path = seed_root / ".ecommerce-tool.json"
     python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    validate_seed_generation_root(lock_path)
+    validate_seed_generation_root(tool_home / "downloads" / "pip")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     def valid() -> bool:
