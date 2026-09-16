@@ -1,0 +1,27 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+
+authorities:
+  rollout_decision: argo-rollouts
+  traffic_shift_execution: istio
+  git_desired_state: rancher-fleet
+  ci: tekton
+
+rules:
+  argo-rollouts-is-single-rollout-decision-authority: true
+  istio-is-single-canary-traffic-shift-authority: true
+  kong-canary-weighting: forbidden
+  caddy-canary-weighting: forbidden
+  haproxy-canary-weighting: forbidden
+  ci-direct-deployment: forbidden
+  rollout-state-must-be-declared-in-git: true
+  abort-must-restore-stable-route: true
+  promotion-requires-health-and-slo-gates: true
+  no-progressive-delivery-before-platform-baseline: true
+
+traffic_shift:
+  protocol: http-grpc
+  mechanism: istio-routing
+  weights_owner: argo-rollouts
+  direct-manual-weight-change: forbidden
