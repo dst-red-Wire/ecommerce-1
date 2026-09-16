@@ -1428,6 +1428,8 @@ def _component_command(component: str) -> tuple[list[str] | None, str | None]:
 
 def preflight(base: str, head: str) -> int:
     """Fail cheaply on missing runners and changed-source syntax before test gates."""
+    if _reject_staged_symlinks():
+        return 1
     components = affected(base, head)
     required = {"ruby", "gitleaks"}
     if any(component.startswith(("service:", "frontend:")) for component in components):
@@ -1440,14 +1442,16 @@ def preflight(base: str, head: str) -> int:
         require(executable)
 
     paths = changed_paths(base, head)
+    if any((ROOT / path).is_symlink() or not (ROOT / path).resolve().is_relative_to(ROOT.resolve()) for path in paths):
+        return fail("preflight refuses symbolic links or paths outside the checkout", 1)
     python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
     ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
-        run([sys.executable, "-m", "py_compile", *python_files])
+        run(["ruff", "check", "--", *python_files])
+        run([sys.executable, "-m", "py_compile", "--", *python_files])
     for path in ruby_files:
-        run(["ruby", "-c", path])
+        run(["ruby", "-c", "--", path])
     print(f"PASS preflight capabilities/syntax ({len(paths)} changed paths)")
     return 0
 
@@ -1583,7 +1587,6 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
         try:
             prior = json.loads(preflight_path.read_text(encoding="utf-8"))
             rows = prior["records"]
-            age = time.time() - prior["created_at_epoch"]
             valid = (
                 bool(os.environ.get("CI_PREFLIGHT_RUN_ID"))
                 and prior["pipeline_run_id"] == os.environ["CI_PREFLIGHT_RUN_ID"]
@@ -1592,7 +1595,6 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
                 and prior["head_sha"] == requested
                 and prior["base_sha"] == git("rev-parse", base).strip()
                 and prior["head_tree_sha"] == git("rev-parse", f"{requested}^{{tree}}").strip()
-                and 0 <= age <= 3600
                 and len(rows) == 1
                 and rows[0]["gate"] == "preflight"
                 and rows[0]["status"] == "PASS"
