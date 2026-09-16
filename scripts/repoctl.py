@@ -1203,7 +1203,11 @@ def preflight(base: str, head: str) -> int:
     if _reject_staged_symlinks():
         return 1
     components = affected(base, head)
+    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+    requirements = contract["gate_requirements"]
     required = {"ruby", "gitleaks"}
+    for gate in ("governance", "contracts", "automation", "security"):
+        required.update(requirements[gate])
     if any(component.startswith(("service:", "frontend:")) for component in components):
         required.update({"go", "gofmt"})
     if "platform:terraform" in components:
