@@ -1,0 +1,45 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+
+defaults:
+  scope: service
+  namespace_scope_allowed: true
+  shared_waypoint_allowed: true
+  dedicated_service_waypoint_preferred_when:
+    - service-specific-l7-authorization
+    - service-specific-resilience-policy
+    - service-specific-egress-sensitive-policy
+
+scope_rules:
+  service:
+    use_when:
+      - one-service-has-unique-l7-requirements
+      - blast-radius-must-be-contained
+  namespace:
+    use_when:
+      - services-share-identical-security-boundary
+      - services-share-identical-l7-policy-set
+    forbidden_when:
+      - any-service-needs-different-l7-authorization
+      - any-service-needs-different-retry-timeout-policy
+  shared-group:
+    use_when:
+      - group-has-identical-l7-policy-and-owner
+    justification_required: true
+
+assignments:
+  payment:
+    scope: service
+    waypoint_name: payment-waypoint
+    namespace: commerce
+    reasons:
+      - service-specific-l7-authorization
+      - service-specific-resilience-policy
+
+rules:
+  unlisted_services_use_waypoint: false
+  one_service_one_effective_waypoint_scope: true
+  namespace_waypoint_requires-homogeneous-policy: true
+  scope-change-requires-governance-review: true
