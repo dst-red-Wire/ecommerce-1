@@ -32,6 +32,28 @@ class ParallelLocalGateTest(unittest.TestCase):
         ):
             self.assertEqual(2, REPOCTL._local_parallelism(5))
 
+    def test_inherited_workers_are_clamped_and_smaller_limits_preserved(self):
+        for inherited, expected in (("99", "2"), ("1", "1"), ("0", "2"), ("-1", "2"), ("bad", "2")):
+            with (
+                self.subTest(inherited=inherited),
+                tempfile.TemporaryDirectory() as directory,
+                mock.patch.object(REPOCTL, "CONTEXT", Path(directory)),
+                mock.patch.object(REPOCTL, "ROOT", Path(directory)),
+                mock.patch.object(REPOCTL, "_local_parallelism", return_value=2),
+                mock.patch.object(REPOCTL, "_local_resources", return_value=(4, 8 * 1024**3)),
+            ):
+                env = dict(os.environ, GOMAXPROCS=inherited, ANSIBLE_FORKS=inherited)
+                command = [
+                    sys.executable,
+                    "-c",
+                    "import os; assert os.environ['GOMAXPROCS'] == "
+                    + repr(expected)
+                    + "; assert os.environ['ANSIBLE_FORKS'] == "
+                    + repr(expected),
+                ]
+                self.assertTrue(REPOCTL._run_independent_gates([("workers", command)], [], env))
+                self.assertEqual(inherited, env["GOMAXPROCS"])
+
     def test_cgroup_quota_and_available_memory_bound_jobs(self):
         values = {
             "/proc/self/cgroup": "0::/\n",

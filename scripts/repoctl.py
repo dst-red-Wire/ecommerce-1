@@ -1152,8 +1152,13 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
     logs.mkdir(parents=True, exist_ok=True)
     effective_cpu, _ = _local_resources()
     child_env = dict(env)
-    child_env.setdefault("GOMAXPROCS", str(max(1, effective_cpu // jobs)))
-    child_env.setdefault("ANSIBLE_FORKS", str(max(1, effective_cpu // jobs)))
+    ceiling = max(1, effective_cpu // jobs)
+    for setting in ("GOMAXPROCS", "ANSIBLE_FORKS"):
+        try:
+            inherited = int(child_env.get(setting, ceiling))
+        except (TypeError, ValueError):
+            inherited = ceiling
+        child_env[setting] = str(min(ceiling, inherited) if inherited > 0 else ceiling)
 
     processes: list[subprocess.Popen] = []
 
