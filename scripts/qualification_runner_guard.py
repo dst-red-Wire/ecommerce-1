@@ -7,6 +7,15 @@ from pathlib import Path
 import re
 import subprocess
 
+# Controller policy: the current campaign base and the historical audited M1 base.
+# Only an independently reviewed controller revision may extend this authority.
+TRUSTED_BASE_REVISIONS = frozenset(
+    {
+        "91c636997a3d62595c65f815319c1342c93ea956",
+        "45433013f97a94a8acf94c51a913ff071e6f74b2",
+    }
+)
+
 RUNNER_SCOPES = (
     "platform/ansible/qualification-runner.yml",
     "platform/ansible/qualification-egress.yml",
@@ -128,6 +137,8 @@ def main() -> int:
     parser.add_argument("--head", required=True)
     args = parser.parse_args()
     try:
+        if args.base not in TRUSTED_BASE_REVISIONS:
+            raise AssertionError("base revision is not admitted by trusted controller policy")
         validate_repository(args.repo, args.base, args.head)
     except (AssertionError, OSError, subprocess.CalledProcessError) as error:
         print(f"FAIL trusted runner admission: {error}")

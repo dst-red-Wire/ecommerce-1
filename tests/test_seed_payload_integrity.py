@@ -63,6 +63,20 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.assertEqual(2, path.stat().st_nlink)
         self.assertFalse(self.valid())
 
+    def test_symlinked_tool_home_or_ancestor_is_rejected_before_writes(self):
+        external = self.root / "external-cache"
+        external.mkdir()
+        alias = self.root / "cache-alias"
+        alias.symlink_to(external, target_is_directory=True)
+        for configured in (alias, alias / "nested"):
+            with (
+                self.subTest(configured=configured),
+                mock.patch.dict(os.environ, {"ECOMMERCE_TOOL_HOME": str(configured)}),
+            ):
+                with self.assertRaises(bootstrap.SeedGenerationBoundaryError):
+                    bootstrap.seed_environment()
+            self.assertEqual([], list(external.iterdir()))
+
     def test_activation_script_tampering_is_rejected(self):
         (self.seed / "bin/activate").write_text("echo compromised\n")
         self.assertFalse(self.valid())
