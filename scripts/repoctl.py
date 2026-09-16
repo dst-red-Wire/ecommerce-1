@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -776,7 +779,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -890,14 +893,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -960,7 +963,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 4
+        evidence.get("schema_version", 0) < 5
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -968,11 +971,13 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_sha") != current_head
         or evidence.get("source_head_sha") != current_head
         or evidence.get("source_tree_sha") != current_tree
+        or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
-        or not isinstance(evidence.get("gates"), list)
-        or any(record.get("status") not in {"PASS", "SKIP"} for record in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
     ):
         return None
     return evidence
@@ -996,6 +1001,9 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or len(parents) != 2
         or parents[1] != source_head
         or commit_tree != source_tree
+        or source.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(source)
+        or not _complete_gate_inventory(source, base_ref, head)
     ):
         return None
 
@@ -1015,7 +1023,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     payload = copy.deepcopy(source)
     payload.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "evidence_kind": "exact_commit",
             "head_ref": requested,
             "head_sha": requested,
@@ -1038,6 +1046,41 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    global_names = {name for name, _ in _global_gate_commands(base, head)}
+    component_names = set(_normalized_component_gates(affected(base, head)))
+    names = [row.get("gate") for row in records]
+    if any(not isinstance(name, str) for name in names):
+        return False
+    if len(names) != len(set(names)) or set(names) != global_names | component_names:
+        return False
+    for row in records:
+        if row.get("status") == "PASS":
+            if row.get("exit_code", 0) != 0:
+                return False
+        elif row.get("status") == "SKIP" and row["gate"] in component_names:
+            command, _ = _component_command(row["gate"])
+            if command is not None:
+                return False
+        else:
+            return False
+    return True
+
+
+def _fresh_evidence(evidence: dict) -> bool:
+    value = evidence.get("created_at_epoch")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        created = float(value)
+    except (ValueError, OverflowError):
+        return False
+    return math.isfinite(created) and 0 <= time.time() - created <= 86400
+
+
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     requested = git("rev-parse", head).strip()
     if requested != git("rev-parse", "HEAD").strip():
@@ -1052,13 +1095,84 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("status") != "PASS"
+        evidence.get("schema_version", 0) < 5
+        or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base_ref, head)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
     return path
+
+
+def qualification_identity() -> str:
+    """Bind reusable evidence to validator/configuration and actual core runners."""
+    digest = hashlib.sha256()
+    for relative in (
+        "scripts/repoctl.py",
+        "scripts/ci-affected.rb",
+        "config/contracts/ci-evidence.yaml",
+        "config/contracts/ci-topology.yaml",
+        "config/toolchain/versions.env",
+        "config/toolchain/capabilities.json",
+    ):
+        path = ROOT / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes())
+    digest.update(sys.version.encode())
+    for command in (
+        "ansible-playbook",
+        "ansible-lint",
+        "go",
+        "gofmt",
+        "templ",
+        "terraform",
+        "tofu",
+        "gitleaks",
+        "ruff",
+        "oapi-codegen",
+        "sqlc",
+        "yq",
+        "oasdiff",
+        "node",
+        "pnpm",
+        "oxlint",
+        "oxfmt",
+    ):
+        executable = shutil.which(command)
+        digest.update(command.encode())
+        digest.update((executable or "missing").encode())
+        if executable:
+            with Path(executable).open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+            # Dispatcher/entrypoint bytes alone do not identify their selected package.
+            # Query the actual validator too (including pyenv and Corepack launchers).
+            version_args = {
+                "go": ["version"],
+                "gofmt": ["-h"],
+                "templ": ["version"],
+                "terraform": ["version"],
+                "tofu": ["version"],
+                "gitleaks": ["version"],
+                "sqlc": ["version"],
+            }.get(command, ["--version"])
+            probe = run([executable, *version_args], check=False, capture=True)
+            digest.update(str(probe.returncode).encode())
+            digest.update(probe.stdout.encode())
+            digest.update(probe.stderr.encode())
+    for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+        digest.update(name.encode())
+        digest.update(os.environ.get(name, "").encode())
+    ruby = shutil.which("ruby") or ""
+    digest.update(ruby.encode())
+    if ruby:
+        digest.update(output([ruby, "--version"]).encode())
+    return digest.hexdigest()
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
@@ -1118,12 +1232,16 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 2
+        evidence.get("schema_version", 0) < 5
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha
         or evidence.get("base_sha") != base_sha
-        or not isinstance(evidence.get("gates"), list)
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base, parent_sha)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
     return parent_sha, evidence
@@ -1441,12 +1559,19 @@ def write_evidence(
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
+        "head_tree_sha": (
+            verification_data.get("source_tree_sha")
+            if head == "WORKTREE"
+            else git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        ),
+        "created_at_epoch": time.time(),
+        "qualification_identity": qualification_identity(),
         "exact_commit_evidence": exact,
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,
@@ -1737,10 +1862,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,24 +1995,83 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    if any(entry.startswith("120000 ") for entry in entries):
+        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
+    ev = _valid_exact_evidence("origin/main", head)
+    if ev is not None:
+        print(f"PASS prepush: reusing validated exact evidence {ev.relative_to(ROOT)}")
+        return 0
     return verify_change("origin/main", head)
 
 

@@ -2,7 +2,7 @@ version: 1
 status: exact
 
 evidence:
-  schema_version: 4
+  schema_version: 5
   local_cache: .context/evidence/<sha>.json
   exact_commit_required: true
   pass_required_for_reuse: true
@@ -11,6 +11,9 @@ evidence:
   wrong_base_reuse: forbidden
   dirty_worktree_reuse: forbidden
   content_cache_authorizes_pass_reuse: false
+  maximum_local_age_seconds: 86400
+  qualification_identity_required: true
+  commit_tree_required: true
 
 remote_store:
   authority: harbor
@@ -38,6 +41,9 @@ provenance:
     - exact_commit_evidence
     - affected_components
     - gates
+    - head_tree_sha
+    - qualification_identity
+    - created_at_epoch
   remote_status_context: tekton/ecommerce-affected
   forge_status_binds_exact_commit_sha: true
 
