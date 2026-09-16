@@ -16,7 +16,7 @@ class FastFailureContractTest(unittest.TestCase):
     def test_preflight_checks_capabilities_and_changed_syntax(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         body = source.split("def preflight", 1)[1].split("\ndef ", 1)[0]
-        for marker in ('"gitleaks"', '"go"', '"terraform"', '"ansible-playbook"', '"py_compile"', '"ruby", "-c"'):
+        for marker in ('"gitleaks"', '"go"', '"terraform"', 'requirements["ansible"]', '"py_compile"', '"ruby", "-c"'):
             self.assertIn(marker, body)
 
     def test_missing_global_contract_tool_fails_before_source_checks(self):
@@ -32,11 +32,79 @@ class FastFailureContractTest(unittest.TestCase):
             mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
             mock.patch.object(module, "affected", return_value=["global"]),
             mock.patch.object(module, "require", side_effect=require),
-            mock.patch.object(module, "changed_paths") as paths,
+            mock.patch.object(module, "changed_paths", return_value=[]),
+            mock.patch.object(module, "run") as commands,
         ):
             with self.assertRaisesRegex(RuntimeError, "missing oasdiff"):
                 module.preflight("base", "head")
-            paths.assert_not_called()
+            commands.assert_not_called()
+
+    def test_missing_ansible_galaxy_is_detected_from_component_contract(self):
+        spec = importlib.util.spec_from_file_location("preflight_ansible_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        def require(name):
+            if name == "ansible-galaxy":
+                raise RuntimeError("missing ansible-galaxy")
+
+        with (
+            mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+            mock.patch.object(module, "affected", return_value=["platform:ansible"]),
+            mock.patch.object(module, "changed_paths", return_value=[]),
+            mock.patch.object(module, "require", side_effect=require),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing ansible-galaxy"):
+                module.preflight("base", "head")
+
+    def test_changed_paths_preserve_literal_newlines(self):
+        spec = importlib.util.spec_from_file_location("preflight_nul_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        name = "scripts/line\nbreak.py"
+        for head in ("HEAD", "WORKTREE"):
+            with self.subTest(head=head), mock.patch.object(module, "git", return_value=name + "\0") as git:
+                self.assertEqual([name], module.changed_paths("base", head))
+                self.assertTrue(all("-z" in call.args for call in git.call_args_list))
+
+    def test_source_diagnostics_never_escape_preflight(self):
+        import subprocess
+        import sys
+        import tempfile
+
+        probe = """import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('preflight_log_probe', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.ROOT = Path(sys.argv[2])
+module._reject_staged_symlinks = lambda: 0
+module.affected = lambda *args: ['global']
+module.changed_paths = lambda *args: [sys.argv[3]]
+module.require = lambda name: name
+try:
+    module.preflight('base', 'WORKTREE')
+except RuntimeError as error:
+    print(error, file=sys.stderr)
+    sys.exit(1)
+"""
+        for name in ("source.py", "source.rb"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                contract = root / "config/toolchain/capabilities.json"
+                contract.parent.mkdir(parents=True)
+                contract.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
+                sentinel = "NOT_A_REAL_SECRET"
+                (root / name).write_text(f'value = "{sentinel}" +\n')
+                result = subprocess.run(
+                    [sys.executable, "-c", probe, str(ROOT / "scripts/repoctl.py"), str(root), name],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn("source diagnostics suppressed", result.stderr)
+                self.assertNotIn(sentinel, result.stdout + result.stderr)
 
     def test_tofu_only_runner_passes_preflight(self):
         spec = importlib.util.spec_from_file_location("preflight_test", ROOT / "scripts/repoctl.py")
@@ -134,7 +202,11 @@ class FastFailureContractTest(unittest.TestCase):
             contract = root / "config/toolchain/capabilities.json"
             contract.parent.mkdir(parents=True)
             contract.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
-            for name, content in (("-eexit;#.rb", "def broken(\n"), ("--stdin-filename=x.py", "undefined_name()\n")):
+            for name, content in (
+                ("-eexit;#.rb", "def broken(\n"),
+                ("--stdin-filename=x.py", "undefined_name()\n"),
+                ("line\nbreak.py", "def broken(\n"),
+            ):
                 with self.subTest(name=name):
                     (root / name).write_text(content)
                     with (
