@@ -2182,6 +2182,7 @@ def _reject_staged_symlinks() -> int:
 
 def _materialize_staged_tree(snapshot: Path) -> None:
     entries = []
+    directories: dict[tuple[int, int], tuple[str, ...]] = {}
     for entry in git("ls-files", "--stage", "-z").split("\0"):
         if not entry:
             continue
@@ -2190,6 +2191,17 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         target = snapshot / path
         if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
             raise RuntimeError("unsupported or unsafe indexed entry")
+        parent = snapshot
+        parts = Path(path).parts[:-1]
+        for index, component in enumerate(parts):
+            parent = parent / component
+            parent.mkdir(exist_ok=True)
+            identity = parent.stat()
+            key = (identity.st_dev, identity.st_ino)
+            spelling = parts[: index + 1]
+            previous = directories.setdefault(key, spelling)
+            if previous != spelling:
+                raise RuntimeError("filesystem-equivalent indexed directory aliases collide")
         entries.append((mode, oid, target))
     if not entries:
         return
@@ -2212,7 +2224,13 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         if len(content) != size or stream.read(1) != b"\n":
             raise RuntimeError("truncated indexed blob response")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        # Exclusive creation also detects aliases on case-insensitive or
+        # Unicode-normalizing filesystems; never overwrite another indexed blob.
+        try:
+            with target.open("xb") as output:
+                output.write(content)
+        except FileExistsError as exc:
+            raise RuntimeError("filesystem-equivalent indexed paths collide") from exc
         target.chmod(0o755 if mode == "100755" else 0o644)
 
 
@@ -2245,8 +2263,48 @@ def precommit() -> int:
             run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
         if yaml_files:
             require("ansible-lint")
-            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
-            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+            # Execution configuration belongs to this controller, not the index.
+            # Retain only the existing canonical data-only lint exceptions.
+            with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as config_directory:
+                control = Path(config_directory)
+                inventory = control / "inventory.ini"
+                inventory.write_text("localhost ansible_connection=local\n", encoding="utf-8")
+                config = control / "ansible.cfg"
+                config.write_text(f"[defaults]\ninventory = {inventory}\n", encoding="utf-8")
+                lint_config = control / "lint.yml"
+                lint_config.write_text(
+                    '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+                    encoding="utf-8",
+                )
+                rules = control / "rules"
+                rules.mkdir()
+                ignore = control / "ignore.txt"
+                ignore.write_text("", encoding="utf-8")
+                env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+                env.update(
+                    ANSIBLE_CONFIG=str(config),
+                    ANSIBLE_INVENTORY_ENABLED="ini",
+                    ANSIBLE_COLLECTIONS_PATH=str(ROOT / ".ansible/collections"),
+                )
+                run(
+                    [
+                        "ansible-lint",
+                        "--offline",
+                        "--config-file",
+                        str(lint_config),
+                        "--project-dir",
+                        str(control),
+                        "--ignore-file",
+                        str(ignore),
+                        "--rules-dir",
+                        str(rules),
+                        "-R",
+                        "--",
+                        *yaml_files,
+                    ],
+                    cwd=control,
+                    env=env,
+                )
         if ruby_files:
             require("ruby")
             for path in ruby_files:
