@@ -55,6 +55,14 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.install_payload()
         self.assertTrue(self.valid())
 
+    def test_hardlinked_payload_is_rejected_even_with_expected_bytes(self):
+        path = self.site / "sample/__init__.py"
+        external = self.root / "external-module"
+        path.rename(external)
+        os.link(external, path)
+        self.assertEqual(2, path.stat().st_nlink)
+        self.assertFalse(self.valid())
+
     def test_activation_script_tampering_is_rejected(self):
         (self.seed / "bin/activate").write_text("echo compromised\n")
         self.assertFalse(self.valid())

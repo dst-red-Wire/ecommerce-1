@@ -604,6 +604,8 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
     from pip._internal.operations.install.wheel import PipScriptMaker
 
     try:
+        if any(path.is_file() and not path.is_symlink() and path.stat().st_nlink != 1 for path in root.rglob("*")):
+            return False
         interpreter_wheels = interpreter_seed_wheels()
         archives = seed_wheels(wheels, lock) + interpreter_wheels
         sites = list(root.glob("lib/python*/site-packages")) if os.name != "nt" else [root / "Lib/site-packages"]
@@ -836,6 +838,13 @@ def seed_unlocked_distributions(lock_path: str) -> list[str]:
     return sorted(set(installed) - allowed)
 
 
+def seed_pip_environment() -> dict[str, str]:
+    """Pip must not inherit install destinations or mutable configuration."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
+    env["PIP_CONFIG_FILE"] = os.devnull
+    return env
+
+
 def validate_seed_lock(lock_path: str) -> bool:
     import importlib.metadata as metadata
 
@@ -852,7 +861,8 @@ def validate_seed_lock(lock_path: str) -> bool:
         return False
     return (
         subprocess.run(
-            [sys.executable, "-I", "-m", "pip", "check"],
+            [sys.executable, "-I", "-m", "pip", "--isolated", "check"],
+            env=seed_pip_environment(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -983,6 +993,9 @@ def seed_environment() -> int:
                                     "-I",
                                     "-m",
                                     "pip",
+                                    "--isolated",
+                                    "--cache-dir",
+                                    str(tool_home / "downloads" / "pip"),
                                     "download",
                                     "--only-binary=:all:",
                                     "--require-hashes",
@@ -992,7 +1005,7 @@ def seed_environment() -> int:
                                     download,
                                 ],
                                 check=True,
-                                env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+                                env=seed_pip_environment(),
                             )
                         if not check_seed_reference(Path(download)):
                             raise RuntimeError("downloaded seed wheel reference is invalid")
@@ -1003,6 +1016,9 @@ def seed_environment() -> int:
                         "-I",
                         "-m",
                         "pip",
+                        "--isolated",
+                        "--cache-dir",
+                        str(tool_home / "downloads" / "pip"),
                         "install",
                         "--no-index",
                         "--find-links",
@@ -1014,7 +1030,7 @@ def seed_environment() -> int:
                         str(SEED_LOCK),
                     ],
                     check=True,
-                    env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+                    env=seed_pip_environment(),
                 )
                 metadata_path.write_text(
                     json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
