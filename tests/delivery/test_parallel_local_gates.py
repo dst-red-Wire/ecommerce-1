@@ -105,6 +105,37 @@ class ParallelLocalGateTest(unittest.TestCase):
             job.close.assert_called_once()
             self.assertIsNotNone(job.attach.call_args.args[0].returncode)
 
+    def test_windows_wrapper_cannot_import_checkout_modules_before_job_assignment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            marker = context / "uncontained-import"
+            (context / "subprocess.py").write_text(f"from pathlib import Path; Path({str(marker)!r}).touch()\n")
+            job = mock.Mock()
+
+            def attach(process):
+                time.sleep(0.2)
+                self.assertIsNone(process.poll())
+                self.assertFalse(marker.exists())
+
+            job.attach.side_effect = attach
+            with (
+                mock.patch.object(REPOCTL.sys, "platform", "win32"),
+                mock.patch.object(REPOCTL, "ROOT", context),
+                mock.patch.object(REPOCTL, "_WindowsJob", return_value=job),
+                open(os.devnull, "w") as output,
+            ):
+                process, returned_job = REPOCTL._start_gate_process(
+                    [sys.executable, "-I", "-S", "-c", "pass"], output, os.environ.copy()
+                )
+                try:
+                    self.assertEqual(0, process.wait(timeout=5))
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait()
+                    returned_job.close()
+            self.assertFalse(marker.exists())
+
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
         with (
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),
@@ -214,6 +245,13 @@ class ParallelLocalGateTest(unittest.TestCase):
         self.assertIsNotNone(processes[0].returncode)
 
     def test_failure_kills_descendant_after_its_gate_exits(self):
+        self._check_descendant_cleanup(new_session=False)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux subreaper regression")
+    def test_failure_kills_detached_descendant_after_its_gate_exits(self):
+        self._check_descendant_cleanup(new_session=True)
+
+    def _check_descendant_cleanup(self, new_session):
         with tempfile.TemporaryDirectory() as directory:
             context = Path(directory)
             pidfile = context / "child.pid"
@@ -224,7 +262,7 @@ class ParallelLocalGateTest(unittest.TestCase):
             )
             parent = (
                 "import subprocess, sys, time; from pathlib import Path; "
-                f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session={new_session!r}); "
                 f"p=Path({str(pidfile)!r}); "
                 "exec('while not p.exists(): time.sleep(0.01)'); sys.exit(1)"
             )

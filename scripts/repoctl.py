@@ -1203,16 +1203,126 @@ class _WindowsJob:
                     raise OSError("CloseHandle failed for gate job")
 
 
+def _linux_gate_supervisor():
+    """Track detached descendants as a Linux child subreaper until cleanup ends."""
+    import ctypes
+    import os
+    from pathlib import Path
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
+        raise OSError("cannot enable gate child subreaper")
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise OSError("gate cleanup requires Linux pidfd support")
+    cancelled = False
+
+    def cancel(_signum, _frame):
+        nonlocal cancelled
+        cancelled = True
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
+    leader = None
+
+    def process_state(pid):
+        try:
+            fields = (Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()
+            return int(fields[1]), fields[19]
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def descendants():
+        states = {}
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                state = process_state(int(entry.name))
+                if state is not None:
+                    states[int(entry.name)] = state
+        owned = {os.getpid()}
+        while True:
+            children = {pid for pid, (parent, _start) in states.items() if parent in owned} - owned
+            if not children:
+                break
+            owned.update(children)
+        return {pid: states[pid] for pid in owned if pid != os.getpid()}
+
+    try:
+        leader = subprocess.Popen(sys.argv[1:])
+        while not cancelled and leader.poll() is None:
+            time.sleep(0.02)
+        result = 130 if cancelled else leader.returncode
+    finally:
+        # Subreaping retains orphans even when their original leader or session
+        # disappears. pidfds prevent a reused PID from targeting another process.
+        deadline = time.monotonic() + 5
+        while True:
+            handles = []
+            try:
+                for pid, expected in descendants().items():
+                    try:
+                        fd = os.pidfd_open(pid)
+                    except ProcessLookupError:
+                        continue
+                    if process_state(pid) != expected:
+                        os.close(fd)
+                        continue
+                    handles.append(fd)
+                    try:
+                        signal.pidfd_send_signal(fd, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        pass
+                for fd in handles:
+                    try:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            finally:
+                for fd in handles:
+                    os.close(fd)
+            while True:
+                try:
+                    pid, _status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    pid = 0
+                if not pid:
+                    break
+            if not descendants():
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("gate descendants survived bounded cleanup")
+            time.sleep(0.02)
+        if leader is not None:
+            leader.wait()
+    raise SystemExit(result)
+
+
 def _start_gate_process(command: list[str], handle, env: dict[str, str]):
     options = dict(cwd=ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
     if sys.platform != "win32":
+        if sys.platform.startswith("linux"):
+            import inspect
+
+            supervisor = inspect.getsource(_linux_gate_supervisor) + "\n_linux_gate_supervisor()\n"
+            command = [sys.executable, "-I", "-S", "-c", supervisor, *command]
         return subprocess.Popen(command, start_new_session=True, **options), None
     job = _WindowsJob()
     process = None
     try:
         # Wait before launching the gate so no descendant can escape assignment.
-        wrapper = "import subprocess,sys; token=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[1:]) if token==b'1' else 125)"
-        process = subprocess.Popen([sys.executable, "-c", wrapper, *command], stdin=subprocess.PIPE, **options)
+        wrapper = (
+            "import sys\n"
+            "if sys.stdin.buffer.read(1) != b'1': raise SystemExit(125)\n"
+            "import subprocess\n"
+            "raise SystemExit(subprocess.call(sys.argv[1:]))\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", wrapper, *command], stdin=subprocess.PIPE, **options
+        )
         job.attach(process)
         process.stdin.write("1")
         process.stdin.close()
@@ -1326,7 +1436,7 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
             return
         # A group may outlive its leader, including the gate that failed.
         signal_groups(signal.SIGTERM)
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             for process in processes:
                 process.poll()
