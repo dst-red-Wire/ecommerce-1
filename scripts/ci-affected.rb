@@ -69,7 +69,7 @@ module AffectedComponents
       when %r{\Aplatform/ansible/}
         components << "platform:ansible"
       when %r{\Acontracts/openapi/}
-        if path == common_openapi
+        if Array(common_openapi).include?(path)
           FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }
           services.each { |service| components << "service:#{service}" }
         elsif (contract = public_contracts[path])
@@ -292,7 +292,7 @@ module AffectedComponents
   def project_for_change(root, base, head)
     services, current, common = load_project(root, head)
     _base_services, previous, previous_common = load_project(root, base)
-    [services, previous.merge(current), common || previous_common]
+    [services, previous.merge(current), [common, previous_common].compact.uniq]
   end
 
   def service_consumers(root, base, head, services)
