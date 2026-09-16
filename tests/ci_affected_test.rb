@@ -266,6 +266,22 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+  def test_common_contract_rename_retains_both_registry_paths
+    old_path = "contracts/openapi/common.v1.yaml"
+    new_path = "contracts/openapi/common.v2.yaml"
+    previous = [["cart", "product"], PUBLIC, old_path]
+    current = [["cart", "product"], PUBLIC, new_path]
+    loader = ->(_root, ref) { ref == "base" ? previous : current }
+    AffectedComponents.stub(:load_project, loader) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      [[old_path], [new_path], [old_path, new_path]].each do |paths|
+        affected = AffectedComponents.classify(paths,
+          services: services, public_contracts: contracts, common_openapi: common)
+        assert_equal ["frontend:admin", "frontend:storefront", "global", "service:cart", "service:product"], affected
+      end
+    end
+  end
+
   def test_unknown_service_path_fails_closed
     assert_raises(ArgumentError) { classify("services/warehouse/main.go") }
   end
