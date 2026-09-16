@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import platform
@@ -479,6 +480,64 @@ class Auditor:
         return results
 
 
+def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> dict[str, str]:
+    # pip is supplied by venv/ensurepip, before the locked closure is installed.
+    # Its vendored PEP 508 parser avoids bootstrapping a dependency on packaging.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = {}
+    for raw in lock.splitlines():
+        if not raw or raw[0].isspace() or raw.startswith("#"):
+            continue
+        requirement = Requirement(raw.rstrip().removesuffix("\\").strip())
+        if requirement.marker and not requirement.marker.evaluate(environment):
+            continue
+        pins = list(requirement.specifier)
+        if len(pins) != 1 or pins[0].operator != "==":
+            raise ValueError(f"seed requires an exact version: {requirement.name}")
+        expected[canonicalize_name(requirement.name)] = pins[0].version
+    return expected
+
+
+def seed_unlocked_distributions(lock_path: str) -> list[str]:
+    import importlib.metadata as metadata
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    # These are supplied by venv/ensurepip rather than the qualification lock.
+    allowed = set(expected) | {"pip", "setuptools", "wheel"}
+    installed = set()
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name", "")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
+            raise ValueError("invalid installed seed distribution name")
+        installed.add(canonicalize_name(name))
+    return sorted(installed - allowed)
+
+
+def validate_seed_lock(lock_path: str) -> bool:
+    import importlib.metadata as metadata
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    try:
+        if any(metadata.version(name) != version for name, version in expected.items()):
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    if seed_unlocked_distributions(lock_path):
+        return False
+    return (
+        subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -487,18 +546,59 @@ def seed_environment() -> int:
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
     python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    marker = SEED_VENV / ".requirements-lock.sha256"
+    lock_digest = hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest()
     if not python.is_file():
         subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
-        check=True,
-    )
+    verify = [
+        str(python),
+        "-c",
+        "import runpy, sys; module = runpy.run_path(sys.argv[1]); "
+        "sys.exit(0 if module['validate_seed_lock'](sys.argv[2]) else 1)",
+        str(Path(__file__).resolve()),
+        str(SEED_LOCK),
+    ]
+    ready = marker.is_file() and marker.read_text(encoding="utf-8").strip() == lock_digest
+    if ready:
+        ready = subprocess.run(verify, text=True, capture_output=True, check=False).returncode == 0
+    if not ready:
+        # Reconcile only the project-owned venv, using that interpreter's inventory.
+        subprocess.run(
+            [
+                str(python),
+                "-c",
+                "import runpy, sys, subprocess; module = runpy.run_path(sys.argv[1]); "
+                "extras = module['seed_unlocked_distributions'](sys.argv[2]); "
+                "subprocess.run([sys.executable, '-m', 'pip', 'uninstall', '--yes', '--', *extras], check=True) if extras else None",
+                str(Path(__file__).resolve()),
+                str(SEED_LOCK),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--require-hashes",
+                "-r",
+                str(SEED_LOCK),
+            ],
+            check=True,
+        )
+        check = subprocess.run(verify, check=False)
+        if check.returncode:
+            marker.unlink(missing_ok=True)
+            raise RuntimeError("qualification seed dependency integrity check failed")
+        marker.write_text(lock_digest + "\n", encoding="utf-8")
     ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
     print(
-        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
+        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']} cache={'hit' if ready else 'reconciled'}"
     )
     return 0
 
