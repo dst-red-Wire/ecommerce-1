@@ -676,6 +676,36 @@
         "linux/arm64"
       ],
       "justification": "Linux host namespace boundary required only for staged Ansible lint. Supplied by the host; unavailable or unsupported sandboxes fail this gate closed."
+    },
+    {
+      "name": "staged-ansible-scope",
+      "requires": [],
+      "command": "systemd-run",
+      "version_args": [
+        "--version"
+      ],
+      "classification": "platform-provided",
+      "requirement": "optional-runtime",
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "justification": "Optional staged Ansible sandbox requires a delegated user cgroup scope with memory, task, CPU and lifetime limits. Host-provided; unavailable delegation fails closed without reconfiguring the host."
+    },
+    {
+      "name": "staged-ansible-cleanup",
+      "requires": [],
+      "command": "systemctl",
+      "version_args": [
+        "--version"
+      ],
+      "classification": "platform-provided",
+      "requirement": "optional-runtime",
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64"
+      ],
+      "justification": "Optional staged Ansible sandbox requires a delegated user cgroup scope with memory, task, CPU and lifetime limits. Host-provided; unavailable delegation fails closed without reconfiguring the host."
     }
   ],
   "provision_owners": {
@@ -861,7 +891,9 @@
       "python3",
       "ansible-lint",
       "bwrap",
-      "git"
+      "git",
+      "systemd-run",
+      "systemctl"
     ]
   },
   "command_capabilities": {

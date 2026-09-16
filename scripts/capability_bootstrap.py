@@ -1322,7 +1322,7 @@ def verify_seed_ansible_version(python: Path, expected: str) -> None:
     # The module belongs to the authenticated seed payload on both platforms.
     # In particular, Windows PE console launchers are not Python source files.
     proc = subprocess.run(
-        [str(python), "-I", "-m", "ansible.cli.adhoc", "--version"],
+        [str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"],
         check=True,
         text=True,
         capture_output=True,

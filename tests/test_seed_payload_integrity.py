@@ -288,7 +288,7 @@ class SeedPayloadIntegrity(unittest.TestCase):
             bootstrap.subprocess, "run", return_value=mock.Mock(stdout="ansible [core 2.20.3]\n")
         ) as run:
             bootstrap.verify_seed_ansible_version(python, "2.20.3")
-        self.assertEqual([str(python), "-I", "-m", "ansible.cli.adhoc", "--version"], run.call_args.args[0])
+        self.assertEqual([str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"], run.call_args.args[0])
         self.assertTrue(run.call_args.kwargs["check"])
 
     def test_checkout_reference_repairs_ordinary_file_and_directory(self):

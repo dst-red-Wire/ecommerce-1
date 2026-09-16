@@ -1,6 +1,9 @@
 import importlib.util
 import json
+import io
+import tarfile
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -15,6 +18,70 @@ SPEC.loader.exec_module(MOD)
 
 
 class AnsibleCollectionResolutionTest(unittest.TestCase):
+    def test_ansible_consumers_cannot_write_bytecode_into_verified_collections(self):
+        import ansible_collections as locked
+
+        for command in ("ansible-lint", "ansible-playbook", "ansible-galaxy"):
+            with (
+                self.subTest(command=command),
+                mock.patch.object(MOD.subprocess, "run") as run,
+                mock.patch.object(locked, "installer_provenance") as provenance,
+            ):
+                run.return_value = subprocess.CompletedProcess([command], 0, "", "")
+                MOD.run([command, "--version"], env={"PYTHONDONTWRITEBYTECODE": "0", "PATH": "/usr/bin"})
+                provenance.assert_called_once()
+                self.assertEqual("1", run.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"])
+                self.assertEqual("/usr/bin", run.call_args.kwargs["env"]["PATH"])
+
+    def test_locked_collection_payload_rejects_mutation_and_generated_extras(self):
+        import ansible_collections as locked
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            archive = root / "locked.tar.gz"
+            payload = root / "payload"
+            payload.mkdir()
+            entries = {
+                "MANIFEST.json": json.dumps(
+                    {
+                        "collection_info": {
+                            "namespace": "test",
+                            "name": "fixture",
+                            "version": "1.0.0",
+                            "dependencies": {},
+                        }
+                    }
+                ).encode(),
+                "FILES.json": b'{"files":[]}',
+                "module.py": b"value = 1\n",
+            }
+            with tarfile.open(archive, "w:gz") as stream:
+                for name, content in entries.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(content)
+                    stream.addfile(info, io.BytesIO(content))
+                    (payload / name).write_bytes(content)
+            item = {
+                "name": "test.fixture",
+                "version": "1.0.0",
+                "dependencies": {},
+                "sha256": locked.digest(archive),
+                "size": archive.stat().st_size,
+            }
+            with mock.patch.object(locked, "archive_path", return_value=archive):
+                self.assertTrue(locked.payload_ok(item, payload))
+                module = payload / "module.py"
+                module.write_bytes(b"value = 2\n")
+                self.assertFalse(locked.payload_ok(item, payload))
+                module.write_bytes(entries["module.py"])
+                extra = payload / "module.pyc"
+                extra.write_bytes(b"generated or injected bytes")
+                self.assertFalse(locked.payload_ok(item, payload))
+                extra.unlink()
+                module.unlink()
+                module.symlink_to(archive)
+                self.assertFalse(locked.payload_ok(item, payload))
+
     @staticmethod
     def write_manifest(root: pathlib.Path, name: str, version: str) -> None:
         namespace, collection = name.split(".", 1)
@@ -27,12 +94,15 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
             {
                 "ansible.posix": "1.5.4",
                 "community.general": "8.3.0",
-                "community.docker": "3.7.0",
+                "community.docker": "5.2.2",
                 "community.crypto": "2.17.1",
                 "community.sops": "1.6.7",
                 "containers.podman": "1.11.0",
                 "hetzner.hcloud": "2.4.1",
                 "kubernetes.core": "2.4.0",
+                "community.library_inventory_filtering_v1": "1.0.0",
+                "ansible.netcommon": "2.0.0",
+                "ansible.utils": "2.0.0",
             },
             MOD.required_ansible_collections(),
         )
@@ -81,20 +151,17 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
 
     def test_ansible_gate_reconciles_missing_project_collections_once(self):
-        with mock.patch.object(MOD, "ansible_collections_ready", side_effect=[False, True]):
-            with mock.patch.object(MOD, "require") as require_mock:
-                with mock.patch.object(MOD, "run") as run_mock:
-                    MOD.reconcile_ansible_collections()
-        require_mock.assert_any_call("ansible-playbook")
-        require_mock.assert_any_call("ansible-galaxy")
-        command = run_mock.call_args.args[0]
-        self.assertIn("platform/ansible/developer.yml", command)
-        self.assertEqual("ansible_collections", command[command.index("--tags") + 1])
-
-        with mock.patch.object(MOD, "ansible_collections_ready", return_value=True):
-            with mock.patch.object(MOD, "run") as second_run:
+        for ready in (True,):
+            with (
+                mock.patch.object(MOD, "ansible_collections_ready", return_value=ready),
+                mock.patch.object(MOD, "require") as require,
+                mock.patch.object(MOD, "run") as run,
+            ):
                 MOD.reconcile_ansible_collections()
-        second_run.assert_not_called()
+            require.assert_called_once_with("ansible-galaxy")
+            self.assertEqual([MOD.sys.executable, "scripts/ansible_collections.py", "prepare"], run.call_args.args[0])
+            self.assertEqual("1", run.call_args.kwargs["env"]["PYTHONDONTWRITEBYTECODE"])
+            run.assert_called_once()
 
     def test_bootstrap_uses_only_the_ansible_core_stdout_callback(self):
         self.assertNotIn("stdout_callback = yaml", ANSIBLE_CFG)

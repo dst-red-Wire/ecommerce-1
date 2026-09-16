@@ -204,7 +204,10 @@ class SeedPlatformBoundaries(unittest.TestCase):
             self.skipTest("real canonical seed unavailable")
         expected = bootstrap.load_versions()["ANSIBLE_CORE_VERSION"]
         result = subprocess.run(
-            [str(python), "-I", "-m", "ansible.cli.adhoc", "--version"], check=True, text=True, capture_output=True
+            [str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"],
+            check=True,
+            text=True,
+            capture_output=True,
         )
         self.assertIn(f"[core {expected}]", result.stdout.splitlines()[0])
         bootstrap.verify_seed_ansible_version(python, expected)
