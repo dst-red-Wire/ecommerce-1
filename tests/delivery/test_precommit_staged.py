@@ -166,6 +166,29 @@ class PrecommitStagedContractTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 REPOCTL.precommit()
 
+    def test_staged_ansible_configuration_cannot_execute_inventory_or_custom_rules(self):
+        with self.fixture() as (root, git):
+            marker = root / "inventory-executed"
+            rule_marker = root / "rule-executed"
+            inventory = root / "inventories/mgmt/inventory.rb"
+            inventory.parent.mkdir(parents=True)
+            inventory.write_text(f"#!/usr/bin/ruby\nFile.write('{marker}', 'executed')\nputs '{{}}'\n")
+            inventory.chmod(0o755)
+            config = root / "platform/ansible/ansible.cfg"
+            config.parent.mkdir(parents=True)
+            config.write_text(f"[defaults]\ninventory = {inventory}\n")
+            rules = root / "candidate_rules"
+            rules.mkdir()
+            (rules / "execute.py").write_text(f'from pathlib import Path\n\nPath("{rule_marker}").touch()\n')
+            (root / ".ansible-lint").write_text(f"---\nrulesdir: [{rules}]\n")
+            (root / "playbook.yml").write_text("---\n- name: Valid indexed playbook\n  hosts: localhost\n  tasks: []\n")
+            git("add", ".")
+            index = git("write-tree")
+            self.assertEqual(0, REPOCTL.precommit())
+            self.assertFalse(marker.exists())
+            self.assertFalse(rule_marker.exists())
+            self.assertEqual(index, git("write-tree"))
+
     def test_staged_ansible_syntax_is_rejected_despite_valid_worktree(self):
         with self.fixture() as (root, git):
             path = root / "playbook.yml"

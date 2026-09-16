@@ -1965,8 +1965,48 @@ def precommit() -> int:
             run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
         if yaml_files:
             require("ansible-lint")
-            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
-            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+            # Execution configuration belongs to this controller, not the index.
+            # Retain only the existing canonical data-only lint exceptions.
+            with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as config_directory:
+                control = Path(config_directory)
+                inventory = control / "inventory.ini"
+                inventory.write_text("localhost ansible_connection=local\n", encoding="utf-8")
+                config = control / "ansible.cfg"
+                config.write_text(f"[defaults]\ninventory = {inventory}\n", encoding="utf-8")
+                lint_config = control / "lint.yml"
+                lint_config.write_text(
+                    '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+                    encoding="utf-8",
+                )
+                rules = control / "rules"
+                rules.mkdir()
+                ignore = control / "ignore.txt"
+                ignore.write_text("", encoding="utf-8")
+                env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+                env.update(
+                    ANSIBLE_CONFIG=str(config),
+                    ANSIBLE_INVENTORY_ENABLED="ini",
+                    ANSIBLE_COLLECTIONS_PATH=str(ROOT / ".ansible/collections"),
+                )
+                run(
+                    [
+                        "ansible-lint",
+                        "--offline",
+                        "--config-file",
+                        str(lint_config),
+                        "--project-dir",
+                        str(control),
+                        "--ignore-file",
+                        str(ignore),
+                        "--rules-dir",
+                        str(rules),
+                        "-R",
+                        "--",
+                        *yaml_files,
+                    ],
+                    cwd=control,
+                    env=env,
+                )
         if ruby_files:
             require("ruby")
             for path in ruby_files:
