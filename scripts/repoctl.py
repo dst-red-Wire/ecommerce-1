@@ -1930,6 +1930,27 @@ def precommit() -> int:
         run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
         python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
         go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        terraform_files = [
+            str(snapshot / path) for path in paths if path.endswith((".tf", ".tfvars")) and (snapshot / path).is_file()
+        ]
+        yaml_files = [
+            str(snapshot / path) for path in paths if path.endswith((".yaml", ".yml")) and (snapshot / path).is_file()
+        ]
+        ruby_files = [str(snapshot / path) for path in paths if path.endswith(".rb") and (snapshot / path).is_file()]
+        if terraform_files:
+            terraform = shutil.which("tofu") or require("terraform")
+            run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
+        if yaml_files:
+            require("ansible-lint")
+            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
+            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+        if ruby_files:
+            require("ruby")
+            for path in ruby_files:
+                run(["ruby", "-c", "--", path], cwd=snapshot)
+        for path in paths:
+            if path.endswith(".json") and (snapshot / path).is_file():
+                json.loads((snapshot / path).read_bytes())
         if python_files:
             require("ruff")
             run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
