@@ -1,0 +1,71 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+dependency_map: config/contracts/dependency-map.yaml
+event_contracts: config/contracts/event-contracts.yaml
+service_ownership: config/contracts/service-ownership.yaml
+
+orchestration:
+  authority: checkout
+  durable_order_authority: order
+  payment_authority: payment
+  inventory_authority: inventory
+  fraud_authority: fraud-risk
+  fulfillment_authority: fulfillment
+
+pre_confirmation_flow:
+  - cart
+  - pricing
+  - tax
+  - inventory
+  - fraud-risk
+  - shipping
+  - order
+
+state_transitions:
+  reserve_stock:
+    owner: inventory
+    compensation: release_stock
+    idempotency_required: true
+  fraud_decision:
+    owner: fraud-risk
+    compensation: none
+  create_order:
+    owner: order
+    point_of_durable_record: true
+    idempotency_required: true
+  authorize_payment:
+    owner: payment
+    external_provider: stripe
+    idempotency_required: true
+    automatic_retry:
+      allowed_only_when_idempotent: true
+      max_attempts_source: config/contracts/service-resilience-policy.yaml
+  confirm_order:
+    owner: order
+    requires: [payment-authorized]
+  start_fulfillment:
+    owner: fulfillment
+    requires: [order-confirmed]
+
+compensations:
+  payment_authorization_failed:
+    actions: [order-fail-or-cancel, inventory-release]
+  order_cancelled_after_authorization:
+    actions: [payment-void-or-refund, inventory-release, fulfillment-cancel-if-started]
+  fulfillment_failed:
+    actions: [order-mark-failed, operator-or-compensation-workflow]
+
+rules:
+  checkout-must-not-own-order-lifecycle: true
+  checkout-must-not-own-payment-state: true
+  order-is-durable-commercial-snapshot: true
+  cross-database-transaction: forbidden
+  distributed-2pc: forbidden
+  transactional-outbox-required-for-domain-events: true
+  consumers-must-be-idempotent: true
+  replayable-commands-require-idempotency-key: true
+  payment-retry-without-idempotency: forbidden
+  compensations-must-be-explicit: true
+  saga-state-must-be-observable: true
+  fulfillment-must-not-start-before-order-confirmed: true
