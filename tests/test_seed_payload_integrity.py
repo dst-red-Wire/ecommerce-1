@@ -73,6 +73,136 @@ class SeedPayloadIntegrity(unittest.TestCase):
             bootstrap.seed_wheels(self.wheels, self.lock, strict=False)
         self.assertFalse(self.valid())
 
+    def test_group_or_world_writable_payload_is_rejected(self):
+        path = self.site / "sample/__init__.py"
+        for mode in (0o660, 0o666):
+            with self.subTest(mode=mode):
+                path.chmod(mode)
+                self.assertFalse(self.valid())
+        path.chmod(0o600)
+        self.assertTrue(self.valid())
+        self.site.chmod(0o777)
+        self.assertFalse(self.valid())
+
+    def test_payload_owned_by_another_uid_is_rejected(self):
+        with mock.patch.object(bootstrap.os, "geteuid", return_value=os.geteuid() + 1):
+            self.assertFalse(self.valid())
+
+    def test_writable_wheel_or_reference_directory_is_rejected(self):
+        self.wheel.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, "externally mutable"):
+            bootstrap.seed_wheels(self.wheels, self.lock)
+        self.wheel.chmod(0o600)
+        self.wheels.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, "externally mutable"):
+            bootstrap.seed_wheels(self.wheels, self.lock)
+
+    def test_mutable_tool_home_or_parent_is_refused_before_writes(self):
+        cache = self.root / "mutable-cache"
+        cache.mkdir()
+        cache.chmod(0o777)
+        for path in (cache, cache / "nested"):
+            with (
+                self.subTest(path=path),
+                self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "externally mutable"),
+            ):
+                bootstrap.validated_seed_tool_home(path)
+        self.assertEqual([], list(cache.iterdir()))
+
+    def test_seed_writes_restrictive_modes_and_restores_callers_umask(self):
+        previous = os.umask(0)
+        observed = []
+
+        def prepare():
+            current = os.umask(0o077)
+            observed.append(current)
+            return 0
+
+        try:
+            with mock.patch.object(bootstrap, "_seed_environment", side_effect=prepare):
+                self.assertEqual(0, bootstrap.seed_environment())
+            self.assertEqual([0o077], observed)
+            self.assertEqual(0, os.umask(0))
+        finally:
+            os.umask(previous)
+
+    def test_windows_acl_probe_fails_closed_and_passes_paths_only_as_data(self):
+        import json
+
+        paths = [(self.root / 'name & quoted" path', False), (self.root, True)]
+        for code, output, accepted in ((0, "PRIVATE", True), (1, "", False), (0, "unexpected", False)):
+            with (
+                self.subTest(code=code, output=output),
+                mock.patch.object(
+                    bootstrap.subprocess, "run", return_value=mock.Mock(returncode=code, stdout=output)
+                ) as run,
+            ):
+                self.assertEqual(accepted, bootstrap.seed_windows_paths_are_private(paths))
+                command = run.call_args.args[0]
+                self.assertIn("-EncodedCommand", command)
+                self.assertFalse(any("name & quoted" in argument for argument in command))
+                payload = json.loads(run.call_args.kwargs["input"])
+                self.assertEqual(str(paths[0][0]), payload[0]["path"])
+        with mock.patch.object(bootstrap.subprocess, "run", side_effect=OSError("unavailable ACL probe")):
+            self.assertFalse(bootstrap.seed_windows_paths_are_private(paths))
+
+    def test_windows_junction_publication_needs_no_symlink_privilege(self):
+        import types
+
+        reference = self.root / "checkout/.venv/qualification"
+        replacement = self.root / "replacement"
+        replacement.mkdir()
+        calls = []
+
+        def junction(target, link):
+            calls.append((target, link))
+            os.symlink(target, link, target_is_directory=True)
+
+        with (
+            mock.patch.object(bootstrap, "seed_windows", return_value=True),
+            mock.patch.dict(sys.modules, {"_winapi": types.SimpleNamespace(CreateJunction=junction)}),
+            mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference),
+            mock.patch.object(Path, "symlink_to", side_effect=PermissionError("no symlink privilege")),
+        ):
+            bootstrap.publish_checkout_reference(self.seed)
+            bootstrap.publish_checkout_reference(replacement)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(replacement, reference.resolve())
+        self.assertTrue(self.seed.is_dir())
+
+    def test_windows_reference_swap_failure_restores_published_generation(self):
+        import types
+
+        reference = self.root / "checkout/.venv/qualification"
+        replacement = self.root / "replacement"
+        replacement.mkdir()
+        original_replace = os.replace
+
+        def replace(source, destination):
+            if str(source).endswith(".tmp") and destination == reference:
+                raise OSError("simulated junction rename failure")
+            return original_replace(source, destination)
+
+        with (
+            mock.patch.object(bootstrap, "seed_windows", return_value=True),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "_winapi": types.SimpleNamespace(
+                        CreateJunction=lambda target, link: os.symlink(target, link, target_is_directory=True)
+                    )
+                },
+            ),
+            mock.patch.object(bootstrap, "LOCAL_SEED_VENV", reference),
+        ):
+            bootstrap.publish_checkout_reference(self.seed)
+            with mock.patch.object(bootstrap.os, "replace", side_effect=replace):
+                with self.assertRaisesRegex(OSError, "simulated junction"):
+                    bootstrap.publish_checkout_reference(replacement)
+        self.assertEqual(self.seed, reference.resolve())
+        self.assertTrue(replacement.is_dir())
+        self.assertEqual(["qualification"], sorted(path.name for path in reference.parent.iterdir()))
+
     def test_symlinked_tool_home_or_ancestor_is_rejected_before_writes(self):
         external = self.root / "external-cache"
         external.mkdir()
