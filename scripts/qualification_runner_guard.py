@@ -1,0 +1,127 @@
+"""Trusted-controller runner admission; never execute a candidate copy as authority."""
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import re
+import subprocess
+
+RUNNER_SCOPES = (
+    "platform/ansible/qualification-runner.yml",
+    "platform/ansible/qualification-egress.yml",
+    "platform/ansible/roles/qualification_runner_host",
+    "platform/ansible/roles/qualification_proxy_client",
+    "platform/ansible/roles/qualification_gateway",
+    "platform/ansible/ansible.cfg",
+    "platform/ansible/requirements.yml",
+    "platform/ansible/inventories",
+    "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+    "tests/test_m1_qualification_runner.py",
+)
+
+# Exact base -> result pairs for the existing PR86 lint correction (1ff77652).
+# This exception permits only those reviewed bytes, never arbitrary runner changes.
+APPROVED_RUNNER_CORRECTIONS = {
+    "platform/ansible/qualification-runner.yml": (
+        "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
+        "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
+    ),
+    "platform/ansible/roles/qualification_runner_host/handlers/main.yml": (
+        "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
+        "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+    ),
+    "platform/ansible/roles/qualification_runner_host/tasks/main.yml": (
+        "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
+        "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+    ),
+    "platform/ansible/roles/qualification_proxy_client/handlers/main.yml": (
+        None,
+        "2557b9cd491e79b89ddf4919e54ab2547962ed16098c827855b11ca2e9c2dcc1",
+    ),
+    "platform/ansible/roles/qualification_proxy_client/tasks/main.yml": (
+        "0aff96b9a791e7d9bd9be1f177d0827df027829af1143be5c3f8a482dd10b1fe",
+        "b2898a4b81f821fe049dc6685755e6a695befa76166a8ce56613c1f4ef611635",
+    ),
+    "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md": (
+        "501f901a8c4cafa4a3c3b76b278cb541614ad4cf3b2c3a3039db2a799c66aeed",
+        "349021f9ca8bcb416ac787931e8fca76d3db9e1e4ae88fc64d2dac0201ae3f86",
+    ),
+}
+
+
+def validate_runner_index(entries: str) -> None:
+    for entry in filter(None, entries.split("\0")):
+        metadata, path = entry.split("\t", 1)
+        mode, _object_id, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            raise AssertionError(f"unapproved runner index entry: {path} ({mode}, stage {stage})")
+
+
+def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> None:
+    for path in before.keys() | after.keys():
+        old, new = before.get(path), after.get(path)
+        if old == new:
+            continue
+        pair = (
+            hashlib.sha256(old).hexdigest() if old is not None else None,
+            hashlib.sha256(new).hexdigest() if new is not None else None,
+        )
+        if pair != APPROVED_RUNNER_CORRECTIONS.get(path):
+            raise AssertionError(f"unapproved base-relative runner change: {path}")
+
+
+def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1")
+    return subprocess.run(["git", "--no-replace-objects", *args], cwd=root, env=env, capture_output=True, check=check)
+
+
+def validate_repository(root: Path, base: str, head: str | None = None) -> None:
+    if git(root, "for-each-ref", "--format=%(refname)", "refs/replace/").stdout.strip():
+        raise AssertionError("Git replacement refs are forbidden for runner admission")
+    if not re.fullmatch(r"[0-9a-f]{40}", base):
+        raise AssertionError("runner admission requires an immutable base SHA")
+    git(root, "cat-file", "-e", f"{base}^{{commit}}")
+    if head is not None:
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise AssertionError("runner admission requires an immutable head SHA")
+        if git(root, "rev-parse", "HEAD").stdout.decode().strip() != head:
+            raise AssertionError("runner admission head differs from selected SHA")
+        if git(root, "status", "--porcelain=v1", "--untracked-files=all").stdout:
+            raise AssertionError("runner admission requires a clean checkout")
+    entries = git(root, "ls-files", "--stage", "-z", "--", *RUNNER_SCOPES).stdout.decode(errors="surrogateescape")
+    validate_runner_index(entries)
+    changed = git(
+        root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base, "--", *RUNNER_SCOPES
+    ).stdout
+    untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z", "--", *RUNNER_SCOPES).stdout
+    before, after = {}, {}
+    for raw in set(filter(None, (changed + untracked).split(b"\0"))):
+        path = os.fsdecode(raw)
+        original = git(root, "show", f"{base}:{path}", check=False)
+        before[path] = original.stdout if original.returncode == 0 else None
+        current = root / path
+        if current.is_symlink() or (current.exists() and not current.is_file()):
+            raise AssertionError(f"unapproved runner file type: {path}")
+        after[path] = current.read_bytes() if current.is_file() else None
+    validate_runner_changes(before, after)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", required=True, type=Path)
+    parser.add_argument("--base", required=True)
+    parser.add_argument("--head", required=True)
+    args = parser.parse_args()
+    try:
+        validate_repository(args.repo, args.base, args.head)
+    except (AssertionError, OSError, subprocess.CalledProcessError) as error:
+        print(f"FAIL trusted runner admission: {error}")
+        return 1
+    print(f"PASS trusted runner admission base={args.base} head={args.head}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
