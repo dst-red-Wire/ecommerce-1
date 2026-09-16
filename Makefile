@@ -42,7 +42,8 @@ ci-full: governance contracts automation lint test security terraform ansible ##
 
 ci-global: governance contracts automation security ## Run global gates used by Tekton
 
-governance: runtime-efficiency ## Validate canonical architecture, service mesh policy and CI authority contracts
+governance: runtime-efficiency ## Validate canonical architecture, service policy chain, service mesh policy and CI authority contracts
+	@ruby scripts/validate-service-policy-chain.rb
 	@ruby scripts/validate-service-mesh-policy.rb
 	@$(PYTHON) scripts/repoctl.py governance
 
