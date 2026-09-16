@@ -62,6 +62,64 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("def invalid(\n", path.read_text())
 
+    def test_replacement_head_cannot_hide_invalid_staged_change(self):
+        with self.fixture() as (root, git):
+            (root / "invalid.py").write_text("undefined_name()\n")
+            git("add", "invalid.py")
+            original = git("rev-parse", "HEAD")
+            replacement = git("commit-tree", git("write-tree"), "-m", "Replacement fixture")
+            git("replace", original, replacement)
+            self.assertEqual("", git("diff", "--cached", "--name-only"))
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_replacement_blob_cannot_change_indexed_bytes(self):
+        with self.fixture() as (root, git):
+            path = root / "invalid.py"
+            path.write_text("undefined_name()\n")
+            git("add", path.name)
+            indexed = git("rev-parse", ":invalid.py")
+            path.write_text("value = 1\n")
+            replacement = git("hash-object", "-w", path.name)
+            git("replace", indexed, replacement)
+            with tempfile.TemporaryDirectory() as directory:
+                REPOCTL._materialize_staged_tree(Path(directory))
+                self.assertEqual("undefined_name()\n", (Path(directory) / path.name).read_text())
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_filesystem_equivalent_index_paths_cannot_overwrite_a_blob(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as directory:
+            (root / "first").write_text("first indexed content")
+            (root / "second").write_text("second indexed content")
+            first = git("hash-object", "-w", "first")
+            second = git("hash-object", "-w", "second")
+            git("update-index", "--add", "--cacheinfo", f"100644,{first},CASE.txt")
+            git("update-index", "--add", "--cacheinfo", f"100644,{second},case.txt")
+            snapshot = Path(directory)
+            original_open = Path.open
+            original_chmod = Path.chmod
+
+            def case_insensitive_chmod(path, *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_chmod(path, *args, **kwargs)
+
+            def case_insensitive_open(path, mode="r", *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", case_insensitive_open),
+                mock.patch.object(Path, "chmod", case_insensitive_chmod),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "indexed paths collide"):
+                    REPOCTL._materialize_staged_tree(snapshot)
+            self.assertEqual("first indexed content", (snapshot / "case.txt").read_text())
+            self.assertEqual(first, git("rev-parse", ":CASE.txt"))
+            self.assertEqual(second, git("rev-parse", ":case.txt"))
+
     def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
         with self.fixture() as (root, git):
             name = os.fsdecode(b"bad\xff.txt")

@@ -1897,7 +1897,7 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         return
     # --batch returns stored object bytes; checkout filters and worktree attributes never run.
     blobs = subprocess.run(
-        ["git", "cat-file", "--batch"],
+        ["git", "--no-replace-objects", "cat-file", "--batch"],
         cwd=ROOT,
         input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
         stdout=subprocess.PIPE,
@@ -1914,13 +1914,21 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         if len(content) != size or stream.read(1) != b"\n":
             raise RuntimeError("truncated indexed blob response")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        # Exclusive creation also detects aliases on case-insensitive or
+        # Unicode-normalizing filesystems; never overwrite another indexed blob.
+        try:
+            with target.open("xb") as output:
+                output.write(content)
+        except FileExistsError as exc:
+            raise RuntimeError("filesystem-equivalent indexed paths collide") from exc
         target.chmod(0o755 if mode == "100755" else 0o644)
 
 
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
-    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    paths = git(
+        "--no-replace-objects", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"
+    ).split("\0")[:-1]
     if not paths:
         print("SKIP precommit: no staged files")
         return 0
