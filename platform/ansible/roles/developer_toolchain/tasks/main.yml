@@ -151,20 +151,11 @@
     force: true
   tags: [toolchain, sqlc]
 
-- name: Download pinned yq
-  ansible.builtin.get_url:
-    url: "https://github.com/mikefarah/yq/releases/download/v{{ yq_version }}/yq_linux_amd64"
-    dest: "{{ local_share }}/tools/yq-{{ yq_version }}"
-    checksum: "sha256:{{ yq_sha256 }}"
-    mode: '0755'
-  tags: [toolchain, context_tools]
-
-- name: Link yq into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/yq-{{ yq_version }}"
-    dest: "{{ local_bin }}/yq"
-    state: link
-    force: true
+- name: Reconcile pinned repository-local yq
+  ansible.builtin.command:
+    argv: ["{{ ansible_python.executable }}", "{{ repo_root }}/scripts/repository_tools.py", yq]
+  register: repository_yq
+  changed_when: "'(provisioned)' in repository_yq.stdout"
   tags: [toolchain, context_tools]
 
 - name: Download pinned ripgrep archive
@@ -311,35 +302,11 @@
   loop: [bazelisk, bazel]
   tags: [toolchain, agent_tools]
 
-- name: Download pinned oasdiff archive
-  ansible.builtin.get_url:
-    url: "https://github.com/oasdiff/oasdiff/releases/download/v{{ oasdiff_version }}/oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz"
-    dest: "{{ local_cache }}/oasdiff-{{ oasdiff_version }}.tar.gz"
-    checksum: "sha256:{{ oasdiff_sha256 }}"
-    mode: '0644'
-  tags: [toolchain, agent_tools]
-
-- name: Create oasdiff version directory
-  ansible.builtin.file:
-    path: "{{ local_share }}/tools/oasdiff-{{ oasdiff_version }}"
-    state: directory
-    mode: '0755'
-  tags: [toolchain, agent_tools]
-
-- name: Extract pinned oasdiff
-  ansible.builtin.unarchive:
-    src: "{{ local_cache }}/oasdiff-{{ oasdiff_version }}.tar.gz"
-    dest: "{{ local_share }}/tools/oasdiff-{{ oasdiff_version }}"
-    remote_src: true
-    creates: "{{ local_share }}/tools/oasdiff-{{ oasdiff_version }}/oasdiff"
-  tags: [toolchain, agent_tools]
-
-- name: Link oasdiff into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/oasdiff-{{ oasdiff_version }}/oasdiff"
-    dest: "{{ local_bin }}/oasdiff"
-    state: link
-    force: true
+- name: Reconcile pinned repository-local oasdiff
+  ansible.builtin.command:
+    argv: ["{{ ansible_python.executable }}", "{{ repo_root }}/scripts/repository_tools.py", oasdiff]
+  register: repository_oasdiff
+  changed_when: "'(provisioned)' in repository_oasdiff.stdout"
   tags: [toolchain, agent_tools]
 
 - name: Check installed oapi-codegen version
