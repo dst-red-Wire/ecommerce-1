@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import subprocess
@@ -18,6 +19,38 @@ RUNNER_PATHS = (
     ROOT / "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
     ROOT / "tests/test_m1_qualification_runner.py",
 )
+
+
+# Exact base -> result pairs for the existing PR86 lint correction (1ff77652).
+# This exception permits only those reviewed bytes, never arbitrary runner changes.
+APPROVED_RUNNER_CORRECTIONS = {
+    "platform/ansible/qualification-runner.yml": (
+        "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
+        "918d12358337bd87556f84c2f1133c1b3da2d2ce4398f3d29e3d2b96f8fbf551",
+    ),
+    "platform/ansible/roles/qualification_runner_host/handlers/main.yml": (
+        "53db449af078130814f9d2d4535172c959cf96c22b47da9561b82b3517e7306e",
+        "bffac11b59505c56485adf3f930009f52eb9bc823c74b19f0f74b57fdb208474",
+    ),
+    "platform/ansible/roles/qualification_runner_host/tasks/main.yml": (
+        "be23a7e8eaa5bf831d308f0d347eb6d0b074b7221bbc5283d7a8e4d98a821928",
+        "64423e2fc4f1ca72d930b04143afd31c966c1884167df40d112d85c4b24412c3",
+    ),
+}
+
+
+def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, bytes | None]) -> None:
+    for path in before.keys() | after.keys():
+        old, new = before.get(path), after.get(path)
+        if old == new:
+            continue
+        pair = (
+            (hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest())
+            if old is not None and new is not None
+            else None
+        )
+        if pair is None or pair != APPROVED_RUNNER_CORRECTIONS.get(path):
+            raise AssertionError(f"unapproved base-relative runner change: {path}")
 
 
 def terraform_output_block(source: str, name: str) -> str:
@@ -473,8 +506,7 @@ class QualificationTerraformContractTest(unittest.TestCase):
         self.assertEqual(developer_ref_before.stdout, developer_ref_after.stdout)
 
     def test_canonical_runner_contract_survives_base_relative_changes(self):
-        # Runner implementation may evolve (e.g. exact checkout and become fixes).
-        # Preserve its execution/security contract instead of freezing its bytes.
+        # Preserve semantic invariants and allow only the exact reviewed lint delta.
         validate_runner_contract(
             (ANSIBLE / "roles/qualification_runner_host/defaults/main.yml").read_text(),
             (ANSIBLE / "roles/qualification_runner_host/tasks/main.yml").read_text(),
@@ -484,20 +516,35 @@ class QualificationTerraformContractTest(unittest.TestCase):
         base = resolve_base(os.environ.get("BASE", ""))
         if base is None:
             self.skipTest("BASE absent: only the base-relative #78 comparison is skipped")
-        deleted = subprocess.check_output(
-            [
-                "git",
-                "diff",
-                "--name-only",
-                "--diff-filter=D",
-                base,
-                "--",
-                *(str(path.relative_to(ROOT)) for path in RUNNER_PATHS),
-            ],
-            cwd=ROOT,
-            text=True,
+        scopes = [str(path.relative_to(ROOT)) for path in RUNNER_PATHS]
+        changed = subprocess.check_output(
+            ["git", "diff", "--name-only", "-z", base, "--", *scopes], cwd=ROOT, text=True
         )
-        self.assertEqual("", deleted.strip(), "canonical #78 runner files were removed")
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", *scopes], cwd=ROOT, text=True
+        )
+        before, after = {}, {}
+        for path in set(filter(None, (changed + untracked).split("\0"))):
+            original = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True)
+            before[path] = original.stdout if original.returncode == 0 else None
+            current = ROOT / path
+            self.assertFalse(current.is_symlink(), f"unapproved runner symlink: {path}")
+            after[path] = current.read_bytes() if current.is_file() else None
+        validate_runner_changes(before, after)
+
+    def test_runner_allowlist_rejects_additions_modifications_and_deletions(self):
+        path = "platform/ansible/qualification-runner.yml"
+        content = (ROOT / path).read_bytes()
+        validate_runner_changes({path: content}, {path: content})
+        for before, after in (
+            ({path: content}, {path: content + b"\n- name: extra privileged action\n  become: true\n"}),
+            ({path: content}, {path: content + b"\n# controller lookup added\n"}),
+            ({}, {"platform/ansible/roles/qualification_runner_host/tasks/extra.yml": b"---\n"}),
+            ({path: content}, {}),
+        ):
+            with self.subTest(before=list(before), after=list(after)):
+                with self.assertRaisesRegex(AssertionError, "unapproved base-relative runner change"):
+                    validate_runner_changes(before, after)
 
 
 if __name__ == "__main__":
