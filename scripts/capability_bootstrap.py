@@ -525,9 +525,10 @@ def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> d
     return expected
 
 
-def seed_wheels(directory: Path, lock: str) -> list[Path]:
+def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path]:
     """Only lock-authorized wheel bytes can define the installed inventory."""
     from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
+    from pip._vendor.packaging.tags import sys_tags
 
     if directory.is_symlink() or directory.resolve() != directory:
         raise ValueError("seed wheel reference escapes its cache")
@@ -540,14 +541,21 @@ def seed_wheels(directory: Path, lock: str) -> list[Path]:
             hashes[name] = set()
         elif name:
             hashes[name].update(re.findall(r"--hash=sha256:([0-9a-f]{64})", line))
+    supported = set(sys_tags())
     selected = {}
-    for wheel in directory.glob("*.whl"):
-        name, version, _, _ = parse_wheel_filename(wheel.name)
-        if name not in expected or str(version) != expected[name] or name in selected:
-            raise ValueError("unexpected or duplicate seed wheel")
-        if wheel.is_symlink() or hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
-            raise ValueError("seed wheel differs from locked digest")
-        selected[name] = wheel
+    for wheel in sorted(directory.glob("*.whl")):
+        try:
+            name, version, _, tags = parse_wheel_filename(wheel.name)
+            if name not in expected or str(version) != expected[name] or name in selected:
+                raise ValueError("unexpected or duplicate seed wheel")
+            if not tags & supported:
+                raise ValueError("seed wheel is incompatible with this interpreter")
+            if wheel.is_symlink() or hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
+                raise ValueError("seed wheel differs from locked digest")
+            selected[name] = wheel
+        except (OSError, ValueError):
+            if strict:
+                raise
     if set(selected) != set(expected):
         raise ValueError("locked seed wheel reference is incomplete")
     return list(selected.values())
@@ -593,7 +601,7 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
     import io
     import marshal
     import zipfile
-    from pip._vendor.distlib.scripts import ScriptMaker
+    from pip._internal.operations.install.wheel import PipScriptMaker
 
     try:
         interpreter_wheels = interpreter_seed_wheels()
@@ -638,7 +646,7 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
                     parser = configparser.ConfigParser(interpolation=None)
                     parser.optionxform = str
                     parser.read_string(entry.decode())
-                    maker = ScriptMaker(None, str(scripts))
+                    maker = PipScriptMaker(None, str(scripts))
                     maker.executable = str(
                         scripts / Path(getattr(sys, "_base_executable", sys.executable)).resolve().name
                         if wheel in interpreter_wheels
@@ -675,6 +683,8 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
                 records[record] = owned
         for path, data in expected.items():
             if path.is_symlink() or path.resolve() != path or not path.is_file():
+                return False
+            if os.name != "nt" and path in generated_scripts and not os.access(path, os.X_OK):
                 return False
             actual = path.read_bytes()
             if os.name == "nt" and path in generated_scripts and path.suffix == ".exe":
@@ -744,7 +754,10 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
             f"python{sys.version_info.major}.{sys.version_info.minor}",
             "python.exe",
             "pythonw.exe",
+            Path(getattr(sys, "_base_executable", sys.executable)).name,
         }
+        if sys.version_info[:2] == (3, 14) and sys.getfilesystemencoding() == "utf-8":
+            venv_files.add("𝜋thon")
         if any(path not in expected and path.name not in venv_files for path in scripts.iterdir()):
             return False
         return True
@@ -752,7 +765,35 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
         return False
 
 
-def check_seed_reference(wheels: Path, root: Path | None = None) -> bool:
+def copy_seed_reference(wheels: Path, destination: Path, lock: str) -> bool:
+    """Recover a complete compatible closure without copying untrusted extras."""
+    try:
+        selected = seed_wheels(wheels, lock, strict=False)
+    except (OSError, ValueError):
+        return False
+    for wheel in selected:
+        shutil.copyfile(wheel, destination / wheel.name)
+    return bool(seed_wheels(destination, lock))
+
+
+def publish_seed_reference(candidate: Path, wheels: Path) -> None:
+    """Replace the whole reference under the identity lock, restoring on failure."""
+    previous = candidate.with_name(candidate.name + ".previous")
+    if wheels.exists():
+        os.replace(wheels, previous)
+    try:
+        os.replace(candidate, wheels)
+    except BaseException:
+        if previous.exists():
+            os.replace(previous, wheels)
+        raise
+    if previous.is_dir():
+        shutil.rmtree(previous)
+    else:
+        previous.unlink(missing_ok=True)
+
+
+def check_seed_reference(wheels: Path, root: Path | None = None, *, copy_to: Path | None = None) -> bool:
     """Use base Python and ensurepip, even if the cached seed's pip is broken."""
     bootstrap = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
     try:
@@ -766,13 +807,15 @@ def check_seed_reference(wheels: Path, root: Path | None = None) -> bool:
                 "import capability_bootstrap as b; "
                 "sys.path[:0] = [str(p) for p in b.interpreter_seed_wheels()]; "
                 "lock = Path(sys.argv[2]).read_text(encoding='utf-8'); "
-                "ok = b.validate_seed_payload(Path(sys.argv[4]), Path(sys.argv[3]), lock) "
+                "ok = b.copy_seed_reference(Path(sys.argv[3]), Path(sys.argv[5]), lock) if sys.argv[5] else "
+                "b.validate_seed_payload(Path(sys.argv[4]), Path(sys.argv[3]), lock) "
                 "if sys.argv[4] else bool(b.seed_wheels(Path(sys.argv[3]), lock)); "
                 "sys.exit(0 if ok else 1)",
                 str(ROOT / "scripts"),
                 str(SEED_LOCK),
                 str(wheels),
                 str(root) if root else "",
+                str(copy_to) if copy_to else "",
             ],
             capture_output=True,
             text=True,
@@ -918,27 +961,26 @@ def seed_environment() -> int:
                 subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
                 if not check_seed_reference(wheels):
                     with tempfile.TemporaryDirectory(dir=generations, prefix="wheels-") as download:
-                        subprocess.run(
-                            [
-                                str(python),
-                                "-m",
-                                "pip",
-                                "download",
-                                "--only-binary=:all:",
-                                "--require-hashes",
-                                "-r",
-                                str(SEED_LOCK),
-                                "--dest",
-                                download,
-                            ],
-                            check=True,
-                            env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
-                        )
+                        if not check_seed_reference(wheels, copy_to=Path(download)):
+                            subprocess.run(
+                                [
+                                    str(python),
+                                    "-m",
+                                    "pip",
+                                    "download",
+                                    "--only-binary=:all:",
+                                    "--require-hashes",
+                                    "-r",
+                                    str(SEED_LOCK),
+                                    "--dest",
+                                    download,
+                                ],
+                                check=True,
+                                env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+                            )
                         if not check_seed_reference(Path(download)):
                             raise RuntimeError("downloaded seed wheel reference is invalid")
-                        wheels.mkdir(parents=True, exist_ok=True)
-                        for archive in Path(download).glob("*.whl"):
-                            os.replace(archive, wheels / archive.name)
+                        publish_seed_reference(Path(download), wheels)
                 subprocess.run(
                     [
                         str(python),

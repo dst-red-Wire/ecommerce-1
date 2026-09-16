@@ -4,7 +4,9 @@ import base64
 import csv
 import hashlib
 import io
+import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -33,6 +35,7 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.payload = {
             "sample/__init__.py": b"value = 1\n",
             "sample-1.0.0.dist-info/METADATA": b"Name: sample\nVersion: 1.0.0\n",
+            "sample-1.0.0.dist-info/entry_points.txt": b"[console_scripts]\nsample = sample:main\n",
         }
         self.wheel = self.wheels / "sample-1.0.0-py3-none-any.whl"
         with zipfile.ZipFile(self.wheel, "w") as archive:
@@ -42,6 +45,19 @@ class SeedPayloadIntegrity(unittest.TestCase):
         digest = hashlib.sha256(self.wheel.read_bytes()).hexdigest()
         self.lock = f"sample==1.0.0 \\\n    --hash=sha256:{digest}\n"
         self.payload.update({"sample-1.0.0.dist-info/INSTALLER": b"pip\n", "sample-1.0.0.dist-info/REQUESTED": b""})
+        self.install_payload()
+        self.assertTrue(self.valid())
+
+    def install_payload(self):
+        from pip._internal.operations.install.wheel import PipScriptMaker
+
+        maker = PipScriptMaker(None, str(self.seed / "bin"))
+        maker.executable = str(self.seed / "bin/python")
+        maker.variants = {""}
+        maker.clobber = True
+        maker.set_mode = True
+        launcher = Path(maker.make("sample = sample:main")[0])
+        self.payload[os.path.relpath(launcher, self.site)] = launcher.read_bytes()
         rows = []
         for relative, data in self.payload.items():
             path = self.site / relative
@@ -53,7 +69,6 @@ class SeedPayloadIntegrity(unittest.TestCase):
         output = io.StringIO()
         csv.writer(output).writerows(rows)
         (self.info / "RECORD").write_text(output.getvalue())
-        self.assertTrue(self.valid())
 
     def valid(self):
         return bootstrap.validate_seed_payload(self.seed, self.wheels, self.lock)
@@ -107,6 +122,81 @@ class SeedPayloadIntegrity(unittest.TestCase):
         self.assertTrue(self.valid())
         bytecode.write_bytes(bytecode.read_bytes()[:16] + b"corrupt")
         self.assertFalse(self.valid())
+
+    def test_generated_entrypoint_requires_execution_permission(self):
+        launcher = self.seed / "bin/sample"
+        launcher.chmod(0o644)
+        self.assertFalse(self.valid())
+        launcher.chmod(0o755)
+        self.assertTrue(self.valid())
+
+    def test_installer_specific_script_template(self):
+        from pip._internal.operations.install.wheel import PipScriptMaker
+
+        # Models installer overrides such as pip 26, independently of the
+        # distlib base template shipped by the test interpreter's pip.
+        template = "# pip installer override\n" + PipScriptMaker.script_template
+        with mock.patch.object(PipScriptMaker, "script_template", template):
+            self.install_payload()
+            self.assertTrue(self.valid())
+
+    def test_python314_venv_alias_is_scaffold(self):
+        from collections import namedtuple
+
+        version = namedtuple("Version", "major minor micro releaselevel serial")(3, 14, 0, "final", 0)
+        alias = self.seed / "bin/𝜋thon"
+        alias.symlink_to(sys.executable)
+        self.assertFalse(self.valid())
+        with (
+            mock.patch.object(sys, "version_info", version),
+            mock.patch.object(sys, "getfilesystemencoding", return_value="utf-8"),
+        ):
+            self.assertTrue(self.valid())
+
+    def test_wheel_tags_must_match_running_interpreter(self):
+        incompatible = self.wheels / "sample-1.0.0-cp999-cp999-any.whl"
+        self.wheel.rename(incompatible)
+        self.assertFalse(self.valid())
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            bootstrap.seed_wheels(self.wheels, self.lock, strict=False)
+
+    def test_clean_reference_recovery_filters_extras_duplicates_and_invalid_wheels(self):
+        shutil.copyfile(self.wheel, self.wheels / "sample-1.0.0-1-py3-none-any.whl")
+        shutil.copyfile(self.wheel, self.wheels / "sample-1.0.0-cp999-cp999-any.whl")
+        (self.wheels / "extra-1.0.0-py3-none-any.whl").write_bytes(b"untrusted")
+        (self.wheels / "invalid.whl").write_bytes(b"untrusted")
+        self.assertFalse(self.valid())
+        candidate = self.root / "candidate"
+        candidate.mkdir()
+        self.assertTrue(bootstrap.copy_seed_reference(self.wheels, candidate, self.lock))
+        self.assertEqual(1, len(list(candidate.iterdir())))
+        bootstrap.publish_seed_reference(candidate, self.wheels)
+        self.assertTrue(self.valid())
+        self.assertFalse(candidate.exists())
+
+    def test_failed_reference_publication_restores_previous_directory(self):
+        candidate = self.root / "candidate"
+        candidate.mkdir()
+        shutil.copyfile(self.wheel, candidate / self.wheel.name)
+        real_replace = os.replace
+
+        def fail_publication(source, target):
+            if source == candidate:
+                raise OSError("controlled reference publication failure")
+            return real_replace(source, target)
+
+        with mock.patch.object(bootstrap.os, "replace", side_effect=fail_publication):
+            with self.assertRaisesRegex(OSError, "controlled"):
+                bootstrap.publish_seed_reference(candidate, self.wheels)
+        self.assertTrue(self.valid())
+        self.assertTrue(candidate.exists())
+
+    def test_reference_path_replaced_by_file_can_be_repaired(self):
+        candidate = self.root / "candidate"
+        self.wheels.rename(candidate)
+        self.wheels.write_bytes(b"corrupted reference")
+        bootstrap.publish_seed_reference(candidate, self.wheels)
+        self.assertTrue(self.valid())
 
 
 class GeneratedLauncherIntegrity(unittest.TestCase):

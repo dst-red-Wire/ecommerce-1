@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,25 @@ class SeedRepairReal(unittest.TestCase):
                 self.assertEqual(0, restored.returncode, restored.stdout + restored.stderr)
                 self.assertIn("REUSE qualification seed", restored.stdout)
                 self.assertEqual(old, reference.resolve())
+            # Recover a polluted reference and a non-executable entrypoint
+            # with acquisition disabled. Only trusted compatible wheels survive.
+            wheels = next((root / "tools/python").glob("*.wheels"))
+            original_wheels = len(list(wheels.glob("*.whl")))
+            wheel = next(wheels.glob("*.whl"))
+            parts = wheel.name.split("-")
+            duplicate = wheels / "-".join([*parts[:2], "1", *parts[2:]])
+            shutil.copyfile(wheel, duplicate)
+            (wheels / "unexpected-1.0.0-py3-none-any.whl").write_bytes(b"untrusted")
+            (old / "bin/ansible").chmod(0o644)
+            env["PIP_NO_INDEX"] = "1"
+            repaired_reference = invoke(sys.executable)
+            self.assertEqual(0, repaired_reference.returncode, repaired_reference.stdout + repaired_reference.stderr)
+            self.assertIn("PREPARE qualification seed", repaired_reference.stdout)
+            self.assertNotEqual(old, reference.resolve())
+            self.assertTrue((old / "bin/python").exists())
+            self.assertEqual(original_wheels, len(list(wheels.glob("*.whl"))))
+            self.assertTrue(os.access(reference / "bin/ansible", os.X_OK))
+            old = reference.resolve()
             python = old / "bin/python"
             package = next(old.glob("lib/python*/site-packages/ansible/__init__.py"))
             original = package.read_text()
