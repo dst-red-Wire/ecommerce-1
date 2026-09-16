@@ -41,6 +41,7 @@ platform:
   node_os: rocky-linux-9
   cni: cilium
   mesh: istio
+  mesh_mode: ambient
   gitops: rancher-fleet
   ci: tekton
   progressive_delivery: argo-rollouts
@@ -154,6 +155,7 @@ machine_contracts:
   ci_topology: config/contracts/ci-topology.yaml
   runtime_efficiency: config/contracts/runtime-efficiency.yaml
   observability_topology: config/contracts/observability-topology.yaml
+  service_mesh_policy: config/contracts/service-mesh-policy.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6
