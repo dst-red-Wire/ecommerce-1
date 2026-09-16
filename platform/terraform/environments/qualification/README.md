@@ -43,7 +43,9 @@ while apt negotiates package access:
 
 ## Trusted two-hop SSH enrollment and provisioning
 
-Before this procedure, complete [trusted controller admission](../../../../docs/project/M1_LINUX_QUALIFICATION_RUNNER.md#trusted-controller-admission).
+Follow the [trusted controller admission policy](../../../../docs/project/M1_LINUX_QUALIFICATION_RUNNER.md#trusted-controller-admission).
+Run the block below in a fresh controller shell: it selects and admits the immutable
+head/base pair once for this two-hop procedure.
 Use a separate clean `/trusted/ecommerce` checkout pinned to an independently
 reviewed full `TRUSTED_RUNNER_REVISION`, selected outside PR-owned configuration.
 The guard, Ansible configuration, collections, roles and both playbooks below

@@ -87,12 +87,16 @@ APPROVED_RUNNER_CORRECTIONS = {
     "platform/terraform/environments/qualification/README.md": [
         (
             "982a2e529d8ba7ca9c763b889f7b2fa7a6bd1703372a6b77a2471a52c72666c9",
-            "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
+            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
         ),
-        (None, "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096"),
+        (None, "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32"),
         (
             "271392b42e7c7397f0dc18aa4f727f962a4391beae15139204c233d0838ec959",
+            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
+        ),
+        (
             "83631bf0d5f13865f071e705e5380792ec05da30b33fa3582d09dd4c552e4096",
+            "7601e9d2f763687b0938ad43d8e40e92ad870b248bea8168504a65661ecebb32",
         ),
     ],
     "tests/test_m1_qualification_runner.py": [
@@ -145,8 +149,14 @@ def validate_repository(root: Path, base: str, head: str | None = None) -> None:
             raise AssertionError("runner admission head differs from selected SHA")
         if git(root, "status", "--porcelain=v1", "--untracked-files=all").stdout:
             raise AssertionError("runner admission requires a clean checkout")
-    entries = git(root, "ls-files", "--stage", "-z", "--", *RUNNER_SCOPES).stdout.decode(errors="surrogateescape")
-    validate_runner_index(entries)
+    entries = git(root, "ls-files", "--stage", "-z").stdout.decode(errors="surrogateescape")
+    for entry in filter(None, entries.split("\0")):
+        _metadata, path = entry.split("\t", 1)
+        if any(scope.startswith(path + "/") for scope in RUNNER_SCOPES):
+            raise AssertionError(f"unapproved runner ancestor index entry: {path}")
+        if any(path == scope or path.startswith(scope + "/") for scope in RUNNER_SCOPES):
+            validate_runner_index(entry)
+
     changed = git(
         root, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base, "--", *RUNNER_SCOPES
     ).stdout
@@ -156,6 +166,11 @@ def validate_repository(root: Path, base: str, head: str | None = None) -> None:
         path = os.fsdecode(raw)
         original = git(root, "show", f"{base}:{path}", check=False)
         before[path] = original.stdout if original.returncode == 0 else None
+        parent = root
+        for component in Path(path).parts[:-1]:
+            parent = parent / component
+            if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                raise AssertionError(f"unapproved runner path ancestor: {parent}")
         current = root / path
         if current.is_symlink() or (current.exists() and not current.is_file()):
             raise AssertionError(f"unapproved runner file type: {path}")
