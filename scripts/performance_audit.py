@@ -168,7 +168,7 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"campaign run {index} must be an object")
         scenario = str(run.get("scenario", ""))
         if scenario not in CAMPAIGN_SCENARIOS:
-            raise ValueError(f"campaign run {index} has unknown scenario: {scenario}")
+            raise ValueError(f"campaign run {index} has unknown scenario")
         cache_state = str(run.get("cache_state", ""))
         if cache_state not in {"cold-isolated", "warm"}:
             raise ValueError(f"campaign run {index} has invalid cache_state")

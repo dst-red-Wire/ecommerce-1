@@ -48,6 +48,15 @@ class PerformanceAuditTests(unittest.TestCase):
             "runs": runs,
         }
 
+    def test_invalid_scenario_diagnostic_does_not_echo_untrusted_content(self):
+        campaign = self.campaign()
+        sensitive = "credential-shaped-private-diagnostic"
+        campaign["runs"][0]["scenario"] = sensitive
+        with self.assertRaises(ValueError) as failure:
+            AUDIT.campaign_summary(campaign)
+        self.assertEqual("campaign run 0 has unknown scenario", str(failure.exception))
+        self.assertNotIn(sensitive, str(failure.exception))
+
     def evidence(self):
         return {
             "schema_version": 4,
