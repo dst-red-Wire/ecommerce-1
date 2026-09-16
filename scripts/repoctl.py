@@ -1111,6 +1111,37 @@ def qualification_identity() -> str:
         digest.update(relative.encode())
         digest.update(path.read_bytes())
     digest.update(sys.version.encode())
+    for command in (
+        "ansible-playbook",
+        "ansible-lint",
+        "go",
+        "gofmt",
+        "templ",
+        "terraform",
+        "tofu",
+        "gitleaks",
+        "ruff",
+        "oapi-codegen",
+        "sqlc",
+        "yq",
+        "oasdiff",
+        "node",
+        "pnpm",
+        "oxlint",
+        "oxfmt",
+    ):
+        executable = shutil.which(command)
+        digest.update(command.encode())
+        digest.update((executable or "missing").encode())
+        if executable:
+            with Path(executable).open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+            # Python entrypoint bytes alone do not identify the installed package.
+            if command in {"ansible-playbook", "ansible-lint"}:
+                digest.update(output([executable, "--version"]).encode())
+    for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+        digest.update(name.encode())
+        digest.update(os.environ.get(name, "").encode())
     ruby = shutil.which("ruby") or ""
     digest.update(ruby.encode())
     if ruby:
