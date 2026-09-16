@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import tempfile
 import time
 import contextlib
@@ -14,6 +15,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -503,6 +505,127 @@ def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> d
     return expected
 
 
+def seed_windows_paths_are_private(paths: list[tuple[Path, bool]]) -> bool:
+    """Read NTFS owners/DACLs once per batch; never infer ACLs from POSIX bits."""
+    script = r"""$ErrorActionPreference = 'Stop'
+try {
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @($current, 'S-1-5-18', 'S-1-5-32-544')
+    $installer = [System.Security.Principal.NTAccount]::new('NT SERVICE', 'TrustedInstaller')
+    $trusted += $installer.Translate($sidType).Value
+    $entries = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+    foreach ($entry in $entries) {
+        $acl = Get-Acl -LiteralPath $entry.path
+        $owner = $acl.GetOwner($sidType).Value
+        if ($entry.ancestor) {
+            if ($trusted -notcontains $owner) { exit 1 }
+            $mask = 0x500D0040  # replace/delete children or change owner/DACL
+        } else {
+            if ($owner -ne $current) { exit 1 }
+            $mask = 0x500D0156  # includes file writes and directory additions
+        }
+        foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (([long]$rule.FileSystemRights -band $mask) -eq 0) { continue }
+            $sid = $rule.IdentityReference.Value
+            if ($trusted -contains $sid -or $sid -eq 'S-1-3-4') { continue }
+            if ($sid -eq 'S-1-3-0' -and ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+            exit 1
+        }
+    }
+    [Console]::Out.Write('PRIVATE')
+} catch { exit 1 }
+"""
+    command = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    try:
+        result = subprocess.run(
+            [
+                str(command),
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                base64.b64encode(script.encode("utf-16le")).decode("ascii"),
+            ],
+            input=json.dumps(
+                [{"path": str(path), "ancestor": ancestor} for path, ancestor in paths], ensure_ascii=True
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "PRIVATE"
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def seed_paths_are_private(paths: list[tuple[Path, bool]]) -> bool:
+    if os.name == "nt":
+        return seed_windows_paths_are_private(paths)
+    return all(seed_path_is_private(path, ancestor=ancestor) for path, ancestor in paths)
+
+
+def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
+    """POSIX cache entries must not be replaceable by another unprivileged UID."""
+    if os.name == "nt":
+        return seed_windows_paths_are_private([(path, ancestor)])
+    try:
+        info = path.lstat()
+        owners = {os.geteuid(), 0} if ancestor else {os.geteuid()}
+        if info.st_uid not in owners:
+            return False
+        if stat.S_ISLNK(info.st_mode):
+            return True  # Its exact target is independently checked by scaffold validation.
+        if info.st_mode & 0o022 and not (ancestor and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX):
+            return False
+        return not stat.S_ISREG(info.st_mode) or info.st_nlink == 1
+    except OSError:
+        return False
+
+
+def seed_directory_reference(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
+
+
+def seed_windows() -> bool:
+    return os.name == "nt"
+
+
+def create_seed_directory_reference(reference: Path, target: Path) -> None:
+    if seed_windows():
+        # CPython's native junction API needs no symbolic-link privilege or shell.
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(reference))
+    else:
+        reference.symlink_to(target, target_is_directory=True)
+
+
+def remove_seed_directory_reference(reference: Path) -> None:
+    if reference.is_junction():
+        reference.rmdir()
+    else:
+        reference.unlink(missing_ok=True)
+
+
+def replace_seed_directory_reference(temporary: Path, destination: Path) -> None:
+    """POSIX atomic replacement; Windows junction rename with rollback under lock."""
+    if not seed_windows() or not destination.exists():
+        os.replace(temporary, destination)
+        return
+    backup = destination.with_name(f".{destination.name}.{os.getpid()}.previous")
+    if backup.exists() or seed_directory_reference(backup):
+        raise SeedGenerationBoundaryError("seed reference backup already exists")
+    os.replace(destination, backup)
+    try:
+        os.replace(temporary, destination)
+    except BaseException:
+        os.replace(backup, destination)
+        raise
+    remove_seed_directory_reference(backup)
+
+
 # Reused from PR92 (46997184): trusted wheel authority and seed recovery.
 def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path]:
     """Only lock-authorized wheel bytes can define the installed inventory."""
@@ -511,6 +634,11 @@ def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path
 
     if directory.is_symlink() or directory.resolve() != directory:
         raise ValueError("seed wheel reference escapes its cache")
+    private_paths = [(directory, False)]
+    if os.name == "nt":
+        private_paths.extend((path, False) for path in directory.glob("*.whl"))
+    if not seed_paths_are_private(private_paths):
+        raise ValueError("seed wheel cache is externally mutable")
     expected = seed_requirements(lock)
     hashes = {}
     name = None
@@ -531,6 +659,8 @@ def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path
                 raise ValueError("seed wheel is incompatible with this interpreter")
             if wheel.is_symlink() or not wheel.is_file() or wheel.stat().st_nlink != 1:
                 raise ValueError("seed wheel must be a regular single-link file")
+            if os.name != "nt" and not seed_path_is_private(wheel):
+                raise ValueError("seed wheel is externally mutable")
             if hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
                 raise ValueError("seed wheel differs from locked digest")
             selected[name] = wheel
@@ -606,7 +736,14 @@ def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
     from pip._internal.operations.install.wheel import PipScriptMaker
 
     try:
-        if any(path.is_file() and not path.is_symlink() and path.stat().st_nlink != 1 for path in root.rglob("*")):
+        payload_paths = [root.resolve()]
+        for path in root.rglob("*"):
+            if path.is_junction():
+                return False
+            payload_paths.append(path)
+        if not seed_paths_are_private([(path, False) for path in payload_paths]):
+            return False
+        if any(path.is_file() and not path.is_symlink() and path.stat().st_nlink != 1 for path in payload_paths):
             return False
         interpreter_wheels = interpreter_seed_wheels()
         archives = seed_wheels(wheels, lock) + interpreter_wheels
@@ -882,6 +1019,10 @@ def validate_seed_generation_root(generations: Path) -> None:
         invalid = generations.is_symlink() or generations.resolve() != generations
     except (OSError, RuntimeError) as exc:
         raise SeedGenerationBoundaryError("seed generation root cannot be resolved safely") from exc
+    if not seed_paths_are_private(
+        [(path, path != generations) for path in (generations, *generations.parents) if path.exists()]
+    ):
+        raise SeedGenerationBoundaryError("seed cache path is externally mutable")
     if invalid:
         raise SeedGenerationBoundaryError(
             "seed generation root is a symlink or escapes its expected identity/tool-home"
@@ -891,12 +1032,24 @@ def validate_seed_generation_root(generations: Path) -> None:
 def validated_seed_tool_home(value: str | Path) -> Path:
     configured = Path(value).absolute()
     for path in (configured, *configured.parents):
-        if path.is_symlink() or (path.exists() and not path.is_dir()):
+        if seed_directory_reference(path) or (path.exists() and not path.is_dir()):
             raise SeedGenerationBoundaryError("seed tool home has an unsafe root or ancestor")
+    if not seed_paths_are_private(
+        [(path, path != configured) for path in (configured, *configured.parents) if path.exists()]
+    ):
+        raise SeedGenerationBoundaryError("seed tool home has externally mutable ownership or permissions")
     return configured.resolve()
 
 
 def seed_environment() -> int:
+    previous = os.umask(0o077)
+    try:
+        return _seed_environment()
+    finally:
+        os.umask(previous)
+
+
+def _seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
     for package, key in (
@@ -963,7 +1116,7 @@ def seed_environment() -> int:
 
     with identity_lock(lock_path):
         validate_seed_generation_root(generations)
-        if selector.is_symlink():
+        if seed_directory_reference(selector):
             selected = selector.resolve()
             if selected.parent != generations:
                 raise RuntimeError("seed generation selector escapes its identity")
@@ -1052,16 +1205,16 @@ def seed_environment() -> int:
                 )
                 if not valid():
                     raise RuntimeError("seed environment verification failed after installation")
-                temporary_selector.unlink(missing_ok=True)
-                temporary_selector.symlink_to(seed_root, target_is_directory=True)
-                os.replace(temporary_selector, selector)
+                remove_seed_directory_reference(temporary_selector)
+                create_seed_directory_reference(temporary_selector, seed_root)
+                replace_seed_directory_reference(temporary_selector, selector)
             except BaseException:
                 # Only discard this unpublished candidate; published readers retain their paths.
-                if not selector.is_symlink() or selector.resolve() != seed_root:
+                if not seed_directory_reference(selector) or selector.resolve() != seed_root:
                     shutil.rmtree(seed_root)
                 raise
             finally:
-                temporary_selector.unlink(missing_ok=True)
+                remove_seed_directory_reference(temporary_selector)
         publish_checkout_reference(seed_root)
     ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(python), "-I", str(ansible), "--version"], check=True, text=True, capture_output=True)
@@ -1110,15 +1263,18 @@ def publish_checkout_reference(seed_root: Path) -> None:
     """Atomically point this checkout at its compatible immutable seed."""
     parent = LOCAL_SEED_VENV.parent
     for ancestor in (parent, *parent.parents):
-        if ancestor.is_symlink() or (ancestor.exists() and not ancestor.is_dir()):
+        if seed_directory_reference(ancestor) or (ancestor.exists() and not ancestor.is_dir()):
             raise SeedGenerationBoundaryError("seed checkout reference has an unsafe parent")
     parent.mkdir(parents=True, exist_ok=True)
     temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
-    temporary.unlink(missing_ok=True)
-    temporary.symlink_to(seed_root, target_is_directory=True)
-    if LOCAL_SEED_VENV.exists() and not LOCAL_SEED_VENV.is_symlink():
+    remove_seed_directory_reference(temporary)
+    create_seed_directory_reference(temporary, seed_root)
+    if LOCAL_SEED_VENV.exists() and not seed_directory_reference(LOCAL_SEED_VENV):
         shutil.rmtree(LOCAL_SEED_VENV)
-    os.replace(temporary, LOCAL_SEED_VENV)
+    try:
+        replace_seed_directory_reference(temporary, LOCAL_SEED_VENV)
+    finally:
+        remove_seed_directory_reference(temporary)
 
 
 def main(argv: list[str] | None = None) -> int:
