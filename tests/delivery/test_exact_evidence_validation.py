@@ -1,3 +1,4 @@
+import os
 import importlib.util
 import json
 from pathlib import Path
@@ -116,6 +117,17 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 probe.return_value.stdout = "ansible-playbook [core 2.20.3]"
                 executable.write_bytes(b"changed entrypoint")
                 self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
+    def test_identity_binds_actual_trusted_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Path(directory) / "trusted.py"
+            controller.write_bytes((ROOT / "scripts/repoctl.py").read_bytes())
+            with mock.patch.object(REPOCTL.shutil, "which", return_value=None):
+                candidate = REPOCTL.qualification_identity()
+                with mock.patch.dict(os.environ, {"REPOCTL_TRUSTED_CONTROLLER": str(controller)}):
+                    self.assertEqual(candidate, REPOCTL.qualification_identity())
+                    controller.write_bytes(b"# different gate implementation\n")
+                    self.assertNotEqual(candidate, REPOCTL.qualification_identity())
 
     def test_requires_each_gate_once_and_does_not_skip_required_checks(self):
         gates = self.evidence()["gates"]
