@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 # Controller policy: the current campaign base and the historical audited M1 base.
@@ -35,6 +36,13 @@ RUNNER_SCOPES = (
 # This controller policy requires independent review before use. No arbitrary edits
 # or Git mode transitions are admitted.
 APPROVED_RUNNER_CORRECTIONS = {
+    # Canonical locked collection closure from integration 623f0bd via qualified PR94.
+    "platform/ansible/requirements.yml": [
+        (
+            "59b0c0805444b127408bcda2e3ca8e0c2d44e4464e561ba569bdcadea681f7bd",
+            "4ea0fac4f26e5120a2cc2a22bd368df19488766af4902c2b7abe497250744dc5",
+        ),
+    ],
     "platform/ansible/qualification-runner.yml": [
         (
             "a774d2cf9c69a145e0020b9168e3e86b808e167beb2aa074dc03477d5790a16f",
@@ -202,8 +210,27 @@ def validate_runner_changes(before: dict[str, bytes | None], after: dict[str, by
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    # Resolve before entering candidate cwd. Relative PATH entries and aliases
+    # into candidate-controlled directories cannot supply the controller's Git.
+    candidate = root.resolve()
+    trusted_paths = []
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        directory = Path(entry)
+        if not directory.is_absolute():
+            continue
+        directory = directory.resolve()
+        if directory.is_relative_to(candidate):
+            continue
+        trusted_paths.append(str(directory))
+    env["PATH"] = os.pathsep.join(trusted_paths)
+    executable = shutil.which("git", path=env["PATH"])
+    if not executable or Path(executable).resolve().is_relative_to(candidate):
+        raise AssertionError("trusted Git executable unavailable outside candidate")
+    executable = str(Path(executable).resolve(strict=True))
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS="1")
-    return subprocess.run(["git", "--no-replace-objects", *args], cwd=root, env=env, capture_output=True, check=check)
+    return subprocess.run(
+        [executable, "--no-replace-objects", *args], cwd=root, env=env, capture_output=True, check=check
+    )
 
 
 def validate_repository(root: Path, base: str, head: str | None = None) -> None:

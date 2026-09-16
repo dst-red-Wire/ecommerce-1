@@ -1,6 +1,7 @@
 """Exercise trusted admission against real, isolated candidate repositories."""
 
 import os
+import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,7 +39,11 @@ class TrustedRunnerGuardTest(unittest.TestCase):
 
     def git(self, *args):
         return subprocess.check_output(
-            ["git", *args], cwd=self.repo, env=self.env, text=True, stderr=subprocess.DEVNULL
+            [shutil.which("git", path=os.defpath), *args],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            stderr=subprocess.DEVNULL,
         )
 
     def write(self, relative, content):
@@ -98,6 +103,35 @@ class TrustedRunnerGuardTest(unittest.TestCase):
         self.write("platform/ansible/roles/qualification_proxy_client/tasks/main.yml", "---\n- shell: unapproved\n")
         self.commit()
         self.assertNotEqual(0, self.admit().returncode)
+
+    def test_candidate_git_on_path_never_executes_in_trusted_guard(self):
+        marker = self.directory / "candidate-git-executed"
+        self.write("git", f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
+        (self.repo / "git").chmod(0o755)
+        self.commit()
+        alias = self.directory / "alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        for entry in (".", str(self.repo), str(alias)):
+            with self.subTest(entry=entry):
+                self.env["PATH"] = entry + os.pathsep + os.defpath
+                result = self.admit()
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertFalse(marker.exists())
+
+    def test_canonical_collection_pin_admission_rejects_any_additional_mutation(self):
+        spec = importlib.util.spec_from_file_location("trusted_runner_guard", self.guard)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        path = "platform/ansible/requirements.yml"
+        before = subprocess.check_output(
+            [shutil.which("git", path=os.defpath), "show", "91c636997a3d62595c65f815319c1342c93ea956:" + path],
+            cwd=ROOT,
+            env=self.env,
+        )
+        after = (ROOT / path).read_bytes()
+        guard.validate_runner_changes({path: before}, {path: after})
+        with self.assertRaisesRegex(AssertionError, "unapproved base-relative"):
+            guard.validate_runner_changes({path: before}, {path: after + b"# extra candidate mutation\n"})
 
     def test_replacement_refs_cannot_hide_real_object_changes(self):
         self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
