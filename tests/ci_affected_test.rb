@@ -247,6 +247,25 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+  def test_existing_root_documentation_remains_global_only
+    %w[CONTRIBUTING.md SECURITY.md LICENSE].each do |path|
+      assert_equal ["global"], classify(path)
+    end
+  end
+
+  def test_retired_contract_uses_base_registry
+    current = [["product"], {}, "contracts/openapi/common.yaml"]
+    previous = [["product"], PUBLIC, "contracts/openapi/common.yaml"]
+    loader = ->(_root, ref) { ref == "base" ? previous : current }
+    AffectedComponents.stub(:load_project, loader) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      affected = AffectedComponents.classify(["contracts/openapi/product.v1.yaml"],
+        services: services, public_contracts: contracts, common_openapi: common)
+      assert_includes affected, "service:product"
+      assert_includes affected, "frontend:admin"
+    end
+  end
+
   def test_unknown_service_path_fails_closed
     assert_raises(ArgumentError) { classify("services/warehouse/main.go") }
   end
