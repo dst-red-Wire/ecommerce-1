@@ -1870,26 +1870,29 @@ def deliver(base: str, title: str, message: str) -> int:
 
 def precommit() -> int:
     """Run fast checks against the index snapshot, never against unstaged content."""
-    paths = git("diff", "--cached", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", "--").splitlines()
+    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
     if not paths:
         print("SKIP precommit: no staged files")
         return 0
     with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
         snapshot = Path(directory)
+        entries = git("ls-files", "--stage", "-z").split("\0")
+        if any(entry.startswith("120000 ") for entry in entries):
+            return fail("staged snapshot contains symbolic links; refusing non-index content")
         run(["git", "checkout-index", "--all", f"--prefix={snapshot}/"])
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
         python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
         go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
         if python_files:
             require("ruff")
-            run(["ruff", "format", "--check", *python_files], cwd=snapshot)
-            run(["ruff", "check", *python_files], cwd=snapshot)
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
         if go_files:
             require("gofmt")
-            formatted = run(["gofmt", "-l", *go_files], cwd=snapshot, capture=True)
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
             if formatted.stdout.strip():
                 return fail("staged Go format drift:\n" + formatted.stdout.strip())
-        require("gitleaks")
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
     print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
     return 0
 

@@ -209,6 +209,7 @@ class PerformanceAuditTests(unittest.TestCase):
     def test_campaign_redacts_metadata_and_reports_all_ranges(self):
         campaign = self.campaign()
         campaign["environment"]["TOKEN"] = "sensitive-fixture"
+        campaign["limitations"] += ["blocked because TOKEN=sensitive-fixture"]
         campaign["commands"] += ["curl --token sensitive-fixture", "TOKEN=sensitive-fixture make ci"]
         sample = dict(
             campaign["runs"][0],
@@ -230,6 +231,13 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(4, group["phase_seconds_range"]["tests"])
         self.assertIsNone(group["phase_seconds_median"]["compilation"])
         self.assertEqual(1, group["phase_sample_counts"]["tool-preparation"])
+
+    def test_campaign_limits_are_bounded_typed_metadata(self):
+        for value in ({"TOKEN": "sensitive-fixture"}, ["x" * 257], ["local observation"] * 33, [123]):
+            campaign = self.campaign()
+            campaign["limitations"] = value
+            with self.assertRaises(ValueError):
+                AUDIT.campaign_summary(campaign)
 
     def test_campaign_requires_all_bounded_scenarios(self):
         campaign = self.campaign()

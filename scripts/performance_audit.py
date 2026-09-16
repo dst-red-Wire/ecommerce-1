@@ -80,7 +80,7 @@ def _finite_seconds(value: Any) -> bool:
         return False
 
 
-def _campaign_metadata(campaign: dict[str, Any]) -> tuple[dict, list[str]]:
+def _campaign_metadata(campaign: dict[str, Any]) -> tuple[dict, list[str], list[str]]:
     environment = campaign["environment"]
     commands = campaign["commands"]
     if not isinstance(environment, dict) or not isinstance(commands, list):
@@ -116,7 +116,30 @@ def _campaign_metadata(campaign: dict[str, Any]) -> tuple[dict, list[str]]:
             parts = []
         safe = len(parts) == 2 and parts[0] == "make" and parts[1] in targets
         safe_commands.append(" ".join(parts) if safe else "[redacted command]")
-    return safe_environment, safe_commands
+    limitations = campaign["limitations"]
+    if (
+        not isinstance(limitations, list)
+        or len(limitations) > 32
+        or any(not isinstance(value, str) or len(value) > 256 for value in limitations)
+    ):
+        raise ValueError("campaign limitations must be at most 32 bounded strings")
+    allowed_limitations = {
+        "local observation",
+        "warm caches only",
+        "cold caches not measured",
+        "single sample",
+        "single host",
+        "no remote ci status present",
+        "no remote ci provenance",
+        "network variability",
+        "tools preinstalled",
+        "synthetic fixture",
+    }
+    safe_limitations = [
+        value.strip().lower() if value.strip().lower() in allowed_limitations else "[redacted limitation]"
+        for value in limitations
+    ]
+    return safe_environment, safe_commands, safe_limitations
 
 
 def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
@@ -137,7 +160,7 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
 
     if not isinstance(campaign["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", campaign["head_sha"]):
         raise ValueError("campaign head_sha must be a full lowercase commit SHA")
-    safe_environment, safe_commands = _campaign_metadata(campaign)
+    safe_environment, safe_commands, safe_limitations = _campaign_metadata(campaign)
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     observed_scenarios: set[str] = set()
     for index, run in enumerate(runs):
@@ -230,7 +253,7 @@ def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
         "head_sha": campaign["head_sha"],
         "environment": safe_environment,
         "commands": safe_commands,
-        "limitations": campaign["limitations"],
+        "limitations": safe_limitations,
         "scenario_count": len(observed_scenarios),
         "run_count": len(runs),
         "groups": summaries,
