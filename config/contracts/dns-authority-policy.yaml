@@ -1,14 +1,36 @@
-version: 1
+version: 2
 status: active
 architecture_authority: architecture.lock.yaml
 
+public_dns_model:
+  mode: hidden-primary-with-public-secondaries
+  zone_source_of_truth: powerdns-hidden-primary
+  public_secondary_provider: cloudns
+  transfer_protocols: [axfr, ixfr]
+  notify: required
+  public_nameservers:
+    status: unresolved-runtime-input
+    provider: cloudns
+    examples: [ns41.cloudns.net, ns42.cloudns.net, ns43.cloudns.net]
+    exact_assigned_set_required_before-delegation: true
+
 authorities:
-  public_authoritative:
+  public_zone_source:
     authority: powerdns-authoritative
-    hidden_primary: mgmt
+    role: hidden-primary
+    location: mgmt
+    publicly-delegated: false
     dnssec: required
+  public_authoritative_secondaries:
+    authority: cloudns
+    role: public-secondary
+    publicly-delegated: true
+    source: powerdns-hidden-primary
+    transfer: axfr-ixfr
+    direct-zone-editing: forbidden-except-break-glass
   dns_frontend:
     authority: dnsdist
+    scope: internal-powerdns-access
     responsibilities: [query-routing, health-checking, protocol-fronting]
   kubernetes_service_discovery:
     authority: coredns
@@ -17,12 +39,15 @@ authorities:
     mode: internal-recursive-cache
   kubernetes_record_writer:
     authority: externaldns
-    target_authority: powerdns-authoritative
+    target_authority: powerdns-hidden-primary
+    writes_public-secondary-directly: false
 
 zones:
   public:
     writer: externaldns-and-approved-manual-bootstrap
-    reader_path: dnsdist-to-powerdns
+    canonical_write_target: powerdns-hidden-primary
+    distribution: powerdns-to-cloudns-axfr-ixfr
+    registrar_delegation_target: cloudns-assigned-nameservers
   internal:
     service_discovery: coredns
     recursive_upstream: unbound
@@ -31,10 +56,22 @@ zones:
     authority: powerdns-plus-coredns
     explicit-zone-contract-required: true
 
+transfer_security:
+  source_allowlist_required: true
+  destination_allowlist_required: true
+  tsig_required_when-supported-by-provider: true
+  zone-transfer-over-public-internet-without-authentication: forbidden
+
 rules:
+  powerdns-hidden-primary-is-only-public-zone-write-authority: true
+  cloudns-is-public-secondary-only: true
+  cloudns-direct-primary-editing-forbidden: true
+  externaldns-must-not-write-cloudns-directly: true
   externaldns-must-not-be-authoritative-server: true
   coredns-must-not-own-public-zone: true
   unbound-must-not-own-authoritative-zone: true
   dnssec-required-for-public-zones: true
   wildcard-records-require-explicit-contract: true
   public-zone-write-path-must-be-auditable: true
+  exact-cloudns-nameserver-set-required-before-registrar-delegation: true
+  zone-transfer-must-be-monitored: true
