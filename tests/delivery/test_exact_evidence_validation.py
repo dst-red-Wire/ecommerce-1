@@ -26,7 +26,7 @@ class ExactEvidenceValidationTest(unittest.TestCase):
             "changed_paths": ["x"],
             "qualification_identity": "identity",
             "created_at_epoch": time.time(),
-            "gates": [{"gate": "governance", "status": "PASS"}],
+            "gates": [{"gate": name, "status": "PASS"} for name, _ in REPOCTL._global_gate_commands("base", "h")],
         }
 
     def validate(self, evidence):
@@ -46,6 +46,7 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "git", side_effect=lambda *args: values[args]),
                 mock.patch.object(REPOCTL, "changed_paths", return_value=["x"]),
+                mock.patch.object(REPOCTL, "affected", return_value=["global"]),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"),
             ):
                 return REPOCTL._valid_exact_evidence("base", "h")
@@ -94,14 +95,50 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                     "which",
                     side_effect=lambda name: str(executable) if name == "ansible-playbook" else None,
                 ),
-                mock.patch.object(REPOCTL, "output", return_value="ansible-playbook [core 2.20.3]") as output,
+                mock.patch.object(
+                    REPOCTL,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout="ansible-playbook [core 2.20.3]", stderr=""),
+                ) as probe,
             ):
                 initial = REPOCTL.qualification_identity()
-                output.return_value = "ansible-playbook [core 2.16.3]"
+                probe.return_value.stdout = "ansible-playbook [core 2.16.3]"
                 self.assertNotEqual(initial, REPOCTL.qualification_identity())
-                output.return_value = "ansible-playbook [core 2.20.3]"
+                probe.return_value.stdout = "ansible-playbook [core 2.20.3]"
                 executable.write_bytes(b"changed entrypoint")
                 self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
+    def test_requires_each_gate_once_and_does_not_skip_required_checks(self):
+        gates = self.evidence()["gates"]
+        for rows in (
+            [],
+            gates[:-1],
+            gates + [gates[0]],
+            gates + [{"gate": "unexpected", "status": "PASS"}],
+            [{**row, "status": "SKIP"} for row in gates],
+            [None],
+        ):
+            with self.subTest(rows=rows):
+                evidence = self.evidence()
+                evidence["gates"] = rows
+                self.assertIsNone(self.validate(evidence))
+
+    def test_dispatcher_version_changes_invalidate_identity(self):
+        for command in ("ruff", "pnpm"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                shim = Path(directory) / command
+                shim.write_bytes(b"unchanged dispatcher")
+                with (
+                    mock.patch.object(
+                        REPOCTL.shutil, "which", side_effect=lambda name: str(shim) if name == command else None
+                    ),
+                    mock.patch.object(
+                        REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout="1.0.0", stderr="")
+                    ) as probe,
+                ):
+                    before = REPOCTL.qualification_identity()
+                    probe.return_value.stdout = "2.0.0"
+                    self.assertNotEqual(before, REPOCTL.qualification_identity())
 
     def test_prepush_requalifies_rejected_evidence(self):
         with (
