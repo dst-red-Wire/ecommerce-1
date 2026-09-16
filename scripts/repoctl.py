@@ -758,6 +758,10 @@ def ensure_developer(tags: str) -> None:
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
 
 
+def service_needs_containers(module: Path) -> bool:
+    return any("testcontainers" in path.read_text(encoding="utf-8") for path in module.rglob("*_test.go"))
+
+
 def service_check(service: str) -> int:
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", service or ""):
         return fail("SERVICE must be a canonical lowercase service name")
@@ -769,8 +773,7 @@ def service_check(service: str) -> int:
     capabilities = ["go", "cgo"]
     if (module / "sqlc.yaml").is_file():
         capabilities.append("sqlc")
-    selected_tests = list(module.rglob("*_test.go"))
-    needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
+    needs_containers = service_needs_containers(module)
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
@@ -1491,8 +1494,17 @@ def preflight(base: str, head: str) -> int:
     required = {"ruby", "gitleaks"}
     for gate in ("governance", "contracts", "automation", "security"):
         required.update(requirements[gate])
-    if any(component.startswith("service:") for component in components):
-        required.update(requirements["service"])
+    for component in components:
+        if not component.startswith("service:"):
+            continue
+        module = ROOT / "services" / component.split(":", 1)[1]
+        if not (module / "go.mod").is_file():
+            continue
+        required.update(set(requirements["service"]) - {"sqlc", "diff", "docker"})
+        if (module / "sqlc.yaml").is_file():
+            required.update({"sqlc", "diff"})
+        if service_needs_containers(module):
+            required.update({"docker", "sysctl"})
     if any(component.startswith("frontend:") for component in components):
         required.update(requirements.get("frontend", ["go", "gofmt", "cc"]))
     if "system" in components:
@@ -2010,13 +2022,14 @@ def diff_context(base: str) -> int:
     out = CONTEXT / "diff.md"
     out.write_text(
         "# Diff context\n\n## Files\n"
-        + "\n".join(f"- `{p}`" for p in paths)
+        + "\n".join(f"- {json.dumps(p, ensure_ascii=True)}" for p in paths)
         + "\n\n## Stat\n```text\n"
         + stat[:12000]
         + "\n```\n\n## Diff\n```diff\n"
         + diff[:28000]
         + "\n```\n",
         encoding="utf-8",
+        errors="backslashreplace",
     )
     print(out.relative_to(ROOT))
     return 0
@@ -2069,6 +2082,7 @@ def failure_context(gate: str, component: str) -> int:
         + "\n".join(relevant[:220])
         + "\n```\n",
         encoding="utf-8",
+        errors="backslashreplace",
     )
     print(path.relative_to(ROOT))
     return p.returncode
