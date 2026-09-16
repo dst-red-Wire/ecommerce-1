@@ -127,13 +127,13 @@ module AffectedComponents
 
   def changed_paths(root, base, head)
     if head == "WORKTREE"
-      output = run_git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base, "--") || ""
-      untracked = run_git(root, "ls-files", "--others", "--exclude-standard") || ""
-      return (output.lines + untracked.lines).map(&:strip).reject(&:empty?).uniq.sort
+      output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--") || ""
+      untracked = run_git(root, "ls-files", "--others", "--exclude-standard", "-z") || ""
+      return (output.split("\0") + untracked.split("\0")).reject(&:empty?).uniq.sort
     end
 
-    output = run_git(root, "diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head, "--")
-    output.lines.map(&:strip).reject(&:empty?).uniq.sort
+    output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--")
+    output.split("\0").reject(&:empty?).uniq.sort
   end
 
   def yaml_at(root, ref, path)
