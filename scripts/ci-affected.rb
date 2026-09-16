@@ -104,7 +104,7 @@ module AffectedComponents
       when %r{\Atests/}, %r{\Ascripts/}
         # Other repository-level tests and native helpers are exercised by system.
         components << "system"
-      when %r{\A(?:docs|instruction)/}, "README.md", "AGENTS.md"
+      when %r{\A(?:docs|instruction)/}, "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE"
         # Documentation remains covered by the global governance/security gates.
         force_all!(components, services) if strict_unknown
       else
@@ -289,6 +289,12 @@ module AffectedComponents
     [services, public_contract_index(public_api), public_api["common_components"]]
   end
 
+  def project_for_change(root, base, head)
+    services, current, common = load_project(root, head)
+    _base_services, previous, previous_common = load_project(root, base)
+    [services, previous.merge(current), common || previous_common]
+  end
+
   def service_consumers(root, base, head, services)
     maps = [yaml_at(root, base, "config/contracts/dependency-map.yaml"),
             yaml_at(root, head, "config/contracts/dependency-map.yaml")]
@@ -331,7 +337,7 @@ if $PROGRAM_NAME == __FILE__
   abort "format must be lines or json" unless %w[lines json].include?(options[:format])
 
   root = File.expand_path("..", __dir__)
-  services, public_contracts, common_openapi = AffectedComponents.load_project(root, options[:head])
+  services, public_contracts, common_openapi = AffectedComponents.project_for_change(root, options[:base], options[:head])
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
   contract_impact = AffectedComponents.contract_impact_map(
     root, options[:base], options[:head], paths, services: services
