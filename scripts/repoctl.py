@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -776,7 +778,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -890,14 +892,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -1092,6 +1094,142 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     if p.returncode:
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
     return p.returncode == 0
+
+
+def _local_resources() -> tuple[int, int]:
+    cpu = max(1, os.cpu_count() or 1)
+    if hasattr(os, "sched_getaffinity"):
+        cpu = min(cpu, max(1, len(os.sched_getaffinity(0))))
+    try:
+        memory = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        memory = 1024**3
+    root = Path("/sys/fs/cgroup")
+    directories = [root]
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                relative = line.split("::", 1)[1].lstrip("/")
+                candidate = (root / relative).resolve()
+                if candidate.is_relative_to(root):
+                    directories += [candidate, *[p for p in candidate.parents if p.is_relative_to(root)]]
+    except OSError:
+        pass
+    for directory in set(directories):
+        try:
+            quota, period = (directory / "cpu.max").read_text().split()
+            if quota != "max" and int(period) > 0:
+                cpu = min(cpu, max(1, int(quota) // int(period)))
+        except (OSError, ValueError):
+            pass
+        try:
+            maximum = (directory / "memory.max").read_text().strip()
+            if maximum != "max":
+                current = int((directory / "memory.current").read_text())
+                memory = min(memory, max(0, int(maximum) - current))
+        except (OSError, ValueError):
+            pass
+    return cpu, memory
+
+
+def _local_parallelism(gate_count: int) -> int:
+    cpu, memory = _local_resources()
+    resource_bound = max(1, min(cpu, max(1, memory // (2 * 1024**3)), gate_count, 4))
+    try:
+        configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+    except ValueError:
+        configured = 1
+    return max(1, min(configured, resource_bound))
+
+
+def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]) -> bool:
+    """Run read-only local gates concurrently and stop siblings on first failure."""
+    jobs = _local_parallelism(len(gates))
+    pending = list(gates)
+    running: dict[str, tuple[subprocess.Popen, object, Path, float, list[str]]] = {}
+    lock = threading.Lock()
+    logs = CONTEXT / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    effective_cpu, _ = _local_resources()
+    child_env = dict(env)
+    child_env.setdefault("GOMAXPROCS", str(max(1, effective_cpu // jobs)))
+    child_env.setdefault("ANSIBLE_FORKS", str(max(1, effective_cpu // jobs)))
+
+    processes: list[subprocess.Popen] = []
+
+    def signal_groups(sig):
+        alive = False
+        for process in processes:
+            try:
+                os.killpg(process.pid, sig)
+                alive = True
+            except ProcessLookupError:
+                pass
+        return alive
+
+    def stop_all():
+        # A group may outlive its leader, including the gate that failed.
+        signal_groups(signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            for process in processes:
+                process.poll()
+            if not signal_groups(0):
+                break
+            time.sleep(0.05)
+        signal_groups(signal.SIGKILL)
+        for process in processes:
+            process.wait()
+
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                name, command = pending.pop(0)
+                log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+                handle = log_path.open("w", encoding="utf-8")
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=ROOT,
+                        env=child_env,
+                        text=True,
+                        stdout=handle,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                except BaseException:
+                    handle.close()
+                    raise
+                processes.append(process)
+                running[name] = (process, handle, log_path, time.monotonic(), command)
+            finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
+            if finished is None:
+                time.sleep(0.05)
+                continue
+            process, handle, log_path, started, command = running.pop(finished)
+            handle.close()
+            record = {
+                "gate": finished,
+                "status": "PASS" if process.returncode == 0 else "FAIL",
+                "exit_code": process.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "command": command,
+                "log": str(log_path.relative_to(ROOT)),
+            }
+            with lock:
+                records.append(record)
+            print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
+            if process.returncode:
+                print(
+                    "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]),
+                    file=sys.stderr,
+                )
+                return False
+        return True
+    finally:
+        stop_all()
+        for _process, handle, *_rest in running.values():
+            handle.close()
 
 
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
@@ -1524,10 +1662,29 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
-    for name, command in global_commands:
+    preparation = [(name, command) for name, command in global_commands if name == "preflight"]
+    independent = [(name, command) for name, command in global_commands if name != "preflight"]
+    for name, command in preparation:
         if not run_stable_gate(name, command):
             write_evidence(base, head, paths, components, records, verification)
             return 1
+    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_independent_gates(independent, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
+        verification["tree_stable"] = False
+        records.append(
+            {
+                "gate": "worktree-stability",
+                "status": "FAIL",
+                "exit_code": 1,
+                "duration_seconds": 0.0,
+                "reason": "parallel global gates mutated worktree",
+            }
+        )
+        write_evidence(base, head, paths, components, records, verification)
+        return fail("parallel global gates mutated the worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
@@ -1737,10 +1894,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,8 +2027,75 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    if any(entry.startswith("120000 ") for entry in entries):
+        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
