@@ -182,6 +182,20 @@ class CIAffectedTest < Minitest::Test
     assert_includes affected, "system"
   end
 
+  def test_event_producers_route_declared_consumers_and_transitive_dependents
+    root = File.expand_path("..", __dir__)
+    services, = AffectedComponents.load_project(root, "HEAD")
+    consumers = AffectedComponents.service_consumers(root, "origin/main", "HEAD", services)
+    %w[order notification returns billing fulfillment].each do |consumer|
+      assert_includes consumers.fetch("payment"), consumer
+    end
+    affected = AffectedComponents.classify(["services/payment/internal/application/change.go"],
+      services: services, public_contracts: {}, service_consumers: consumers)
+    %w[payment order notification returns billing fulfillment].each do |consumer|
+      assert_includes affected, "service:#{consumer}"
+    end
+  end
+
   def test_changed_paths_reads_exact_git_range
     Dir.mktmpdir("ci-affected-git") do |dir|
       with_isolated_git_environment do
