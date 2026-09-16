@@ -22,6 +22,35 @@ class SeedFastPathContractTest(unittest.TestCase):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         self.assertIn('- "{{ local_share }}/tools"', tasks)
 
+    def test_duplicate_canonical_names_reject_warm_seed_even_when_pip_check_passes(self):
+        import sys
+
+        spec = importlib.util.spec_from_file_location("seed_duplicate_test", ROOT / "scripts/capability_bootstrap.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory) / "requirements.lock"
+            lock.write_text("demo-package==1.0\n")
+            for second_version in ("1.0", "9.9"):
+                with (
+                    self.subTest(second_version=second_version),
+                    mock.patch.object(importlib.metadata, "version", return_value="1.0"),
+                    mock.patch.object(
+                        importlib.metadata,
+                        "distributions",
+                        return_value=[
+                            mock.Mock(metadata={"Name": "demo-package"}, version="1.0"),
+                            mock.Mock(metadata={"Name": "Demo_Package"}, version=second_version),
+                        ],
+                    ),
+                    mock.patch.object(module.subprocess, "run", return_value=mock.Mock(returncode=0)) as run,
+                ):
+                    self.assertFalse(module.validate_seed_lock(str(lock)))
+                    with self.assertRaisesRegex(ValueError, "duplicate canonical"):
+                        module.seed_unlocked_distributions(str(lock))
+                    run.assert_not_called()
+
     def test_compatible_but_unlocked_dependency_is_rejected(self):
         spec = importlib.util.spec_from_file_location("seed_inventory_test", ROOT / "scripts/capability_bootstrap.py")
         module = importlib.util.module_from_spec(spec)

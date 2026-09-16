@@ -514,13 +514,16 @@ def seed_unlocked_distributions(lock_path: str) -> list[str]:
     expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
     # These are supplied by venv/ensurepip rather than the qualification lock.
     allowed = set(expected) | {"pip", "setuptools", "wheel"}
-    installed = set()
+    installed: dict[str, list[str]] = {}
     for distribution in metadata.distributions():
         name = distribution.metadata.get("Name", "")
         if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
             raise ValueError("invalid installed seed distribution name")
-        installed.add(canonicalize_name(name))
-    return sorted(installed - allowed)
+        canonical = canonicalize_name(name)
+        installed.setdefault(canonical, []).append(distribution.version)
+    if any(len(versions) != 1 for versions in installed.values()):
+        raise ValueError("duplicate canonical seed distributions")
+    return sorted(set(installed) - allowed)
 
 
 def validate_seed_lock(lock_path: str) -> bool:
@@ -532,7 +535,10 @@ def validate_seed_lock(lock_path: str) -> bool:
             return False
     except metadata.PackageNotFoundError:
         return False
-    if seed_unlocked_distributions(lock_path):
+    try:
+        if seed_unlocked_distributions(lock_path):
+            return False
+    except ValueError:
         return False
     return (
         subprocess.run(
