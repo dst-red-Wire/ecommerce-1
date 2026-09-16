@@ -296,12 +296,26 @@ module AffectedComponents
   end
 
   def service_consumers(root, base, head, services)
-    maps = [yaml_at(root, base, "config/contracts/dependency-map.yaml"),
-            yaml_at(root, head, "config/contracts/dependency-map.yaml")]
     reverse = Hash.new { |hash, key| hash[key] = Set.new }
-    maps.each do |data|
+    [base, head].each do |ref|
+      data = yaml_at(root, ref, "config/contracts/dependency-map.yaml")
+      events = yaml_at(root, ref, "config/contracts/event-contracts.yaml")
+      producers = {}
+      events.fetch("events", {}).each do |name, spec|
+        provider = event_producer(name)
+        next unless services.include?(provider)
+        producers[name] = provider
+        producers[event_tail(name)] = provider
+        Array(spec && spec["consumers"]).each do |consumer|
+          reverse[provider] << consumer if services.include?(consumer)
+        end
+      end
       data.fetch("services", {}).each do |consumer, spec|
         next unless services.include?(consumer)
+        Array(spec && spec["events_in"]).each do |event|
+          provider = producers[event]
+          reverse[provider] << consumer if provider
+        end
         %w[sync sync_external].each do |kind|
           Array(spec && spec[kind]).each do |provider|
             reverse[provider] << consumer if services.include?(provider)
