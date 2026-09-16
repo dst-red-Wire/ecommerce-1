@@ -25,7 +25,7 @@ class PrecommitStagedContractTest(unittest.TestCase):
         controller = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         function = controller.split("def precommit()", 1)[1].split("\ndef prepush()", 1)[0]
         self.assertIn('"--cached"', function)
-        self.assertIn('"checkout-index"', function)
+        self.assertIn("_materialize_staged_tree(snapshot)", function)
         self.assertNotIn("verify_change", function)
         self.assertIn('"gitleaks"', function)
 
@@ -109,6 +109,29 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(head, git("rev-parse", "HEAD"))
             self.assertFalse(any(command[:2] in (["git", "commit"], ["git", "push"]) for command in commands))
             verify.assert_not_called()
+
+    def test_unstaged_attributes_cannot_convert_indexed_blobs(self):
+        for tracked in (False, True):
+            with self.subTest(tracked=tracked), self.fixture() as (root, git):
+                folder = root / "nested"
+                folder.mkdir()
+                path = folder / "fixture.go"
+                content = b"package fixture\n\nvar value = 1\n"
+                path.write_bytes(content)
+                attributes = folder / ".gitattributes"
+                if tracked:
+                    attributes.write_text("*.go text\n")
+                    git("add", "--", "nested/.gitattributes")
+                git("add", "--", "nested/fixture.go")
+                index = git("write-tree")
+                attributes.write_text("*.go working-tree-encoding=UTF-16\n")
+                with tempfile.TemporaryDirectory() as destination:
+                    snapshot = Path(destination)
+                    REPOCTL._materialize_staged_tree(snapshot)
+                    self.assertEqual(content, (snapshot / "nested/fixture.go").read_bytes())
+                self.assertEqual(0, REPOCTL.precommit())
+                self.assertEqual(index, git("write-tree"))
+                self.assertEqual("*.go working-tree-encoding=UTF-16\n", attributes.read_text())
 
 
 if __name__ == "__main__":
