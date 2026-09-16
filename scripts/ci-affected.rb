@@ -129,11 +129,11 @@ module AffectedComponents
     if head == "WORKTREE"
       output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--") || ""
       untracked = run_git(root, "ls-files", "--others", "--exclude-standard", "-z") || ""
-      return (output.split("\0") + untracked.split("\0")).reject(&:empty?).uniq.sort
+      return (output.b.split("\0") + untracked.b.split("\0")).reject(&:empty?).uniq.sort
     end
 
     output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--")
-    output.split("\0").reject(&:empty?).uniq.sort
+    output.b.split("\0").reject(&:empty?).uniq.sort
   end
 
   def yaml_at(root, ref, path)
@@ -291,8 +291,8 @@ module AffectedComponents
 
   def project_for_change(root, base, head)
     services, current, common = load_project(root, head)
-    _base_services, previous, previous_common = load_project(root, base)
-    [services, previous.merge(current), [common, previous_common].compact.uniq]
+    base_services, previous, previous_common = load_project(root, base)
+    [(services | base_services).sort, previous.merge(current), [common, previous_common].compact.uniq]
   end
 
   def service_consumers(root, base, head, services)
