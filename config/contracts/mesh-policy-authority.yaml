@@ -1,0 +1,41 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+
+layers:
+  l3_l4:
+    authority: cilium
+    responsibilities:
+      - cni
+      - ebpf-dataplane
+      - network-policy
+      - service-load-balancing
+    istio_authority: false
+  mesh_transport:
+    authority: istio-ambient-ztunnel
+    responsibilities:
+      - workload-to-workload-mtls
+      - workload-identity-transport
+      - l4-mesh-authorization
+  l7:
+    authority: istio-waypoint
+    enabled_only_when: service-mesh-policy-waypoint-required
+    capabilities:
+      - http-grpc-routing
+      - application-authorization
+      - retries-timeouts-circuit-breaking
+      - l7-telemetry
+    cilium_l7_policy: forbidden-for-ambient-managed-flows
+  ingress:
+    authorities: [haproxy, caddy-coraza, kong, istio-gateway]
+  runtime_security:
+    authority: tetragon
+  workload_identity:
+    authority: spire
+
+rules:
+  single_l7_policy_authority_per_flow: true
+  cilium_l3_l4_with_istio_l7_allowed: true
+  cilium_l7_and_istio_l7_same_flow_forbidden: true
+  waypoint_without_versioned_l7_requirement_forbidden: true
