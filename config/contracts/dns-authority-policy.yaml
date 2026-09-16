@@ -9,9 +9,13 @@ public_dns_model:
   transfer_protocols: [axfr, ixfr]
   notify: required
   public_nameservers:
-    status: unresolved-runtime-input
+    status: exact
     provider: cloudns
-    examples: [ns41.cloudns.net, ns42.cloudns.net, ns43.cloudns.net]
+    names:
+      - pns41.cloudns.net
+      - pns42.cloudns.net
+      - pns43.cloudns.net
+      - pns44.cloudns.net
     exact_assigned_set_required_before-delegation: true
 
 authorities:
