@@ -1963,6 +1963,26 @@ def precommit() -> int:
             formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
             if formatted.stdout.strip():
                 return fail("staged Go format drift:\n" + formatted.stdout.strip())
+            go = require("go")
+            modules: set[Path] = set()
+            standalone: dict[Path, list[str]] = {}
+            for relative in go_files:
+                source = snapshot / relative
+                parent = source.parent
+                while parent != snapshot and not (parent / "go.mod").is_file():
+                    parent = parent.parent
+                if (parent / "go.mod").is_file():
+                    modules.add(parent)
+                else:
+                    standalone.setdefault(source.parent, []).append(str(source))
+            env = dict(os.environ, GOWORK="off")
+            env.pop("GOROOT", None)
+            env.pop("GOTOOLDIR", None)
+            for module in sorted(modules):
+                run([go, "vet", "./..."], cwd=module, env=env)
+            for parent, files in sorted(standalone.items()):
+                run([go, "vet", *files], cwd=parent, env=env)
+
     print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
     return 0
 

@@ -103,6 +103,17 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("[invalid YAML\n", playbook.read_text())
 
+    def test_staged_go_vet_failure_is_not_hidden_by_valid_worktree(self):
+        with self.fixture() as (root, git):
+            (root / "go.mod").write_text("module fixture\n\ngo 1.23.0\n")
+            source = root / "example.go"
+            invalid = 'package fixture\n\nimport "fmt"\n\nfunc message() {\n\tfmt.Printf("%d", "text")\n}\n'
+            source.write_text(invalid)
+            git("add", "go.mod", "example.go")
+            source.write_text(invalid.replace('"%d"', '"%s"'))
+            with self.assertRaisesRegex(RuntimeError, "vet"):
+                REPOCTL.precommit()
+
     def test_option_like_and_quoted_paths_are_checked(self):
         for name in ("--stdin-filename=x.py", "line\nbreak.py"):
             with self.subTest(name=name), self.fixture() as (root, git):
