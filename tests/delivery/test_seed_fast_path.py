@@ -87,6 +87,45 @@ class SeedFastPathContractTest(unittest.TestCase):
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                     self.assertTrue((root / "validated").exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX fixtures simulate Windows case and executable discovery")
+    def test_windows_make_seed_excludes_mixed_case_cache_and_accepts_python_exe(self):
+        import shutil
+
+        make = shutil.which("make")
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "Makefile").write_bytes((ROOT / "Makefile").read_bytes())
+                (root / "scripts").mkdir()
+                (root / "scripts/capability_bootstrap.py").write_text(
+                    "import sys; from pathlib import Path\n"
+                    "assert sys.flags.isolated and sys.flags.no_site\n"
+                    "Path('validated').touch()\n"
+                )
+                cache = root / ("caché" if explicit else "MixedCache")
+                cache.mkdir()
+                (cache / "python.exe").write_text("invalid cached executable must never run")
+                (cache / "python.exe").chmod(0o755)
+                trusted = root / "trusted"
+                trusted.mkdir()
+                provisioned = trusted / "python.exe"
+                provisioned.symlink_to(getattr(sys, "_base_executable", sys.executable))
+                env = dict(
+                    os.environ, OS="Windows_NT", PATH=f"{cache};{trusted}", ECOMMERCE_TOOL_HOME=str(cache).upper()
+                )
+                command = [make, "seed"]
+                if explicit:
+                    command.append(f"SEED_PYTHON={provisioned}")
+                result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                self.assertTrue((root / "validated").exists())
+                if explicit:
+                    (root / "validated").unlink()
+                    refused = subprocess.run([make, "seed"], cwd=root, env=env, capture_output=True, text=True)
+                    self.assertNotEqual(0, refused.returncode)
+                    self.assertIn("Unsupported Windows seed path", refused.stderr)
+                    self.assertFalse((root / "validated").exists())
+
     def test_seed_uses_lock_digest_and_pip_integrity_check(self):
         source = (ROOT / "scripts/capability_bootstrap.py").read_text(encoding="utf-8")
         body = source.split("def seed_environment", 1)[1].split("\ndef main", 1)[0]

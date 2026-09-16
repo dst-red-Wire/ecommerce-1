@@ -202,6 +202,7 @@ class SeedPayloadIntegrity(unittest.TestCase):
         for code, output, accepted in ((0, "PRIVATE", True), (1, "", False), (0, "unexpected", False)):
             with (
                 self.subTest(code=code, output=output),
+                mock.patch.object(bootstrap, "seed_windows_system_directory", return_value=self.root / "System32"),
                 mock.patch.object(
                     bootstrap.subprocess, "run", return_value=mock.Mock(returncode=code, stdout=output)
                 ) as run,
@@ -212,7 +213,10 @@ class SeedPayloadIntegrity(unittest.TestCase):
                 self.assertFalse(any("name & quoted" in argument for argument in command))
                 payload = json.loads(run.call_args.kwargs["input"])
                 self.assertEqual(str(paths[0][0]), payload[0]["path"])
-        with mock.patch.object(bootstrap.subprocess, "run", side_effect=OSError("unavailable ACL probe")):
+        with (
+            mock.patch.object(bootstrap, "seed_windows_system_directory", return_value=self.root / "System32"),
+            mock.patch.object(bootstrap.subprocess, "run", side_effect=OSError("unavailable ACL probe")),
+        ):
             self.assertFalse(bootstrap.seed_windows_paths_are_private(paths))
 
     def test_checkout_reference_rejects_writable_checkout_and_venv(self):

@@ -9,6 +9,8 @@ import base64
 import tempfile
 import time
 import contextlib
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -19,7 +21,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -505,6 +507,67 @@ def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> d
     return expected
 
 
+def seed_windows_system_directory() -> Path:
+    """Use the OS loader/API, never an inherited SystemRoot or PATH override."""
+    kernel = ctypes.WinDLL("kernel32.dll", use_last_error=True, winmode=0x00000800)
+    get_directory = kernel.GetSystemDirectoryW
+    get_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    get_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    size = get_directory(buffer, len(buffer))
+    if not 0 < size < len(buffer) or not PureWindowsPath(buffer.value).is_absolute():
+        raise OSError("Windows system directory unavailable")
+    return Path(buffer.value)
+
+
+def seed_darwin_acl_is_private(path: Path) -> bool:
+    """Reject extended write grants; retain harmless read grants and deny ACLs."""
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        signatures = {
+            "acl_get_link_np": ([ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p),
+            "acl_valid": ([ctypes.c_void_p], ctypes.c_int),
+            "acl_get_entry": ([ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int),
+            "acl_get_tag_type": ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)], ctypes.c_int),
+            "acl_get_permset_mask_np": ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)], ctypes.c_int),
+            "acl_free": ([ctypes.c_void_p], ctypes.c_int),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(libc, name)
+            function.argtypes, function.restype = arguments, result
+        acl = libc.acl_get_link_np(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED, no symlink following.
+        if not acl:
+            return False
+        try:
+            if libc.acl_valid(acl) != 0:
+                return False
+            entry = ctypes.c_void_p()
+            tag = ctypes.c_int()
+            permissions = ctypes.c_uint64()
+            # Darwin sys/acl.h: write/add, delete, append, delete-child,
+            # write attributes/xattrs/security and change owner. Conservatively
+            # reject these grants for any principal, including inherited entries.
+            mutation_mask = sum(1 << bit for bit in (2, 4, 5, 6, 8, 10, 12, 13))
+            for index in range(129):  # ACL_MAX_ENTRIES is 128; one final end probe.
+                ctypes.set_errno(0)
+                result = libc.acl_get_entry(acl, 0 if index == 0 else -1, ctypes.byref(entry))
+                if result != 0:
+                    # On a validated Darwin ACL, EINVAL marks iterator exhaustion.
+                    return result == -1 and ctypes.get_errno() == errno.EINVAL
+                if libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0 or tag.value not in (1, 2):
+                    return False
+                if tag.value == 1:
+                    if libc.acl_get_permset_mask_np(entry, ctypes.byref(permissions)) != 0:
+                        return False
+                    if permissions.value & mutation_mask:
+                        return False
+            return False
+        finally:
+            libc.acl_free(acl)
+    except (AttributeError, OSError):
+        return False
+
+
 def seed_windows_paths_are_private(paths: list[tuple[Path, bool]]) -> bool:
     """Read NTFS owners/DACLs once per batch; never infer ACLs from POSIX bits."""
     script = r"""$ErrorActionPreference = 'Stop'
@@ -537,8 +600,17 @@ try {
     [Console]::Out.Write('PRIVATE')
 } catch { exit 1 }
 """
-    command = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     try:
+        system = seed_windows_system_directory()
+        command = system / "WindowsPowerShell/v1.0/powershell.exe"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.casefold() not in {"systemroot", "windir", "psmodulepath"}
+        }
+        env.update(
+            SystemRoot=str(system.parent), windir=str(system.parent), PSModulePath=str(command.parent / "Modules")
+        )
         result = subprocess.run(
             [
                 str(command),
@@ -554,9 +626,10 @@ try {
             capture_output=True,
             check=False,
             timeout=60,
+            env=env,
         )
         return result.returncode == 0 and result.stdout.strip() == "PRIVATE"
-    except (OSError, subprocess.TimeoutExpired):
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
         return False
 
 
@@ -574,6 +647,8 @@ def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
         info = path.lstat()
         owners = {os.geteuid(), 0} if ancestor else {os.geteuid()}
         if info.st_uid not in owners:
+            return False
+        if sys.platform == "darwin" and not seed_darwin_acl_is_private(path):
             return False
         if stat.S_ISLNK(info.st_mode):
             return True  # Its exact target is independently checked by scaffold validation.
@@ -1260,7 +1335,28 @@ def verify_seed_ansible_version(python: Path, expected: str) -> None:
 @contextlib.contextmanager
 def identity_lock(path: Path, timeout: float = 300.0):
     """Bounded cross-process lock; the caller must recheck after acquisition."""
-    handle = path.open("a+", encoding="utf-8")
+    try:
+        if path.exists() or path.is_symlink():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SeedGenerationBoundaryError("seed identity lock must be a regular file")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            opened = os.fstat(descriptor)
+            current = path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or not seed_path_is_private(path)
+            ):
+                raise SeedGenerationBoundaryError("seed identity lock is not a private regular file")
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except OSError as exc:
+        raise SeedGenerationBoundaryError("seed identity lock cannot be opened safely") from exc
     deadline = time.monotonic() + timeout
     while True:
         try:
