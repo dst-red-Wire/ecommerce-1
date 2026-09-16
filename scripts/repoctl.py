@@ -1884,6 +1884,7 @@ def _reject_staged_symlinks() -> int:
 
 def _materialize_staged_tree(snapshot: Path) -> None:
     entries = []
+    directories: dict[tuple[int, int], tuple[str, ...]] = {}
     for entry in git("ls-files", "--stage", "-z").split("\0"):
         if not entry:
             continue
@@ -1892,6 +1893,17 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         target = snapshot / path
         if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
             raise RuntimeError("unsupported or unsafe indexed entry")
+        parent = snapshot
+        parts = Path(path).parts[:-1]
+        for index, component in enumerate(parts):
+            parent = parent / component
+            parent.mkdir(exist_ok=True)
+            identity = parent.stat()
+            key = (identity.st_dev, identity.st_ino)
+            spelling = parts[: index + 1]
+            previous = directories.setdefault(key, spelling)
+            if previous != spelling:
+                raise RuntimeError("filesystem-equivalent indexed directory aliases collide")
         entries.append((mode, oid, target))
     if not entries:
         return

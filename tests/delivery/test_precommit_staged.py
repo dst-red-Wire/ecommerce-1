@@ -120,6 +120,34 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(first, git("rev-parse", ":CASE.txt"))
             self.assertEqual(second, git("rev-parse", ":case.txt"))
 
+    def test_directory_aliases_cannot_redirect_staged_linter_configuration(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as directory:
+            (root / "config").write_text('[tool.ruff.lint]\nignore = ["F821"]\n')
+            (root / "bad").write_text("undefined_name()\n")
+            config = git("hash-object", "-w", "config")
+            bad = git("hash-object", "-w", "bad")
+            git("update-index", "--add", "--cacheinfo", f"100644,{config},CASE/pyproject.toml")
+            git("update-index", "--add", "--cacheinfo", f"100644,{bad},case/bad.py")
+            snapshot = Path(directory)
+            original_mkdir, original_stat = Path.mkdir, Path.stat
+
+            def folded(path):
+                if path.is_relative_to(snapshot):
+                    return snapshot.joinpath(*(part.lower() for part in path.relative_to(snapshot).parts))
+                return path
+
+            def mkdir(path, *args, **kwargs):
+                return original_mkdir(folded(path), *args, **kwargs)
+
+            def stat(path, *args, **kwargs):
+                return original_stat(folded(path), *args, **kwargs)
+
+            with mock.patch.object(Path, "mkdir", mkdir), mock.patch.object(Path, "stat", stat):
+                with self.assertRaisesRegex(RuntimeError, "directory aliases collide"):
+                    REPOCTL._materialize_staged_tree(snapshot)
+            self.assertEqual([], list(snapshot.rglob("*.py")))
+            self.assertEqual([], list(snapshot.rglob("*.toml")))
+
     def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
         with self.fixture() as (root, git):
             name = os.fsdecode(b"bad\xff.txt")
