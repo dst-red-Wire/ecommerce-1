@@ -1,0 +1,50 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+edge_protocol_policy: config/contracts/edge-protocol-policy.yaml
+
+chain:
+  - haproxy
+  - caddy-coraza
+  - kong
+  - istio-gateway
+
+responsibilities:
+  haproxy:
+    owns: [vip, transport-load-balancing, connection-admission, tcp-health-checks]
+    forbids: [tls-termination, http-authentication, api-rate-limit, retry-policy, canary-weighting]
+  caddy-coraza:
+    owns: [public-tls, http2, http3-quic, waf, secure-http-normalization]
+    forbids: [api-authentication, api-quota, business-rate-limit, canary-weighting, service-retry-policy]
+  kong:
+    owns: [api-authentication, api-authorization-entry, api-routing, public-api-rate-limit, api-request-policy]
+    forbids: [public-tls-authority, http3-termination, rollout-traffic-splitting, internal-service-retry-policy]
+  istio-gateway:
+    owns: [mesh-ingress-routing]
+    forbids: [public-user-authentication-authority, public-rate-limit-authority, duplicate-public-waf]
+  istio-waypoint:
+    owns: [justified-internal-l7-policy]
+    conditional: service-mesh-policy-waypoint-required
+
+headers:
+  client_ip:
+    canonical_header: Forwarded
+    compatibility_header: X-Forwarded-For
+    trusted_hops: [haproxy, caddy-coraza, kong, istio-gateway]
+    external-supplied-forwarded-headers: strip-and-rebuild
+  request_id:
+    authority: kong
+    preserve-downstream: true
+
+retry_ownership:
+  public_edge: none
+  api_gateway: none-by-default
+  internal_service: service-resilience-policy
+  rule: one-effective-retry-authority-per-hop
+
+rules:
+  one-owner-per-responsibility: true
+  no-duplicate-authentication: true
+  no-duplicate-rate-limit-for-same-policy: true
+  no-duplicate-retry-for-same-hop: true
+  client-ip-chain-must-be-rebuilt-from-trusted-hops: true
