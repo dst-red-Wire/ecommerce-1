@@ -1,0 +1,71 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+dependency_map: config/contracts/dependency-map.yaml
+traffic_class_policy: config/contracts/traffic-class-policy.yaml
+
+policy_defaults:
+  source: policy-default
+  timeout_required_for_sync_calls: true
+  retries_bounded: true
+  retry_non_idempotent_operations: false
+  circuit_breaking_enabled_by_default: false
+  rate_limit_enabled_by_default: false
+  explicit_override_requires_versioned_contract: true
+
+classes:
+  transactional-critical:
+    timeout_ms: 1500
+    max_retries: 1
+    retry_conditions: [connect-failure, reset, unavailable]
+    circuit_breaking: true
+  interactive:
+    timeout_ms: 2000
+    max_retries: 1
+    retry_conditions: [connect-failure, reset, unavailable]
+    circuit_breaking: true
+  internal-read:
+    timeout_ms: 1200
+    max_retries: 1
+    retry_conditions: [connect-failure, reset, unavailable]
+    circuit_breaking: false
+  async:
+    timeout_ms: 5000
+    max_retries: 0
+    circuit_breaking: false
+  external-critical:
+    timeout_ms: 3000
+    max_retries: 1
+    retry_conditions: [connect-failure, reset, unavailable]
+    circuit_breaking: true
+
+services:
+  catalog: {class: internal-read}
+  product: {class: internal-read}
+  inventory: {class: transactional-critical}
+  cart: {class: interactive}
+  checkout: {class: transactional-critical}
+  pricing: {class: internal-read}
+  tax: {class: internal-read}
+  order: {class: transactional-critical}
+  payment:
+    class: external-critical
+    source_contract: contracts/payment-runtime.yaml
+    retry_requires_idempotency: true
+  fulfillment: {class: transactional-critical}
+  shipping: {class: external-critical}
+  tracking: {class: internal-read}
+  returns: {class: transactional-critical}
+  billing: {class: transactional-critical}
+  fraud-risk: {class: transactional-critical}
+  search: {class: interactive}
+  review: {class: internal-read}
+  user-profile: {class: internal-read}
+  notification: {class: async}
+
+rules:
+  every_sync_dependency_must_resolve_to_timeout_policy: true
+  retry_count_must_be_finite: true
+  payment_non_idempotent_retry_forbidden: true
+  service_specific_override_requires_source_contract: true
+  provisional_values_must_be_replaced_by_measured-preprod-evidence-before-prod-certification: true
