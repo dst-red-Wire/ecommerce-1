@@ -53,6 +53,20 @@ remains the owner of repeatable project-tool installation. Its invocation is rep
 a provisioning dependency, not falsely as a runtime dependency. Downloads continue to
 consume pinned versions and checksums from the existing authority.
 
+The seed entry point never probes an unvalidated PATH interpreter by executing it.
+On POSIX, `/usr/bin/python3` supplied by the OS runs the discovery validator with
+`-I -S -B`; it checks executable regular files, trusted owners, write permissions,
+ACLs and both lexical/resolved cache boundaries before selecting the provisioned
+PATH Python. Publicly writable PATH directories are skipped. A private owned
+installation below a sticky shared ancestor remains admissible. Missing OS Python
+requires an explicit `SEED_PYTHON=/trusted/provisioned/python` override.
+Windows automatic discovery is unsupported because there is no authenticated OS
+Python location; the same explicit provisioned override is required there. This
+is an operator trust decision and must not point at an unvalidated seed cache.
+The override remains the escape hatch for trusted paths outside automatic discovery's
+restricted character set. Native Windows/macOS bootstrap qualification is not claimed
+by Linux tests that exercise rejection and simulated platform inputs.
+
 ## Gate executable closure
 
 The contract also owns `gate_requirements`, the explicit executable closure for bootstrap,
