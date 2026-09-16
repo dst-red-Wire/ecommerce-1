@@ -95,6 +95,13 @@ developer_automation:
   shell_policy: forbidden
   shell_state_mutation_forbidden: true
   tekton_remains_ci_authority: true
+  commit_hook:
+    source: git-index
+    checks: [format, lint, secrets]
+    preserves_partial_commits: true
+  push_hook:
+    source: exact-commit
+    qualification_required: true
 
 developer_accelerators:
   bazel:
