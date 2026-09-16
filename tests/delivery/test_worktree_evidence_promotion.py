@@ -240,9 +240,19 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 candidate = REPOCTL._load_promotable_worktree_evidence(base)
                 self.assertIsNotNone(candidate)
+                for field in ("duration_seconds", "source_duration_seconds"):
+                    malformed = json.loads(json.dumps(candidate))
+                    malformed["gates"][0][field] = {}
+                    (evidence_dir / "worktree.json").write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                (evidence_dir / "worktree.json").write_text(json.dumps(candidate), encoding="utf-8")
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+                for field in ("duration_seconds", "source_duration_seconds"):
+                    malformed = json.loads(json.dumps(candidate))
+                    malformed["gates"][0][field] = {}
+                    self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, malformed))
                 promoted_path = REPOCTL._promote_worktree_evidence(base, head, candidate)
                 self.assertIsNotNone(promoted_path)
                 promoted = json.loads(promoted_path.read_text(encoding="utf-8"))

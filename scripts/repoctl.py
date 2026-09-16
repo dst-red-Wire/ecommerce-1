@@ -67,6 +67,8 @@ PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 # This prevents a user or distro installation from silently changing execution.
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
+# Every service/frontend owns its go.mod; ambient workspaces are not gate inputs.
+os.environ["GOWORK"] = "off"
 CONTEXT = ROOT / ".context"
 
 
@@ -96,6 +98,8 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if cmd and Path(cmd[0]).name in {"go", "go.exe"}:
+        env = dict(os.environ if env is None else env, GOWORK="off")
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -1050,6 +1054,15 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _valid_gate_seconds(value) -> bool:
+    if type(value) not in {int, float}:
+        return False
+    try:
+        return math.isfinite(float(value)) and value >= 0
+    except OverflowError:
+        return False
+
+
 def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
     records = evidence.get("gates")
     if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
@@ -1062,6 +1075,8 @@ def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
     if len(names) != len(set(names)) or set(names) != global_names | component_names:
         return False
     for row in records:
+        if any(not _valid_gate_seconds(row.get(key, 0)) for key in ("duration_seconds", "source_duration_seconds")):
+            return False
         if row.get("status") == "PASS":
             if row.get("exit_code", 0) != 0:
                 return False
@@ -1364,6 +1379,8 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
 def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list[dict]) -> bool:
     source = next((gate for gate in parent_evidence.get("gates", []) if gate.get("gate") == name), None)
     if not source or source.get("status") != "PASS":
+        return False
+    if any(not _valid_gate_seconds(source.get(key, 0)) for key in ("duration_seconds", "source_duration_seconds")):
         return False
     source_duration = float(source.get("source_duration_seconds", source.get("duration_seconds", 0.0)) or 0.0)
     original_execution_sha = source.get("original_execution_sha") or source.get("reused_from_sha") or parent_sha

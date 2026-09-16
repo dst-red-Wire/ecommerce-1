@@ -68,6 +68,30 @@ class ExactEvidenceValidationTest(unittest.TestCase):
                 evidence[field] = value
                 self.assertIsNone(self.validate(evidence))
 
+    def test_invalid_gate_durations_reject_evidence_and_reuse_without_conversion_errors(self):
+        for key in ("duration_seconds", "source_duration_seconds"):
+            for value in ({}, [], None, True, "1.0", -1, float("nan"), float("inf"), 10**400):
+                with self.subTest(key=key, value_type=type(value).__name__):
+                    evidence = self.evidence()
+                    evidence["gates"][0][key] = value
+                    self.assertIsNone(self.validate(evidence))
+                    records = []
+                    self.assertFalse(REPOCTL._reuse_gate(evidence["gates"][0]["gate"], "parent", evidence, records))
+                    self.assertEqual([], records)
+
+    def test_go_gates_ignore_external_or_missing_workspaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "go.mod").write_text("module workspacefixture\n\ngo 1.23.0\n")
+            external = root / "external.work"
+            external.write_text("invalid workspace content\n")
+            for value in (str(external), str(root / "missing.work")):
+                env = dict(os.environ, GOWORK=value)
+                with self.subTest(workspace=value):
+                    result = REPOCTL.run(["go", "list", "-m"], cwd=root, env=env, capture=True)
+                    self.assertEqual("workspacefixture", result.stdout.strip())
+                    self.assertEqual(value, env["GOWORK"])
+
     def test_rejects_malformed_nonfinite_and_future_timestamps(self):
         for value in (
             None,
