@@ -1,0 +1,59 @@
+version: 1
+status: provisional
+architecture_authority: architecture.lock.yaml
+traffic_class_policy: config/contracts/traffic-class-policy.yaml
+source: policy-targets-not-measured-performance
+
+profiles:
+  critical:
+    availability_percent: 99.9
+    latency_p95_ms: 500
+    latency_p99_ms: 1000
+    error_rate_percent: 0.5
+    monthly_error_budget_percent: 0.1
+  high:
+    availability_percent: 99.9
+    latency_p95_ms: 700
+    latency_p99_ms: 1500
+    error_rate_percent: 1.0
+    monthly_error_budget_percent: 0.1
+  normal:
+    availability_percent: 99.5
+    latency_p95_ms: 1000
+    latency_p99_ms: 2000
+    error_rate_percent: 1.0
+    monthly_error_budget_percent: 0.5
+  async:
+    availability_percent: 99.5
+    processing_p95_ms: 5000
+    processing_p99_ms: 15000
+    failure_rate_percent: 1.0
+    monthly_error_budget_percent: 0.5
+
+services:
+  catalog: {profile: normal}
+  product: {profile: normal}
+  inventory: {profile: critical}
+  cart: {profile: high}
+  checkout: {profile: critical}
+  pricing: {profile: normal}
+  tax: {profile: normal}
+  order: {profile: critical}
+  payment: {profile: critical}
+  fulfillment: {profile: critical}
+  shipping: {profile: critical}
+  tracking: {profile: normal}
+  returns: {profile: critical}
+  billing: {profile: critical}
+  fraud-risk: {profile: critical}
+  search: {profile: high}
+  review: {profile: normal}
+  user-profile: {profile: normal}
+  notification: {profile: async}
+
+rules:
+  targets_are_not-production-evidence: true
+  measured-preprod-baseline-required-before-prod-certification: true
+  slo-change-requires-observability-query-update: true
+  hpa-keda-alerting-may-consume-only-versioned-slo: true
+  external-provider-latency-must-be-reported-separately: true
