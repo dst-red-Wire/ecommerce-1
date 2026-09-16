@@ -107,7 +107,7 @@ class FastFailureContractTest(unittest.TestCase):
                 mock.patch.object(module, "run", return_value=mock.Mock(returncode=code)) as probe,
             ):
                 if code:
-                    with self.assertRaisesRegex(RuntimeError, "through its provider"):
+                    with self.assertRaisesRegex(RuntimeError, "probe failed"):
                         module.preflight("base", "head")
                 else:
                     self.assertEqual(0, module.preflight("base", "head"))
@@ -137,7 +137,7 @@ class FastFailureContractTest(unittest.TestCase):
                     mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
                     mock.patch.object(module, "affected", return_value=["service:billing"]),
                     mock.patch.object(module, "changed_paths", return_value=[]),
-                    mock.patch.object(module, "run", return_value=mock.Mock(returncode=0)),
+                    mock.patch.object(module, "run", return_value=mock.Mock(returncode=0, stdout="1\n")),
                     mock.patch.object(module, "require") as require,
                 ):
                     self.assertEqual(0, module.preflight("base", "head"))
@@ -146,6 +146,49 @@ class FastFailureContractTest(unittest.TestCase):
                     self.assertEqual(sqlc, name in required)
                 for name in ("docker", "sysctl"):
                     self.assertEqual(containers, name in required)
+
+    def test_direct_runtime_probes_fail_before_source_checks(self):
+        import tempfile
+
+        spec = importlib.util.spec_from_file_location("preflight_runtime_test", ROOT / "scripts/repoctl.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config/toolchain/capabilities.json"
+            config.parent.mkdir(parents=True)
+            config.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
+            service = root / "services/product"
+            service.mkdir(parents=True)
+            (service / "go.mod").touch()
+            (service / "integration_test.go").write_text("// testcontainers\n")
+            for daemon_ready, forwarding in ((False, "1"), (True, "0"), (True, "1")):
+                commands = []
+
+                def run(command, **kwargs):
+                    commands.append(command)
+                    return mock.Mock(
+                        returncode=0 if command != ["docker", "info"] or daemon_ready else 1,
+                        stdout=forwarding if command[0] == "sysctl" else "ready",
+                    )
+
+                with (
+                    self.subTest(daemon_ready=daemon_ready, forwarding=forwarding),
+                    mock.patch.object(module, "ROOT", root),
+                    mock.patch.object(module, "_reject_staged_symlinks", return_value=0),
+                    mock.patch.object(module, "affected", return_value=["service:product"]),
+                    mock.patch.object(module, "changed_paths", return_value=[]),
+                    mock.patch.object(module, "require", side_effect=lambda name: name),
+                    mock.patch.object(module, "run", side_effect=run),
+                ):
+                    if daemon_ready and forwarding == "1":
+                        self.assertEqual(0, module.preflight("base", "head"))
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                            module.preflight("base", "head")
+                    self.assertIn(["docker", "info"], commands)
+                    if daemon_ready:
+                        self.assertIn(["sysctl", "-n", "net.ipv4.ip_forward"], commands)
 
     def test_diff_context_serializes_non_utf8_paths_and_output(self):
         import os

@@ -1239,12 +1239,14 @@ def preflight(base: str, head: str) -> int:
         required.update(requirements["ansible"])
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     for executable in sorted(required):
-        capability = capabilities.get(executable, {})
-        probe = capability.get("probe") if capability.get("provider") else None
+        capability = capabilities.get(contract.get("command_capabilities", {}).get(executable, executable), {})
+        probe = capability.get("probe")
         if probe:
             require(probe[0])
-            if run(probe, capture=True, check=False).returncode:
-                raise RuntimeError(f"preflight capability {executable} is unavailable through its provider")
+            result = run(probe, capture=True, check=False)
+            expected = capability.get("expected_output")
+            if result.returncode or (expected is not None and result.stdout.strip() != expected):
+                raise RuntimeError(f"preflight capability {executable} probe failed")
         else:
             require(executable)
 
