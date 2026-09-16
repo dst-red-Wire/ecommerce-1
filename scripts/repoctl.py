@@ -1204,7 +1204,7 @@ class _WindowsJob:
 
 
 def _linux_gate_supervisor():
-    """Track detached descendants as a Linux child subreaper until cleanup ends."""
+    """Keep gate processes in a private PID namespace owned by its init."""
     import ctypes
     import os
     from pathlib import Path
@@ -1214,11 +1214,16 @@ def _linux_gate_supervisor():
     import time
 
     libc = ctypes.CDLL(None, use_errno=True)
-    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
-    if libc.prctl(36, 1, 0, 0, 0):  # PR_SET_CHILD_SUBREAPER
-        raise OSError("cannot enable gate child subreaper")
-    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-        raise OSError("gate cleanup requires Linux pidfd support")
+    libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
+    uid, gid = os.getuid(), os.getgid()
+    # No host configuration or elevated host privilege: only this new process
+    # enters fresh user/mount/PID namespaces. Unsupported runners fail closed.
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWPID)
+    Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
+    if libc.mount(None, b"/", None, 16384 | (1 << 18), None):  # MS_REC | MS_PRIVATE
+        raise OSError(ctypes.get_errno(), "cannot isolate gate mounts")
     cancelled = False
 
     def cancel(_signum, _frame):
@@ -1227,78 +1232,43 @@ def _linux_gate_supervisor():
 
     signal.signal(signal.SIGTERM, cancel)
     signal.signal(signal.SIGINT, cancel)
-    leader = None
-
-    def process_state(pid):
+    reader, writer = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    child = os.fork()
+    if child == 0:
+        os.close(writer)
+        # The kernel also tears down the namespace if the outer launcher dies.
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0):  # PR_SET_PDEATHSIG
+            os._exit(125)
         try:
-            fields = (Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()
-            return int(fields[1]), fields[19]
-        except (OSError, ValueError, IndexError):
-            return None
-
-    def descendants():
-        states = {}
-        for entry in Path("/proc").iterdir():
-            if entry.name.isdigit():
-                state = process_state(int(entry.name))
-                if state is not None:
-                    states[int(entry.name)] = state
-        owned = {os.getpid()}
-        while True:
-            children = {pid for pid, (parent, _start) in states.items() if parent in owned} - owned
-            if not children:
-                break
-            owned.update(children)
-        return {pid: states[pid] for pid in owned if pid != os.getpid()}
-
+            if os.read(reader, 1) == b"":
+                os._exit(125)
+        except BlockingIOError:
+            pass
+        os.close(reader)
+        if libc.mount(b"proc", b"/proc", b"proc", 2 | 4 | 8, None):
+            os._exit(125)
+        try:
+            leader = subprocess.Popen(sys.argv[1:])
+            while not cancelled and leader.poll() is None:
+                time.sleep(0.02)
+            result = 130 if cancelled else leader.returncode
+        except BaseException:
+            os._exit(125)
+        # Exiting namespace PID 1 makes the kernel kill/reap every descendant,
+        # including detached sessions. Gates cannot signal ancestor namespaces.
+        os._exit(result if result >= 0 else 128 - result)
+    os.close(reader)
     try:
-        leader = subprocess.Popen(sys.argv[1:])
-        while not cancelled and leader.poll() is None:
-            time.sleep(0.02)
-        result = 130 if cancelled else leader.returncode
-    finally:
-        # Subreaping retains orphans even when their original leader or session
-        # disappears. pidfds prevent a reused PID from targeting another process.
-        deadline = time.monotonic() + 5
         while True:
-            handles = []
-            try:
-                for pid, expected in descendants().items():
-                    try:
-                        fd = os.pidfd_open(pid)
-                    except ProcessLookupError:
-                        continue
-                    if process_state(pid) != expected:
-                        os.close(fd)
-                        continue
-                    handles.append(fd)
-                    try:
-                        signal.pidfd_send_signal(fd, signal.SIGSTOP)
-                    except ProcessLookupError:
-                        pass
-                for fd in handles:
-                    try:
-                        signal.pidfd_send_signal(fd, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            finally:
-                for fd in handles:
-                    os.close(fd)
-            while True:
-                try:
-                    pid, _status = os.waitpid(-1, os.WNOHANG)
-                except ChildProcessError:
-                    pid = 0
-                if not pid:
-                    break
-            if not descendants():
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError("gate descendants survived bounded cleanup")
+            if cancelled:
+                os.kill(child, signal.SIGKILL)
+            completed, status = os.waitpid(child, os.WNOHANG)
+            if completed:
+                result = os.waitstatus_to_exitcode(status)
+                raise SystemExit(result if result >= 0 else 128 - result)
             time.sleep(0.02)
-        if leader is not None:
-            leader.wait()
-    raise SystemExit(result)
+    finally:
+        os.close(writer)
 
 
 def _start_gate_process(command: list[str], handle, env: dict[str, str]):

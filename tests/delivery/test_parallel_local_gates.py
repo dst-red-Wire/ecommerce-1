@@ -136,6 +136,16 @@ class ParallelLocalGateTest(unittest.TestCase):
                     returned_job.close()
             self.assertFalse(marker.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux namespace prerequisite")
+    def test_denied_namespaces_fail_before_running_any_gate(self):
+        with (
+            mock.patch.object(os, "unshare", side_effect=PermissionError("namespaces denied")),
+            mock.patch.object(REPOCTL.subprocess, "Popen") as spawn,
+        ):
+            with self.assertRaisesRegex(PermissionError, "namespaces denied"):
+                REPOCTL._linux_gate_supervisor()
+            spawn.assert_not_called()
+
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
         with (
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),
@@ -251,22 +261,43 @@ class ParallelLocalGateTest(unittest.TestCase):
     def test_failure_kills_detached_descendant_after_its_gate_exits(self):
         self._check_descendant_cleanup(new_session=True)
 
-    def _check_descendant_cleanup(self, new_session):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux PID namespace regression")
+    def test_gate_cannot_kill_supervisor_and_leave_detached_descendant(self):
+        self._check_descendant_cleanup(new_session=True, kill_supervisor=True)
+
+    def _check_descendant_cleanup(self, new_session, kill_supervisor=False):
         with tempfile.TemporaryDirectory() as directory:
             context = Path(directory)
             pidfile = context / "child.pid"
             child = (
                 "import os, signal, time; from pathlib import Path; "
                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-                f"Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)"
+                f"Path({str(pidfile)!r}).write_text(os.readlink('/proc/self/ns/pid')); time.sleep(60)"
             )
             parent = (
-                "import subprocess, sys, time; from pathlib import Path; "
+                "import os, signal, subprocess, sys, time; from pathlib import Path; "
                 f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session={new_session!r}); "
                 f"p=Path({str(pidfile)!r}); "
-                "exec('while not p.exists(): time.sleep(0.01)'); sys.exit(1)"
+                "exec('while not p.exists(): time.sleep(0.01)'); "
+                + ("os.kill(os.getppid(), signal.SIGKILL); " if kill_supervisor else "")
+                + "sys.exit(1)"
             )
-            pid = None
+
+            def members():
+                if not pidfile.exists():
+                    return []
+                namespace = pidfile.read_text()
+                result = []
+                for entry in Path("/proc").iterdir():
+                    if not entry.name.isdigit():
+                        continue
+                    try:
+                        if os.readlink(entry / "ns/pid") == namespace:
+                            result.append(int(entry.name))
+                    except (OSError, PermissionError):
+                        continue
+                return result
+
             try:
                 with mock.patch.object(REPOCTL, "CONTEXT", context), mock.patch.object(REPOCTL, "ROOT", context):
                     self.assertFalse(
@@ -274,18 +305,11 @@ class ParallelLocalGateTest(unittest.TestCase):
                             [("failed-parent", [sys.executable, "-c", parent])], [], os.environ.copy()
                         )
                     )
-                pid = int(pidfile.read_text())
-                for _ in range(100):
-                    stat = Path(f"/proc/{pid}/stat")
-                    if not stat.exists() or stat.read_text().split()[2] == "Z":
-                        break
-                    time.sleep(0.01)
-                else:
-                    self.fail("gate descendant survived cancellation")
+                self.assertTrue(pidfile.exists(), "the detached descendant must actually run")
+                self.assertNotEqual(os.readlink("/proc/self/ns/pid"), pidfile.read_text())
+                self.assertEqual([], members(), "a gate process survived namespace teardown")
             finally:
-                if pid is None and pidfile.exists():
-                    pid = int(pidfile.read_text())
-                if pid is not None:
+                for pid in members():
                     try:
                         os.kill(pid, signal.SIGKILL)
                     except ProcessLookupError:
