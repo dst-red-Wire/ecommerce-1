@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -172,6 +173,14 @@ class RemoteEvidenceTests(unittest.TestCase):
 
 
 class BundleDeliveryTests(unittest.TestCase):
+    def setUp(self):
+        # Commit hooks export Git-local paths; fixtures must own their repositories.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        environment = mock.patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def git(self, cwd: Path, *args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
 
