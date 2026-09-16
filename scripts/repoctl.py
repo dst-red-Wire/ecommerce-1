@@ -1914,7 +1914,13 @@ def _materialize_staged_tree(snapshot: Path) -> None:
         if len(content) != size or stream.read(1) != b"\n":
             raise RuntimeError("truncated indexed blob response")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        # Exclusive creation also detects aliases on case-insensitive or
+        # Unicode-normalizing filesystems; never overwrite another indexed blob.
+        try:
+            with target.open("xb") as output:
+                output.write(content)
+        except FileExistsError as exc:
+            raise RuntimeError("filesystem-equivalent indexed paths collide") from exc
         target.chmod(0o755 if mode == "100755" else 0o644)
 
 

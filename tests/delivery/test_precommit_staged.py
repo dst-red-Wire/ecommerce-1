@@ -88,6 +88,38 @@ class PrecommitStagedContractTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 REPOCTL.precommit()
 
+    def test_filesystem_equivalent_index_paths_cannot_overwrite_a_blob(self):
+        with self.fixture() as (root, git), tempfile.TemporaryDirectory() as directory:
+            (root / "first").write_text("first indexed content")
+            (root / "second").write_text("second indexed content")
+            first = git("hash-object", "-w", "first")
+            second = git("hash-object", "-w", "second")
+            git("update-index", "--add", "--cacheinfo", f"100644,{first},CASE.txt")
+            git("update-index", "--add", "--cacheinfo", f"100644,{second},case.txt")
+            snapshot = Path(directory)
+            original_open = Path.open
+            original_chmod = Path.chmod
+
+            def case_insensitive_chmod(path, *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_chmod(path, *args, **kwargs)
+
+            def case_insensitive_open(path, mode="r", *args, **kwargs):
+                if path.parent == snapshot:
+                    path = path.with_name(path.name.lower())
+                return original_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch.object(Path, "open", case_insensitive_open),
+                mock.patch.object(Path, "chmod", case_insensitive_chmod),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "indexed paths collide"):
+                    REPOCTL._materialize_staged_tree(snapshot)
+            self.assertEqual("first indexed content", (snapshot / "case.txt").read_text())
+            self.assertEqual(first, git("rev-parse", ":CASE.txt"))
+            self.assertEqual(second, git("rev-parse", ":case.txt"))
+
     def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
         with self.fixture() as (root, git):
             name = os.fsdecode(b"bad\xff.txt")
