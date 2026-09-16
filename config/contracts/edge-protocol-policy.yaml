@@ -1,0 +1,69 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+service_exposure_policy: config/contracts/service-exposure-policy.yaml
+
+public_http_authority: caddy
+public_tls_authority: caddy
+public_http3_authority: caddy
+
+edge_chain:
+  tcp:
+    path: [internet, dns-gslb, haproxy, caddy-coraza, kong, istio-gateway]
+    listener:
+      protocol: tcp
+      port: 443
+    caddy_downstream:
+      http1: false
+      http2: true
+      http3: false
+  quic:
+    path: [internet, dns-gslb, caddy-coraza]
+    listener:
+      protocol: udp
+      port: 443
+    termination: caddy
+    caddy_downstream:
+      http1: false
+      http2: false
+      http3: true
+    haproxy_http3_termination: false
+    requirement: udp-443-must-reach-caddy-without-http3-termination-before-caddy
+
+caddy:
+  protocols:
+    http1: false
+    http2: true
+    http3: true
+  quic:
+    enabled: true
+    transport: udp
+    port: 443
+  coraza_waf: true
+
+upstream:
+  caddy_to_kong:
+    protocol: http2
+    http3_required: false
+  kong_to_istio_gateway:
+    protocol: http2
+    http3_required: false
+  internal_service_mesh:
+    protocol_family: http2-grpc-as-required
+    http3_required: false
+
+fallback:
+  http3_client_failure: http2
+  http1_fallback_allowed: false
+
+rules:
+  only_one_public_http3_termination_authority: true
+  public_http3_termination_must_be_caddy: true
+  udp_443_must_reach_caddy_when_http3_enabled: true
+  no_http3_termination_before_caddy: true
+  public_http1_forbidden: true
+  public_http2_required: true
+  public_http3_required: true
+  internal_http3_not_required: true
+  quic_and_tcp_443_must_be_exposed_concurrently: true
+  coraza_must_protect_caddy_terminated_public_http: true
