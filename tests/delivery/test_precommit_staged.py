@@ -62,6 +62,32 @@ class PrecommitStagedContractTest(unittest.TestCase):
             self.assertEqual(index, git("write-tree"))
             self.assertEqual("def invalid(\n", path.read_text())
 
+    def test_replacement_head_cannot_hide_invalid_staged_change(self):
+        with self.fixture() as (root, git):
+            (root / "invalid.py").write_text("undefined_name()\n")
+            git("add", "invalid.py")
+            original = git("rev-parse", "HEAD")
+            replacement = git("commit-tree", git("write-tree"), "-m", "Replacement fixture")
+            git("replace", original, replacement)
+            self.assertEqual("", git("diff", "--cached", "--name-only"))
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
+    def test_replacement_blob_cannot_change_indexed_bytes(self):
+        with self.fixture() as (root, git):
+            path = root / "invalid.py"
+            path.write_text("undefined_name()\n")
+            git("add", path.name)
+            indexed = git("rev-parse", ":invalid.py")
+            path.write_text("value = 1\n")
+            replacement = git("hash-object", "-w", path.name)
+            git("replace", indexed, replacement)
+            with tempfile.TemporaryDirectory() as directory:
+                REPOCTL._materialize_staged_tree(Path(directory))
+                self.assertEqual("undefined_name()\n", (Path(directory) / path.name).read_text())
+            with self.assertRaises(RuntimeError):
+                REPOCTL.precommit()
+
     def test_non_utf8_staged_path_is_scanned_without_decoding_failure(self):
         with self.fixture() as (root, git):
             name = os.fsdecode(b"bad\xff.txt")
