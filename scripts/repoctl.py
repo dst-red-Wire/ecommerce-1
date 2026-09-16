@@ -12,6 +12,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -981,8 +982,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
         or evidence.get("qualification_identity") != qualification_identity()
-        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
-        or time.time() < float(evidence.get("created_at_epoch", 0))
+        or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not isinstance(evidence.get("gates"), list)
@@ -1052,6 +1052,17 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _fresh_evidence(evidence: dict) -> bool:
+    value = evidence.get("created_at_epoch")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        created = float(value)
+    except (ValueError, OverflowError):
+        return False
+    return math.isfinite(created) and 0 <= time.time() - created <= 86400
+
+
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     requested = git("rev-parse", head).strip()
     if requested != git("rev-parse", "HEAD").strip():
@@ -1074,8 +1085,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
         or evidence.get("changed_paths") != changed_paths(base_ref, head)
         or evidence.get("qualification_identity") != qualification_identity()
-        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
-        or time.time() < float(evidence.get("created_at_epoch", 0))
+        or not _fresh_evidence(evidence)
         or not isinstance(evidence.get("gates"), list)
         or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
@@ -1302,8 +1312,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
         or evidence.get("changed_paths") != changed_paths(base, parent_sha)
         or evidence.get("qualification_identity") != qualification_identity()
-        or time.time() - float(evidence.get("created_at_epoch", 0)) > 86400
-        or time.time() < float(evidence.get("created_at_epoch", 0))
+        or not _fresh_evidence(evidence)
         or not isinstance(evidence.get("gates"), list)
         or any(gate.get("status") not in {"PASS", "SKIP"} for gate in evidence.get("gates", []))
     ):
@@ -2132,18 +2141,10 @@ def precommit() -> int:
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
+    ev = _valid_exact_evidence("origin/main", head)
+    if ev is not None:
+        print(f"PASS prepush: reusing validated exact evidence {ev.relative_to(ROOT)}")
+        return 0
     return verify_change("origin/main", head)
 
 
