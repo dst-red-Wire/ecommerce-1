@@ -43,6 +43,14 @@ while apt negotiates package access:
 
 ## Trusted two-hop SSH enrollment and provisioning
 
+Before this procedure, complete [trusted controller admission](../../../../docs/project/M1_LINUX_QUALIFICATION_RUNNER.md#trusted-controller-admission).
+Use a separate clean `/trusted/ecommerce` checkout pinned to an independently
+reviewed full `TRUSTED_RUNNER_REVISION`, selected outside PR-owned configuration.
+The guard, Ansible configuration, collections, roles and both playbooks below
+must come from that trusted checkout, never the candidate or a consumed runner.
+Keep the candidate in a separate controller-owned checkout and repeat admission
+when retaining the final evidence.
+
 After a separately authorized apply, record the non-secret Terraform outputs
 for gateway public address/user, runner private address/user, ProxyJump, and
 both inventory lines. Obtain each server's ED25519 SHA256 fingerprint from the
@@ -55,6 +63,8 @@ only that verified gateway to scan and independently verify the private runner:
 
 ```text
 set -euo pipefail
+cd /trusted/ecommerce
+python3 -I scripts/qualification_runner_guard.py --repo /candidate/ecommerce --base FULL_BASE_SHA --head FULL_HEAD_SHA
 export QUALIFICATION_GATEWAY_HOST=replace-from-qualification_gateway_ipv4
 export QUALIFICATION_GATEWAY_USER=replace-from-qualification_gateway_user
 export QUALIFICATION_GATEWAY_FINGERPRINT=SHA256:replace-from-oob-source
