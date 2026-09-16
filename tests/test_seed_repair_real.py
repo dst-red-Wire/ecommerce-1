@@ -28,7 +28,16 @@ class SeedRepairReal(unittest.TestCase):
             ambient.mkdir()
             marker = root / "ambient-executed"
             (ambient / "sitecustomize.py").write_text(f"from pathlib import Path; Path({str(marker)!r}).touch()\n")
-            env = dict(os.environ, ECOMMERCE_TOOL_HOME=str(root / "tools"), PYTHONPATH=str(ambient))
+            pip_external = root / "pip-external"
+            pip_config = root / "pip.conf"
+            pip_config.write_text(f"[global]\ntarget = {pip_external}\n")
+            env = dict(
+                os.environ,
+                ECOMMERCE_TOOL_HOME=str(root / "tools"),
+                PYTHONPATH=str(ambient),
+                PIP_TARGET=str(pip_external),
+                PIP_CONFIG_FILE=str(pip_config),
+            )
 
             def invoke(python):
                 return subprocess.run(
@@ -38,6 +47,7 @@ class SeedRepairReal(unittest.TestCase):
             cold = invoke(sys.executable)
             self.assertEqual(0, cold.returncode, cold.stdout + cold.stderr)
             self.assertFalse(marker.exists(), "seed child imported ambient sitecustomize")
+            self.assertFalse(pip_external.exists(), "pip wrote outside its candidate generation")
             old = reference.resolve()
             # Exercise the public seed entry point before any candidate creation.
             # Every mutated path belongs to this dedicated temporary tool home.
@@ -138,6 +148,7 @@ class SeedRepairReal(unittest.TestCase):
             self.assertEqual(0, warm.returncode, warm.stdout + warm.stderr)
             self.assertIn("REUSE qualification seed", warm.stdout)
             self.assertFalse(marker.exists(), "seed child imported ambient sitecustomize")
+            self.assertFalse(pip_external.exists(), "pip wrote outside its candidate generation")
             for command in (
                 [str(reference / "bin/python"), "-m", "pip", "check"],
                 [str(reference / "bin/ansible-playbook"), "--version"],
