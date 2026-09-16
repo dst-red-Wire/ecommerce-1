@@ -1,0 +1,40 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+
+authorities:
+  public_authoritative:
+    authority: powerdns-authoritative
+    hidden_primary: mgmt
+    dnssec: required
+  dns_frontend:
+    authority: dnsdist
+    responsibilities: [query-routing, health-checking, protocol-fronting]
+  kubernetes_service_discovery:
+    authority: coredns
+  recursive_resolution:
+    authority: unbound
+    mode: internal-recursive-cache
+  kubernetes_record_writer:
+    authority: externaldns
+    target_authority: powerdns-authoritative
+
+zones:
+  public:
+    writer: externaldns-and-approved-manual-bootstrap
+    reader_path: dnsdist-to-powerdns
+  internal:
+    service_discovery: coredns
+    recursive_upstream: unbound
+  split_horizon:
+    allowed: true
+    authority: powerdns-plus-coredns
+    explicit-zone-contract-required: true
+
+rules:
+  externaldns-must-not-be-authoritative-server: true
+  coredns-must-not-own-public-zone: true
+  unbound-must-not-own-authoritative-zone: true
+  dnssec-required-for-public-zones: true
+  wildcard-records-require-explicit-contract: true
+  public-zone-write-path-must-be-auditable: true
