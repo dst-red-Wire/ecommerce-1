@@ -480,6 +480,46 @@ class Auditor:
         return results
 
 
+def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> dict[str, str]:
+    # pip is supplied by venv/ensurepip, before the locked closure is installed.
+    # Its vendored PEP 508 parser avoids bootstrapping a dependency on packaging.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = {}
+    for raw in lock.splitlines():
+        if not raw or raw[0].isspace() or raw.startswith("#"):
+            continue
+        requirement = Requirement(raw.rstrip().removesuffix("\\").strip())
+        if requirement.marker and not requirement.marker.evaluate(environment):
+            continue
+        pins = list(requirement.specifier)
+        if len(pins) != 1 or pins[0].operator != "==":
+            raise ValueError(f"seed requires an exact version: {requirement.name}")
+        expected[canonicalize_name(requirement.name)] = pins[0].version
+    return expected
+
+
+def validate_seed_lock(lock_path: str) -> bool:
+    import importlib.metadata as metadata
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    try:
+        if any(metadata.version(name) != version for name, version in expected.items()):
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    return (
+        subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
@@ -492,17 +532,32 @@ def seed_environment() -> int:
     lock_digest = hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest()
     if not python.is_file():
         subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
+    verify = [
+        str(python),
+        "-c",
+        "import runpy, sys; module = runpy.run_path(sys.argv[1]); "
+        "sys.exit(0 if module['validate_seed_lock'](sys.argv[2]) else 1)",
+        str(Path(__file__).resolve()),
+        str(SEED_LOCK),
+    ]
     ready = marker.is_file() and marker.read_text(encoding="utf-8").strip() == lock_digest
     if ready:
-        ready = subprocess.run(
-            [str(python), "-m", "pip", "check"], text=True, capture_output=True, check=False
-        ).returncode == 0
+        ready = subprocess.run(verify, text=True, capture_output=True, check=False).returncode == 0
     if not ready:
         subprocess.run(
-            [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--require-hashes",
+                "-r",
+                str(SEED_LOCK),
+            ],
             check=True,
         )
-        check = subprocess.run([str(python), "-m", "pip", "check"], check=False)
+        check = subprocess.run(verify, check=False)
         if check.returncode:
             marker.unlink(missing_ok=True)
             raise RuntimeError("qualification seed dependency integrity check failed")
