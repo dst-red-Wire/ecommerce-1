@@ -1874,8 +1874,11 @@ def deliver(base: str, title: str, message: str) -> int:
 
 def _reject_staged_symlinks() -> int:
     entries = git("ls-files", "--stage", "-z").split("\0")
-    if any(entry.startswith("120000 ") for entry in entries):
-        return fail("staged snapshot contains symbolic links; refusing non-index content")
+    for entry in filter(None, entries):
+        metadata, _path = entry.split("\t", 1)
+        mode, _oid, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            return fail("staged snapshot contains non-regular or unresolved entries; refusing non-index content")
     return 0
 
 
