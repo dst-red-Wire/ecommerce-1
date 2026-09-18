@@ -61,12 +61,13 @@ The architecture favors generated policy over hand-maintained duplication:
 
 ## Fail-closed runtime inputs
 
-Two runtime areas intentionally remain unresolved rather than guessed:
+This document is a derived view; runtime values come from the machine contracts registered in `architecture.lock.yaml`.
 
-1. Internal NTP source addresses/names.
-2. Concrete external FQDNs for Stripe, carrier adapters, Qonto and the Keycloak reference endpoint.
+- Internal NTP sources are resolved in `time-authority-policy.yaml` as `ntp-01.internal.deployfrance.com`, `ntp-02.internal.deployfrance.com`, and `ntp-03.internal.deployfrance.com`.
+- The Keycloak reference endpoint is resolved in `egress-runtime-policy.yaml` as `keycloak.internal.deployfrance.com`.
+- Stripe, carrier-adapter, and Qonto runtime FQDNs remain `unresolved-runtime-input`.
 
-`time-authority-policy.yaml` and `egress-runtime-policy.yaml` mark these values as `unresolved-runtime-input`. Real provisioning must fail until approved values are versioned.
+Real provisioning remains fail-closed only for the unresolved runtime endpoints declared by the registered machine contracts.
 
 ## Commerce saga boundary
 
