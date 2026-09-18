@@ -120,15 +120,18 @@ developer_platform:
     required: true
     exact_head_sha_required: true
     human_review_required: false
-    ai_auto_merge_allowed: true
-    ai_auto_merge_required_verifications:
+    automatic_merge_allowed: true
+    automatic_merge_authority: deterministic
+    automatic_merge_required_verifications:
       - deterministic-qualification
-      - code-review
-      - security-review
+      - deterministic-code
+      - deterministic-security
       - provenance-integrity
       - governance-policy
-    ai_auto_merge_same_head_sha_required: true
-    ai_auto_merge_fail_closed: true
+    automatic_merge_same_head_sha_required: true
+    automatic_merge_fail_closed: true
+    ai_code_review: advisory
+    ai_security_review: advisory
     review_policy_changes_require_human_gate: true
     required_context:
       - request-id
