@@ -116,6 +116,16 @@
       "path": "config/toolchain/capabilities.json",
       "mode": "operational-projection",
       "authority": "toolchain_lock.versions"
+    },
+    "bazel_version": {
+      "path": ".bazelversion",
+      "mode": "generated-projection",
+      "authority": "toolchain_lock.native_tool_configs.bazel.version_ref"
+    },
+    "bazel_rc": {
+      "path": ".bazelrc",
+      "mode": "generated-projection",
+      "authority": "toolchain_lock.native_tool_configs.bazel.bazelrc_lines"
     }
   },
   "rules": {
@@ -151,5 +161,15 @@
     "managed_bin_subdirectories": [
       ".local/bin"
     ]
+  },
+  "native_tool_configs": {
+    "bazel": {
+      "version_ref": "BAZEL_VERSION",
+      "bazelrc_lines": [
+        "common --announce_rc",
+        "build --show_timestamps",
+        "test --test_output=errors"
+      ]
+    }
   }
 }
