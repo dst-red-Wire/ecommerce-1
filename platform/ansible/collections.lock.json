@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "installer": {
+    "ansible_core": "2.20.3",
+    "layout": 1,
+    "no_dependencies": true
+  },
+  "source": "https://galaxy.ansible.com/api/",
+  "digest_authority": "Galaxy v3 artifact metadata (not a locally calculated authenticity proof)",
+  "collections": [
+    {
+      "name": "ansible.posix",
+      "version": "1.5.4",
+      "sha256": "6dc970c9350e7c54e628dc0704631a41ebfd5056b6ab05a566155d8c999217e9",
+      "size": 181688,
+      "requires_ansible": ">=2.9",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "community.general",
+      "version": "8.3.0",
+      "sha256": "362915ba367687c12e44c215c80ea3f80c78247f1a732310ed8f8d8f997ecfdd",
+      "size": 2586506,
+      "requires_ansible": ">=2.13.0",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "community.docker",
+      "version": "5.2.2",
+      "sha256": "96f30eea08f719918bb223a3777271bf82ef72076eef204a4986dfcea94ce3f7",
+      "size": 595920,
+      "requires_ansible": ">=2.17.0",
+      "dependencies": {
+        "community.library_inventory_filtering_v1": ">=1.0.0"
+      },
+      "direct": true
+    },
+    {
+      "name": "community.crypto",
+      "version": "2.17.1",
+      "sha256": "fe459f3da4e99acd9c77a9fa2355e91c9a3991f014e4366757c3075e052cd920",
+      "size": 594633,
+      "requires_ansible": ">=2.9.10",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "community.sops",
+      "version": "1.6.7",
+      "sha256": "79a95b446bd43de392aab54ebde0b53f54eaac062604813e09c5ea1320eff455",
+      "size": 122037,
+      "requires_ansible": ">=2.9.10",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "containers.podman",
+      "version": "1.11.0",
+      "sha256": "5b2b241d6569cbcb12c46bd0afe9994ce2528bba15f13e663d0083abbb88d322",
+      "size": 509715,
+      "requires_ansible": ">=2.8",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "hetzner.hcloud",
+      "version": "2.4.1",
+      "sha256": "5628ae966ee0f1fb82a6bc43b8f1eeb0e7670bfbda3c11a0ed30b9d975118ae3",
+      "size": 183216,
+      "requires_ansible": ">=2.13.0",
+      "dependencies": {
+        "ansible.netcommon": ">=0.0.1"
+      },
+      "direct": true
+    },
+    {
+      "name": "kubernetes.core",
+      "version": "2.4.0",
+      "sha256": "3713580886f8f9b509f5ce09cee360675ce45b170e53631d9307b76d1dcdbf2c",
+      "size": 303449,
+      "requires_ansible": ">=2.9.17",
+      "dependencies": {},
+      "direct": true
+    },
+    {
+      "name": "community.library_inventory_filtering_v1",
+      "version": "1.0.0",
+      "sha256": "d2603dbc9161530fd87246c40f5a0cd0624a743de0bb50ad94dd79bd6c98cf1b",
+      "size": 24564,
+      "requires_ansible": ">=2.9.10",
+      "dependencies": {},
+      "direct": false
+    },
+    {
+      "name": "ansible.netcommon",
+      "version": "2.0.0",
+      "sha256": "04c74be7438fe8dd7b6bc7f7d19ba2fc4625711b1735348e5a11ac15c4b894fc",
+      "size": 203434,
+      "requires_ansible": ">=2.9.10",
+      "dependencies": {
+        "ansible.utils": ">=2.0.0"
+      },
+      "direct": false
+    },
+    {
+      "name": "ansible.utils",
+      "version": "2.0.0",
+      "sha256": "7752144a2ca6370518cde0c1af5a8abc110ed7eaa53caf414df1ab398fb10d74",
+      "size": 158817,
+      "requires_ansible": ">=2.9.10",
+      "dependencies": {},
+      "direct": false
+    }
+  ]
+}

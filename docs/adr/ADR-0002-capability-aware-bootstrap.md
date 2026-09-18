@@ -77,6 +77,68 @@ repository does not yet implement a provisioner. `oapi-codegen` has no Go runtim
 Go and Ansible are only provisioning dependencies. Kind alone retains the real Docker
 runtime edge.
 
+## Staged Ansible execution boundary
+
+The optional `precommit-ansible` gate requires Linux bubblewrap pinned by
+`BWRAP_VERSION`, plus systemd-run/systemctl and a delegated user cgroup v2 manager.
+These host-provided capabilities are prerequisites only for staged Ansible lint.
+Unsupported platforms, unavailable namespaces/delegation, mismatched pins or missing
+controllers fail this gate closed. No installation, global host reconfiguration or
+unsandboxed fallback occurs. The indexed bubblewrap pin must match the trusted
+controller pin; an unstaged pin cannot hide an incompatible staged declaration.
+The checkout-external tool installations and their PATH configuration remain operator
+trust inputs; this boundary does not establish ownership/ACL trust for every external
+executable or protect an already compromised workstation.
+
+Ansible can discover executable plugins next to candidate YAML even with trusted
+lint rules and inventory. Staged lint therefore uses private user, PID, IPC, network
+and other namespaces, disables nested user namespaces, and drops all capabilities.
+Indexed regular files, controller-generated configuration, the installed isolated
+ansible-lint runtime, Git and system libraries are mounted read-only. Runtime
+location and base-Python stdlib/shared-library paths come from the installed launcher
+and verified interpreter, never candidate metadata. External Python prefixes are
+supported when their declared runtime paths stay inside that installed prefix;
+unrepresentable layouts fail closed. Host credentials, ambient environment, sockets
+and network are absent. Standard input is closed, and candidate stdout/stderr are
+discarded; only a controller-authored failure message reaches the terminal.
+Controller-owned lint kinds classify only `platform/tekton/**/*.yaml` and `*.yml`
+as generic YAML before Ansible filename discovery. YAML validation still applies;
+Tekton contract gates retain semantic validation, and Ansible task schema checks
+remain enforced for Ansible paths.
+
+Third-party modules use the fully checksum-locked collection closure copied from
+integration `623f0bd` (the PR86 collection dependency), including community.docker
+5.2.2. The canonical `scripts/ansible_collections.py`, requirements and lock are
+reused without another resolver or extractor. PR99 dependency commit
+`ab3bedd9f0d74b2ad77b8ab439ffa0f35b6ee693` supplies the complete seed and lock
+primitives; no partial bootstrap implementation is duplicated. Every archive, payload and inventory
+is authenticated before mounting a concrete immutable generation read-only.
+Candidate `.ansible` trees and arbitrary host collection caches never supply this
+runtime. Provisioning uses the canonical collection preparer separately; lint never
+downloads or repairs dependencies. The exact requirements delta is admitted in the
+runner guard as this reviewed dependency, without widening runner scopes; independent
+review of the controller remains required before qualification-runner use.
+
+Each invocation owns a random transient user scope: at most 32 tasks, 768 MiB cgroup
+memory, no swap, one CPU and 120 seconds lifetime. Effective memory/task/CPU cgroup
+limits are verified before execution. A read-only CPU budget view keeps ansible-lint
+from sizing its worker pool to the host CPU count. Inherited hard limits additionally cap each
+process at 512 MiB address space, 90 CPU seconds, 128 descriptors and 16 MiB file
+output. Temporary/home tmpfs mounts are limited to 64/16 MiB. Cleanup stops only that
+invocation's scope, including detached descendants; PID namespace teardown adds an
+independent boundary. No candidate output is accumulated in controller memory.
+
+Regression evidence exercises valid builtin and Kubernetes YAML, malicious adjacent
+filter/lookup plugins and indexed collections, closed inherited input, suppressed
+diagnostics, effective resource limits and detached-process termination. A real
+sandbox probe checks host-file reads/writes, credential environment, PID and network
+isolation. This host exercised bubblewrap 0.9.0, systemd 255, Python 3.12 and
+ansible-lint 26.8.0 (its isolated runtime uses ansible-core 2.21.4; the canonical
+Galaxy/playbook installer remains pinned to 2.20.3); other
+hosts must provide the same capabilities rather than receiving a claimed proof.
+Rollback must preserve an equivalent execution boundary or fail this optional gate
+closed.
+
 ## Consequences and rollback
 
 Audits report all reachable branches and return non-zero whenever the complete platform
