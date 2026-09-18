@@ -49,6 +49,7 @@ safety:
   caller-mutation-must-not-modify-memory-cache: true
   atomic-disk-write-required: true
   corrupt-entry-behavior: miss
+  cache-io-failure-behavior: miss-without-skipping-qualification
   tool-identity-change-behavior: miss
   validator-change-behavior: miss
   input-change-behavior: miss
