@@ -11,6 +11,12 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class TrustedRunnerGuardPolicyTest(unittest.TestCase):
+    def test_current_main_base_is_explicitly_admitted(self):
+        source = (ROOT / "scripts/qualification_runner_guard.py").read_text()
+        self.assertIn("3e2436f8426f7d98878e586c5d48e5b44b844974", source)
+
+
 class TrustedRunnerGuardTest(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
