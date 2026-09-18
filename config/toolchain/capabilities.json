@@ -187,6 +187,19 @@
       "requirement": "required-static"
     },
     {
+      "name": "templ",
+      "requires": [],
+      "provision_requires": ["go", "ansible-playbook"],
+      "command": "templ",
+      "identity_path": ".local/share/ecommerce-1/tools/templ/{version}/linux-amd64/templ",
+      "version_args": ["version"],
+      "version_key": "TEMPL_VERSION",
+      "platforms": ["linux/amd64"],
+      "provision": {"type": "ansible", "tags": "templ"},
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
       "name": "yq",
       "requires": [],
       "provision_requires": [
@@ -436,15 +449,22 @@
         "type": "ansible",
         "tags": "docker_client"
       },
-      "classification": "platform-provided",
-      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
-      "requirement": "optional-runtime"
+      "classification": "managed",
+      "justification": "Ansible supplies the pinned Docker CLI; daemon lifecycle and server version remain environment-owned.",
+      "requirement": "optional-runtime",
+      "version_key": "DOCKER_CLIENT_VERSION",
+      "checksum_key": "DOCKER_CLIENT_SHA256_LINUX_AMD64",
+      "platforms": [
+        "linux/amd64"
+      ],
+      "runtime_selection": true
     },
     {
       "name": "docker-user-access",
       "requires": [
         "docker-client-installed"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"
@@ -456,8 +476,10 @@
     {
       "name": "docker-daemon-ready",
       "requires": [
+        "docker-client-installed",
         "docker-user-access"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"
@@ -469,8 +491,10 @@
     {
       "name": "docker",
       "requires": [
+        "docker-client-installed",
         "docker-daemon-ready"
       ],
+      "provider": "docker-client-installed",
       "probe": [
         "docker",
         "info"
@@ -667,6 +691,7 @@
     "node": "ansible",
     "go": "ansible",
     "sqlc": "ansible",
+    "templ": "ansible",
     "yq": "ansible",
     "oasdiff": "ansible",
     "rg": "ansible",
@@ -685,7 +710,8 @@
     "terraform": "ansible",
     "kustomize": "ansible",
     "kind": "ansible",
-    "gitleaks": "ansible"
+    "gitleaks": "ansible",
+    "docker-client-installed": "ansible"
   },
   "seed_prerequisites": [
     {
@@ -764,6 +790,7 @@
       "oasdiff",
       "oapi-codegen",
       "go",
+      "templ",
       "corepack",
       "pnpm",
       "oxfmt"

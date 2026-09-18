@@ -1,3 +1,4 @@
+import os
 import importlib.util
 import pathlib
 import subprocess
@@ -13,6 +14,14 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def setUp(self):
+        # Git hooks export repository-local selectors. Temporary repository tests
+        # must never inherit them and mutate the invoking checkout's index/config.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        patch = mock.patch.dict(os.environ, isolated, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
@@ -31,10 +40,12 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         with (
             mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
+            mock.patch.object(MOD, "ensure_developer") as ensure,
             mock.patch.object(MOD, "run", side_effect=lambda argv, **kwargs: calls.append(argv)),
         ):
             self.assertEqual(0, MOD.terraform_check())
 
+        ensure.assert_called_once_with("terraform")
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
 

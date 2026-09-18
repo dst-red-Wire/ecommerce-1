@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -12,6 +14,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -23,7 +27,7 @@ STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 REQUIREMENTS = {"required-static", "optional-runtime"}
 SEED_LOCK = ROOT / "config/python/requirements.lock"
-SEED_VENV = ROOT / ".venv/qualification"
+LOCAL_SEED_VENV = ROOT / ".venv/qualification"
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
@@ -250,7 +254,16 @@ Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        env = os.environ.copy()
+        if Path(command[0]).name.startswith("ansible"):
+            from ansible_collections import selected_path, load_lock
+
+            load_lock()
+            env["ANSIBLE_COLLECTIONS_PATH"] = str(selected_path())
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            command, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
@@ -289,6 +302,13 @@ class Auditor:
             if candidate.is_file() and os.access(candidate, os.X_OK) and str(candidate) not in candidates:
                 candidates.append(str(candidate))
         return candidates
+
+    def identity_executable(self, item: dict) -> str | None:
+        template = item.get("identity_path")
+        if not template:
+            return None
+        candidate = Path.home() / template.format(version=self.versions[item["version_key"]])
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
 
     def resolve(self, command: str) -> str | None:
         candidates = self.resolve_all(command)
@@ -363,6 +383,9 @@ class Auditor:
                 provider_executable if argv and argv[0] == provider_item["command"] else self.provider_entrypoint(item)
             )
             resolved_candidates = [provider_command] if provider_command else []
+        elif item.get("runtime_selection"):
+            selected = self.resolve_repoctl_runtime(command)
+            resolved_candidates = [selected] if selected else []
         elif item.get("isolated"):
             resolved_candidates = [
                 str(candidate)
@@ -371,7 +394,10 @@ class Auditor:
             ]
         else:
             selected = item.get("resolved_executable")
-            resolved_candidates = [selected] if selected else (self.resolve_all(command) if command else [])
+            identity = self.identity_executable(item)
+            resolved_candidates = (
+                [selected or identity] if selected or identity else (self.resolve_all(command) if command else [])
+            )
         if (command or provider) and not resolved_candidates:
             if provider:
                 detail = f"entry point absent from provider {provider}"
@@ -479,28 +505,238 @@ class Auditor:
         return results
 
 
+def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> dict[str, str]:
+    # pip is supplied by venv/ensurepip, before the locked closure is installed.
+    # Its vendored PEP 508 parser avoids bootstrapping a dependency on packaging.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = {}
+    for raw in lock.splitlines():
+        if not raw or raw[0].isspace() or raw.startswith("#"):
+            continue
+        requirement = Requirement(raw.rstrip().removesuffix("\\").strip())
+        if requirement.marker and not requirement.marker.evaluate(environment):
+            continue
+        pins = list(requirement.specifier)
+        if len(pins) != 1 or pins[0].operator != "==":
+            raise ValueError(f"seed requires an exact version: {requirement.name}")
+        expected[canonicalize_name(requirement.name)] = pins[0].version
+    return expected
+
+
+def validate_seed_lock(lock_path: str) -> bool:
+    import importlib.metadata as metadata
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    try:
+        if any(metadata.version(name) != version for name, version in expected.items()):
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    return (
+        subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+class SeedGenerationBoundaryError(RuntimeError):
+    """The seed cache cannot safely own its generation directory."""
+
+
+def validate_seed_generation_root(generations: Path) -> None:
+    try:
+        invalid = generations.is_symlink() or generations.resolve() != generations
+    except (OSError, RuntimeError) as exc:
+        raise SeedGenerationBoundaryError("seed generation root cannot be resolved safely") from exc
+    if invalid:
+        raise SeedGenerationBoundaryError(
+            "seed generation root is a symlink or escapes its expected identity/tool-home"
+        )
+
+
 def seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
-    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+    for package, key in (
+        ("ansible-core", "ANSIBLE_CORE_VERSION"),
+        ("ansible-lint", "ANSIBLE_LINT_VERSION"),
+        ("pyyaml", "PYYAML_VERSION"),
+    ):
         expected = versions[key]
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
-    python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file():
-        subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
-        check=True,
-    )
-    ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
+    identity_input = json.dumps(
+        {
+            "python": [platform.python_implementation(), f"{sys.version_info.major}.{sys.version_info.minor}"],
+            "platform": normalized_platform()[:2],
+            "lock_sha256": hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest(),
+            "installer": ["pip", "--require-hashes"],
+        },
+        sort_keys=True,
+    ).encode()
+    identity = hashlib.sha256(identity_input).hexdigest()
+    tool_home = Path(os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")).resolve()
+    seed_root = tool_home / "python" / identity
+    lock_path = tool_home / "locks" / f"python-{identity}.lock"
+    selector = seed_root.with_suffix(".current")
+    generations = seed_root.with_suffix(".generations")
+    validate_seed_generation_root(generations)
+    metadata_path = seed_root / ".ecommerce-tool.json"
+    python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def valid() -> bool:
+        if not python.is_file() or not metadata_path.is_file():
+            return False
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata != {"identity": identity, "input": json.loads(identity_input)}:
+                return False
+            proc = subprocess.run(
+                [
+                    str(python),
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "from capability_bootstrap import validate_seed_lock; "
+                    "sys.exit(0 if validate_seed_lock(sys.argv[2]) else 1)",
+                    str(ROOT / "scripts"),
+                    str(SEED_LOCK),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            return proc.returncode == 0
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return False
+
+    with identity_lock(lock_path):
+        validate_seed_generation_root(generations)
+        if selector.is_symlink():
+            selected = selector.resolve()
+            if selected.parent != generations:
+                raise RuntimeError("seed generation selector escapes its identity")
+            seed_root = selected
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if valid():
+            print(f"REUSE qualification seed identity={identity[:16]}")
+        else:
+            print(f"PREPARE qualification seed identity={identity[:16]}")
+            # Keep published generations in place: running consumers do not take
+            # the writer lock, and venv shebangs must never change location.
+            bootstrap = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
+            probe = subprocess.run(
+                [
+                    bootstrap,
+                    "-c",
+                    "import json,platform,sys; print(json.dumps([platform.python_implementation(), list(sys.version_info[:2])]))",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            if json.loads(probe.stdout) != [platform.python_implementation(), list(sys.version_info[:2])]:
+                raise RuntimeError("bootstrap interpreter does not match seed Python identity")
+            validate_seed_generation_root(generations)
+            generations.mkdir(parents=True, exist_ok=True)
+            seed_root = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            temporary_selector = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
+            try:
+                subprocess.run([bootstrap, "-m", "venv", str(seed_root)], check=True)
+                subprocess.run(
+                    [
+                        str(python),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "--require-hashes",
+                        "-r",
+                        str(SEED_LOCK),
+                    ],
+                    check=True,
+                    env={**os.environ, "PIP_CACHE_DIR": str(tool_home / "downloads" / "pip")},
+                )
+                metadata_path.write_text(
+                    json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                if not valid():
+                    raise RuntimeError("seed environment verification failed after installation")
+                temporary_selector.unlink(missing_ok=True)
+                temporary_selector.symlink_to(seed_root, target_is_directory=True)
+                os.replace(temporary_selector, selector)
+            except BaseException:
+                # Only discard this unpublished candidate; published readers retain their paths.
+                if not selector.is_symlink() or selector.resolve() != seed_root:
+                    shutil.rmtree(seed_root)
+                raise
+            finally:
+                temporary_selector.unlink(missing_ok=True)
+        publish_checkout_reference(seed_root)
+    ansible = seed_root / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
         raise RuntimeError("seed Ansible version verification failed")
     print(
-        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
+        f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} "
+        f"ansible-lint={versions['ANSIBLE_LINT_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
+
+
+@contextlib.contextmanager
+def identity_lock(path: Path, timeout: float = 300.0):
+    """Bounded cross-process lock; the caller must recheck after acquisition."""
+    handle = path.open("a+", encoding="utf-8")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError(f"timed out waiting for {path}")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def publish_checkout_reference(seed_root: Path) -> None:
+    """Atomically point this checkout at its compatible immutable seed."""
+    LOCAL_SEED_VENV.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(seed_root, target_is_directory=True)
+    if LOCAL_SEED_VENV.exists() and not LOCAL_SEED_VENV.is_symlink():
+        shutil.rmtree(LOCAL_SEED_VENV)
+    os.replace(temporary, LOCAL_SEED_VENV)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -512,7 +748,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", choices=("static", "runtime"), default="static")
     args = parser.parse_args(argv)
     if args.mode == "seed":
-        return seed_environment()
+        try:
+            return seed_environment()
+        except SeedGenerationBoundaryError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
     contract = load_contract(args.contract)
     auditor = Auditor(contract)
     os_name, arch, context = normalized_platform(args.os, args.arch)

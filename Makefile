@@ -1,18 +1,23 @@
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
+ECOMMERCE_TOOL_HOME ?= $(HOME)/.cache/ecommerce-1/qualification
+export ECOMMERCE_TOOL_HOME
+export PIP_CACHE_DIR ?= $(ECOMMERCE_TOOL_HOME)/downloads/pip
+export GOMODCACHE ?= $(ECOMMERCE_TOOL_HOME)/cache/go/mod
+export GOCACHE ?= $(ECOMMERCE_TOOL_HOME)/cache/go/$(shell sed -n 's/^GO_VERSION=//p' config/toolchain/versions.env)/build
+export TF_PLUGIN_CACHE_DIR ?= $(ECOMMERCE_TOOL_HOME)/cache/terraform/providers
 PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),python3)
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
 MANAGED_BIN := $(HOME)/.local/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
-export ANSIBLE_COLLECTIONS_PATH
-ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
+ANSIBLE_PLAYBOOK = $(PYTHON) scripts/ansible_collections.py run-playbook --
+ANSIBLE_LOCAL = $(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime qualify ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
 	@$(PYTHON) scripts/capability_bootstrap.py seed
@@ -30,6 +35,10 @@ env-check: ## Audit capabilities without changing the workstation
 env-check-runtime: ## Audit and require optional external runtime capabilities
 	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
+
+qualify: bootstrap ## Prepare missing pinned prerequisites once, then qualify the exact worktree
+	@$(MAKE) env-check
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
@@ -84,6 +93,13 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
+.PHONY: ansible-collections ansible-collections-offline
+ansible-collections: seed ## Acquire verified archives and atomically prepare the locked collection closure
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/ansible_collections.py prepare
+
+ansible-collections-offline: seed ## Prepare only from verified local archives; never contact Galaxy
+	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/ansible_collections.py prepare --offline
+
 .PHONY: mgmt-runtime-inventory
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from Terraform MGMT outputs
@@ -135,7 +151,7 @@ product-bootstrap-persistence: ## Reconcile Product persistence generation/depen
 	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
 
 git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target another checkout
-	@ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
+	@$(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
 
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
@@ -213,4 +229,4 @@ resource-candidate: ## Derive a deterministic candidate from representative prep
 .PHONY: tekton-proof
 
 tekton-proof: ## Reconcile Tekton and run one exact remote proof; RUNTIME_CONFIG/BASE_SHA/PARENT_SHA/HEAD_SHA required
-	@ansible-playbook -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"
+	@$(ANSIBLE_PLAYBOOK) -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"

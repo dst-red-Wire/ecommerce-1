@@ -1,6 +1,7 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+from functools import lru_cache
 import json
 import re
 import subprocess
@@ -751,10 +752,11 @@ EXACT_CONTRACTS = {
 }
 
 
-def load_yaml(path):
+@lru_cache(maxsize=1024)
+def _load_yaml_text(text):
     """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
     ruby = """
-document = Psych.parse_file(ARGV[0])
+document = Psych.parse(text)
 walk = lambda do |node|
   if node.is_a?(Psych::Nodes::Mapping)
     keys = node.children.each_slice(2).map { |key, _| key.value }
@@ -764,14 +766,19 @@ walk = lambda do |node|
   Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
 end
 walk.call(document)
-data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
+data = Psych.safe_load(text, aliases: false)
 puts JSON.generate(data)
 """
-    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    command = ["ruby", "-rpsych", "-rjson", "-e", "text = STDIN.read\n" + ruby]
+    completed = subprocess.run(command, input=text, text=True, capture_output=True, check=False)
     if completed.returncode:
-        raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
+        raise ValueError(completed.stderr.strip() or "cannot parse YAML")
     return json.loads(completed.stdout)
+
+
+def load_yaml(path):
+    """Parse by content so unchanged mutation fixtures reuse validated YAML."""
+    return _load_yaml_text(Path(path).read_text(encoding="utf-8"))
 
 
 def validate_exact_keys(name, actual, expected_keys):
@@ -1211,6 +1218,7 @@ def derived_index_errors(index, lock, network_plan):
     return errors
 
 
+@lru_cache(maxsize=4096)
 def documentation_errors(text):
     """Inspect every sentence, including code blocks; no document-wide exemptions."""
     errors = []
