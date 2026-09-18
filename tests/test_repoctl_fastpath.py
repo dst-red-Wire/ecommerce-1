@@ -31,29 +31,74 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 "drift_exit_codes": [3],
             },
             "validation": {
-                "init_args": ["init", "-backend=false", "-input=false"],
+                "provider_lock_authority": "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
+            },
+        }
+        provider_lock = {
+            "providers": {
+                "hcloud": {
+                    "source": "registry.terraform.io/hetznercloud/hcloud",
+                    "version": "1.68.0",
+                    "constraints": "= 1.68.0",
+                    "hashes": ["h1:test", "zh:test"],
+                }
+            },
+            "qualification": {
+                "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
-                "module_validation_in_temporary_copy": True,
+                "provider_plugin_cache": {},
             },
         }
 
         def fake_which(command):
             return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
 
-        def fake_run(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
         with (
-            mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
+            mock.patch.object(
+                pathlib.Path,
+                "rglob",
+                return_value=[MOD.ROOT / "platform/terraform/example.tf"],
+            ),
             mock.patch.object(MOD, "source_quality_adapter", return_value=policy),
+            mock.patch.object(MOD, "terraform_provider_lock_contract", return_value=provider_lock),
+            mock.patch.object(MOD, "_run_cached_static_gate", return_value=0) as cached_gate,
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
-            mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
             self.assertEqual(0, MOD.terraform_check())
 
-        self.assertTrue(calls)
-        self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+        cached_gate.assert_called_once()
+        self.assertEqual("platform:terraform", cached_gate.call_args.args[0])
+        self.assertEqual("/opt/bin/tofu", cached_gate.call_args.args[1]["selected_tool"])
+
+    def test_terraform_provider_lock_is_central_and_exact(self):
+        contract = MOD.terraform_provider_lock_contract()
+        self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
+        self.assertEqual("platform/terraform", contract["scope"])
+        self.assertEqual("exact", contract["status"])
+
+        provider = contract["providers"]["hcloud"]
+        self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])
+        self.assertEqual("1.68.0", provider["version"])
+        self.assertEqual("= 1.68.0", provider["constraints"])
+        self.assertTrue(any(value.startswith("h1:") for value in provider["hashes"]))
+        self.assertTrue(any(value.startswith("zh:") for value in provider["hashes"]))
+
+        qualification = contract["qualification"]
+        self.assertEqual("non-authoritative", qualification["repository_lockfiles"]["authority"])
+        self.assertFalse(qualification["repository_lockfiles"]["qualification_input"])
+        self.assertIn("-lockfile=readonly", qualification["init_args"])
+
+    def test_terraform_native_lockfile_is_generated_from_central_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".terraform.lock.hcl"
+            MOD.write_terraform_provider_lock(path)
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
+        self.assertIn('version     = "1.68.0"', text)
+        self.assertIn('constraints = "= 1.68.0"', text)
+        self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
+
 
     def test_source_quality_policy_is_central_repository_authority(self):
         policy = MOD.source_quality_policy()
@@ -80,6 +125,10 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         advisory = set(policy["adapters"]["ansible"]["lint"]["advisory_rules"])
         self.assertTrue(
             {"partial-become", "latest[git]", "no-handler", "yaml[empty-lines]"}.issubset(advisory)
+        )
+        self.assertEqual(
+            "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
+            policy["adapters"]["terraform"]["validation"]["provider_lock_authority"],
         )
 
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
@@ -240,27 +289,53 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("d" * 64, digest)
         self.assertEqual(64, len(key))
 
-    def test_platform_terraform_component_cache_is_forbidden(self):
+    def test_platform_terraform_component_cache_is_centrally_approved(self):
         approved = {
             "consumers": {
                 "repoctl_component_static_gates": {
                     "gates": {
-                        "platform:ansible": {
-                            "inputs": ["platform/ansible/**/*"],
-                            "tools": ["ansible-lint"],
+                        "platform:terraform": {
+                            "inputs": [
+                                "config/contracts/terraform-provider-lock.yaml",
+                                "platform/terraform/**/*.tf",
+                                "platform/terraform/**/*.tftpl",
+                            ],
+                            "tools": ["tofu", "terraform"],
                         }
                     }
-                },
-                "uncached_component_gates": {
-                    "platform:terraform": {
-                        "persistence": "forbidden",
-                    }
-                },
+                }
             }
         }
-        with mock.patch.object(MOD.qualification_cache, "contract", return_value=approved):
-            with self.assertRaisesRegex(RuntimeError, "not approved"):
-                MOD._static_gate_cache_key("platform:terraform", {})
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="e" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": str(executable), "sha256": "tool"},
+            ),
+        ):
+            key, digest = MOD._static_gate_cache_key(
+                "platform:terraform",
+                {
+                    "selected_tool": "/opt/bin/terraform",
+                    "provider_versions": {"hcloud": "1.68.0"},
+                },
+            )
+
+        self.assertEqual("e" * 64, digest)
+        self.assertEqual(64, len(key))
+
+    def test_platform_terraform_cache_inputs_include_provider_lock(self):
+        contract = MOD.qualification_cache.contract()
+        patterns = (
+            contract["consumers"]["repoctl_component_static_gates"]["gates"]["platform:terraform"]["inputs"]
+        )
+        self.assertIn("config/contracts/terraform-provider-lock.yaml", patterns)
+        self.assertIn("platform/terraform/**/*.tf", patterns)
+        self.assertIn("platform/terraform/**/*.tftpl", patterns)
+
 
     def test_security_gate_is_never_cacheable(self):
         approved = {
