@@ -1,0 +1,662 @@
+import os
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SPEC = importlib.util.spec_from_file_location("repoctl_evidence_validation_test", ROOT / "scripts/repoctl.py")
+assert SPEC and SPEC.loader
+REPOCTL = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(REPOCTL)
+
+
+class ExactEvidenceValidationTest(unittest.TestCase):
+    def setUp(self):
+        # Each identity regression owns its collection fixture; hashing the host
+        # collections repeatedly adds unrelated I/O to tool-identity tests.
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        patch = mock.patch.object(REPOCTL, "PROJECT_COLLECTIONS", Path(temporary.name))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def evidence(self):
+        return {
+            "schema_version": 5,
+            "status": "PASS",
+            "exact_commit_evidence": True,
+            "head_sha": "h",
+            "base_sha": "b",
+            "head_tree_sha": "t",
+            "changed_paths": ["x"],
+            "qualification_identity": "identity",
+            "created_at_epoch": time.time(),
+            "gates": [
+                {"gate": name, "status": "PASS", "original_execution_at_epoch": time.time() - 1}
+                for name, _ in REPOCTL._global_gate_commands("base", "h")
+            ],
+        }
+
+    def validate(self, evidence):
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            path = context / "evidence" / "h.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(evidence))
+            values = {
+                ("rev-parse", "h"): "h",
+                ("rev-parse", "HEAD"): "h",
+                ("status", "--porcelain", "--untracked-files=all"): "",
+                ("rev-parse", "base"): "b",
+                ("rev-parse", "h^{tree}"): "t",
+            }
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=lambda *args: values[args]),
+                mock.patch.object(REPOCTL, "changed_paths", return_value=["x"]),
+                mock.patch.object(REPOCTL, "affected", return_value=["global"]),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"),
+            ):
+                return REPOCTL._valid_exact_evidence("base", "h")
+
+    def test_accepts_current_exact_identity(self):
+        self.assertIsNotNone(self.validate(self.evidence()))
+
+    def test_rejects_stale_or_tampered_evidence(self):
+        for field, value in (
+            ("created_at_epoch", time.time() - 90000),
+            ("qualification_identity", "tampered"),
+            ("head_tree_sha", "wrong"),
+            ("base_sha", "wrong"),
+            ("gates", [{"status": "FAIL"}]),
+        ):
+            with self.subTest(field=field):
+                evidence = self.evidence()
+                evidence[field] = value
+                self.assertIsNone(self.validate(evidence))
+
+    def test_invalid_gate_durations_reject_evidence_and_reuse_without_conversion_errors(self):
+        for key in ("duration_seconds", "source_duration_seconds"):
+            for value in ({}, [], None, True, "1.0", -1, float("nan"), float("inf"), 10**400):
+                with self.subTest(key=key, value_type=type(value).__name__):
+                    evidence = self.evidence()
+                    evidence["gates"][0][key] = value
+                    self.assertIsNone(self.validate(evidence))
+                    records = []
+                    self.assertFalse(REPOCTL._reuse_gate(evidence["gates"][0]["gate"], "parent", evidence, records))
+                    self.assertEqual([], records)
+
+    def test_non_object_json_is_a_cache_miss(self):
+        for value in (None, [], [1], True, 1, "cached"):
+            with self.subTest(value=value):
+                self.assertIsNone(self.validate(value))
+                self.assertIsNone(REPOCTL._promote_worktree_evidence("base", "h", value))
+
+    def test_installed_collection_bytes_invalidate_same_version_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collections = Path(directory)
+            plugin = collections / "ansible_collections/demo/example/plugins/modules/module.py"
+            plugin.parent.mkdir(parents=True)
+            manifest = plugin.parents[2] / "MANIFEST.json"
+            manifest.write_text('{"collection_info":{"version":"1.0"}}')
+            plugin.write_text("original implementation")
+            with (
+                mock.patch.object(REPOCTL, "PROJECT_COLLECTIONS", collections),
+                mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+            ):
+                original = REPOCTL.qualification_identity()
+                plugin.write_text("modified implementation")
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+                plugin.write_text("original implementation")
+                self.assertEqual(original, REPOCTL.qualification_identity())
+                plugin.unlink()
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+            self.assertEqual('{"collection_info":{"version":"1.0"}}', manifest.read_text())
+
+    def test_goenv_files_cannot_change_gate_flags_or_evidence_identity(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            identities = []
+            for tag in ("qualified", "changed"):
+                config = Path(directory) / tag
+                config.write_text(f"GOFLAGS=-tags={tag}\n")
+                env = {key: value for key, value in os.environ.items() if key not in {"GOFLAGS", "GOEXPERIMENT"}}
+                env["GOENV"] = str(config)
+                raw = subprocess.run(["go", "env", "GOFLAGS"], env=env, text=True, capture_output=True, check=True)
+                self.assertEqual(f"-tags={tag}", raw.stdout.strip())
+                with mock.patch.dict(os.environ, env, clear=True):
+                    self.assertEqual("", REPOCTL.run(["go", "env", "GOFLAGS"], capture=True).stdout.strip())
+                    self.assertEqual("", REPOCTL.run(["go", "env", "GOENV"], env=env, capture=True).stdout.strip())
+                    with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+                        identities.append(REPOCTL.qualification_identity())
+                self.assertEqual(str(config), env["GOENV"], "caller environment must remain unchanged")
+            self.assertEqual(*identities)
+
+    def test_effective_go_targets_and_native_flags_invalidate_evidence(self):
+        overrides = {
+            "GOOS": "windows",
+            "GOARCH": "arm64",
+            "GOAMD64": "v3",
+            "GOARM64": "v8.2",
+            "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1",
+            "CGO_LDFLAGS": "-Wl,--as-needed",
+            "CGO_CFLAGS_ALLOW": ".*",
+            "GODEBUG": "cgocheck=0",
+            "CXX": "different-cxx",
+            "FC": "different-fortran",
+            "PKG_CONFIG": "different-pkg-config",
+        }
+        original_env = {key: value for key, value in os.environ.items() if key not in overrides}
+        with (
+            mock.patch.dict(os.environ, original_env, clear=True),
+            mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])),
+            mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+        ):
+            identity = REPOCTL.qualification_identity()
+            evidence = {"qualification_identity": identity, "gates": [{"gate": "frontend:all"}]}
+            self.assertTrue(REPOCTL._evidence_identity_matches(evidence))
+            for key, value in overrides.items():
+                with self.subTest(variable=key), mock.patch.dict(os.environ, {key: value}):
+                    self.assertNotEqual(identity, REPOCTL.qualification_identity())
+                    self.assertFalse(REPOCTL._evidence_identity_matches(evidence))
+            self.assertTrue(REPOCTL._evidence_identity_matches(evidence))
+
+    def test_native_go_observes_the_configuration_bound_by_identity(self):
+        with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+            identity = REPOCTL.qualification_identity()
+            with mock.patch.dict(os.environ, {"GOOS": "windows", "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1"}):
+                observed = REPOCTL.run(["go", "env", "-json", "GOOS", "CGO_CFLAGS"], capture=True)
+                self.assertEqual(
+                    {"GOOS": "windows", "CGO_CFLAGS": "-DQUALIFICATION_CHANGED=1"}, json.loads(observed.stdout)
+                )
+                self.assertNotEqual(identity, REPOCTL.qualification_identity())
+
+    def test_ansible_gate_and_reconciliation_strip_ambient_plugin_overrides(self):
+        overrides = {
+            name: "/untrusted/plugins"
+            for name in (
+                "ANSIBLE_LIBRARY",
+                "ANSIBLE_ROLES_PATH",
+                "ANSIBLE_ACTION_PLUGINS",
+                "ANSIBLE_FILTER_PLUGINS",
+                "ANSIBLE_LOOKUP_PLUGINS",
+                "ANSIBLE_CALLBACK_PLUGINS",
+                "ANSIBLE_CONFIG",
+                "ANSIBLE_COLLECTIONS_PATH",
+                "ANSIBLE_INVENTORY_PLUGINS",
+            )
+        }
+        calls = []
+        with (
+            mock.patch.dict(os.environ, overrides),
+            mock.patch.object(REPOCTL, "require", side_effect=lambda name: name),
+            mock.patch.object(REPOCTL, "run", side_effect=lambda command, **kw: calls.append((command, kw["env"]))),
+            mock.patch.object(REPOCTL, "ansible_collections_ready", side_effect=[False, True]),
+            mock.patch.object(REPOCTL, "ansible_collections_check", return_value=0),
+        ):
+            self.assertEqual(0, REPOCTL.ansible_check())
+        self.assertEqual(["ansible-playbook", "ansible-lint", "ansible-playbook"], [command[0] for command, _ in calls])
+        expected = {
+            "ANSIBLE_CONFIG": str(REPOCTL.ROOT / "platform/ansible/ansible.cfg"),
+            "ANSIBLE_COLLECTIONS_PATH": str(REPOCTL.PROJECT_COLLECTIONS),
+        }
+        for _, env in calls:
+            self.assertEqual(expected, {key: value for key, value in env.items() if key.startswith("ANSIBLE_")})
+
+    def test_ignored_ansible_overrides_do_not_change_effective_identity(self):
+        with mock.patch.object(REPOCTL, "_qualification_toolchain", return_value=({}, [])):
+            before = REPOCTL.qualification_identity()
+            with mock.patch.dict(os.environ, {"ANSIBLE_LIBRARY": "/outside", "ANSIBLE_CONFIG": "/outside/config"}):
+                self.assertEqual(before, REPOCTL.qualification_identity())
+
+    def test_fresh_envelope_cannot_renew_expired_original_gate_execution(self):
+        evidence = self.evidence()
+        evidence["gates"][0]["original_execution_at_epoch"] = time.time() - 86401
+        self.assertIsNone(self.validate(evidence))
+        records = []
+        self.assertFalse(REPOCTL._reuse_gate(evidence["gates"][0]["gate"], "parent", evidence, records))
+        self.assertEqual([], records)
+
+    def test_missing_malformed_or_future_execution_age_fails_closed(self):
+        for value in (None, True, "123", {}, [], float("nan"), float("inf"), 10**400, time.time() + 30):
+            evidence = self.evidence()
+            evidence["gates"][0]["original_execution_at_epoch"] = value
+            self.assertIsNone(self.validate(evidence))
+        evidence = self.evidence()
+        del evidence["gates"][0]["original_execution_at_epoch"]
+        self.assertIsNone(self.validate(evidence))
+
+    def test_gate_records_its_actual_execution_time_before_evidence_publication(self):
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = []
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", root / ".context"),
+                mock.patch.object(REPOCTL.time, "time", return_value=123456.0),
+            ):
+                self.assertTrue(REPOCTL._run_gate("gate", [sys.executable, "-c", "pass"], records))
+            self.assertEqual(123456.0, records[0]["original_execution_at_epoch"])
+
+    def test_successive_reuse_preserves_age_until_original_result_expires(self):
+        started = 100000.0
+        parent = {
+            "created_at_epoch": started,
+            "gates": [{"gate": "service:product", "status": "PASS", "original_execution_at_epoch": started}],
+        }
+        for age in (0, 30000, 60000, 86400):
+            now = started + age
+            with mock.patch.object(REPOCTL.time, "time", return_value=now):
+                records = []
+                self.assertTrue(REPOCTL._reuse_gate("service:product", "parent", parent, records))
+                self.assertEqual(started, records[0]["original_execution_at_epoch"])
+                parent = {"created_at_epoch": now, "gates": records}
+        with mock.patch.object(REPOCTL.time, "time", return_value=started + 86401):
+            self.assertFalse(REPOCTL._reuse_gate("service:product", "parent", parent, []))
+
+    def test_go_gates_use_the_bound_cc_instead_of_an_ambient_wrapper(self):
+        for compiler in ("missing-compiler", "/outside/compiler --extra-flag"):
+            env = dict(os.environ, CC=compiler)
+            with self.subTest(compiler=compiler):
+                result = REPOCTL.run(["go", "env", "CC"], env=env, capture=True)
+                self.assertEqual("cc", result.stdout.strip())
+                self.assertEqual(compiler, env["CC"])
+
+    def test_go_gates_ignore_external_or_missing_workspaces(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "go.mod").write_text("module workspacefixture\n\ngo 1.23.0\n")
+            external = root / "external.work"
+            external.write_text("invalid workspace content\n")
+            for value in (str(external), str(root / "missing.work")):
+                env = dict(os.environ, GOWORK=value)
+                with self.subTest(workspace=value):
+                    result = REPOCTL.run(["go", "list", "-m"], cwd=root, env=env, capture=True)
+                    self.assertEqual("workspacefixture", result.stdout.strip())
+                    self.assertEqual(value, env["GOWORK"])
+
+    def test_rejects_malformed_nonfinite_and_future_timestamps(self):
+        for value in (
+            None,
+            "bad",
+            "123",
+            {},
+            True,
+            float("nan"),
+            float("inf"),
+            -float("inf"),
+            10**400,
+            time.time() + 60,
+        ):
+            with self.subTest(value=value):
+                evidence = self.evidence()
+                evidence["created_at_epoch"] = value
+                self.assertIsNone(self.validate(evidence))
+
+    def test_rejects_malformed_schema_without_aborting_validation(self):
+        for value in (None, "5", {}, [], True, False, 5.0, float("nan"), float("inf"), 10**400, 6):
+            with self.subTest(value=value):
+                evidence = self.evidence()
+                evidence["schema_version"] = value
+                self.assertIsNone(self.validate(evidence))
+                self.assertFalse(REPOCTL._supported_evidence_schema(evidence, 4))
+                self.assertFalse(REPOCTL._supported_evidence_schema(evidence, 5))
+
+    def test_tool_identity_changes_with_provider_bytes_and_ansible_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "ansible-playbook"
+            executable.write_bytes(b"entrypoint")
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil,
+                    "which",
+                    side_effect=lambda name: str(executable) if name == "ansible-playbook" else None,
+                ),
+                mock.patch.object(
+                    REPOCTL,
+                    "run",
+                    return_value=mock.Mock(returncode=0, stdout="ansible-playbook [core 2.20.3]", stderr=""),
+                ) as probe,
+            ):
+                initial = REPOCTL.qualification_identity()
+                probe.return_value.stdout = "ansible-playbook [core 2.16.3]"
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = "ansible-playbook [core 2.20.3]"
+                executable.write_bytes(b"changed entrypoint")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
+    def test_identity_binds_actual_trusted_controller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Path(directory) / "trusted.py"
+            controller.write_bytes((ROOT / "scripts/repoctl.py").read_bytes())
+            with mock.patch.object(REPOCTL.shutil, "which", return_value=None):
+                candidate = REPOCTL.qualification_identity()
+                with mock.patch.dict(os.environ, {"REPOCTL_TRUSTED_CONTROLLER": str(controller)}):
+                    self.assertEqual(candidate, REPOCTL.qualification_identity())
+                    controller.write_bytes(b"# different gate implementation\n")
+                    self.assertNotEqual(candidate, REPOCTL.qualification_identity())
+
+    def test_all_declared_gate_tools_and_provider_dependencies_are_bound(self):
+        commands, _probes = REPOCTL._qualification_toolchain()
+        contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+        declared = {name for names in contract["gate_requirements"].values() for name in names}
+        self.assertTrue(declared <= commands.keys())
+        for command in ("git", "cc", "docker", "sysctl", "ansible-galaxy", "diff", "tar", "ruby"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                executable = Path(directory) / command
+                executable.write_bytes(b"original tool")
+                with (
+                    mock.patch.object(
+                        REPOCTL.shutil, "which", side_effect=lambda name: str(executable) if name == command else None
+                    ),
+                    mock.patch.object(
+                        REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout='{"ServerVersion": "1"}', stderr="")
+                    ),
+                    mock.patch.object(REPOCTL, "output", return_value="version 1"),
+                ):
+                    original = REPOCTL.qualification_identity()
+                    executable.write_bytes(b"changed tool")
+                    self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_new_contract_tool_and_transitive_provider_are_discovered(self):
+        contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+        contract["gate_requirements"]["test"].append("new-tool")
+        contract["capabilities"] += [
+            {"name": "new-tool", "provider": "new-provider", "probe": ["launcher", "new-tool", "--version"]},
+            {"name": "new-provider", "command": "launcher", "version_args": ["version"], "requires": ["new-helper"]},
+            {"name": "new-helper", "command": "helper", "version_args": ["--version"]},
+        ]
+        with mock.patch.object(REPOCTL.json, "loads", return_value=contract):
+            commands, probes = REPOCTL._qualification_toolchain()
+        self.assertEqual(["version"], commands["launcher"])
+        self.assertIn("helper", commands)
+        self.assertIn((("launcher", "new-tool", "--version"), False), probes)
+
+    def test_interpreter_aliases_share_identity_but_environments_do_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory) / "python"
+            alias = Path(directory) / "python3"
+            interpreter.write_bytes(b"same interpreter")
+            alias.symlink_to(interpreter)
+            with mock.patch.object(REPOCTL.shutil, "which", return_value=None):
+                with mock.patch.object(REPOCTL.sys, "executable", str(interpreter)):
+                    original = REPOCTL.qualification_identity()
+                with mock.patch.object(REPOCTL.sys, "executable", str(alias)):
+                    self.assertEqual(original, REPOCTL.qualification_identity())
+                    with mock.patch.object(REPOCTL.sys, "prefix", str(Path(directory) / "different-env")):
+                        self.assertNotEqual(original, REPOCTL.qualification_identity())
+                    interpreter.write_bytes(b"changed interpreter")
+                    self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_git_hook_aliases_share_identity_only_for_same_installation_and_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = Path(directory) / "usr/bin/git"
+            hook = Path(directory) / "usr/lib/git-core/git"
+            for executable in (original, hook):
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(b"identical git binary")
+            selected = original
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(selected) if name == "git" else None
+                ),
+                mock.patch.object(
+                    REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout=str(hook.parent), stderr="")
+                ) as probe,
+            ):
+                initial = REPOCTL.qualification_identity()
+                selected = hook
+                self.assertEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(Path(directory) / "other-install")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+                probe.return_value.stdout = str(hook.parent)
+                hook.write_bytes(b"different git binary")
+                self.assertNotEqual(initial, REPOCTL.qualification_identity())
+
+    def test_runtime_identity_binds_daemon_configuration_not_container_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config/toolchain/capabilities.json"
+            config.parent.mkdir(parents=True)
+            config.write_bytes((ROOT / "config/toolchain/capabilities.json").read_bytes())
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                _commands, probes = REPOCTL._qualification_toolchain()
+                self.assertNotIn((("docker", "info"), True), probes)
+                service = root / "services/product"
+                service.mkdir(parents=True)
+                (service / "go.mod").touch()
+                (service / "integration_test.go").write_text("// testcontainers\n")
+                _commands, probes = REPOCTL._qualification_toolchain(("governance", "system"))
+                self.assertNotIn((("docker", "info"), True), probes)
+                _commands, probes = REPOCTL._qualification_toolchain(("service:other",))
+                self.assertNotIn((("docker", "info"), True), probes)
+                _commands, probes = REPOCTL._qualification_toolchain(("service:product",))
+                self.assertIn((("docker", "info"), True), probes)
+                self.assertIn((("sysctl", "-n", "net.ipv4.ip_forward"), True), probes)
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "docker"
+            executable.write_bytes(b"docker client")
+            state = {"ServerVersion": "1", "ID": "daemon-a", "Containers": 1}
+
+            def run(command, **kwargs):
+                return mock.Mock(returncode=0, stdout=json.dumps(state) if "info" in command else "client 1", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL,
+                    "_qualification_toolchain",
+                    return_value=({"docker": ["--version"]}, {(("docker", "info"), True)}),
+                ),
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(executable) if name == "docker" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+            ):
+                original = REPOCTL.qualification_identity()
+                state["Containers"] = 2
+                self.assertEqual(original, REPOCTL.qualification_identity())
+                state["ServerVersion"] = "2"
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+                with mock.patch.object(REPOCTL, "run", return_value=mock.Mock(returncode=1, stdout="", stderr="")):
+                    with self.assertRaisesRegex(RuntimeError, "runtime identity probe failed"):
+                        REPOCTL.qualification_identity()
+
+    def test_actual_imported_evidence_helper_bytes_invalidate_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "repository_delivery.py"
+            helper.write_text("# original imported trust helper\n")
+            with (
+                mock.patch.object(REPOCTL.evidence_delivery_module, "__file__", str(helper)),
+                mock.patch.object(REPOCTL.shutil, "which", return_value=None),
+            ):
+                original = REPOCTL.qualification_identity()
+                helper.write_text("# strengthened signature verification\n")
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_global_identity_works_with_docker_cli_but_no_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_bytes(b"docker CLI")
+            calls = []
+
+            def run(command, **kwargs):
+                calls.append(command)
+                return mock.Mock(returncode=1 if "info" in command else 0, stdout="client version", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(docker) if name == "docker" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+            ):
+                REPOCTL.qualification_identity(("governance", "contracts"))
+                self.assertFalse(any("info" in command for command in calls))
+                with self.assertRaisesRegex(RuntimeError, "runtime identity probe failed"):
+                    REPOCTL.qualification_identity(("service:product",))
+                self.assertFalse(
+                    REPOCTL._evidence_identity_matches(
+                        {
+                            "qualification_identity": "old-PASS",
+                            "gates": [{"gate": "service:product"}],
+                        }
+                    )
+                )
+
+    def test_psych_version_changes_identity_with_unchanged_ruby(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ruby = Path(directory) / "ruby"
+            ruby.write_bytes(b"unchanged ruby executable")
+            psych = "5.0.1"
+
+            def run(command, **kwargs):
+                return mock.Mock(returncode=0, stdout=psych if "-rpsych" in command else "ruby 3.2.3", stderr="")
+
+            with (
+                mock.patch.object(
+                    REPOCTL.shutil, "which", side_effect=lambda name: str(ruby) if name == "ruby" else None
+                ),
+                mock.patch.object(REPOCTL, "run", side_effect=run),
+                mock.patch.object(REPOCTL, "output", return_value="ruby 3.2.3"),
+            ):
+                original = REPOCTL.qualification_identity()
+                psych = "5.1.0"
+                self.assertNotEqual(original, REPOCTL.qualification_identity())
+
+    def test_finalizer_publishes_without_daemon_and_does_not_claim_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = root / "services/product"
+            service.mkdir(parents=True)
+            (service / "go.mod").touch()
+            (service / "integration_test.go").write_text("// testcontainers\n")
+            records = root / "records"
+            records.mkdir()
+            (records / "plan.json").write_text(
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "base_sha": "b",
+                        "component_gates": ["service:product"],
+                        "changed_paths": [],
+                        "affected_components": ["service:product"],
+                    }
+                )
+            )
+            (records / "global.json").write_text(
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "records": [
+                            {"gate": "governance", "status": "PASS", "original_execution_at_epoch": time.time() - 1}
+                        ],
+                    }
+                )
+            )
+            (records / "component-product.json").write_text(
+                json.dumps(
+                    {
+                        "head_sha": "h",
+                        "records": [
+                            {
+                                "gate": "service:product",
+                                "status": "PASS",
+                                "original_execution_at_epoch": time.time() - 1,
+                            }
+                        ],
+                    }
+                )
+            )
+
+            def git(*args):
+                if args[0] == "status":
+                    return ""
+                return "b" if args == ("rev-parse", "base") else "tree" if "^{tree}" in args[-1] else "h"
+
+            def identity(gates=()):
+                self.assertEqual((), gates, "finalizer must not probe another task's Docker runtime")
+                return "static-identity"
+
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", root / ".context"),
+                mock.patch.object(REPOCTL, "git", side_effect=git),
+                mock.patch.object(REPOCTL, "_require_clean_exact_checkout", return_value=("h", "h")),
+                mock.patch.object(REPOCTL, "_global_gate_commands", return_value=[("governance", [])]),
+                mock.patch.object(REPOCTL, "qualification_identity", side_effect=identity),
+                mock.patch.object(
+                    REPOCTL, "publish_evidence", return_value={"digest_reference": "fixture-digest"}
+                ) as publish,
+                mock.patch.object(REPOCTL, "publish_remote_status"),
+                mock.patch.dict(os.environ, {"CI_EVIDENCE_REPOSITORY": "fixture"}),
+            ):
+                self.assertEqual(0, REPOCTL.ci_finalize("base", "h", str(records)))
+                publish.assert_called_once()
+                evidence = json.loads((root / ".context/evidence/h.json").read_text())
+                self.assertEqual("PASS", evidence["status"])
+                self.assertFalse(evidence["reuse_identity_complete"])
+                self.assertFalse(REPOCTL._evidence_identity_matches(evidence))
+
+    def test_requires_each_gate_once_and_does_not_skip_required_checks(self):
+        gates = self.evidence()["gates"]
+        for rows in (
+            [],
+            gates[:-1],
+            gates + [gates[0]],
+            gates + [{"gate": "unexpected", "status": "PASS", "original_execution_at_epoch": time.time() - 1}],
+            [{**row, "status": "SKIP"} for row in gates],
+            [None],
+        ):
+            with self.subTest(rows=rows):
+                evidence = self.evidence()
+                evidence["gates"] = rows
+                self.assertIsNone(self.validate(evidence))
+
+    def test_dispatcher_version_changes_invalidate_identity(self):
+        for command in ("ruff", "pnpm"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                shim = Path(directory) / command
+                shim.write_bytes(b"unchanged dispatcher")
+                with (
+                    mock.patch.object(
+                        REPOCTL.shutil, "which", side_effect=lambda name: str(shim) if name == command else None
+                    ),
+                    mock.patch.object(
+                        REPOCTL, "run", return_value=mock.Mock(returncode=0, stdout="1.0.0", stderr="")
+                    ) as probe,
+                ):
+                    before = REPOCTL.qualification_identity()
+                    probe.return_value.stdout = "2.0.0"
+                    self.assertNotEqual(before, REPOCTL.qualification_identity())
+
+    def test_prepush_requalifies_rejected_evidence(self):
+        with (
+            mock.patch.object(REPOCTL, "git", return_value="h"),
+            mock.patch.object(REPOCTL, "_valid_exact_evidence", return_value=None) as validate,
+            mock.patch.object(REPOCTL, "verify_change", return_value=1) as verify,
+        ):
+            self.assertEqual(1, REPOCTL.prepush())
+            validate.assert_called_once_with("origin/main", "h")
+            verify.assert_called_once_with("origin/main", "h")
+
+    def test_prepush_reuses_only_canonical_validation(self):
+        path = ROOT / ".context/evidence/h.json"
+        with (
+            mock.patch.object(REPOCTL, "git", return_value="h"),
+            mock.patch.object(REPOCTL, "_valid_exact_evidence", return_value=path) as validate,
+            mock.patch.object(REPOCTL, "verify_change") as verify,
+        ):
+            self.assertEqual(0, REPOCTL.prepush())
+            validate.assert_called_once_with("origin/main", "h")
+            verify.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

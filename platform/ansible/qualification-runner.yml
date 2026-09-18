@@ -3,6 +3,15 @@
   hosts: qualification_runners
   become: true
   gather_facts: true
+  pre_tasks:
+    - name: Require controller-selected immutable qualification revisions
+      ansible.builtin.assert:
+        that:
+          - qualification_pr_head is defined
+          - qualification_pr_base is defined
+          - qualification_pr_head is match('^[0-9a-f]{40}$')
+          - qualification_pr_base is match('^[0-9a-f]{40}$')
+        fail_msg: Pass the exact admitted head and base from the trusted controller.
   roles:
     - role: qualification_runner_host
   post_tasks:
@@ -38,13 +47,17 @@
       ansible.builtin.git:
         repo: "{{ qualification_repository_url }}"
         dest: "{{ qualification_repository_path }}"
+        version: "{{ qualification_pr_head }}"
+        refspec: "{{ qualification_pr_head }}"
         update: false
+      become: true
       become_user: "{{ qualification_user }}"
 
     - name: Fetch the exact qualification head and base objects
       ansible.builtin.command:
         argv: [git, fetch, origin, "{{ qualification_pr_head }}", "{{ qualification_pr_base }}"]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -52,6 +65,7 @@
       ansible.builtin.command:
         argv: [git, rev-parse, HEAD]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       register: qualification_current_head
       changed_when: false
@@ -60,14 +74,31 @@
       ansible.builtin.command:
         argv: [git, checkout, --detach, "{{ qualification_pr_head }}"]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       when: qualification_current_head.stdout != qualification_pr_head
       changed_when: true
+
+    - name: Read the detached qualification revision before PR-owned code
+      ansible.builtin.command:
+        argv: [git, rev-parse, HEAD]
+        chdir: "{{ qualification_repository_path }}"
+      become: true
+      become_user: "{{ qualification_user }}"
+      register: qualification_selected_head
+      changed_when: false
+
+    - name: Require the checkout to match the admitted qualification head
+      ansible.builtin.assert:
+        that:
+          - qualification_selected_head.stdout == qualification_pr_head
+        fail_msg: The checkout differs from the controller-admitted head.
 
     - name: Reconcile the hash-locked qualification seed
       ansible.builtin.command:
         argv: [make, seed]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -75,6 +106,7 @@
       ansible.builtin.command:
         argv: [make, bootstrap]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -82,5 +114,6 @@
       ansible.builtin.command:
         argv: [make, env-check]
         chdir: "{{ qualification_repository_path }}"
+      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false

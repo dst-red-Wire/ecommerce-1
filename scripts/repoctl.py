@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -34,6 +37,8 @@ def _missing_repository_delivery(*_args, **_kwargs):
 
 
 try:
+    import repository_delivery as evidence_delivery_module
+
     from repository_delivery import (
         bundle_deliver as isolated_bundle_deliver,
         compare_evidence,
@@ -46,6 +51,7 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "repository_delivery":
         raise
+    evidence_delivery_module = None
     isolated_bundle_deliver = _missing_repository_delivery
     compare_evidence = _missing_repository_delivery
     evidence_metrics = _missing_repository_delivery
@@ -61,6 +67,13 @@ PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 # This prevents a user or distro installation from silently changing execution.
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
+# Every service/frontend owns its go.mod; ambient workspaces are not gate inputs.
+os.environ["GOWORK"] = "off"
+os.environ["GOENV"] = "off"
+# The declared native cc capability owns CGO compilation for qualification.
+os.environ["CC"] = "cc"
+# Every controller child inspects the objects that push will actually publish.
+os.environ["GIT_NO_REPLACE_OBJECTS"] = "1"
 CONTEXT = ROOT / ".context"
 
 
@@ -90,11 +103,16 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if cmd and Path(cmd[0]).name in {"git", "git.exe"}:
+        cmd = [cmd[0], "--no-replace-objects", *cmd[1:]]
+    if cmd and Path(cmd[0]).name in {"go", "go.exe"}:
+        env = dict(os.environ if env is None else env, GOWORK="off", GOENV="off", CC="cc")
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
         env=env,
         text=True,
+        errors="surrogateescape",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
@@ -183,6 +201,16 @@ def ansible_collections_ready() -> bool:
     )
 
 
+def qualification_ansible_environment() -> dict[str, str]:
+    """Exclude ambient plugin, role and configuration overrides from qualification."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+    env.update(
+        ANSIBLE_CONFIG=str(ROOT / "platform" / "ansible" / "ansible.cfg"),
+        ANSIBLE_COLLECTIONS_PATH=str(PROJECT_COLLECTIONS),
+    )
+    return env
+
+
 def reconcile_ansible_collections() -> None:
     """Reconcile the checkout-local pinned Galaxy collections only when missing or drifted."""
     if ansible_collections_ready():
@@ -201,7 +229,8 @@ def reconcile_ansible_collections() -> None:
             f"repo_root={ROOT}",
             "--tags",
             "ansible_collections",
-        ]
+        ],
+        env=qualification_ansible_environment(),
     )
     if not ansible_collections_ready():
         drift = []
@@ -736,7 +765,8 @@ def ensure_developer(tags: str) -> None:
             f"repo_root={ROOT}",
             "--tags",
             tags,
-        ]
+        ],
+        env=qualification_ansible_environment(),
     )
     if not developer_state_ready(tags):
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
@@ -776,7 +806,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -847,6 +877,7 @@ def terraform_check() -> int:
 
 
 def ansible_check() -> int:
+    env = qualification_ansible_environment()
     reconcile_ansible_collections()
     require("ansible-lint")
     files = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yml"))
@@ -854,7 +885,7 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+    run(["ansible-lint", *files], env=env)
     run(
         [
             "ansible-playbook",
@@ -866,7 +897,8 @@ def ansible_check() -> int:
             "--syntax-check",
             "-e",
             f"repo_root={ROOT}",
-        ]
+        ],
+        env=env,
     )
     if ansible_collections_check():
         return 1
@@ -890,14 +922,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -960,7 +992,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 4
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -968,17 +1000,22 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_sha") != current_head
         or evidence.get("source_head_sha") != current_head
         or evidence.get("source_tree_sha") != current_tree
+        or evidence.get("head_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
-        or evidence.get("verification", {}).get("tree_stable") is not True
+        or not _evidence_identity_matches(evidence)
+        or not _fresh_evidence(evidence)
+        or not isinstance(evidence.get("verification"), dict)
+        or evidence["verification"].get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
-        or not isinstance(evidence.get("gates"), list)
-        or any(record.get("status") not in {"PASS", "SKIP"} for record in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
     ):
         return None
     return evidence
 
 
 def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path | None:
+    if not isinstance(source, dict):
+        return None
     requested = git("rev-parse", head).strip()
     current = git("rev-parse", "HEAD").strip()
     if requested != current or git("status", "--porcelain", "--untracked-files=all").strip():
@@ -989,13 +1026,16 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     source_tree = str(source.get("source_tree_sha", ""))
     commit_tree = git("rev-parse", f"{requested}^{{tree}}").strip()
     if (
-        source.get("schema_version", 0) < 4
+        not _supported_evidence_schema(source, 4)
         or source.get("status") != "PASS"
         or source.get("exact_commit_evidence") is not False
         or source.get("base_sha") != base_sha
         or len(parents) != 2
         or parents[1] != source_head
         or commit_tree != source_tree
+        or not _evidence_identity_matches(source)
+        or not _fresh_evidence(source)
+        or not _complete_gate_inventory(source, base_ref, head)
     ):
         return None
 
@@ -1015,7 +1055,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     payload = copy.deepcopy(source)
     payload.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "evidence_kind": "exact_commit",
             "head_ref": requested,
             "head_sha": requested,
@@ -1038,6 +1078,78 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _valid_gate_seconds(value) -> bool:
+    if type(value) not in {int, float}:
+        return False
+    try:
+        return math.isfinite(float(value)) and value >= 0
+    except OverflowError:
+        return False
+
+
+def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    global_names = {name for name, _ in _global_gate_commands(base, head)}
+    component_names = set(_normalized_component_gates(affected(base, head)))
+    names = [row.get("gate") for row in records]
+    if any(not isinstance(name, str) for name in names):
+        return False
+    if len(names) != len(set(names)) or set(names) != global_names | component_names:
+        return False
+    for row in records:
+        if any(not _valid_gate_seconds(row.get(key, 0)) for key in ("duration_seconds", "source_duration_seconds")):
+            return False
+        if row.get("status") == "PASS":
+            if row.get("exit_code", 0) != 0:
+                return False
+        elif row.get("status") == "SKIP" and row["gate"] in component_names:
+            command, _ = _component_command(row["gate"])
+            if command is not None:
+                return False
+        else:
+            return False
+    return True
+
+
+def _supported_evidence_schema(evidence: dict, minimum: int) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    version = evidence.get("schema_version")
+    return type(version) is int and minimum <= version <= 5
+
+
+def _fresh_execution_timestamp(value: object, now: float, *, envelope: float | None = None) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        executed = float(value)
+    except (ValueError, OverflowError):
+        return False
+    return math.isfinite(executed) and 0 <= now - executed <= 86400 and (envelope is None or executed <= envelope)
+
+
+def _fresh_evidence(evidence: dict) -> bool:
+    """The envelope cannot renew the lifetime of an older underlying gate result."""
+    if not isinstance(evidence, dict):
+        return False
+    now = time.time()
+    created = evidence.get("created_at_epoch")
+    if not _fresh_execution_timestamp(created, now):
+        return False
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    return all(
+        row.get("status") != "PASS"
+        or _fresh_execution_timestamp(row.get("original_execution_at_epoch"), now, envelope=created)
+        for row in records
+    )
+
+
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     requested = git("rev-parse", head).strip()
     if requested != git("rev-parse", "HEAD").strip():
@@ -1052,13 +1164,225 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("status") != "PASS"
+        not _supported_evidence_schema(evidence, 5)
+        or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base_ref, head)
+        or not _evidence_identity_matches(evidence)
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
     return path
+
+
+def _runtime_identity_required(gates: tuple[str, ...]) -> bool:
+    for gate in gates:
+        if not gate.startswith("service:"):
+            continue
+        name = gate.split(":", 1)[1]
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+            continue
+        module = ROOT / "services" / name
+        if (module / "go.mod").is_file() and any(
+            "testcontainers" in path.read_text(encoding="utf-8") for path in module.rglob("*_test.go")
+        ):
+            return True
+    return False
+
+
+def _evidence_identity_matches(evidence: dict) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    records = evidence.get("gates")
+    if (
+        evidence.get("reuse_identity_complete", True) is not True
+        or not isinstance(evidence.get("qualification_identity"), str)
+        or not isinstance(records, list)
+        or any(not isinstance(row, dict) or not isinstance(row.get("gate"), str) for row in records)
+    ):
+        return False
+    try:
+        return evidence["qualification_identity"] == qualification_identity(tuple(row["gate"] for row in records))
+    except (OSError, RuntimeError, ValueError):
+        # An unavailable current runtime cannot authorize an old PASS.
+        return False
+
+
+def _qualification_toolchain(
+    gates: tuple[str, ...] = (),
+) -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
+    """Conservatively bind all declared gates and their transitive tool providers."""
+    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+    capabilities = {item["name"]: item for item in contract["capabilities"]}
+    aliases = contract.get("command_capabilities", {})
+    required = {name for names in contract["gate_requirements"].values() for name in names}
+    # These native invocations supplement older contracts without a frontend gate.
+    required.update({"templ", "gofmt", "sysctl", "tofu", "psych"})
+    runtime = _runtime_identity_required(gates)
+    commands: dict[str, list[str] | None] = {}
+    probes: set[tuple[tuple[str, ...], bool]] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        capability = capabilities.get(aliases.get(name, name), {})
+        direct = capability.get("command")
+        if direct:
+            commands[direct] = capability.get("version_args", ["--version"])
+            if direct != name and capability.get("version_args"):
+                probes.add((tuple([direct, *capability["version_args"]]), False))
+        if name in required:
+            commands.setdefault(name, {"gofmt": ["-h"], "tofu": ["version"]}.get(name, ["--version"]))
+        probe = capability.get("probe")
+        is_runtime = capability.get("requirement") == "optional-runtime"
+        if probe and (runtime or not is_runtime):
+            probes.add((tuple(probe), is_runtime))
+            commands.setdefault(probe[0], None)
+        for dependency in capability.get("requires", []):
+            visit(dependency)
+        if capability.get("provider"):
+            visit(capability["provider"])
+
+    for name in sorted(required):
+        visit(name)
+    return commands, probes
+
+
+def qualification_identity(gates: tuple[str, ...] = ()) -> str:
+    """Bind reusable evidence to validator/configuration and actual core runners."""
+    digest = hashlib.sha256()
+    for relative in (
+        "scripts/repoctl.py",
+        "scripts/ci-affected.rb",
+        "config/contracts/ci-evidence.yaml",
+        "config/contracts/ci-topology.yaml",
+        "config/toolchain/versions.env",
+        "config/toolchain/capabilities.json",
+    ):
+        path = ROOT / relative
+        digest.update(relative.encode())
+        digest.update(path.read_bytes())
+    controller = Path(_controller_command()[1])
+    if not controller.is_absolute():
+        controller = ROOT / controller
+    digest.update(b"executed-controller")
+    digest.update(controller.read_bytes())
+    digest.update(b"executed-evidence-helper")
+    if evidence_delivery_module is None:
+        digest.update(b"unavailable")
+    else:
+        digest.update(Path(evidence_delivery_module.__file__).read_bytes())
+    digest.update(b"installed-ansible-collections")
+    for path in sorted(PROJECT_COLLECTIONS.rglob("*")):
+        digest.update(os.fsencode(path.relative_to(PROJECT_COLLECTIONS)))
+        if path.is_symlink():
+            digest.update(b"symlink:" + os.fsencode(os.readlink(path)))
+            if path.is_dir() and not path.resolve().is_relative_to(PROJECT_COLLECTIONS.resolve()):
+                raise RuntimeError("collection directory symlink escapes the bound collection contents")
+        if path.is_file():
+            with path.open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+        elif not path.is_dir():
+            digest.update(b"missing-or-nonregular")
+    digest.update(sys.version.encode())
+    # python and python3 are equivalent aliases inside one environment; separate
+    # virtualenvs and changed interpreter bytes must still invalidate evidence.
+    interpreter = Path(sys.executable).resolve()
+    digest.update(json.dumps([str(interpreter), sys.prefix, sys.base_prefix]).encode())
+    with interpreter.open("rb") as handle:
+        digest.update(hashlib.file_digest(handle, "sha256").digest())
+    commands, probes = _qualification_toolchain(gates)
+    for command, version_args in sorted(commands.items()):
+        executable = shutil.which(command)
+        digest.update(command.encode())
+        location = executable or "missing"
+        if executable and command == "git":
+            # Git prepends its exec-path to PATH for hooks. Distributions may
+            # ship an identical copy there instead of a symlink to /usr/bin/git.
+            location = run([executable, "--exec-path"], capture=True).stdout.strip()
+        digest.update(location.encode())
+        if executable:
+            with Path(executable).open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+            if version_args is not None:
+                result = run(
+                    [executable, *version_args],
+                    check=False,
+                    capture=True,
+                    env=qualification_ansible_environment() if command.startswith("ansible") else None,
+                )
+                digest.update(json.dumps([result.returncode, result.stdout, result.stderr]).encode())
+    for command, runtime in sorted(probes):
+        executable = shutil.which(command[0])
+        digest.update(json.dumps(command).encode())
+        if not executable:
+            digest.update(b"missing-probe")
+            continue
+        args = list(command)
+        if command == ("docker", "info"):
+            args += ["--format", "{{json .}}"]
+        result = run(
+            [executable, *args[1:]],
+            check=False,
+            capture=True,
+            env=qualification_ansible_environment() if command[0].startswith("ansible") else None,
+        )
+        if runtime and result.returncode:
+            raise RuntimeError("qualification runtime identity probe failed")
+        value = result.stdout
+        if command == ("docker", "info"):
+            # Container counts, timestamps and resource usage change during tests.
+            # Bind the daemon and its execution configuration, not live workload data.
+            info = json.loads(value)
+            value = json.dumps(
+                {
+                    key: info.get(key)
+                    for key in (
+                        "ID",
+                        "ServerVersion",
+                        "Driver",
+                        "DockerRootDir",
+                        "OSType",
+                        "Architecture",
+                        "KernelVersion",
+                        "OperatingSystem",
+                        "CgroupDriver",
+                        "CgroupVersion",
+                        "SecurityOptions",
+                        "Runtimes",
+                        "DefaultRuntime",
+                        "DriverStatus",
+                    )
+                },
+                sort_keys=True,
+            )
+        digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
+    # GOENV/GOWORK/CC are forced for every Go command. All other ambient Go
+    # target, compiler, linker and runtime switches remain effective gate inputs.
+    # Bind prefixes rather than a fixed list so new architecture knobs cannot
+    # silently inherit evidence from a different native build configuration.
+    go_environment = {
+        name: value
+        for name, value in os.environ.items()
+        if (name.startswith(("GO", "CGO_")) or name in {"CXX", "FC", "PKG_CONFIG"}) and name not in {"GOENV", "GOWORK"}
+    }
+    go_environment.update(GOENV="off", GOWORK="off", CC="cc")
+    digest.update(json.dumps(go_environment, sort_keys=True).encode())
+    effective = qualification_ansible_environment()
+    for name in ("ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+        digest.update(name.encode())
+        digest.update(effective.get(name, "").encode())
+    ruby = shutil.which("ruby") or ""
+    digest.update(ruby.encode())
+    if ruby:
+        digest.update(output([ruby, "--version"]).encode())
+    return digest.hexdigest()
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
@@ -1074,6 +1398,7 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+    executed_at = time.time()
     start = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
         p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
@@ -1084,6 +1409,7 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
             "status": "PASS" if p.returncode == 0 else "FAIL",
             "exit_code": p.returncode,
             "duration_seconds": duration,
+            "original_execution_at_epoch": executed_at,
             "command": command,
             "log": str(log_path.relative_to(ROOT)),
         }
@@ -1118,12 +1444,16 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 2
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha
         or evidence.get("base_sha") != base_sha
-        or not isinstance(evidence.get("gates"), list)
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base, parent_sha)
+        or not _evidence_identity_matches(evidence)
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
     return parent_sha, evidence
@@ -1131,7 +1461,9 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
 
 def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list[dict]) -> bool:
     source = next((gate for gate in parent_evidence.get("gates", []) if gate.get("gate") == name), None)
-    if not source or source.get("status") != "PASS":
+    if not source or source.get("status") != "PASS" or not _fresh_evidence(parent_evidence):
+        return False
+    if any(not _valid_gate_seconds(source.get(key, 0)) for key in ("duration_seconds", "source_duration_seconds")):
         return False
     source_duration = float(source.get("source_duration_seconds", source.get("duration_seconds", 0.0)) or 0.0)
     original_execution_sha = source.get("original_execution_sha") or source.get("reused_from_sha") or parent_sha
@@ -1143,6 +1475,7 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "duration_seconds": 0.0,
             "reused_from_sha": parent_sha,
             "original_execution_sha": original_execution_sha,
+            "original_execution_at_epoch": source["original_execution_at_epoch"],
             "source_duration_seconds": source_duration,
             "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
         }
@@ -1373,6 +1706,7 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
         list(plan.get("affected_components", [])),
         [by_gate[name] for name in sorted(expected)],
         dict(plan.get("verification", {"mode": "full"})),
+        capture_runtime_identity=False,
     )
     if os.environ.get("CI_EVIDENCE_REPOSITORY", "").strip():
         published = publish_evidence(ROOT, evidence)
@@ -1432,7 +1766,14 @@ def github_exact_ci_status(gh: str, head_sha: str) -> str:
 
 
 def write_evidence(
-    base: str, head: str, paths: list[str], components: list[str], records: list[dict], verification: dict | None = None
+    base: str,
+    head: str,
+    paths: list[str],
+    components: list[str],
+    records: list[dict],
+    verification: dict | None = None,
+    *,
+    capture_runtime_identity: bool = True,
 ) -> Path:
     base_sha = git("rev-parse", base).strip()
     current_head_sha = git("rev-parse", "HEAD").strip()
@@ -1440,13 +1781,29 @@ def write_evidence(
     clean = not git("status", "--porcelain", "--untracked-files=all").strip()
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
+    gates = tuple(row["gate"] for row in records)
+    identity_complete = capture_runtime_identity or not _runtime_identity_required(gates)
+    try:
+        identity = qualification_identity(gates if identity_complete else ())
+    except (OSError, RuntimeError, ValueError):
+        # Preserve a gate failure report even if its runtime is inaccessible.
+        identity_complete = False
+        identity = qualification_identity(())
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
+        "head_tree_sha": (
+            verification_data.get("source_tree_sha")
+            if head == "WORKTREE"
+            else git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        ),
+        "created_at_epoch": time.time(),
+        "qualification_identity": identity,
+        "reuse_identity_complete": identity_complete,
         "exact_commit_evidence": exact,
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,
@@ -1737,10 +2094,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,24 +2227,187 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    for entry in filter(None, entries):
+        metadata, _path = entry.split("\t", 1)
+        mode, _oid, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            return fail("staged snapshot contains non-regular or unresolved entries; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    directories: dict[tuple[int, int], tuple[str, ...]] = {}
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        parent = snapshot
+        parts = Path(path).parts[:-1]
+        for index, component in enumerate(parts):
+            parent = parent / component
+            parent.mkdir(exist_ok=True)
+            identity = parent.stat()
+            key = (identity.st_dev, identity.st_ino)
+            spelling = parts[: index + 1]
+            previous = directories.setdefault(key, spelling)
+            if previous != spelling:
+                raise RuntimeError("filesystem-equivalent indexed directory aliases collide")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "--no-replace-objects", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation also detects aliases on case-insensitive or
+        # Unicode-normalizing filesystems; never overwrite another indexed blob.
+        try:
+            with target.open("xb") as output:
+                output.write(content)
+        except FileExistsError as exc:
+            raise RuntimeError("filesystem-equivalent indexed paths collide") from exc
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git(
+        "--no-replace-objects", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"
+    ).split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        terraform_files = [
+            str(snapshot / path) for path in paths if path.endswith((".tf", ".tfvars")) and (snapshot / path).is_file()
+        ]
+        yaml_files = [
+            str(snapshot / path) for path in paths if path.endswith((".yaml", ".yml")) and (snapshot / path).is_file()
+        ]
+        ruby_files = [str(snapshot / path) for path in paths if path.endswith(".rb") and (snapshot / path).is_file()]
+        if terraform_files:
+            terraform = shutil.which("tofu") or require("terraform")
+            run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
+        if yaml_files:
+            require("ansible-lint")
+            # Execution configuration belongs to this controller, not the index.
+            # Retain only the existing canonical data-only lint exceptions.
+            with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as config_directory:
+                control = Path(config_directory)
+                inventory = control / "inventory.ini"
+                inventory.write_text("localhost ansible_connection=local\n", encoding="utf-8")
+                config = control / "ansible.cfg"
+                config.write_text(f"[defaults]\ninventory = {inventory}\n", encoding="utf-8")
+                lint_config = control / "lint.yml"
+                lint_config.write_text(
+                    '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+                    encoding="utf-8",
+                )
+                rules = control / "rules"
+                rules.mkdir()
+                ignore = control / "ignore.txt"
+                ignore.write_text("", encoding="utf-8")
+                env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+                env.update(
+                    ANSIBLE_CONFIG=str(config),
+                    ANSIBLE_INVENTORY_ENABLED="ini",
+                    ANSIBLE_COLLECTIONS_PATH=str(ROOT / ".ansible/collections"),
+                )
+                run(
+                    [
+                        "ansible-lint",
+                        "--offline",
+                        "--config-file",
+                        str(lint_config),
+                        "--project-dir",
+                        str(control),
+                        "--ignore-file",
+                        str(ignore),
+                        "--rules-dir",
+                        str(rules),
+                        "-R",
+                        "--",
+                        *yaml_files,
+                    ],
+                    cwd=control,
+                    env=env,
+                )
+        if ruby_files:
+            require("ruby")
+            for path in ruby_files:
+                run(["ruby", "-c", "--", path], cwd=snapshot)
+        for path in paths:
+            if path.endswith(".json") and (snapshot / path).is_file():
+                json.loads((snapshot / path).read_bytes())
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+            go = require("go")
+            modules: set[Path] = set()
+            standalone: dict[Path, list[str]] = {}
+            for relative in go_files:
+                source = snapshot / relative
+                parent = source.parent
+                while parent != snapshot and not (parent / "go.mod").is_file():
+                    parent = parent.parent
+                if (parent / "go.mod").is_file():
+                    modules.add(parent)
+                else:
+                    standalone.setdefault(source.parent, []).append(str(source))
+            env = dict(os.environ, GOWORK="off")
+            env.pop("GOROOT", None)
+            env.pop("GOTOOLDIR", None)
+            for module in sorted(modules):
+                run([go, "vet", "./..."], cwd=module, env=env)
+            for parent, files in sorted(standalone.items()):
+                run([go, "vet", *files], cwd=parent, env=env)
+
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
+    ev = _valid_exact_evidence("origin/main", head)
+    if ev is not None:
+        print(f"PASS prepush: reusing validated exact evidence {ev.relative_to(ROOT)}")
+        return 0
     return verify_change("origin/main", head)
 
 

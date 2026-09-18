@@ -3,9 +3,11 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -18,6 +20,31 @@ MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 
 class WorktreeEvidencePromotionTests(unittest.TestCase):
+    def setUp(self):
+        # Commit hooks export Git-local paths; fixtures must own their repositories.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        environment = mock.patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        affected = mock.patch.object(REPOCTL, "affected", return_value=["global"])
+        self.affected = affected.start()
+        self.addCleanup(affected.stop)
+
+    def global_records(self, duration):
+        return [
+            {
+                "gate": "governance",
+                "status": "PASS",
+                "original_execution_at_epoch": time.time() - 1,
+                "duration_seconds": duration,
+            }
+        ] + [
+            {"gate": name, "status": "PASS", "original_execution_at_epoch": time.time() - 1, "duration_seconds": 0.0}
+            for name, _ in REPOCTL._global_gate_commands("base", "head")
+            if name != "governance"
+        ]
+
     def init_repo(self, root: Path) -> str:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
@@ -27,6 +54,42 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=root, check=True)
         subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+
+    def test_replacement_commit_cannot_supply_the_qualified_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.init_repo(root)
+            original_tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root, text=True).strip()
+            (root / "README.md").write_text("benign replacement")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "replacement"], cwd=root, check=True)
+            replacement = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            subprocess.run(["git", "reset", "--hard", base], cwd=root, check=True, capture_output=True)
+            subprocess.run(["git", "replace", base, replacement], cwd=root, check=True)
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=root, check=True, capture_output=True)
+            self.assertEqual("benign replacement", (root / "README.md").read_text())
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                self.assertEqual(original_tree, REPOCTL.git("rev-parse", "HEAD^{tree}").strip())
+                self.assertIsNone(REPOCTL._valid_exact_evidence(base, "HEAD"))
+                with mock.patch.object(REPOCTL, "_run_gate") as gate:
+                    self.assertEqual(2, REPOCTL.verify_change(base, "HEAD"))
+                    gate.assert_not_called()
+
+    def test_non_object_parent_and_worktree_evidence_is_a_cache_miss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.init_repo(root)
+            subprocess.run(["git", "commit", "--allow-empty", "-qm", "child"], cwd=root, check=True)
+            context = root / ".context"
+            evidence = context / "evidence"
+            evidence.mkdir(parents=True)
+            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+                for value in (None, [], [1], True, 1, "cached"):
+                    with self.subTest(value=value):
+                        for name in ("worktree", base):
+                            (evidence / f"{name}.json").write_text(json.dumps(value))
+                        self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                        self.assertEqual((None, None), REPOCTL._incremental_parent_evidence(base, "HEAD"))
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
@@ -135,10 +198,14 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -146,11 +213,14 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
                     "affected_components": ["global"],
-                    "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 2.0}],
+                    "gates": self.global_records(2.0),
                     "verification": {
                         "mode": "worktree",
                         "source_head_sha": base,
@@ -164,6 +234,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
 
     def test_exact_commit_promotion_binds_parent_tree_base_and_metrics(self):
+        self.affected.return_value = ["global", "service:catalog"]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             base = self.init_repo(root)
@@ -171,10 +242,14 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -182,12 +257,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
                     "affected_components": ["global"],
-                    "gates": [
-                        {"gate": "governance", "status": "PASS", "duration_seconds": 12.5},
+                    "gates": self.global_records(12.5)
+                    + [
                         {
                             "gate": "service:catalog",
                             "status": "SKIP",
@@ -205,9 +283,19 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 candidate = REPOCTL._load_promotable_worktree_evidence(base)
                 self.assertIsNotNone(candidate)
+                for field in ("duration_seconds", "source_duration_seconds", "original_execution_at_epoch"):
+                    malformed = json.loads(json.dumps(candidate))
+                    malformed["gates"][0][field] = {}
+                    (evidence_dir / "worktree.json").write_text(json.dumps(malformed), encoding="utf-8")
+                    self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                (evidence_dir / "worktree.json").write_text(json.dumps(candidate), encoding="utf-8")
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+                for field in ("duration_seconds", "source_duration_seconds", "original_execution_at_epoch"):
+                    malformed = json.loads(json.dumps(candidate))
+                    malformed["gates"][0][field] = {}
+                    self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, malformed))
                 promoted_path = REPOCTL._promote_worktree_evidence(base, head, candidate)
                 self.assertIsNotNone(promoted_path)
                 promoted = json.loads(promoted_path.read_text(encoding="utf-8"))
@@ -218,9 +306,12 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 self.assertEqual("promoted-worktree", promoted["verification"]["mode"])
                 self.assertEqual(tree, promoted["verification"]["commit_tree_sha"])
                 self.assertEqual(0, promoted["metrics"]["executed_gates"])
-                self.assertEqual(1, promoted["metrics"]["reused_gates"])
+                self.assertEqual(len(self.global_records(0)), promoted["metrics"]["reused_gates"])
                 self.assertEqual(12.5, promoted["metrics"]["estimated_saved_seconds"])
                 gate = promoted["gates"][0]
+                self.assertEqual(
+                    candidate["gates"][0]["original_execution_at_epoch"], gate["original_execution_at_epoch"]
+                )
                 self.assertTrue(gate["promoted_from_worktree"])
                 self.assertEqual(0.0, gate["duration_seconds"])
                 self.assertEqual(12.5, gate["source_duration_seconds"])
@@ -231,20 +322,34 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             base = self.init_repo(root)
             context = root / ".context"
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="identity"),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 source = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_sha": base,
                     "head_sha": "f" * 40,
                     "source_head_sha": "f" * 40,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": REPOCTL.qualification_identity(),
+                    "created_at_epoch": time.time(),
                     "status": "PASS",
                     "exact_commit_evidence": False,
                     "changed_paths": ["README.md"],
                     "affected_components": ["global"],
-                    "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 1.0}],
+                    "gates": [
+                        {
+                            "gate": "governance",
+                            "status": "PASS",
+                            "original_execution_at_epoch": time.time() - 1,
+                            "duration_seconds": 1.0,
+                        }
+                    ],
                 }
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)

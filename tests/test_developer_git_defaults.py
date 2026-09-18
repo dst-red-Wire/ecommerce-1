@@ -1,9 +1,11 @@
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +14,15 @@ ANSIBLE_PLAYBOOK = shutil.which("ansible-playbook")
 
 
 class DeveloperGitDefaultsTest(unittest.TestCase):
+    def setUp(self):
+        # Git exports worktree-local variables to commit hooks. Temporary repositories
+        # must not inherit those paths or mutate the caller's index/configuration.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        environment = mock.patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def run_playbook(self, repo_root: Path) -> subprocess.CompletedProcess[str]:
         playbook = repo_root / "git-defaults-test.yml"
         playbook.write_text(
