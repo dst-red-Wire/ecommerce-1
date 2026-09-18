@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import Any, Callable
@@ -18,6 +19,7 @@ CONTRACT_PATH = ROOT / "config" / "contracts" / "qualification-cache.yaml"
 _SCHEMA_VERSION = 1
 _MEMORY: dict[tuple[str, str], Any] = {}
 _TOOL_VERSIONS: dict[tuple[str, tuple[str, ...]], str] = {}
+_EXECUTABLE_IDENTITIES: dict[str, dict[str, str]] = {}
 
 _PSYCH_SCRIPT = r"""
 document = Psych.parse_file(ARGV[0])
@@ -104,6 +106,19 @@ def tool_version(executable: str, *args: str) -> str:
     value = (completed.stdout or completed.stderr or "").strip()
     _TOOL_VERSIONS[key] = value
     return value
+
+
+def executable_identity(executable: str) -> dict[str, str]:
+    cached = _EXECUTABLE_IDENTITIES.get(executable)
+    if cached is not None:
+        return dict(cached)
+    resolved = shutil.which(executable) if not Path(executable).is_absolute() else executable
+    if not resolved:
+        return {"path": executable, "sha256": "absent"}
+    path = Path(resolved).resolve()
+    identity = {"path": str(path), "sha256": sha256_bytes(path.read_bytes())}
+    _EXECUTABLE_IDENTITIES[executable] = identity
+    return dict(identity)
 
 
 def build_key(
