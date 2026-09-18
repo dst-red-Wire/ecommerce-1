@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "status": "exact",
+  "architecture_authority": "architecture.lock.yaml",
+  "scope": "entire-repository",
+  "purpose": "single authority for repository-wide toolchain versions, checksums and native projections",
+  "versions": {
+    "PRE_COMMIT_VERSION": "4.6.2",
+    "ANSIBLE_CORE_VERSION": "2.20.3",
+    "PYYAML_VERSION": "6.0.2",
+    "ANSIBLE_LINT_VERSION": "26.8.0",
+    "MOLECULE_VERSION": "26.8.0",
+    "MOLECULE_DOCKER_VERSION": "26.7.15",
+    "TESTINFRA_VERSION": "10.2.2",
+    "ANSIBLE_RUNNER_VERSION": "2.4.3",
+    "ANSIBLE_BUILDER_VERSION": "3.1.1",
+    "ANSIBLE_NAVIGATOR_VERSION": "26.8.0",
+    "GGSHIELD_VERSION": "1.54.0",
+    "CHECKOV_VERSION": "3.3.16",
+    "SEMGREP_VERSION": "1.176.1",
+    "CVE_BIN_TOOL_VERSION": "3.4",
+    "COSIGN_VERSION": "3.1.3",
+    "COSIGN_SHA256_LINUX_AMD64": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+    "ORAS_VERSION": "1.3.3",
+    "ORAS_SHA256_LINUX_AMD64": "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59",
+    "RIPGREP_VERSION": "15.2.0",
+    "RIPGREP_SHA256_LINUX_AMD64": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+    "FD_VERSION": "10.4.2",
+    "FD_SHA256_LINUX_AMD64": "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
+    "YQ_VERSION": "4.53.6",
+    "YQ_SHA256_LINUX_AMD64": "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385",
+    "AST_GREP_VERSION": "0.45.0",
+    "AST_GREP_SHA256_LINUX_AMD64": "78931ae35ebac33d9a72b3aecea3e3d62d6e5b0b718ac8bbedfbe69d68421e41",
+    "GO_VERSION": "1.26.6",
+    "GO_SHA256_LINUX_AMD64": "708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89",
+    "TEMPL_VERSION": "0.3.1020",
+    "SQLC_VERSION": "1.31.1",
+    "SQLC_SHA256_LINUX_AMD64": "497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354",
+    "NODE_VERSION": "24.20.0",
+    "PNPM_VERSION": "11.24.0",
+    "NODE_SHA256_LINUX_X64": "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+    "BAZEL_VERSION": "8.8.0",
+    "BAZELISK_VERSION": "1.29.0",
+    "BAZELISK_SHA256_LINUX_AMD64": "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992",
+    "NX_VERSION": "23.2.0",
+    "TURBO_VERSION": "2.10.12",
+    "PRISM_VERSION": "5.16.0",
+    "OPENAPI_TYPESCRIPT_VERSION": "7.13.0",
+    "OPENAPI_FETCH_VERSION": "0.17.0",
+    "OAPI_CODEGEN_VERSION": "2.8.0",
+    "OASDIFF_VERSION": "1.28.0",
+    "OASDIFF_SHA256_LINUX_AMD64_TARGZ": "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
+    "OAPI_CODEGEN_RUNTIME_VERSION": "1.6.0",
+    "OXC_RELEASE_TAG": "apps_v1.82.0",
+    "OXLINT_VERSION": "1.82.0",
+    "OXLINT_SHA256_LINUX_AMD64": "2284a516360c42166b9f0b1c1aa6920322d3385d93a7ff7061d2d8ed77ec1e35",
+    "OXFMT_VERSION": "0.67.0",
+    "OXFMT_SHA256_LINUX_AMD64": "7fcda58499e25a261069022f3c6b9827da4bcc729a6181214c0645b3e30d1603",
+    "RUFF_VERSION": "0.16.6",
+    "RUFF_SHA256_LINUX_AMD64": "0696335ef16615d8c7445ad438750eb0f55b3da6f153df21265a7c6d5750254f",
+    "GITLEAKS_VERSION": "8.30.1",
+    "GITLEAKS_SHA256_LINUX_AMD64": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+    "KUBECTL_VERSION": "1.37.0",
+    "KUBECTL_SHA256_LINUX_AMD64": "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f",
+    "HELM_VERSION": "4.2.4",
+    "HELM_SHA256_LINUX_AMD64": "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3",
+    "TERRAFORM_VERSION": "1.16.2",
+    "TERRAFORM_SHA256_LINUX_AMD64": "0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a",
+    "OPENTOFU_VERSION": "1.11.5",
+    "KUSTOMIZE_VERSION": "5.8.1",
+    "KUSTOMIZE_SHA256_LINUX_AMD64": "029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d",
+    "KIND_VERSION": "0.33.0",
+    "KIND_SHA256_LINUX_AMD64": "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
+  },
+  "ansible_collections": {
+    "ansible.posix": "1.5.4",
+    "community.general": "8.3.0",
+    "community.docker": "3.7.0",
+    "community.crypto": "2.17.1",
+    "community.sops": "1.6.7",
+    "containers.podman": "1.11.0",
+    "hetzner.hcloud": "2.4.1",
+    "kubernetes.core": "2.4.0"
+  },
+  "language_contracts": {
+    "go": {
+      "toolchain_version_ref": "GO_VERSION",
+      "workspace_language_directive": "1.25.0",
+      "module_roots_source": "architecture.lock.yaml#business.services+business.frontend_runtime.module"
+    },
+    "python": {
+      "seed_lock": "config/python/requirements.lock",
+      "seed_roots": {
+        "ansible-core": "ANSIBLE_CORE_VERSION",
+        "PyYAML": "PYYAML_VERSION"
+      }
+    }
+  },
+  "projections": {
+    "versions_env": {
+      "path": "config/toolchain/versions.env",
+      "mode": "generated-projection",
+      "authority": "toolchain_lock.versions"
+    },
+    "ansible_collections": {
+      "path": "platform/ansible/requirements.yml",
+      "mode": "generated-projection",
+      "authority": "toolchain_lock.ansible_collections"
+    },
+    "python_seed_lock": {
+      "path": "config/python/requirements.lock",
+      "mode": "hash-locked-projection",
+      "authority": "toolchain_lock.language_contracts.python.seed_roots"
+    },
+    "capability_graph": {
+      "path": "config/toolchain/capabilities.json",
+      "mode": "operational-projection",
+      "authority": "toolchain_lock.versions"
+    }
+  },
+  "rules": {
+    "native_projection_drift": "block",
+    "duplicate_version_authority": "forbidden",
+    "unmanaged_cross_cutting_version": "forbidden"
+  }
+}
