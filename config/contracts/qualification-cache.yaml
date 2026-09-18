@@ -64,7 +64,9 @@ consumers:
       - runtime-efficiency
       - contracts
       - automation
-      - security
     persistence: l2
+  security_scan:
+    persistence: forbidden
+    reason: exact Git history and worktree state must be scanned fresh
   dynamic_checks:
     persistence: forbidden
