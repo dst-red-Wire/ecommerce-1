@@ -5,15 +5,23 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
+import tempfile
+import time
+import contextlib
+import ctypes
+import errno
+import hashlib
 import json
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +31,7 @@ STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 REQUIREMENTS = {"required-static", "optional-runtime"}
 SEED_LOCK = ROOT / "config/python/requirements.lock"
-SEED_VENV = ROOT / ".venv/qualification"
+LOCAL_SEED_VENV = ROOT / ".venv/qualification"
 MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
@@ -479,40 +487,992 @@ class Auditor:
         return results
 
 
+def seed_requirements(lock: str, environment: dict[str, str] | None = None) -> dict[str, str]:
+    # pip is supplied by venv/ensurepip, before the locked closure is installed.
+    # Its vendored PEP 508 parser avoids bootstrapping a dependency on packaging.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = {}
+    for raw in lock.splitlines():
+        if not raw or raw[0].isspace() or raw.startswith("#"):
+            continue
+        requirement = Requirement(raw.rstrip().removesuffix("\\").strip())
+        if requirement.marker and not requirement.marker.evaluate(environment):
+            continue
+        pins = list(requirement.specifier)
+        if len(pins) != 1 or pins[0].operator != "==":
+            raise ValueError(f"seed requires an exact version: {requirement.name}")
+        expected[canonicalize_name(requirement.name)] = pins[0].version
+    return expected
+
+
+def seed_windows_system_directory() -> Path:
+    """Use the OS loader/API, never an inherited SystemRoot or PATH override."""
+    kernel = ctypes.WinDLL("kernel32.dll", use_last_error=True, winmode=0x00000800)
+    get_directory = kernel.GetSystemDirectoryW
+    get_directory.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+    get_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    size = get_directory(buffer, len(buffer))
+    if not 0 < size < len(buffer) or not PureWindowsPath(buffer.value).is_absolute():
+        raise OSError("Windows system directory unavailable")
+    return Path(buffer.value)
+
+
+def seed_darwin_acl_is_private(path: Path) -> bool:
+    """Reject extended write grants; retain harmless read grants and deny ACLs."""
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        signatures = {
+            "acl_get_link_np": ([ctypes.c_char_p, ctypes.c_int], ctypes.c_void_p),
+            "acl_valid": ([ctypes.c_void_p], ctypes.c_int),
+            "acl_get_entry": ([ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)], ctypes.c_int),
+            "acl_get_tag_type": ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)], ctypes.c_int),
+            "acl_get_permset_mask_np": ([ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint64)], ctypes.c_int),
+            "acl_free": ([ctypes.c_void_p], ctypes.c_int),
+        }
+        for name, (arguments, result) in signatures.items():
+            function = getattr(libc, name)
+            function.argtypes, function.restype = arguments, result
+        acl = libc.acl_get_link_np(os.fsencode(path), 0x100)  # ACL_TYPE_EXTENDED, no symlink following.
+        if not acl:
+            return False
+        try:
+            if libc.acl_valid(acl) != 0:
+                return False
+            entry = ctypes.c_void_p()
+            tag = ctypes.c_int()
+            permissions = ctypes.c_uint64()
+            # Darwin sys/acl.h: write/add, delete, append, delete-child,
+            # write attributes/xattrs/security and change owner. Conservatively
+            # reject these grants for any principal, including inherited entries.
+            mutation_mask = sum(1 << bit for bit in (2, 4, 5, 6, 8, 10, 12, 13))
+            for index in range(129):  # ACL_MAX_ENTRIES is 128; one final end probe.
+                ctypes.set_errno(0)
+                result = libc.acl_get_entry(acl, 0 if index == 0 else -1, ctypes.byref(entry))
+                if result != 0:
+                    # On a validated Darwin ACL, EINVAL marks iterator exhaustion.
+                    return result == -1 and ctypes.get_errno() == errno.EINVAL
+                if libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0 or tag.value not in (1, 2):
+                    return False
+                if tag.value == 1:
+                    if libc.acl_get_permset_mask_np(entry, ctypes.byref(permissions)) != 0:
+                        return False
+                    if permissions.value & mutation_mask:
+                        return False
+            return False
+        finally:
+            libc.acl_free(acl)
+    except (AttributeError, OSError):
+        return False
+
+
+def seed_windows_paths_are_private(paths: list[tuple[Path, bool]]) -> bool:
+    """Read NTFS owners/DACLs once per batch; never infer ACLs from POSIX bits."""
+    script = r"""$ErrorActionPreference = 'Stop'
+try {
+    $sidType = [System.Security.Principal.SecurityIdentifier]
+    $current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @($current, 'S-1-5-18', 'S-1-5-32-544')
+    $installer = [System.Security.Principal.NTAccount]::new('NT SERVICE', 'TrustedInstaller')
+    $trusted += $installer.Translate($sidType).Value
+    $entries = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+    foreach ($entry in $entries) {
+        $acl = Get-Acl -LiteralPath $entry.path
+        $owner = $acl.GetOwner($sidType).Value
+        if ($entry.ancestor) {
+            if ($trusted -notcontains $owner) { exit 1 }
+            $mask = 0x500D0040  # replace/delete children or change owner/DACL
+        } else {
+            if ($owner -ne $current) { exit 1 }
+            $mask = 0x500D0156  # includes file writes and directory additions
+        }
+        foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if (([long]$rule.FileSystemRights -band $mask) -eq 0) { continue }
+            $sid = $rule.IdentityReference.Value
+            if ($trusted -contains $sid -or $sid -eq 'S-1-3-4') { continue }
+            if ($sid -eq 'S-1-3-0' -and ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+            exit 1
+        }
+    }
+    [Console]::Out.Write('PRIVATE')
+} catch { exit 1 }
+"""
+    try:
+        system = seed_windows_system_directory()
+        command = system / "WindowsPowerShell/v1.0/powershell.exe"
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.casefold() not in {"systemroot", "windir", "psmodulepath"}
+        }
+        env.update(
+            SystemRoot=str(system.parent), windir=str(system.parent), PSModulePath=str(command.parent / "Modules")
+        )
+        result = subprocess.run(
+            [
+                str(command),
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                base64.b64encode(script.encode("utf-16le")).decode("ascii"),
+            ],
+            input=json.dumps(
+                [{"path": str(path), "ancestor": ancestor} for path, ancestor in paths], ensure_ascii=True
+            ),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+            env=env,
+        )
+        return result.returncode == 0 and result.stdout.strip() == "PRIVATE"
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def seed_paths_are_private(paths: list[tuple[Path, bool]]) -> bool:
+    if os.name == "nt":
+        return seed_windows_paths_are_private(paths)
+    return all(seed_path_is_private(path, ancestor=ancestor) for path, ancestor in paths)
+
+
+def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
+    """POSIX cache entries must not be replaceable by another unprivileged UID."""
+    if os.name == "nt":
+        return seed_windows_paths_are_private([(path, ancestor)])
+    try:
+        info = path.lstat()
+        owners = {os.geteuid(), 0} if ancestor else {os.geteuid()}
+        if info.st_uid not in owners:
+            return False
+        if sys.platform == "darwin" and not seed_darwin_acl_is_private(path):
+            return False
+        if stat.S_ISLNK(info.st_mode):
+            return True  # Its exact target is independently checked by scaffold validation.
+        if info.st_mode & 0o022 and not (ancestor and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX):
+            return False
+        return not stat.S_ISREG(info.st_mode) or info.st_nlink == 1
+    except OSError:
+        return False
+
+
+def select_seed_python(root: Path | None = None, environment: dict[str, str] | None = None) -> str:
+    """Inspect candidates using an OS-provisioned interpreter; never execute a candidate to trust it."""
+    environment = os.environ if environment is None else environment
+    if os.name == "nt" or environment.get("OS") == "Windows_NT":
+        raise SeedGenerationBoundaryError("Windows seed requires an explicit provisioned SEED_PYTHON")
+    root = Path.cwd() if root is None else root
+    excluded = [root / ".venv", Path.home() / ".cache/ecommerce-1/qualification"]
+    if environment.get("ECOMMERCE_TOOL_HOME"):
+        excluded.append(root / environment["ECOMMERCE_TOOL_HOME"])
+    boundaries = []
+    for path in excluded:
+        boundaries.append(path.absolute())
+        try:
+            boundaries.append(path.resolve())
+        except (OSError, RuntimeError):
+            raise SeedGenerationBoundaryError("seed discovery cache boundary cannot be resolved safely") from None
+    for directory in environment.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = (root / directory / "python3").absolute()
+        try:
+            resolved = candidate.resolve(strict=True)
+            if any(path.is_relative_to(boundary) for path in (candidate, resolved) for boundary in boundaries):
+                continue
+            # Make receives one quoted path. Reject metacharacters instead of
+            # emitting text that a later recipe shell could interpret as code.
+            if not re.fullmatch(r"/[A-Za-z0-9/._+@~-]+", str(resolved)):
+                continue
+            if not resolved.is_file() or not os.access(resolved, os.X_OK):
+                continue
+            paths = set((candidate, *candidate.parents, resolved, *resolved.parents))
+            if not seed_paths_are_private([(path, True) for path in paths]):
+                continue
+            # A PATH directory itself must be private even if it is sticky.
+            # Sticky shared ancestors remain valid above an owned private directory.
+            if any(path.stat().st_mode & 0o022 for path in (candidate.parent, resolved.parent)):
+                continue
+            return str(resolved)
+        except (OSError, RuntimeError):
+            continue
+    raise SeedGenerationBoundaryError("no executable Python with trusted ownership, permissions and ACLs in PATH")
+
+
+def resolved_seed_selector(selector: Path, generations: Path) -> Path | None:
+    """Unresolvable selectors are replaceable corruption, never executable generations."""
+    if not seed_directory_reference(selector):
+        return None
+    try:
+        selected = selector.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if selected.parent != generations:
+        raise SeedGenerationBoundaryError("seed generation selector escapes its identity")
+    return selected
+
+
+def seed_directory_reference(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
+
+
+def seed_windows() -> bool:
+    return os.name == "nt"
+
+
+def create_seed_directory_reference(reference: Path, target: Path) -> None:
+    if seed_windows():
+        # CPython's native junction API needs no symbolic-link privilege or shell.
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(reference))
+    else:
+        reference.symlink_to(target, target_is_directory=True)
+
+
+def remove_seed_directory_reference(reference: Path) -> None:
+    if reference.is_junction():
+        reference.rmdir()
+    else:
+        reference.unlink(missing_ok=True)
+
+
+def replace_seed_directory_reference(temporary: Path, destination: Path) -> None:
+    """Replace references and quarantine invalid directories, with rollback under lock."""
+    if not destination.exists() or (
+        not seed_windows()
+        and seed_directory_reference(temporary)
+        and (not destination.is_dir() or seed_directory_reference(destination))
+    ):
+        os.replace(temporary, destination)
+        return
+    backup = destination.with_name(f".{destination.name}.{os.getpid()}.{time.time_ns()}.quarantine")
+    if backup.exists() or seed_directory_reference(backup):
+        raise SeedGenerationBoundaryError("seed reference backup already exists")
+    os.replace(destination, backup)
+    try:
+        os.replace(temporary, destination)
+    except BaseException:
+        os.replace(backup, destination)
+        raise
+    # An invalid directory may contain mount points. Keep it quarantined: no
+    # recursive cleanup is safe solely from the selector's ownership or mode.
+    if not backup.is_dir() or seed_directory_reference(backup):
+        remove_seed_directory_reference(backup)
+
+
+# Reused from PR92 (46997184): trusted wheel authority and seed recovery.
+def seed_wheels(directory: Path, lock: str, *, strict: bool = True) -> list[Path]:
+    """Only lock-authorized wheel bytes can define the installed inventory."""
+    from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
+    from pip._vendor.packaging.tags import sys_tags
+
+    if directory.is_symlink() or directory.resolve() != directory:
+        raise ValueError("seed wheel reference escapes its cache")
+    private_paths = [(directory, False)]
+    if os.name == "nt":
+        private_paths.extend((path, False) for path in directory.glob("*.whl"))
+    if not seed_paths_are_private(private_paths):
+        raise ValueError("seed wheel cache is externally mutable")
+    expected = seed_requirements(lock)
+    hashes = {}
+    name = None
+    for line in lock.splitlines():
+        if line and not line[0].isspace() and not line.startswith("#"):
+            name = canonicalize_name(line.split("==", 1)[0])
+            hashes[name] = set()
+        elif name:
+            hashes[name].update(re.findall(r"--hash=sha256:([0-9a-f]{64})", line))
+    supported = set(sys_tags())
+    selected = {}
+    for wheel in sorted(directory.glob("*.whl")):
+        try:
+            name, version, _, tags = parse_wheel_filename(wheel.name)
+            if name not in expected or str(version) != expected[name] or name in selected:
+                raise ValueError("unexpected or duplicate seed wheel")
+            if not tags & supported:
+                raise ValueError("seed wheel is incompatible with this interpreter")
+            if wheel.is_symlink() or not wheel.is_file() or wheel.stat().st_nlink != 1:
+                raise ValueError("seed wheel must be a regular single-link file")
+            if os.name != "nt" and not seed_path_is_private(wheel):
+                raise ValueError("seed wheel is externally mutable")
+            if hashlib.sha256(wheel.read_bytes()).hexdigest() not in hashes[name]:
+                raise ValueError("seed wheel differs from locked digest")
+            selected[name] = wheel
+        except (OSError, ValueError):
+            if strict:
+                raise
+    if set(selected) != set(expected):
+        raise ValueError("locked seed wheel reference is incomplete")
+    return list(selected.values())
+
+
+def interpreter_seed_wheels() -> list[Path]:
+    # ensurepip's bundled/distribution wheels belong to the trusted interpreter,
+    # not to the mutable seed cache. They cover pip outside requirements.lock.
+    import ensurepip
+
+    if not hasattr(ensurepip, "_get_packages"):
+        directory = getattr(ensurepip, "_WHEEL_PKG_DIR", None)
+        candidates = sorted(Path(directory).glob("pip-*.whl")) if directory else []
+        return candidates[-1:] or [
+            Path(ensurepip.__file__).parent / "_bundled" / f"pip-{ensurepip.version()}-py3-none-any.whl"
+        ]
+    return [
+        Path(package.wheel_path)
+        if package.wheel_path
+        else Path(ensurepip.__file__).parent / "_bundled" / package.wheel_name
+        for package in ensurepip._get_packages().values()
+    ]
+
+
+def seed_launcher_matches(actual: bytes, expected: bytes) -> bool:
+    """Ignore only distlib's two installation-time ZIP timestamp fields."""
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(expected)) as archive:
+        offsets = (archive.getinfo("__main__.py").header_offset + 10, archive.start_dir + 12)
+    normalized = bytearray(actual)
+    for offset in offsets:
+        normalized[offset : offset + 4] = expected[offset : offset + 4]
+    return len(actual) == len(expected) and bytes(normalized) == expected
+
+
+def seed_scaffold(root: Path) -> dict[Path, bytes | str]:
+    """Rebuild venv-owned files with trusted stdlib, without executing the seed."""
+    import venv
+
+    with tempfile.TemporaryDirectory(prefix="seed-scaffold-") as temporary:
+        reference = Path(temporary) / root.name
+        builder = venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt")
+        context = builder.ensure_directories(str(reference))
+        builder.create_configuration(context)
+        builder.setup_python(context)
+        builder.setup_scripts(context)
+        expected = {}
+        for path in reference.rglob("*"):
+            relative = path.relative_to(reference)
+            if path.is_symlink():
+                expected[relative] = os.readlink(path).replace(str(reference), str(root))
+            elif path.is_file():
+                expected[relative] = path.read_bytes().replace(str(reference).encode(), str(root).encode())
+        return expected
+
+
+def validate_seed_payload(root: Path, wheels: Path, lock: str) -> bool:
+    """Reconstruct payload authority from wheels, never from installed RECORD."""
+    import base64
+    import configparser
+    import csv
+    import io
+    import marshal
+    import zipfile
+    from pip._internal.operations.install.wheel import PipScriptMaker
+
+    try:
+        payload_paths = [root.resolve()]
+        for path in root.rglob("*"):
+            if path.is_junction():
+                return False
+            payload_paths.append(path)
+        if not seed_paths_are_private([(path, False) for path in payload_paths]):
+            return False
+        if any(path.is_file() and not path.is_symlink() and path.stat().st_nlink != 1 for path in payload_paths):
+            return False
+        interpreter_wheels = interpreter_seed_wheels()
+        archives = seed_wheels(wheels, lock) + interpreter_wheels
+        sites = list(root.glob("lib/python*/site-packages")) if os.name != "nt" else [root / "Lib/site-packages"]
+        if len(sites) != 1:
+            return False
+        site = sites[0]
+        scripts = root / ("Scripts" if os.name == "nt" else "bin")
+        python = scripts / ("python.exe" if os.name == "nt" else "python")
+        expected = {}
+        records = {}
+        generated_scripts = set()
+        for wheel in archives:
+            owned = {}
+            with zipfile.ZipFile(wheel) as archive:
+                for member in archive.namelist():
+                    if member.endswith("/"):
+                        continue
+                    parts = Path(member).parts
+                    if not parts or member.startswith("/") or ".." in parts or "\\" in member:
+                        return False
+                    if parts[0].endswith(".data"):
+                        scheme = {"purelib": site, "platlib": site, "scripts": scripts, "data": root}
+                        if len(parts) < 3 or parts[1] not in scheme:
+                            return False
+                        path = scheme[parts[1]].joinpath(*parts[2:])
+                    else:
+                        path = site / member
+                    data = archive.read(member)
+                    if member.endswith(".dist-info/RECORD"):
+                        record = path
+                        continue
+                    if path.parent == scripts and data.startswith((b"#!python\n", b"#!pythonw\n")):
+                        data = b"#!" + str(python).encode() + b"\n" + data.split(b"\n", 1)[1]
+                    owned[path] = data
+                info = record.parent
+                owned[info / "INSTALLER"] = b"pip\n"
+                owned[info / "REQUESTED"] = b""
+                entry = owned.get(info / "entry_points.txt")
+                if entry:
+                    parser = configparser.ConfigParser(interpolation=None)
+                    parser.optionxform = str
+                    parser.read_string(entry.decode())
+                    maker = PipScriptMaker(None, str(scripts))
+                    maker.executable = str(
+                        scripts / Path(getattr(sys, "_base_executable", sys.executable)).resolve().name
+                        if wheel in interpreter_wheels
+                        else python
+                    )
+                    maker.variants = {""}
+                    maker.clobber = True
+                    maker.set_mode = False
+
+                    # Generate expected entrypoint bytes in memory, with pip's
+                    # own transformation; no writes or installation on reuse.
+                    def capture_script(name, data):
+                        path = Path(name)
+                        owned[path] = data
+                        generated_scripts.add(path)
+
+                    maker._fileop.write_binary_file = capture_script
+                    for group in ("console_scripts", "gui_scripts"):
+                        for name, value in parser.items(group) if parser.has_section(group) else []:
+                            if wheel in interpreter_wheels and name.startswith("pip"):
+                                if name != "pip":
+                                    continue
+                                for command in (
+                                    "pip",
+                                    f"pip{sys.version_info.major}",
+                                    f"pip{sys.version_info.major}.{sys.version_info.minor}",
+                                ):
+                                    maker.make(f"{command} = {value}")
+                            else:
+                                maker.make(f"{name} = {value}", options={"gui": group == "gui_scripts"})
+                if expected.keys() & owned.keys():
+                    return False
+                expected.update(owned)
+                records[record] = owned
+        for path, data in expected.items():
+            if path.is_symlink() or path.resolve() != path or not path.is_file():
+                return False
+            if os.name != "nt" and path in generated_scripts and not os.access(path, os.X_OK):
+                return False
+            actual = path.read_bytes()
+            if os.name == "nt" and path in generated_scripts and path.suffix == ".exe":
+                # distlib's Windows launcher embeds a ZIP with installation-time
+                # DOS timestamps. Only those two timestamp fields may differ.
+                if not seed_launcher_matches(actual, data):
+                    return False
+                # RECORD still must hash the actual, now authenticated wrapper.
+                records[next(record for record, owned in records.items() if path in owned)][path] = actual
+            elif actual != data:
+                return False
+        # Bytecode is installation/import output, not authority. Its code must
+        # equal compilation of the wheel-authenticated source at this location.
+        bytecode = set()
+        for path in site.rglob("*.pyc"):
+            import importlib.util
+
+            source = Path(importlib.util.source_from_cache(str(path)))
+            if source not in expected:
+                return False
+            optimization = re.search(r"\.opt-([012])\.pyc$", path.name)
+            level = int(optimization[1]) if optimization else 0
+            if path.is_symlink() or marshal.loads(path.read_bytes()[16:]) != compile(
+                expected[source], str(source), "exec", dont_inherit=True, optimize=level
+            ):
+                return False
+            bytecode.add(path)
+        for record, owned in records.items():
+            rows = list(csv.reader(io.StringIO(record.read_text())))
+            seen = set()
+            for relative, digest, size in rows:
+                path = Path(os.path.abspath(site / relative))
+                if path in seen:
+                    return False
+                seen.add(path)
+                if path == record or path in bytecode:
+                    if digest or size:
+                        return False
+                elif path in owned:
+                    data = owned[path]
+                    wanted = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+                    if digest != wanted or size != str(len(data)):
+                        return False
+                else:
+                    return False
+            if not set(owned).issubset(seen) or record not in seen:
+                return False
+        allowed = set(expected) | set(records) | bytecode
+        for path in site.rglob("*"):
+            if path.is_symlink():
+                return False
+            if path.is_dir():
+                continue
+            if path not in allowed:
+                return False
+        scaffold = seed_scaffold(root)
+        for relative, trusted in scaffold.items():
+            path = root / relative
+            if isinstance(trusted, str):
+                if not path.is_symlink() or os.readlink(path) != trusted:
+                    return False
+            elif path.is_symlink() or not path.is_file() or path.read_bytes() != trusted:
+                return False
+        if any(path not in expected and path.relative_to(root) not in scaffold for path in scripts.iterdir()):
+            return False
+        return True
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile):
+        return False
+
+
+def copy_seed_reference(wheels: Path, destination: Path, lock: str) -> bool:
+    """Recover a complete compatible closure without copying untrusted extras."""
+    try:
+        selected = seed_wheels(wheels, lock, strict=False)
+    except (OSError, ValueError):
+        return False
+    for wheel in selected:
+        shutil.copyfile(wheel, destination / wheel.name)
+    return bool(seed_wheels(destination, lock))
+
+
+def publish_seed_reference(candidate: Path, wheels: Path) -> None:
+    """Replace the whole reference under the identity lock, restoring on failure."""
+    replace_seed_directory_reference(candidate, wheels)
+
+
+def check_seed_reference(wheels: Path, root: Path | None = None, *, copy_to: Path | None = None) -> bool:
+    """Use base Python and ensurepip, even if the cached seed's pip is broken."""
+    bootstrap = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
+    try:
+        result = subprocess.run(
+            [
+                bootstrap,
+                "-I",
+                "-S",
+                "-c",
+                "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+                "import capability_bootstrap as b; "
+                "sys.path[:0] = [str(p) for p in b.interpreter_seed_wheels()]; "
+                "lock = Path(sys.argv[2]).read_text(encoding='utf-8'); "
+                "ok = b.copy_seed_reference(Path(sys.argv[3]), Path(sys.argv[5]), lock) if sys.argv[5] else "
+                "b.validate_seed_payload(Path(sys.argv[4]), Path(sys.argv[3]), lock) "
+                "if sys.argv[4] else bool(b.seed_wheels(Path(sys.argv[3]), lock)); "
+                "sys.exit(0 if ok else 1)",
+                str(ROOT / "scripts"),
+                str(SEED_LOCK),
+                str(wheels),
+                str(root) if root else "",
+                str(copy_to) if copy_to else "",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def seed_unlocked_distributions(lock_path: str) -> list[str]:
+    import importlib.metadata as metadata
+    from pip._vendor.packaging.utils import canonicalize_name
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    # These are supplied by venv/ensurepip rather than the qualification lock.
+    allowed = set(expected) | {"pip", "setuptools", "wheel"}
+    installed: dict[str, list[str]] = {}
+    for distribution in metadata.distributions():
+        name = distribution.metadata.get("Name", "")
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
+            raise ValueError("invalid installed seed distribution name")
+        canonical = canonicalize_name(name)
+        installed.setdefault(canonical, []).append(distribution.version)
+    if any(len(versions) != 1 for versions in installed.values()):
+        raise ValueError("duplicate canonical seed distributions")
+    return sorted(set(installed) - allowed)
+
+
+def seed_pip_environment() -> dict[str, str]:
+    """Pip must not inherit install destinations or mutable configuration."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PIP_")}
+    env["PIP_CONFIG_FILE"] = os.devnull
+    return env
+
+
+def validate_seed_lock(lock_path: str) -> bool:
+    import importlib.metadata as metadata
+
+    expected = seed_requirements(Path(lock_path).read_text(encoding="utf-8"))
+    try:
+        if any(metadata.version(name) != version for name, version in expected.items()):
+            return False
+    except metadata.PackageNotFoundError:
+        return False
+    try:
+        if seed_unlocked_distributions(lock_path):
+            return False
+    except ValueError:
+        return False
+    return (
+        subprocess.run(
+            [sys.executable, "-I", "-m", "pip", "--isolated", "check"],
+            env=seed_pip_environment(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+class SeedGenerationBoundaryError(RuntimeError):
+    """The seed cache cannot safely own its generation directory."""
+
+
+def validate_seed_generation_root(generations: Path) -> None:
+    try:
+        invalid = generations.is_symlink() or generations.resolve() != generations
+    except (OSError, RuntimeError) as exc:
+        raise SeedGenerationBoundaryError("seed generation root cannot be resolved safely") from exc
+    if not seed_paths_are_private(
+        [(path, path != generations) for path in (generations, *generations.parents) if path.exists()]
+    ):
+        raise SeedGenerationBoundaryError("seed cache path is externally mutable")
+    if invalid:
+        raise SeedGenerationBoundaryError(
+            "seed generation root is a symlink or escapes its expected identity/tool-home"
+        )
+
+
+def validated_seed_tool_home(value: str | Path) -> Path:
+    configured = Path(value).absolute()
+    for path in (configured, *configured.parents):
+        if seed_directory_reference(path) or (path.exists() and not path.is_dir()):
+            raise SeedGenerationBoundaryError("seed tool home has an unsafe root or ancestor")
+    if not seed_paths_are_private(
+        [(path, path != configured) for path in (configured, *configured.parents) if path.exists()]
+    ):
+        raise SeedGenerationBoundaryError("seed tool home has externally mutable ownership or permissions")
+    return configured.resolve()
+
+
 def seed_environment() -> int:
+    previous = os.umask(0o077)
+    try:
+        return _seed_environment()
+    finally:
+        os.umask(previous)
+
+
+def create_seed_tool_home(value: str | Path) -> Path:
+    """Create private components atomically before any cache or lock writes."""
+    configured = Path(value).absolute()
+    if validated_seed_tool_home(configured) != configured:
+        raise SeedGenerationBoundaryError("seed tool home changed during initial validation")
+    missing = []
+    current = configured
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            # A competing creator must pass the same ownership/link checks.
+            pass
+        validated_seed_tool_home(path)
+    before = configured.lstat()
+    validated_seed_tool_home(configured)
+    after = configured.lstat()
+    if not stat.S_ISDIR(after.st_mode) or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise SeedGenerationBoundaryError("seed tool home identity changed during creation")
+    return configured
+
+
+def _seed_environment() -> int:
     versions = load_versions()
     lock = SEED_LOCK.read_text(encoding="utf-8").lower()
-    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+    for package, key in (
+        ("ansible-core", "ANSIBLE_CORE_VERSION"),
+        ("pyyaml", "PYYAML_VERSION"),
+    ):
         expected = versions[key]
         if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
             raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
-    python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not python.is_file():
-        subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
-        check=True,
+    identity_input = json.dumps(
+        {
+            "python": [platform.python_implementation(), f"{sys.version_info.major}.{sys.version_info.minor}"],
+            "platform": normalized_platform()[:2],
+            "lock_sha256": hashlib.sha256(SEED_LOCK.read_bytes()).hexdigest(),
+            "installer": ["pip", "--require-hashes"],
+        },
+        sort_keys=True,
+    ).encode()
+    identity = hashlib.sha256(identity_input).hexdigest()
+    tool_home = create_seed_tool_home(
+        os.environ.get("ECOMMERCE_TOOL_HOME", Path.home() / ".cache/ecommerce-1/qualification")
     )
-    ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
-    proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
-    if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
-        raise RuntimeError("seed Ansible version verification failed")
+    seed_root = tool_home / "python" / identity
+    lock_path = tool_home / "locks" / f"python-{identity}.lock"
+    wheels = tool_home / "python" / f"{identity}.wheels"
+    validate_seed_generation_root(wheels)
+    selector = seed_root.with_suffix(".current")
+    generations = seed_root.with_suffix(".generations")
+    validate_seed_generation_root(generations)
+    metadata_path = seed_root / ".ecommerce-tool.json"
+    python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    validate_seed_generation_root(lock_path)
+    validate_seed_generation_root(tool_home / "downloads" / "pip")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def valid() -> bool:
+        if not python.is_file() or not metadata_path.is_file():
+            return False
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata != {"identity": identity, "input": json.loads(identity_input)}:
+                return False
+            if not check_seed_reference(wheels, seed_root):
+                return False
+            proc = subprocess.run(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); "
+                    "from capability_bootstrap import validate_seed_lock; "
+                    "sys.exit(0 if validate_seed_lock(sys.argv[2]) else 1)",
+                    str(ROOT / "scripts"),
+                    str(SEED_LOCK),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            return proc.returncode == 0
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+            return False
+
+    with identity_lock(lock_path):
+        validate_seed_generation_root(generations)
+        selected = resolved_seed_selector(selector, generations)
+        if selected is not None:
+            seed_root = selected
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if valid():
+            print(f"REUSE qualification seed identity={identity[:16]}")
+        else:
+            print(f"PREPARE qualification seed identity={identity[:16]}")
+            # Keep published generations in place: running consumers do not take
+            # the writer lock, and venv shebangs must never change location.
+            bootstrap = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve(strict=True))
+            probe = subprocess.run(
+                [
+                    bootstrap,
+                    "-I",
+                    "-c",
+                    "import json,platform,sys; print(json.dumps([platform.python_implementation(), list(sys.version_info[:2])]))",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            if json.loads(probe.stdout) != [platform.python_implementation(), list(sys.version_info[:2])]:
+                raise RuntimeError("bootstrap interpreter does not match seed Python identity")
+            validate_seed_generation_root(generations)
+            generations.mkdir(parents=True, exist_ok=True)
+            seed_root = Path(tempfile.mkdtemp(prefix="generation-", dir=generations))
+            metadata_path = seed_root / ".ecommerce-tool.json"
+            python = seed_root / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            temporary_selector = selector.with_name(f".{selector.name}.{os.getpid()}.tmp")
+            try:
+                subprocess.run([bootstrap, "-I", "-m", "venv", str(seed_root)], check=True)
+                if not check_seed_reference(wheels):
+                    with tempfile.TemporaryDirectory(dir=generations, prefix="wheels-") as download:
+                        if not check_seed_reference(wheels, copy_to=Path(download)):
+                            subprocess.run(
+                                [
+                                    str(python),
+                                    "-I",
+                                    "-m",
+                                    "pip",
+                                    "--isolated",
+                                    "--cache-dir",
+                                    str(tool_home / "downloads" / "pip"),
+                                    "download",
+                                    "--only-binary=:all:",
+                                    "--require-hashes",
+                                    "-r",
+                                    str(SEED_LOCK),
+                                    "--dest",
+                                    download,
+                                ],
+                                check=True,
+                                env=seed_pip_environment(),
+                            )
+                        if not check_seed_reference(Path(download)):
+                            raise RuntimeError("downloaded seed wheel reference is invalid")
+                        publish_seed_reference(Path(download), wheels)
+                subprocess.run(
+                    [
+                        str(python),
+                        "-I",
+                        "-m",
+                        "pip",
+                        "--isolated",
+                        "--cache-dir",
+                        str(tool_home / "downloads" / "pip"),
+                        "install",
+                        "--no-index",
+                        "--find-links",
+                        str(wheels),
+                        "--only-binary=:all:",
+                        "--disable-pip-version-check",
+                        "--require-hashes",
+                        "-r",
+                        str(SEED_LOCK),
+                    ],
+                    check=True,
+                    env=seed_pip_environment(),
+                )
+                metadata_path.write_text(
+                    json.dumps({"identity": identity, "input": json.loads(identity_input)}, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                if not valid():
+                    raise RuntimeError("seed environment verification failed after installation")
+                remove_seed_directory_reference(temporary_selector)
+                create_seed_directory_reference(temporary_selector, seed_root)
+                replace_seed_directory_reference(temporary_selector, selector)
+            except BaseException:
+                # Only discard this unpublished candidate; published readers retain their paths.
+                if resolved_seed_selector(selector, generations) != seed_root:
+                    shutil.rmtree(seed_root)
+                raise
+            finally:
+                remove_seed_directory_reference(temporary_selector)
+        publish_checkout_reference(seed_root)
+    verify_seed_ansible_version(python, versions["ANSIBLE_CORE_VERSION"])
     print(
         f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
 
 
+def verify_seed_ansible_version(python: Path, expected: str) -> None:
+    # The module belongs to the authenticated seed payload on both platforms.
+    # In particular, Windows PE console launchers are not Python source files.
+    proc = subprocess.run(
+        [str(python), "-I", "-B", "-m", "ansible.cli.adhoc", "--version"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    lines = proc.stdout.splitlines()
+    if not lines or expected not in lines[0]:
+        raise RuntimeError("seed Ansible version verification failed")
+
+
+@contextlib.contextmanager
+def identity_lock(path: Path, timeout: float = 300.0):
+    """Bounded cross-process lock; the caller must recheck after acquisition."""
+    try:
+        if path.exists() or path.is_symlink():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SeedGenerationBoundaryError("seed identity lock must be a regular file")
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            opened = os.fstat(descriptor)
+            current = path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                or not seed_path_is_private(path)
+            ):
+                raise SeedGenerationBoundaryError("seed identity lock is not a private regular file")
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+        except BaseException:
+            os.close(descriptor)
+            raise
+    except OSError as exc:
+        raise SeedGenerationBoundaryError("seed identity lock cannot be opened safely") from exc
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError(f"timed out waiting for {path}")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def publish_checkout_reference(seed_root: Path) -> None:
+    """Atomically point this checkout at its compatible immutable seed."""
+    # The checkout reference is an executable entry point too. Apply the same
+    # ownership, POSIX permissions/Windows ACL and atomic creation checks as the
+    # tool-home hierarchy, including revalidation after a competing creator.
+    parent = create_seed_tool_home(LOCAL_SEED_VENV.parent)
+    temporary = LOCAL_SEED_VENV.with_name(f".{LOCAL_SEED_VENV.name}.{os.getpid()}.tmp")
+    remove_seed_directory_reference(temporary)
+    create_seed_directory_reference(temporary, seed_root)
+    try:
+        validated_seed_tool_home(parent)
+        replace_seed_directory_reference(temporary, LOCAL_SEED_VENV)
+    finally:
+        remove_seed_directory_reference(temporary)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("seed", "bootstrap", "env-check"))
+    parser.add_argument("mode", choices=("seed", "select-seed-python", "bootstrap", "env-check"))
     parser.add_argument("--contract", type=Path, default=CONTRACT)
     parser.add_argument("--os")
     parser.add_argument("--arch")
     parser.add_argument("--profile", choices=("static", "runtime"), default="static")
     args = parser.parse_args(argv)
-    if args.mode == "seed":
-        return seed_environment()
+    if args.mode in {"seed", "select-seed-python"}:
+        try:
+            if args.mode == "select-seed-python":
+                print(select_seed_python())
+                return 0
+            return seed_environment()
+        except SeedGenerationBoundaryError as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 1
     contract = load_contract(args.contract)
     auditor = Auditor(contract)
     os_name, arch, context = normalized_platform(args.os, args.arch)

@@ -1,3 +1,7 @@
+# The provisioned OS Python validates PATH candidates before any candidate executes.
+# Windows has no authenticated OS Python location: use an explicitly provisioned override.
+# SEED_PYTHON is an operator trust decision, never an automatically cached interpreter.
+SEED_PYTHON ?= $(if $(filter Windows_NT,$(OS)),$(error Automatic Windows seed discovery is unsupported; set SEED_PYTHON to its trusted provisioned absolute path),$(or $(shell /usr/bin/python3 -I -S -B scripts/capability_bootstrap.py select-seed-python),$(error No trusted contracted Python executable found; set SEED_PYTHON to its provisioned absolute path)))
 QUALIFICATION_VENV := $(CURDIR)/.venv/qualification
 QUALIFICATION_BIN := $(QUALIFICATION_VENV)/bin
 QUALIFICATION_PYTHON := $(QUALIFICATION_BIN)/python
@@ -15,7 +19,7 @@ ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/develo
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@$(PYTHON) scripts/capability_bootstrap.py seed
+	@"$(SEED_PYTHON)" -I -S -B scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
