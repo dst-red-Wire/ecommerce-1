@@ -1037,15 +1037,45 @@ def validate_seed_generation_root(generations: Path) -> None:
 
 
 def validated_seed_tool_home(value: str | Path) -> Path:
+    """Create the cache root component-by-component and fail closed on creation races."""
     configured = Path(value).absolute()
-    for path in (configured, *configured.parents):
+    chain = (configured, *configured.parents)
+    for path in chain:
         if seed_directory_reference(path) or (path.exists() and not path.is_dir()):
             raise SeedGenerationBoundaryError("seed tool home has an unsafe root or ancestor")
-    if not seed_paths_are_private(
-        [(path, path != configured) for path in (configured, *configured.parents) if path.exists()]
-    ):
+    if not seed_paths_are_private([(path, path != configured) for path in chain if path.exists()]):
         raise SeedGenerationBoundaryError("seed tool home has externally mutable ownership or permissions")
-    return configured.resolve()
+
+    missing: list[Path] = []
+    current = configured
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for path in reversed(missing):
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            # Another actor won the creation race. Accept only if the resulting
+            # object is exactly the private directory we would have created.
+            pass
+        except OSError as exc:
+            raise SeedGenerationBoundaryError("seed tool home cannot be created safely") from exc
+        if seed_directory_reference(path) or not path.is_dir():
+            raise SeedGenerationBoundaryError("seed tool home creation raced with an unsafe path")
+        if not seed_paths_are_private([(path, False), (path.parent, True)]):
+            raise SeedGenerationBoundaryError("seed tool home creation raced with an externally mutable directory")
+        try:
+            if path.resolve(strict=True).parent != path.parent.resolve(strict=True):
+                raise SeedGenerationBoundaryError("seed tool home creation escaped its expected parent")
+        except (OSError, RuntimeError) as exc:
+            raise SeedGenerationBoundaryError("seed tool home cannot be resolved safely") from exc
+
+    if not seed_paths_are_private([(path, path != configured) for path in chain if path.exists()]):
+        raise SeedGenerationBoundaryError("seed tool home changed during validation")
+    try:
+        return configured.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise SeedGenerationBoundaryError("seed tool home cannot be resolved safely") from exc
 
 
 def seed_environment() -> int:
