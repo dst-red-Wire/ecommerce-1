@@ -193,6 +193,98 @@ def advisory_output_check(label: str, output_text: str) -> None:
         print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
 
 
+_TERRAFORM_PROVIDER_LOCK: dict | None = None
+
+
+def terraform_provider_lock_contract() -> dict:
+    """Load and validate the single canonical Terraform provider lock contract."""
+    global _TERRAFORM_PROVIDER_LOCK
+    if _TERRAFORM_PROVIDER_LOCK is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("terraform_provider_lock")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.terraform_provider_lock")
+
+        contract = ruby_yaml(relative)
+        if (
+            contract.get("architecture_authority") != "architecture.lock.yaml"
+            or contract.get("scope") != "platform/terraform"
+            or contract.get("status") != "exact"
+        ):
+            raise RuntimeError("Terraform provider lock must inherit architecture.lock.yaml for platform/terraform")
+
+        quality_authority = source_quality_adapter("terraform").get("validation", {}).get("provider_lock_authority")
+        if quality_authority != "architecture.lock.yaml#machine_contracts.terraform_provider_lock":
+            raise RuntimeError("Terraform quality validation must delegate provider resolution to the central lock contract")
+
+        providers = contract.get("providers")
+        if not isinstance(providers, dict) or not providers:
+            raise RuntimeError("Terraform provider lock must declare at least one provider")
+
+        for name, provider in providers.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(provider, dict):
+                raise RuntimeError("Terraform provider lock entries must be named mappings")
+            for field in ("source", "version", "constraints"):
+                value = provider.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RuntimeError(f"Terraform provider {name} must declare {field}")
+            hashes = provider.get("hashes")
+            if not isinstance(hashes, list) or not hashes or any(not isinstance(value, str) or not value for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must declare non-empty hashes")
+            if not any(value.startswith("h1:") for value in hashes) or not any(value.startswith("zh:") for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must include both h1 and zh hashes")
+
+        qualification = contract.get("qualification")
+        if not isinstance(qualification, dict):
+            raise RuntimeError("Terraform provider lock must declare qualification behavior")
+        if qualification.get("canonical_lockfile_materialization") != "required":
+            raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
+        if qualification.get("init_lockfile_mode") != "readonly":
+            raise RuntimeError("Terraform qualification provider lock must be readonly")
+
+        _TERRAFORM_PROVIDER_LOCK = contract
+    return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
+
+
+def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> None:
+    """Materialize Terraform's native lockfile from the canonical YAML authority."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    lines = [
+        "# Generated from architecture.lock.yaml#machine_contracts.terraform_provider_lock.",
+        "# Do not edit this temporary projection.",
+        "",
+    ]
+    for name in sorted(provider_lock["providers"]):
+        provider = provider_lock["providers"][name]
+        lines.extend(
+            [
+                f'provider {json.dumps(provider["source"])} {{',
+                f'  version     = {json.dumps(provider["version"])}',
+                f'  constraints = {json.dumps(provider["constraints"])}',
+                "  hashes = [",
+            ]
+        )
+        lines.extend(f"    {json.dumps(value)}," for value in provider["hashes"])
+        lines.extend(["  ]", "}", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | None:
+    """Return the persistent provider package cache; availability is an acceleration only."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    cache = provider_lock["qualification"].get("provider_plugin_cache", {})
+    env_name = str(cache.get("root_source", "ECOMMERCE_TOOL_HOME"))
+    configured = os.environ.get(env_name, "").strip()
+    base = Path(configured).expanduser() if configured else Path(str(cache.get("fallback_root", "~/.cache/ecommerce-1"))).expanduser()
+    destination = base / str(cache.get("subdirectory", "terraform-provider-cache/v1"))
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ADVISORY terraform provider cache unavailable: {exc}", file=sys.stderr)
+        return None
+    return destination
+
+
 def pinned_versions() -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
@@ -923,14 +1015,17 @@ def security() -> int:
 
 
 def terraform_check() -> int:
-    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    terraform_root = ROOT / "platform" / "terraform"
+    tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
 
     policy = source_quality_adapter("terraform")
     formatter = policy["formatter"]
-    validation = policy["validation"]
+    provider_lock = terraform_provider_lock_contract()
+    qualification = provider_lock["qualification"]
+
     tool = next(
         (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
         None,
@@ -938,27 +1033,57 @@ def terraform_check() -> int:
     if not tool:
         return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
 
-    advisory_exit_check(
-        "terraform fmt",
-        [tool, *formatter["args"]],
-        drift_exit_codes=formatter["drift_exit_codes"],
+    selected_tool = str(Path(tool).resolve())
+    provider_versions = {
+        name: provider["version"]
+        for name, provider in sorted(provider_lock["providers"].items())
+    }
+
+    def execute() -> int:
+        advisory_exit_check(
+            "terraform fmt",
+            [tool, *formatter["args"]],
+            drift_exit_codes=formatter["drift_exit_codes"],
+        )
+
+        provider_cache = terraform_provider_plugin_cache_dir(provider_lock)
+        env = os.environ.copy()
+        if provider_cache is not None:
+            env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
+
+        directories = sorted({p.parent for p in tf_files})
+        with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
+            temp_root = Path(temp_dir) / "terraform"
+            shutil.copytree(
+                terraform_root,
+                temp_root,
+                ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
+            )
+
+            for directory in directories:
+                relative = directory.relative_to(terraform_root)
+                validation_dir = temp_root / relative
+                write_terraform_provider_lock(validation_dir / ".terraform.lock.hcl", provider_lock)
+                print(f"CHECK terraform: {relative}")
+                run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
+                run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
+
+        providers = ", ".join(
+            f"{name}={provider['version']}"
+            for name, provider in sorted(provider_lock["providers"].items())
+        )
+        print(f"PASS terraform provider lock {providers}")
+        print("PASS terraform checks completed")
+        return 0
+
+    return _run_cached_static_gate(
+        "platform:terraform",
+        {
+            "selected_tool": selected_tool,
+            "provider_versions": provider_versions,
+        },
+        execute,
     )
-
-    init_args = [tool, *validation["init_args"]]
-    validate_args = [tool, *validation["validate_args"]]
-    for directory in sorted({p.parent for p in tf_files}):
-        print(f"CHECK terraform: {directory.relative_to(ROOT)}")
-        if "modules" in directory.parts and "platform" in directory.parts and validation["module_validation_in_temporary_copy"]:
-            with tempfile.TemporaryDirectory(prefix="tf-module-") as temp:
-                shutil.copytree(directory, temp, dirs_exist_ok=True)
-                run(init_args, cwd=Path(temp))
-                run(validate_args, cwd=Path(temp))
-        else:
-            run(init_args, cwd=directory)
-            run(validate_args, cwd=directory)
-    print("PASS terraform checks completed")
-    return 0
-
 
 def ansible_check() -> int:
     reconcile_ansible_collections()
