@@ -274,10 +274,10 @@ module ArchitectureValidator
     check_equal(errors, "MGMT inventory Terraform/OpenTofu bootstrap", "terraform-opentofu", mgmt.dig("bootstrap", "infrastructure"))
     check_equal(errors, "MGMT Ansible bootstrap", true, management.dig("bootstrap", "ansible"))
     check_equal(errors, "MGMT inventory Ansible bootstrap", "ansible", mgmt.dig("bootstrap", "configuration"))
-    check_equal(errors, "MGMT human apply gate", true, management.dig("bootstrap", "requires_human_apply_gate"))
-    check_equal(errors, "MGMT inventory human apply gate", true, mgmt.dig("bootstrap", "human_apply_gate"))
-    check_equal(errors, "MGMT gateway human apply gate", true, mgmt_gateways.dig("implementation", "human_apply_gate"))
-    check_equal(errors, "MGMT WireGuard provider apply gate", "required", mgmt_wireguard.dig("human_gates", "provider_apply"))
+    check_equal(errors, "MGMT owner authorization", true, management.dig("bootstrap", "requires_owner_authorization"))
+    check_equal(errors, "MGMT inventory owner authorization", "required", mgmt.dig("bootstrap", "owner_authorization"))
+    check_equal(errors, "MGMT gateway owner authorization", "required", mgmt_gateways.dig("implementation", "owner_authorization"))
+    check_equal(errors, "MGMT WireGuard provider owner authorization", "required", mgmt_wireguard.dig("owner_authorizations", "provider_apply"))
     check_equal(errors, "security trust zones", {
       "Z0" => "internet-untrusted", "Z1" => "public-edge-dmz", "Z2" => "kubernetes-ingress-service-mesh",
       "Z3" => "application-workloads", "Z4" => "stateful-data", "Z5" => "permanent-mgmt",
@@ -546,6 +546,7 @@ module ArchitectureValidator
         "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
         "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
         "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon",
+        "infrastructure_api" => "crossplane",
         "autoscaling" => {
           "synchronous_pods" => "kubernetes-hpa", "event_driven_pods" => "keda",
           "certified_nodes" => "fixed", "preprod_perf_burst" => "gate-only"

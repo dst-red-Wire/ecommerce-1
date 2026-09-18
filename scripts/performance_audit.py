@@ -14,13 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
+import shlex
 import os
 from pathlib import Path
 import subprocess
 import sys
+import statistics
 from typing import Any
 
 GLOBAL_GATES = (
+    "preflight",
     "governance",
     "runtime-efficiency",
     "contracts",
@@ -31,6 +36,26 @@ REUSE_FIELDS = (
     "reused_from_sha",
     "promoted_from_worktree",
     "reused_from_worktree_tree_sha",
+)
+CAMPAIGN_SCENARIOS = (
+    "documentation",
+    "go-service-local",
+    "frontend-application-local",
+    "ansible",
+    "independent-tool",
+    "repository-controller",
+)
+CAMPAIGN_PHASES = (
+    "tool-preparation",
+    "commit-hook",
+    "push-hook",
+    "change-classification",
+    "global-qualification",
+    "component-qualification",
+    "generation",
+    "compilation",
+    "tests",
+    "evidence-reuse",
 )
 
 
@@ -47,6 +72,194 @@ def _round(value: float) -> float:
 
 def _is_reused(record: dict[str, Any]) -> bool:
     return any(bool(record.get(field)) for field in REUSE_FIELDS)
+
+
+def _finite_seconds(value: Any) -> bool:
+    try:
+        return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
+def _campaign_metadata(campaign: dict[str, Any]) -> tuple[dict, list[str], list[str]]:
+    environment = campaign["environment"]
+    commands = campaign["commands"]
+    if not isinstance(environment, dict) or not isinstance(commands, list):
+        raise ValueError("campaign metadata must be an environment object and command list")
+    safe_environment = {}
+    for key in ("cpus", "memory_bytes"):
+        value = environment.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            safe_environment[key] = value
+    for key, allowed in {"os": {"linux", "darwin", "windows"}, "arch": {"amd64", "arm64", "x86_64", "aarch64"}}.items():
+        if isinstance(environment.get(key), str) and environment[key] in allowed:
+            safe_environment[key] = environment[key]
+    safe_commands = []
+    targets = {
+        "ci",
+        "verify-change",
+        "seed",
+        "bootstrap",
+        "governance",
+        "contracts",
+        "ansible",
+        "terraform",
+        "test",
+        "lint",
+        "format-check",
+        "security",
+        "perf-audit",
+    }
+    for command in commands:
+        try:
+            parts = shlex.split(command) if isinstance(command, str) else []
+        except ValueError:
+            parts = []
+        safe = len(parts) == 2 and parts[0] == "make" and parts[1] in targets
+        safe_commands.append(" ".join(parts) if safe else "[redacted command]")
+    limitations = campaign["limitations"]
+    if (
+        not isinstance(limitations, list)
+        or len(limitations) > 32
+        or any(not isinstance(value, str) or len(value) > 256 for value in limitations)
+    ):
+        raise ValueError("campaign limitations must be at most 32 bounded strings")
+    allowed_limitations = {
+        "local observation",
+        "warm caches only",
+        "cold caches not measured",
+        "single sample",
+        "single host",
+        "no remote ci status present",
+        "no remote ci provenance",
+        "network variability",
+        "tools preinstalled",
+        "synthetic fixture",
+    }
+    safe_limitations = [
+        value.strip().lower() if value.strip().lower() in allowed_limitations else "[redacted limitation]"
+        for value in limitations
+    ]
+    return safe_environment, safe_commands, safe_limitations
+
+
+def campaign_summary(campaign: dict[str, Any]) -> dict[str, Any]:
+    """Validate and summarize an externally measured, bounded campaign.
+
+    Measurements are observations, never PASS authorization. Cold runs must use an
+    isolated cache rather than deleting a user's cache, and warm results remain
+    explicitly labelled so they cannot be mistaken for skipped controls.
+    """
+    if not isinstance(campaign, dict):
+        raise ValueError("campaign must be a JSON object")
+    runs = campaign.get("runs")
+    if not isinstance(runs, list) or not runs:
+        raise ValueError("campaign must contain a non-empty runs array")
+    for field in ("head_sha", "environment", "commands", "limitations"):
+        if field not in campaign:
+            raise ValueError(f"campaign must document {field}")
+
+    if not isinstance(campaign["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", campaign["head_sha"]):
+        raise ValueError("campaign head_sha must be a full lowercase commit SHA")
+    safe_environment, safe_commands, safe_limitations = _campaign_metadata(campaign)
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    observed_scenarios: set[str] = set()
+    for index, run in enumerate(runs):
+        if not isinstance(run, dict):
+            raise ValueError(f"campaign run {index} must be an object")
+        scenario = str(run.get("scenario", ""))
+        if scenario not in CAMPAIGN_SCENARIOS:
+            raise ValueError(f"campaign run {index} has unknown scenario: {scenario}")
+        cache_state = str(run.get("cache_state", ""))
+        if cache_state not in {"cold-isolated", "warm"}:
+            raise ValueError(f"campaign run {index} has invalid cache_state")
+        if cache_state == "cold-isolated" and not str(run.get("cache_root", "")).strip():
+            raise ValueError(f"campaign run {index} cold cache must name its isolated cache_root")
+        if run.get("result") not in {"PASS", "FAIL", "BLOCKED", "SKIP"}:
+            raise ValueError(f"campaign run {index} has invalid result")
+        phases = run.get("phases")
+        if not isinstance(phases, dict) or not phases:
+            raise ValueError(f"campaign run {index} must contain phase measurements")
+        unknown_phases = sorted(set(phases) - set(CAMPAIGN_PHASES))
+        if unknown_phases:
+            raise ValueError(f"campaign run {index} has unknown phases: {', '.join(unknown_phases)}")
+        for phase, seconds in phases.items():
+            if not _finite_seconds(seconds):
+                raise ValueError(f"campaign run {index} phase {phase} must be non-negative seconds")
+        for field in ("wall_seconds", "task_duration_sum_seconds", "estimated_saved_seconds"):
+            if not _finite_seconds(run.get(field)):
+                raise ValueError(f"campaign run {index} {field} must be non-negative seconds")
+        observed_scenarios.add(scenario)
+        grouped.setdefault((scenario, cache_state), []).append(run)
+
+    missing = sorted(
+        {(scenario, cache) for scenario in CAMPAIGN_SCENARIOS for cache in ("cold-isolated", "warm")} - set(grouped)
+    )
+    if missing:
+        raise ValueError(
+            "campaign is missing required scenarios: " + ", ".join(f"{scenario}/{cache}" for scenario, cache in missing)
+        )
+
+    summaries = []
+    for (scenario, cache_state), samples in sorted(grouped.items()):
+        walls = [float(sample["wall_seconds"]) for sample in samples]
+        task_sums = [float(sample["task_duration_sum_seconds"]) for sample in samples]
+        saved = [float(sample["estimated_saved_seconds"]) for sample in samples]
+        summaries.append(
+            {
+                "scenario": scenario,
+                "cache_state": cache_state,
+                "samples": len(samples),
+                "executed_runs": sum(sample["result"] != "SKIP" for sample in samples),
+                "results": {
+                    status: sum(sample["result"] == status for sample in samples)
+                    for status in ("PASS", "FAIL", "BLOCKED", "SKIP")
+                },
+                "wall_seconds_median": _round(statistics.median(walls)),
+                "wall_seconds_min": _round(min(walls)),
+                "wall_seconds_max": _round(max(walls)),
+                "wall_seconds_range": _round(max(walls) - min(walls)),
+                "task_duration_sum_seconds_median": _round(statistics.median(task_sums)),
+                "estimated_saved_seconds_median": _round(statistics.median(saved)),
+                **{
+                    f"{field}_{metric}": _round(operation(values))
+                    for field, values in (("task_duration_sum_seconds", task_sums), ("estimated_saved_seconds", saved))
+                    for metric, operation in (
+                        ("min", min),
+                        ("max", max),
+                        ("range", lambda items: max(items) - min(items)),
+                    )
+                },
+                **{
+                    f"phase_seconds_{metric}": {
+                        phase: (_round(operation(values)) if values else None)
+                        for phase in CAMPAIGN_PHASES
+                        for values in [
+                            [float(sample["phases"][phase]) for sample in samples if phase in sample["phases"]]
+                        ]
+                    }
+                    for metric, operation in (
+                        ("median", statistics.median),
+                        ("min", min),
+                        ("max", max),
+                        ("range", lambda items: max(items) - min(items)),
+                    )
+                },
+                "phase_sample_counts": {
+                    phase: sum(phase in sample["phases"] for sample in samples) for phase in CAMPAIGN_PHASES
+                },
+            }
+        )
+    return {
+        "head_sha": campaign["head_sha"],
+        "environment": safe_environment,
+        "commands": safe_commands,
+        "limitations": safe_limitations,
+        "scenario_count": len(observed_scenarios),
+        "run_count": len(runs),
+        "groups": summaries,
+        "safety": {"authorizes_pass": False, "cold_cache_policy": "isolated-cache-only"},
+    }
 
 
 def _source_seconds(record: dict[str, Any]) -> float:
@@ -111,23 +324,26 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Model the canonical affected Pipeline after classification.
+    """Model the canonical affected Pipeline including its early preflight.
 
     The current Pipeline runs one sequential global-gates Task in parallel with a
-    matrix of independent component TaskRuns, then joins in the finalizer. Classify,
+    matrix of independent component TaskRuns, after a serial preflight, then joins in the finalizer. Classify,
     pod scheduling and finalizer overhead are not represented in per-gate evidence,
     so this is an execution-gate estimate rather than observed wall clock.
     """
     active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
-    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
+    preflight_seconds = sum(
+        _seconds(record.get("duration_seconds")) for record in active if record.get("gate") == "preflight"
+    )
+    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES and record.get("gate") != "preflight"]
     components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
     global_seconds = sum(_seconds(record.get("duration_seconds")) for record in globals_)
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
-    serial_seconds = global_seconds + sum(seconds for _, seconds in component_durations)
-    critical_seconds = max(global_seconds, component_parallel_seconds)
+    serial_seconds = preflight_seconds + global_seconds + sum(seconds for _, seconds in component_durations)
+    critical_seconds = preflight_seconds + max(global_seconds, component_parallel_seconds)
 
     if global_seconds >= component_parallel_seconds and globals_:
         branch = "global-gates"
@@ -145,8 +361,9 @@ def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "model": "tekton-affected-v1",
-        "assumption": "global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
+        "assumption": "preflight runs once before classify; global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
         "aggregate_executed_gate_seconds": _round(serial_seconds),
+        "preflight_serial_seconds": _round(preflight_seconds),
         "global_branch_seconds": _round(global_seconds),
         "component_matrix_branch_seconds": _round(component_parallel_seconds),
         "critical_path_estimate_seconds": _round(critical_seconds),
@@ -372,7 +589,13 @@ def recommendations(
     return items
 
 
-def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+def audit(
+    evidence: dict[str, Any],
+    *,
+    root: Path,
+    baseline: dict[str, Any] | None = None,
+    campaign: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     records = _validate_evidence(evidence)
     inventory = gate_inventory(records)
     critical = tekton_critical_path(records)
@@ -398,6 +621,11 @@ def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | No
     }
     if baseline is not None:
         report["comparison"] = compare_baseline(evidence, baseline)
+    if campaign is not None:
+        summary = campaign_summary(campaign)
+        if summary["head_sha"] != evidence.get("head_sha"):
+            raise ValueError("campaign head_sha differs from audited evidence")
+        report["campaign"] = summary
     return report
 
 
@@ -466,6 +694,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", default=os.environ.get("EVIDENCE", ""))
     parser.add_argument("--baseline", default=os.environ.get("BASELINE_EVIDENCE", ""))
     parser.add_argument("--output", default=os.environ.get("PERF_OUTPUT", ""))
+    parser.add_argument(
+        "--campaign", default=os.environ.get("PERF_CAMPAIGN", ""), help="bounded measured campaign JSON"
+    )
     parser.add_argument("--json", action="store_true", help="print the full JSON report to stdout")
     args = parser.parse_args(argv)
 
@@ -481,7 +712,13 @@ def main(argv: list[str] | None = None) -> int:
             if not baseline_path.is_absolute():
                 baseline_path = root / baseline_path
             baseline = _load(baseline_path, label="baseline evidence")
-        report = audit(evidence, root=root, baseline=baseline)
+        campaign = None
+        if args.campaign:
+            campaign_path = Path(args.campaign).expanduser()
+            if not campaign_path.is_absolute():
+                campaign_path = root / campaign_path
+            campaign = _load(campaign_path, label="campaign")
+        report = audit(evidence, root=root, baseline=baseline, campaign=campaign)
         identity = str(report.get("head_sha") or "worktree")
         destination = (
             Path(args.output).expanduser() if args.output else root / ".context" / "performance" / f"{identity}.json"

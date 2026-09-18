@@ -1,6 +1,8 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
+from functools import lru_cache
 from pathlib import Path
+import copy
 import json
 import re
 import subprocess
@@ -111,7 +113,7 @@ V5_SECTION_KEYS = {
         {
             "terraform_opentofu",
             "ansible",
-            "requires_human_apply_gate",
+            "requires_owner_authorization",
         }
     ),
     "developer_platform": frozenset(
@@ -176,6 +178,15 @@ V5_SECTION_KEYS = {
             "required",
             "exact_head_sha_required",
             "human_review_required",
+            "automatic_merge_allowed",
+            "automatic_merge_authority",
+            "automatic_merge_required_verifications",
+            "automatic_merge_same_head_sha_required",
+            "automatic_merge_fail_closed",
+            "ai_code_review",
+            "ai_security_review",
+            "sensitive_changes_require_owner_authorization",
+            "owner_authorization_contract",
             "required_context",
         }
     ),
@@ -371,6 +382,77 @@ V5_MACHINE_CONTRACTS = {
     "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
     "observability_topology": "config/contracts/observability-topology.yaml",
 }
+V5_REVIEW_POLICY = {
+    "version": 2,
+    "status": "exact",
+    "architecture_authority": AUTHORITY,
+    "pull_request_review": {
+        "forge": "github",
+        "ci": "tekton",
+        "deterministic_gate": {
+            "authority": True,
+            "required_for_merge": True,
+            "binds_exact_commit_sha": True,
+            "fail_closed": True,
+        },
+        "ai_reviewer": {
+            "enabled": True,
+            "advisory_only": True,
+            "execution_environment": "chatgpt-plus-wsl2-evidence",
+            "may_comment": True,
+            "may_request_changes": True,
+            "may_approve": False,
+            "may_merge": False,
+            "may_sign": False,
+            "may_promote": False,
+            "may_push": False,
+        },
+        "merge_controller": {
+            "enabled": True,
+            "authority": "deterministic",
+            "execution_environment": "wsl2-or-approved-runner",
+            "verification_count": 5,
+            "required_verifications": [
+                "deterministic-qualification",
+                "deterministic-code",
+                "deterministic-security",
+                "provenance-integrity",
+                "governance-policy",
+            ],
+            "binds_exact_commit_sha": True,
+            "all_verifications_same_head_sha": True,
+            "require_pr_mergeable": True,
+            "require_no_unresolved_blocking_threads": True,
+            "fail_closed_on_missing_or_stale_evidence": True,
+            "forbid_force_push": True,
+            "forbid_branch_protection_bypass": True,
+            "blocking_findings": ["P1", "P2"],
+        },
+        "owner_authorization": {
+            "enabled": True,
+            "decision_authority": "repository-owner",
+            "recording_agent": "chatgpt-allowed-after-explicit-owner-instruction",
+            "transport": "github-pull-request-comment",
+            "command": "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
+            "binds_exact_commit_sha": True,
+            "binds_scope": True,
+            "stale_on_head_change": True,
+            "fail_closed": True,
+            "required_for": [
+                "review_policy_changes",
+                "infrastructure_apply",
+                "destructive_changes",
+                "state_migrations",
+                "dns_network_iam_secret_changes",
+                "mgmt_bootstrap_apply",
+                "public_ingress_activation",
+                "routing_change",
+                "peer_or_key_change",
+            ],
+        },
+    },
+}
+
 V5_SECTION_KEYS.update(
     {
         "superseded": frozenset(V5_SUPERSEDED),
@@ -451,7 +533,22 @@ V5_DEVELOPER_PLATFORM = {
     "pull_request_contract": {
         "required": True,
         "exact_head_sha_required": True,
-        "human_review_required": True,
+        "human_review_required": False,
+        "automatic_merge_allowed": True,
+        "automatic_merge_authority": "deterministic",
+        "automatic_merge_required_verifications": [
+            "deterministic-qualification",
+            "deterministic-code",
+            "deterministic-security",
+            "provenance-integrity",
+            "governance-policy",
+        ],
+        "automatic_merge_same_head_sha_required": True,
+        "automatic_merge_fail_closed": True,
+        "ai_code_review": "advisory",
+        "ai_security_review": "advisory",
+        "sensitive_changes_require_owner_authorization": True,
+        "owner_authorization_contract": "config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
         "required_context": [
             "request-id",
             "component",
@@ -751,10 +848,12 @@ EXACT_CONTRACTS = {
 }
 
 
-def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
+@lru_cache(maxsize=256)
+def _load_yaml_with_psych(content):
+    """Parse one immutable file version with the contracted Ruby/Psych runtime."""
     ruby = """
-document = Psych.parse_file(ARGV[0])
+content = STDIN.read
+document = Psych.parse(content)
 walk = lambda do |node|
   if node.is_a?(Psych::Nodes::Mapping)
     keys = node.children.each_slice(2).map { |key, _| key.value }
@@ -764,14 +863,25 @@ walk = lambda do |node|
   Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
 end
 walk.call(document)
-data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
+data = Psych.safe_load(content, aliases: false)
 puts JSON.generate(data)
 """
-    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    command = ["ruby", "-rpsych", "-rjson", "-e", ruby]
+    completed = subprocess.run(command, input=content, text=True, capture_output=True, check=False)
     if completed.returncode:
-        raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
+        raise ValueError(completed.stderr.strip() or "Psych rejected YAML content")
     return json.loads(completed.stdout)
+
+
+def load_yaml(path):
+    """Load YAML with Psych, reusing only byte-identical parse results."""
+    path = Path(path)
+    try:
+        # Validators may freely transform their result without poisoning the
+        # byte-keyed cache observed by later negative mutation cases.
+        return copy.deepcopy(_load_yaml_with_psych(path.read_text()))
+    except ValueError as exc:
+        raise ValueError(f"cannot parse {path}: {exc}") from exc
 
 
 def validate_exact_keys(name, actual, expected_keys):
@@ -1384,6 +1494,9 @@ def validate(root):
                 errors.extend(security_source_errors(source, contract))
         if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
             errors.append("machine_contracts must match the complete approved V5 role/path registry")
+        review_policy = load_yaml(root / V5_MACHINE_CONTRACTS["review_policy"])
+        if review_policy != V5_REVIEW_POLICY:
+            errors.append("config/contracts/review-policy.yaml must match the exact V5 five-verification deterministic merge policy")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
@@ -1429,14 +1542,14 @@ def validate(root):
             or inventory.get("bootstrap", {}).get("configuration") != "ansible"
         ):
             errors.append("management_plane.bootstrap contradicts the MGMT inventory")
-        human_gates = (
-            bootstrap.get("requires_human_apply_gate"),
-            inventory.get("bootstrap", {}).get("human_apply_gate"),
-            gateways.get("implementation", {}).get("human_apply_gate"),
-            wireguard.get("human_gates", {}).get("provider_apply") == "required",
+        owner_authorizations = (
+            bootstrap.get("requires_owner_authorization") is True,
+            inventory.get("bootstrap", {}).get("owner_authorization") == "required",
+            gateways.get("implementation", {}).get("owner_authorization") == "required",
+            wireguard.get("owner_authorizations", {}).get("provider_apply") == "required",
         )
-        if any(gate is not True for gate in human_gates):
-            errors.append("management_plane.bootstrap requires the locked human apply gate")
+        if any(authorization is not True for authorization in owner_authorizations):
+            errors.append("management_plane.bootstrap requires the locked owner authorization")
         for role, relative in topology_contracts.items():
             if (
                 not isinstance(relative, str)

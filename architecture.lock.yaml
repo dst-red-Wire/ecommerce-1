@@ -70,7 +70,7 @@ management_plane:
   bootstrap:
     terraform_opentofu: true
     ansible: true
-    requires_human_apply_gate: true
+    requires_owner_authorization: true
 
 developer_platform:
   status: contract-locked-in-m1-implemented-from-m4
@@ -119,7 +119,21 @@ developer_platform:
   pull_request_contract:
     required: true
     exact_head_sha_required: true
-    human_review_required: true
+    human_review_required: false
+    automatic_merge_allowed: true
+    automatic_merge_authority: deterministic
+    automatic_merge_required_verifications:
+      - deterministic-qualification
+      - deterministic-code
+      - deterministic-security
+      - provenance-integrity
+      - governance-policy
+    automatic_merge_same_head_sha_required: true
+    automatic_merge_fail_closed: true
+    ai_code_review: advisory
+    ai_security_review: advisory
+    sensitive_changes_require_owner_authorization: true
+    owner_authorization_contract: config/contracts/review-policy.yaml#pull_request_review.owner_authorization
     required_context:
       - request-id
       - component

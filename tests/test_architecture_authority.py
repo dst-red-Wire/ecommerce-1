@@ -15,6 +15,16 @@ SPEC.loader.exec_module(authority)
 
 
 class ArchitectureAuthorityTest(unittest.TestCase):
+    def test_yaml_cache_is_content_invalidated_and_returns_isolated_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "contract.yaml"
+            path.write_text("value: first\n")
+            first = authority.load_yaml(path)
+            first["value"] = "caller mutation"
+            self.assertEqual({"value": "first"}, authority.load_yaml(path))
+            path.write_text("value: second\n")
+            self.assertEqual({"value": "second"}, authority.load_yaml(path))
+
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
 
@@ -253,6 +263,29 @@ graph LR
         self.assertEqual("crossplane", contract["principles"]["infrastructure_api"])
         self.assertEqual("forbidden", contract["execution_contract"]["tekton_direct_workload_deploy"])
         self.assertTrue(contract["execution_contract"]["mutating_platform_action_requires_git_change"])
+        pr_contract = contract["pull_request_contract"]
+        self.assertFalse(pr_contract["human_review_required"])
+        self.assertTrue(pr_contract["automatic_merge_allowed"])
+        self.assertEqual("deterministic", pr_contract["automatic_merge_authority"])
+        self.assertEqual(
+            [
+                "deterministic-qualification",
+                "deterministic-code",
+                "deterministic-security",
+                "provenance-integrity",
+                "governance-policy",
+            ],
+            pr_contract["automatic_merge_required_verifications"],
+        )
+        self.assertTrue(pr_contract["automatic_merge_same_head_sha_required"])
+        self.assertTrue(pr_contract["automatic_merge_fail_closed"])
+        self.assertEqual("advisory", pr_contract["ai_code_review"])
+        self.assertEqual("advisory", pr_contract["ai_security_review"])
+        self.assertTrue(pr_contract["sensitive_changes_require_owner_authorization"])
+        self.assertEqual(
+            "config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
+            pr_contract["owner_authorization_contract"],
+        )
         self.assertEqual(
             "stable-pr-driven-contract-locked",
             contract["milestone_contract"]["M1-monorepo-bootstrap"]["outcome"],
@@ -274,6 +307,9 @@ graph LR
                 ("    backstage_management_plane_nodejs: allowed-required", "    backstage_management_plane_nodejs: forbidden"),
                 ("    source_of_truth: git", "    source_of_truth: backstage"),
                 ("    tekton_direct_workload_deploy: forbidden", "    tekton_direct_workload_deploy: allowed"),
+                ("    automatic_merge_allowed: true", "    automatic_merge_allowed: false"),
+                ("    automatic_merge_authority: deterministic", "    automatic_merge_authority: ai"),
+                ("    automatic_merge_same_head_sha_required: true", "    automatic_merge_same_head_sha_required: false"),
                 ("      implementation_required: false", "      implementation_required: true"),
                 ("      outcome: implement-pr-driven-platform-contract", "      outcome: redesign-pr-driven-platform-contract"),
             )
@@ -288,6 +324,38 @@ graph LR
                         )
                     )
                     lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_review_policy_requires_five_exact_sha_verifications(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            mutations = (
+                ("    advisory_only: true", "    advisory_only: false"),
+                ("    may_approve: false", "    may_approve: true"),
+                ("    may_merge: false", "    may_merge: true"),
+                ("    verification_count: 5", "    verification_count: 4"),
+                ("      - deterministic-code", ""),
+                ("      - deterministic-security", ""),
+                ("      - provenance-integrity", ""),
+                ("      - governance-policy", ""),
+                ("    all_verifications_same_head_sha: true", "    all_verifications_same_head_sha: false"),
+                ("    decision_authority: repository-owner", "    decision_authority: ai"),
+                ("    binds_exact_commit_sha: true", "    binds_exact_commit_sha: false"),
+                ("      - review_policy_changes", ""),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    policy.write_text(original.replace(before, after, 1))
+                    self.assertTrue(
+                        any(
+                            "five-verification deterministic merge policy" in error
+                            for error in authority.validate(root)
+                        )
+                    )
+                    policy.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
     def test_topology_assertions_and_operational_subsets(self):
@@ -521,7 +589,11 @@ graph LR
                 "platform keys",
             ),
             ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
-            ("  gitops: rancher-fleet\n  bootstrap:", "  bootstrap:", "management_plane keys"),
+            (
+                "  gitops: rancher-fleet\n  developer_portal: backstage\n  bootstrap:",
+                "  developer_portal: backstage\n  bootstrap:",
+                "management_plane keys",
+            ),
             (
                 "    migration_source: nextjs-react-node",
                 "    migration_source: nextjs-react-node\n    package_manager: npm",
@@ -1292,7 +1364,7 @@ graph LR
     def test_management_plane_mutations_are_rejected(self):
         mutations = (
             ("architecture.lock.yaml", "provider: hetzner-cloud", "provider: aws"),
-            ("architecture.lock.yaml", "requires_human_apply_gate: true", "requires_human_apply_gate: false"),
+            ("architecture.lock.yaml", "requires_owner_authorization: true", "requires_owner_authorization: false"),
             ("config/infrastructure/mgmt-inventory.yaml", "provider: hetzner-cloud", "provider: aws"),
         )
         with tempfile.TemporaryDirectory() as directory:

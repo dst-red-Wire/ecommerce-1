@@ -32,7 +32,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "ansible_facts.architecture == qualification_architecture",
         "net.ipv4.ip_forward=1",
         "argv: [sysctl, -n, net.ipv4.ip_forward]",
-        "qualification_ip_forward.stdout != \"1\"",
+        'qualification_ip_forward.stdout != "1"',
         "argv: [docker, version]",
         "'Server:' not in qualification_docker_version.stdout",
         "argv: [docker, info]",
@@ -56,21 +56,28 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     for future_platform in ("tekton", "harbor", "buildkit", "cosign"):
         if future_platform in lowered_playbook:
             raise AssertionError(f"M4 resource entered M1 scope: {future_platform}")
-    immutable_sha = "58e10fdb7122f9f3302e3fc5534b07021f7cc37f"
-    base_sha = "45433013f97a94a8acf94c51a913ff071e6f74b2"
+    if "qualification_pr_head:" in defaults or "qualification_pr_base:" in defaults:
+        raise AssertionError("runner revisions must come from controller admission, not defaults")
     for marker in (
-        f"qualification_pr_head: {immutable_sha}",
-        f"qualification_pr_base: {base_sha}",
+        "qualification_pr_head is defined",
+        "qualification_pr_base is defined",
+        "qualification_selected_head.stdout == qualification_pr_head",
         "Fetch the exact qualification head and base objects",
         "Reconcile the hash-locked qualification seed",
         "Reconcile the repository qualification toolchain",
     ):
         if marker not in combined:
             raise AssertionError(f"Ansible does not own runner reconciliation: {marker}")
-    if f"git checkout --detach {immutable_sha}" not in runbook:
+    if 'git --no-replace-objects checkout --detach "$qualification_head"' not in runbook:
         raise AssertionError("qualification checkout is not pinned to the audited SHA")
-    if "git checkout milestone/" in runbook or "git checkout infra/" in runbook:
+    if (
+        "git --no-replace-objects checkout milestone/" in runbook
+        or "git --no-replace-objects checkout infra/" in runbook
+    ):
         raise AssertionError("qualification checkout uses a mutable branch tip")
+
+    if "set -euo pipefail\nreadonly QUALIFICATION_HEAD=" not in runbook:
+        raise AssertionError("trusted admission must fail closed before provisioning")
 
     trust_markers = (
         "set -euo pipefail",
@@ -96,9 +103,7 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     if trust_positions != sorted(trust_positions):
         raise AssertionError("candidate host key is enrolled before fingerprint equality")
 
-    remote_start = runbook.find(
-        'ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes'
-    )
+    remote_start = runbook.find('ssh -o UserKnownHostsFile="$QUALIFICATION_KNOWN_HOSTS" -o StrictHostKeyChecking=yes')
     remote_end = runbook.find("\nQUALIFICATION_RUNNER", remote_start + 1)
     if remote_start < 0 or remote_end < 0:
         raise AssertionError("qualification commands lack an explicit verified SSH context")
@@ -110,15 +115,15 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
         "docker version",
         "docker info",
         "sysctl -n net.ipv4.ip_forward",
-        "git rev-parse HEAD",
-        "45433013f97a94a8acf94c51a913ff071e6f74b2",
-        "git status --porcelain=v1",
+        "git --no-replace-objects rev-parse HEAD",
+        "$qualification_base",
+        "git --no-replace-objects status --porcelain=v1",
         'test -z "$worktree_status"',
         "make seed",
         "make bootstrap",
         "make env-check",
         "$HOME/.local/bin/go test -race -tags=integration",
-        "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci",
+        'BASE="$qualification_base" make ci',
     ):
         if command not in remote_sequence:
             raise AssertionError(f"qualification command is not explicitly remote: {command}")
@@ -151,13 +156,11 @@ def validate_contract(defaults: str, tasks: str, playbook: str, runbook: str) ->
     product_start = remote_sequence.find("cd services/product")
     post_bootstrap = remote_sequence.find("make env-check")
     final_head = remote_sequence.find(
-        'test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f',
+        'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"',
         post_bootstrap,
     )
     final_clean = remote_sequence.find('test -z "$post_bootstrap_status"', post_bootstrap)
-    final_forwarding = remote_sequence.find(
-        'test "$(sysctl -n net.ipv4.ip_forward)" = "1"', post_bootstrap
-    )
+    final_forwarding = remote_sequence.find('test "$(sysctl -n net.ipv4.ip_forward)" = "1"', post_bootstrap)
     if not (post_bootstrap < final_head < final_clean < final_forwarding < product_start):
         raise AssertionError("post-bootstrap fail-closed checks do not immediately precede Product")
 
@@ -195,9 +198,7 @@ class QualificationRunnerContractTest(unittest.TestCase):
         self.assertTrue(all("=" in package for package in self._declared_packages()))
 
     def test_mutation_disallow_pinned_snapshot_downgrade(self):
-        self.assert_mutation_rejected(
-            tasks=self.tasks.replace("allow_downgrade: true", "allow_downgrade: false")
-        )
+        self.assert_mutation_rejected(tasks=self.tasks.replace("allow_downgrade: true", "allow_downgrade: false"))
 
     def test_mutation_remove_non_root_docker_info_verification(self):
         start = self.tasks.index("- name: Verify Docker daemon information")
@@ -208,16 +209,20 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_remove_persistent_sysctl_file(self):
         self.assert_mutation_rejected(
-            defaults=self.defaults.replace("qualification_sysctl_file: /etc/sysctl.d/", "qualification_sysctl_file: /tmp/")
+            defaults=self.defaults.replace(
+                "qualification_sysctl_file: /etc/sysctl.d/", "qualification_sysctl_file: /tmp/"
+            )
         )
 
     def test_mutation_add_m4_resource(self):
         self.assert_mutation_rejected(playbook=self.playbook + "\n  - role: tekton\n")
 
     def test_mutation_checkout_branch_tip(self):
-        sha = "58e10fdb7122f9f3302e3fc5534b07021f7cc37f"
         self.assert_mutation_rejected(
-            runbook=self.runbook.replace(f"git checkout --detach {sha}", "git checkout milestone/m1-monorepo-bootstrap")
+            runbook=self.runbook.replace(
+                'git --no-replace-objects checkout --detach "$qualification_head"',
+                "git --no-replace-objects checkout milestone/m1-monorepo-bootstrap",
+            )
         )
 
     def test_mutation_remove_ssh_fingerprint_comparison(self):
@@ -243,11 +248,7 @@ class QualificationRunnerContractTest(unittest.TestCase):
         self.assert_mutation_rejected(runbook=self.runbook.replace("ForwardAgent=no", "ForwardAgent=yes"))
 
     def test_mutation_use_default_ci_base(self):
-        self.assert_mutation_rejected(
-            runbook=self.runbook.replace(
-                "BASE=45433013f97a94a8acf94c51a913ff071e6f74b2 make ci", "make ci"
-            )
-        )
+        self.assert_mutation_rejected(runbook=self.runbook.replace('BASE="$qualification_base" make ci', "make ci"))
 
     def test_mutation_reuse_general_known_hosts(self):
         self.assert_mutation_rejected(
@@ -264,7 +265,9 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_mutation_accept_reusable_tainted_runner(self):
         self.assert_mutation_rejected(
-            playbook=self.playbook.replace("not qualification_consumed.stat.exists", "qualification_consumed.stat.exists")
+            playbook=self.playbook.replace(
+                "not qualification_consumed.stat.exists", "qualification_consumed.stat.exists"
+            )
         )
 
     def test_mutation_remove_post_bootstrap_worktree_check(self):
@@ -273,9 +276,11 @@ class QualificationRunnerContractTest(unittest.TestCase):
         )
 
     def test_mutation_remove_post_bootstrap_exact_head_check(self):
-        marker = 'test "$(git rev-parse HEAD)" = 58e10fdb7122f9f3302e3fc5534b07021f7cc37f'
+        marker = 'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"'
         position = self.runbook.index(marker, self.runbook.index("make env-check"))
-        mutated = self.runbook[:position] + "git rev-parse HEAD" + self.runbook[position + len(marker):]
+        mutated = (
+            self.runbook[:position] + "git --no-replace-objects rev-parse HEAD" + self.runbook[position + len(marker) :]
+        )
         self.assert_mutation_rejected(runbook=mutated)
 
     def test_mutation_replace_final_ip_forward_assertion_with_print(self):
@@ -287,16 +292,10 @@ class QualificationRunnerContractTest(unittest.TestCase):
         )
 
     def test_mutation_remove_credential_isolation_requirement(self):
-        self.assert_mutation_rejected(
-            runbook=self.runbook.replace("no cloud instance role", "ordinary cloud host")
-        )
+        self.assert_mutation_rejected(runbook=self.runbook.replace("no cloud instance role", "ordinary cloud host"))
 
     def _declared_packages(self):
-        return [
-            line.strip()[3:-1]
-            for line in self.defaults.splitlines()
-            if line.strip().startswith('- "')
-        ]
+        return [line.strip()[3:-1] for line in self.defaults.splitlines() if line.strip().startswith('- "')]
 
 
 if __name__ == "__main__":

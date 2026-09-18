@@ -160,10 +160,10 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
-  def test_management_plane_provider_and_human_gate_are_cross_checked
+  def test_management_plane_provider_and_owner_authorization_are_cross_checked
     {
       "MGMT inventory provider" => lambda { |data| data["management_plane"]["provider"] = "aws" },
-      "MGMT human apply gate" => lambda { |data| data["management_plane"]["bootstrap"]["requires_human_apply_gate"] = false }
+      "MGMT owner authorization" => lambda { |data| data["management_plane"]["bootstrap"]["requires_owner_authorization"] = false }
     }.each do |message, mutation|
       with_contract_copy do |root|
         mutate_yaml(root, "architecture.lock.yaml", &mutation)
@@ -652,6 +652,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform progressive_delivery] => "flagger",
       %w[platform registry] => "docker-hub",
       %w[platform runtime_security] => "falco",
+      %w[platform infrastructure_api] => "terraform",
       %w[stateful object_storage] => "minio-community",
       %w[observability application_gateway] => "opentelemetry-collector",
       %w[observability hyperdx_metadata_store] => "postgresql",

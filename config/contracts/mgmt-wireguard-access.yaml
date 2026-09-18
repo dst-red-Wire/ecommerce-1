@@ -62,7 +62,7 @@ ownership:
   secret_authority: openbao
   kubernetes: none
 
-human_gates:
+owner_authorizations:
   provider_apply: required
   public_ingress_activation: required
   routing_change: required
@@ -100,4 +100,4 @@ threat_model:
       - separate-address-pool
       - separate-control
       - audited-activation
-      - human-authorization
+      - owner-authorization

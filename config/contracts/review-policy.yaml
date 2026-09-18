@@ -1,5 +1,6 @@
-version: 1
+version: 2
 status: exact
+architecture_authority: architecture.lock.yaml
 
 pull_request_review:
   forge: github
@@ -14,6 +15,7 @@ pull_request_review:
   ai_reviewer:
     enabled: true
     advisory_only: true
+    execution_environment: chatgpt-plus-wsl2-evidence
     may_comment: true
     may_request_changes: true
     may_approve: false
@@ -22,10 +24,45 @@ pull_request_review:
     may_promote: false
     may_push: false
 
-  human_gate:
+  merge_controller:
+    enabled: true
+    authority: deterministic
+    execution_environment: wsl2-or-approved-runner
+    verification_count: 5
+    required_verifications:
+      - deterministic-qualification
+      - deterministic-code
+      - deterministic-security
+      - provenance-integrity
+      - governance-policy
+    binds_exact_commit_sha: true
+    all_verifications_same_head_sha: true
+    require_pr_mergeable: true
+    require_no_unresolved_blocking_threads: true
+    fail_closed_on_missing_or_stale_evidence: true
+    forbid_force_push: true
+    forbid_branch_protection_bypass: true
+    blocking_findings:
+      - P1
+      - P2
+
+  owner_authorization:
+    enabled: true
+    decision_authority: repository-owner
+    recording_agent: chatgpt-allowed-after-explicit-owner-instruction
+    transport: github-pull-request-comment
+    command: /owner-authorization approve scope=<scope> sha=<exact-head-sha>
+    binds_exact_commit_sha: true
+    binds_scope: true
+    stale_on_head_change: true
+    fail_closed: true
     required_for:
-      - architecture_changes
+      - review_policy_changes
       - infrastructure_apply
       - destructive_changes
       - state_migrations
       - dns_network_iam_secret_changes
+      - mgmt_bootstrap_apply
+      - public_ingress_activation
+      - routing_change
+      - peer_or_key_change

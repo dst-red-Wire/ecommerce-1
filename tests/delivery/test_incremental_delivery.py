@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -21,15 +22,27 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
     def parent_evidence(self):
         return {
-            "schema_version": 2,
+            "schema_version": 5,
             "base_sha": self.BASE,
             "head_sha": self.PARENT,
             "status": "PASS",
             "exact_commit_evidence": True,
+            "head_tree_sha": "4" * 40,
+            "changed_paths": [
+                "frontend/apps/storefront/app/page.tsx",
+                "platform/terraform/main.tf",
+                "scripts/resource-sizing.rb",
+            ],
+            "qualification_identity": REPOCTL.qualification_identity(),
+            "created_at_epoch": time.time(),
             "gates": [
                 {"gate": "frontend:storefront", "status": "PASS"},
                 {"gate": "platform:terraform", "status": "PASS"},
                 {"gate": "system", "status": "PASS"},
+            ]
+            + [
+                {"gate": name, "status": "PASS"}
+                for name, _ in REPOCTL._global_gate_commands("origin/main", "feature-head")
             ],
         }
 
@@ -42,6 +55,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
             return f"{self.HEAD} {self.PARENT}\n"
         if args == ("rev-parse", "origin/main"):
             return self.BASE + "\n"
+        if args == ("rev-parse", f"{self.PARENT}^{{tree}}"):
+            return "4" * 40 + "\n"
         if args == ("status", "--porcelain", "--untracked-files=all"):
             return ""
         raise AssertionError(f"unexpected git call: {args}")
@@ -94,12 +109,19 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
         self.assertEqual(
-            ["governance", "runtime-efficiency", "contracts", "automation", "security"],
+            ["preflight", "governance", "runtime-efficiency", "contracts", "automation", "security"],
             executed,
         )
         records = {record["gate"]: record for record in captured["records"]}
@@ -170,7 +192,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
             context = Path(tmp)
             evidence_dir = context / "evidence"
             evidence_dir.mkdir()
-            (evidence_dir / f"{self.PARENT}.json").write_text(json.dumps(self.parent_evidence()), encoding="utf-8")
+            parent = self.parent_evidence()
+            parent["changed_paths"] = ["platform/terraform/main.tf", "scripts/resource-sizing.rb"]
+            parent["gates"] = [row for row in parent["gates"] if row["gate"] != "frontend:storefront"]
+            (evidence_dir / f"{self.PARENT}.json").write_text(json.dumps(parent), encoding="utf-8")
 
             def fake_changed_paths(base, head):
                 if base == "origin/main":
@@ -202,6 +227,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(
+                    REPOCTL,
+                    "_run_independent_gates",
+                    side_effect=lambda gates, records, env: all(
+                        fake_run_gate(name, command, records, env) for name, command in gates
+                    ),
+                ),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))

@@ -21,4 +21,4 @@ access_gateways:
 implementation:
   terraform_wiring: future-pr-after-contract-merge
   ansible_wiring: future-pr-after-contract-merge
-  human_apply_gate: true
+  owner_authorization: required

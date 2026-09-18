@@ -182,6 +182,40 @@ class CIAffectedTest < Minitest::Test
     assert_includes affected, "system"
   end
 
+  def test_event_producers_route_declared_consumers_and_transitive_dependents
+    root = File.expand_path("..", __dir__)
+    services, = AffectedComponents.load_project(root, "HEAD")
+    consumers = AffectedComponents.service_consumers(root, "origin/main", "HEAD", services)
+    %w[order notification returns billing fulfillment].each do |consumer|
+      assert_includes consumers.fetch("payment"), consumer
+    end
+    affected = AffectedComponents.classify(["services/payment/internal/application/change.go"],
+      services: services, public_contracts: {}, service_consumers: consumers)
+    %w[payment order notification returns billing fulfillment].each do |consumer|
+      assert_includes affected, "service:#{consumer}"
+    end
+  end
+
+  def test_literal_newline_paths_survive_worktree_and_commit_classification
+    Dir.mktmpdir("ci-affected-literal") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "base.txt"), "base")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        name = "scripts/line\nbreak.py"
+        FileUtils.mkdir_p(File.join(dir, "scripts"))
+        File.write(File.join(dir, name), "def broken(\n")
+        assert_equal [name], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+        isolated_git("add", "--", name, chdir: dir)
+        isolated_git("commit", "-qm", "literal name", chdir: dir)
+        assert_equal [name], AffectedComponents.changed_paths(dir, base, "HEAD")
+        assert_equal %w[global system], classify(name)
+      end
+    end
+  end
+
   def test_changed_paths_reads_exact_git_range
     Dir.mktmpdir("ci-affected-git") do |dir|
       with_isolated_git_environment do
@@ -210,6 +244,107 @@ class CIAffectedTest < Minitest::Test
         File.write(File.join(dir, "new.txt"), "new\n")
         assert_equal ["new.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
       end
+    end
+  end
+
+  def test_changed_paths_preserves_deletions
+    Dir.mktmpdir("ci-affected-delete") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "deleted.txt"), "one\n")
+        isolated_git("add", "deleted.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.delete(File.join(dir, "deleted.txt"))
+        assert_equal ["deleted.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+      end
+    end
+  end
+
+  def test_service_consumers_include_transitive_dependents
+    Dir.mktmpdir("ci-affected-consumers") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        FileUtils.mkdir_p(File.join(dir, "config/contracts"))
+        File.write(File.join(dir, "config/contracts/dependency-map.yaml"), <<~YAML)
+          services:
+            product: {sync: []}
+            cart: {sync: [product]}
+            checkout: {sync: [cart]}
+        YAML
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        head = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        consumers = AffectedComponents.service_consumers(dir, head, head, %w[product cart checkout])
+        assert_equal %w[cart checkout], consumers["product"]
+      end
+    end
+  end
+
+  def test_existing_root_documentation_remains_global_only
+    %w[CONTRIBUTING.md SECURITY.md LICENSE].each do |path|
+      assert_equal ["global"], classify(path)
+    end
+  end
+
+  def test_retired_contract_uses_base_registry
+    current = [["product"], {}, "contracts/openapi/common.yaml"]
+    previous = [["product"], PUBLIC, "contracts/openapi/common.yaml"]
+    loader = ->(_root, ref) { ref == "base" ? previous : current }
+    AffectedComponents.stub(:load_project, loader) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      affected = AffectedComponents.classify(["contracts/openapi/product.v1.yaml"],
+        services: services, public_contracts: contracts, common_openapi: common)
+      assert_includes affected, "service:product"
+      assert_includes affected, "frontend:admin"
+    end
+  end
+
+  def test_common_contract_rename_retains_both_registry_paths
+    old_path = "contracts/openapi/common.v1.yaml"
+    new_path = "contracts/openapi/common.v2.yaml"
+    previous = [["cart", "product"], PUBLIC, old_path]
+    current = [["cart", "product"], PUBLIC, new_path]
+    loader = ->(_root, ref) { ref == "base" ? previous : current }
+    AffectedComponents.stub(:load_project, loader) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      [[old_path], [new_path], [old_path, new_path]].each do |paths|
+        affected = AffectedComponents.classify(paths,
+          services: services, public_contracts: contracts, common_openapi: common)
+        assert_equal ["frontend:admin", "frontend:storefront", "global", "service:cart", "service:product"], affected
+      end
+    end
+  end
+
+  def test_non_utf8_git_paths_route_conservatively
+    Dir.mktmpdir("ci-affected-binary") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "base.txt"), "base")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        FileUtils.mkdir_p(File.join(dir, "scripts"))
+        path = "scripts/bad\xff.py".b
+        File.binwrite(File.join(dir.b, path), "pass\n")
+        assert_equal [path], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+        isolated_git("add", ".", chdir: dir)
+        isolated_git("commit", "-qm", "head", chdir: dir)
+        paths = AffectedComponents.changed_paths(dir, base, "HEAD")
+        assert_equal [path], paths
+        assert_equal ["global", "system"], classify(*paths)
+      end
+    end
+  end
+
+  def test_retired_service_paths_keep_base_ownership
+    previous = [["cart", "product"], PUBLIC, "contracts/openapi/common.yaml"]
+    current = [["product"], PUBLIC, "contracts/openapi/common.yaml"]
+    AffectedComponents.stub(:load_project, ->(_root, ref) { ref == "base" ? previous : current }) do
+      services, contracts, common = AffectedComponents.project_for_change("unused", "base", "head")
+      affected = AffectedComponents.classify(["services/cart/main.go"],
+        services: services, public_contracts: contracts, common_openapi: common)
+      assert_includes affected, "service:cart"
     end
   end
 
