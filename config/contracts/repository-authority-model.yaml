@@ -61,8 +61,19 @@ native_projections:
 
 orchestration_adapters:
   - path: Makefile
+    forbidden_markers:
+      - versions.env
+      - MANAGED_BIN
   - path: frontend/Makefile
+    forbidden_markers:
+      - versions.env
+      - TEMPL_VERSION
   - path: .pre-commit-config.yaml
+    forbidden_markers:
+      - ruff
+      - gitleaks
+      - ansible-lint
+      - terraform fmt
 
 component_manifests:
   - pattern: go.work
