@@ -538,8 +538,8 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         return 0
 
     options = {
-        "base_sha": git("rev-parse", base).strip() if base else "",
-        "head": "WORKTREE" if head == "WORKTREE" else git("rev-parse", head).strip(),
+        "base_tree": git("rev-parse", f"{base}^{{tree}}").strip() if base else "",
+        "head_tree": worktree_tree_sha() if head == "WORKTREE" else git("rev-parse", f"{head}^{{tree}}").strip(),
         "generate": bool(generate),
     }
     return _run_cached_static_gate("contracts", options, execute)
