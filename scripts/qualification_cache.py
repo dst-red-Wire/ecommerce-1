@@ -94,6 +94,30 @@ def digest_paths(paths: list[Path] | tuple[Path, ...], *, root: Path = ROOT) -> 
     return digest.hexdigest()
 
 
+def digest_globs(patterns: list[str] | tuple[str, ...], *, root: Path = ROOT) -> str:
+    """Digest the complete current content set selected by repository-relative globs."""
+    root = root.resolve()
+    digest = hashlib.sha256()
+    selected: dict[str, Path] = {}
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ValueError("cache input patterns must be non-empty strings")
+        digest.update(b"pattern\0")
+        digest.update(pattern.encode("utf-8"))
+        digest.update(b"\0")
+        for path in root.glob(pattern):
+            if not path.is_file():
+                continue
+            relative = path.resolve().relative_to(root).as_posix()
+            selected[relative] = path
+    for relative, path in sorted(selected.items()):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def tool_version(executable: str, *args: str) -> str:
     key = (executable, tuple(args))
     cached = _TOOL_VERSIONS.get(key)
