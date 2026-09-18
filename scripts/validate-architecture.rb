@@ -546,6 +546,7 @@ module ArchitectureValidator
         "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
         "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
         "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon",
+        "infrastructure_api" => "crossplane",
         "autoscaling" => {
           "synchronous_pods" => "kubernetes-hpa", "event_driven_pods" => "keda",
           "certified_nodes" => "fixed", "preprod_perf_burst" => "gate-only"
