@@ -25,6 +25,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import qualification_cache
+
 
 def _missing_repository_delivery(*_args, **_kwargs):
     raise RuntimeError(
@@ -115,8 +117,10 @@ def git(*args: str, check: bool = True) -> str:
 
 def ruby_yaml(path: str) -> dict:
     require("ruby")
-    script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
-    return json.loads(output(["ruby", "-e", script, path]))
+    source = Path(path)
+    if not source.is_absolute():
+        source = ROOT / source
+    return qualification_cache.psych_load(source)
 
 
 def pinned_versions() -> dict[str, str]:
