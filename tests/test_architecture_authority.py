@@ -290,6 +290,123 @@ graph LR
                     lock.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+    def test_repository_governance_contract_is_repository_wide(self):
+        contract = authority.V5_REPOSITORY_GOVERNANCE
+        self.assertEqual("entire-repository", contract["scope"])
+        self.assertEqual(
+            "architecture.lock.yaml",
+            contract["transverse_rule_contract"]["source_of_truth"],
+        )
+        self.assertEqual(
+            "central-contract-only",
+            contract["transverse_rule_contract"]["rule_definition"],
+        )
+        self.assertEqual(
+            "generic-validator",
+            contract["transverse_rule_contract"]["enforcement"],
+        )
+        self.assertEqual(
+            "forbidden",
+            contract["transverse_rule_contract"]["per_file_rule_propagation"],
+        )
+        self.assertEqual(
+            "only-if-required-to-consume-contract",
+            contract["transverse_rule_contract"]["consumer_changes"],
+        )
+        authorization = contract["owner_authorization"]
+        self.assertEqual(
+            "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
+            authorization["syntax"],
+        )
+        self.assertEqual("repository-owner", authorization["decision_authority"])
+        self.assertEqual("ChatGPT", authorization["recording_agent"])
+        self.assertTrue(authorization["recording_requires_explicit_owner_instruction"])
+        self.assertEqual("exact", authorization["sha_binding"])
+        self.assertEqual("exact", authorization["scope_binding"])
+        self.assertEqual("authorization-expired", authorization["head_change"])
+        self.assertEqual("block", authorization["absence_or_mismatch"])
+
+    def test_owner_authorization_is_exact_and_fail_closed(self):
+        head = "a" * 40
+        command = f"/owner-authorization approve scope=repository sha={head}"
+        valid = dict(
+            expected_scope="repository",
+            head_sha=head,
+            decision_authority="repository-owner",
+            recording_agent="ChatGPT",
+            explicit_owner_instruction=True,
+        )
+        self.assertEqual([], authority.owner_authorization_errors(command, **valid))
+
+        cases = (
+            (
+                None,
+                valid,
+                "BLOCK owner authorization missing",
+            ),
+            (
+                command,
+                {**valid, "expected_scope": "architecture"},
+                "BLOCK owner authorization scope mismatch",
+            ),
+            (
+                command,
+                {**valid, "head_sha": "b" * 40},
+                "BLOCK owner authorization SHA mismatch or authorization expired after HEAD change",
+            ),
+            (
+                "/owner-authorization approve scope=repository sha=abc123",
+                valid,
+                "BLOCK owner authorization syntax mismatch",
+            ),
+            (
+                command,
+                {**valid, "decision_authority": "recording-agent"},
+                "BLOCK owner authorization decision authority mismatch",
+            ),
+            (
+                command,
+                {**valid, "recording_agent": "other-agent"},
+                "BLOCK owner authorization recording agent mismatch",
+            ),
+            (
+                command,
+                {**valid, "explicit_owner_instruction": False},
+                "BLOCK owner authorization requires explicit repository-owner instruction",
+            ),
+        )
+        for candidate, kwargs, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, authority.owner_authorization_errors(candidate, **kwargs))
+
+    def test_repository_governance_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            mutations = (
+                ("  scope: entire-repository", "  scope: developer-platform"),
+                (
+                    "    per_file_rule_propagation: forbidden",
+                    "    per_file_rule_propagation: allowed",
+                ),
+                ("    recording_agent: ChatGPT", "    recording_agent: autonomous-agent"),
+                (
+                    "    head_change: authorization-expired",
+                    "    head_change: authorization-valid",
+                ),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    lock.write_text(original.replace(before, after, 1))
+                    self.assertIn(
+                        "repository_governance must match the approved repository-wide contract",
+                        authority.validate(root),
+                    )
+                    lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
