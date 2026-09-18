@@ -6,7 +6,6 @@ import re
 import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
-INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
 CANONICAL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,6 +30,7 @@ def _load_canonical_yaml(relative):
 
 
 _CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
+INDEX = _CANONICAL_LOCK["topology_contracts"]["exact_index"]
 V5_FRONTENDS = list(_CANONICAL_LOCK["business"]["frontends"])
 EXPECTED_V5_FRONTEND_RUNTIME = dict(_CANONICAL_LOCK["business"]["frontend_runtime"])
 V5_PROD_TOPOLOGY_KEYS = frozenset(
@@ -1205,7 +1205,8 @@ def validate(root):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
         mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if f"`{relative}`" not in mandatory_handoffs:
                 errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
@@ -1359,14 +1360,15 @@ def validate(root):
         l2_canonical = router["canonical"]["L2"]
         canonical_l2_contracts = (
             INDEX,
-            "config/infrastructure/deployment-waves.yaml",
-            "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+            lock["machine_contracts"]["deployment_waves"],
+            topology_contracts["aiops"],
+            topology_contracts["mlops"],
         )
         for relative in canonical_l2_contracts:
             if relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
         for keyword in ("resilience", "recovery", "mlops", "aiops"):
