@@ -587,6 +587,7 @@ def runtime_efficiency_check() -> int:
 
 
 def governance() -> int:
+    repository_authority_check()
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
@@ -1118,24 +1119,38 @@ def service_check(service: str) -> int:
 
 
 def security() -> int:
-    require("gitleaks")
-    if os.environ.get("HEAD", "").strip() == "WORKTREE":
-        tree_sha = worktree_tree_sha()
-        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
-            temp_root = Path(temp_dir)
-            archive = temp_root / "tree.tar"
-            scan_root = temp_root / "tree"
-            scan_root.mkdir()
-            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
-            shutil.unpack_archive(str(archive), str(scan_root), "tar")
-            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
-    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-        run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    else:
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
+    policy = security_scan_policy()
+    scanner = policy.get("scanner", {})
+    command = str(scanner.get("name", "gitleaks"))
+    require(command)
+
+    execution = policy.get("execution", {})
+    with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
+        config = Path(policy_dir) / "gitleaks.toml"
+        write_gitleaks_policy_config(config, policy)
+        common = [command, "--config", str(config)]
+        if execution.get("redact") is True:
+            common.append("--redact")
+        if execution.get("no_banner") is True:
+            common.append("--no-banner")
+
+        if os.environ.get("HEAD", "").strip() == "WORKTREE":
+            tree_sha = worktree_tree_sha()
+            with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+                temp_root = Path(temp_dir)
+                archive = temp_root / "tree.tar"
+                scan_root = temp_root / "tree"
+                scan_root.mkdir()
+                run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+                shutil.unpack_archive(str(archive), str(scan_root), "tar")
+                run([*common, "dir", str(scan_root)])
+        elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+            run([*common, "git", "."])
+        else:
+            run([*common, "dir", "."])
+
     print("PASS secret scan completed")
     return 0
-
 
 def terraform_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
