@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import ast
 import json
 import os
@@ -116,6 +117,22 @@ def validate_toolchain_projections(contract: dict | None = None) -> None:
     expected_collections = lock.get("ansible_collections", {})
     if projected_collections != expected_collections:
         raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
+
+    ansible_config = lock.get("native_tool_configs", {}).get("ansible", {})
+    ansible_projection = ROOT / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
+    parser = configparser.ConfigParser()
+    parser.read(ansible_projection, encoding="utf-8")
+    expected_sections = ansible_config.get("sections", {})
+    actual_sections = {
+        section: {key: value for key, value in parser.items(section)}
+        for section in parser.sections()
+    }
+    normalized_expected_sections = {
+        str(section): {str(key): str(value) for key, value in values.items()}
+        for section, values in expected_sections.items()
+    }
+    if actual_sections != normalized_expected_sections:
+        raise ValueError("platform/ansible/ansible.cfg drifted from central toolchain lock")
 
     bazel = lock.get("native_tool_configs", {}).get("bazel", {})
     version_ref = bazel.get("version_ref")
