@@ -39,11 +39,12 @@ class ParallelLocalGateTest(unittest.TestCase):
             mock.patch.object(REPOCTL, "_local_parallelism", return_value=1),
             mock.patch.object(REPOCTL, "_local_resources", return_value=(2, 4 * 1024**3)),
             mock.patch.object(REPOCTL.os, "name", "nt"),
+            mock.patch.object(REPOCTL.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, create=True),
             mock.patch.object(REPOCTL.subprocess, "Popen", popen),
             mock.patch.object(REPOCTL.subprocess, "run") as run,
         ):
             self.assertTrue(REPOCTL._run_independent_gates([("windows", ["cmd", "/c", "exit", "0"])], [], {}))
-        self.assertEqual(REPOCTL.subprocess.CREATE_NEW_PROCESS_GROUP, popen.call_args.kwargs["creationflags"])
+        self.assertEqual(0x00000200, popen.call_args.kwargs["creationflags"])
         self.assertNotIn("start_new_session", popen.call_args.kwargs)
         commands = [call.args[0] for call in run.call_args_list]
         self.assertTrue(any(command[:4] == ["taskkill", "/PID", "4242", "/T"] for command in commands))
