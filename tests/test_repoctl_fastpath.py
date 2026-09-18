@@ -1,3 +1,4 @@
+import os
 import importlib.util
 import pathlib
 import subprocess
@@ -13,6 +14,15 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def setUp(self):
+        # Git exports worktree-local variables to commit hooks. Temporary repositories
+        # must not inherit those paths or mutate the caller's index/configuration.
+        isolated = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        isolated.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        environment = mock.patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
