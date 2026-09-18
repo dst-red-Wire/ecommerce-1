@@ -87,6 +87,25 @@ class QualificationCacheTest(unittest.TestCase):
         entry = tool_home / "qualification-cache" / "v1" / "unit" / f"{key}.json"
         self.assertTrue(entry.is_file())
 
+    def test_digest_globs_tracks_only_declared_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="qualification-cache-globs-") as directory:
+            root = Path(directory)
+            (root / "governance").mkdir()
+            (root / "ansible").mkdir()
+            governed = root / "governance" / "contract.yaml"
+            unrelated = root / "ansible" / "tasks.yml"
+            governed.write_text("value: one\n", encoding="utf-8")
+            unrelated.write_text("value: one\n", encoding="utf-8")
+
+            first = qualification_cache.digest_globs(["governance/**/*"], root=root)
+            unrelated.write_text("value: two\n", encoding="utf-8")
+            second = qualification_cache.digest_globs(["governance/**/*"], root=root)
+            self.assertEqual(first, second)
+
+            governed.write_text("value: two\n", encoding="utf-8")
+            third = qualification_cache.digest_globs(["governance/**/*"], root=root)
+            self.assertNotEqual(second, third)
+
     def test_corrupt_disk_entry_is_a_cache_miss(self):
         tool_home = self.isolated_tool_home()
         key = qualification_cache.build_key(
