@@ -266,7 +266,18 @@ def repository_authority_check() -> int:
 
     toolchain = load_toolchain_lock()
     validate_toolchain_projections(toolchain)
-    validate_contract(load_contract(), toolchain["versions"])
+    capability_graph = load_contract()
+    validate_contract(capability_graph, toolchain["versions"])
+
+    capability_policy = toolchain.get("capability_policy", {})
+    if capability_graph.get("supported") != capability_policy.get("supported"):
+        raise RuntimeError("capability graph supported platforms drifted from central toolchain lock")
+    allowed_provision_types = set(capability_policy.get("managed_provision_types", []))
+    for capability, owner in capability_graph.get("provision_owners", {}).items():
+        if owner not in allowed_provision_types:
+            raise RuntimeError(
+                f"capability {capability} uses provision owner {owner!r} outside central toolchain policy"
+            )
 
     go_policy = toolchain.get("language_contracts", {}).get("go", {})
     expected_go_directive = str(go_policy.get("workspace_language_directive", ""))
