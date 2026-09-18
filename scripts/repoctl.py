@@ -154,6 +154,151 @@ def source_quality_policy() -> dict:
     return copy.deepcopy(_SOURCE_QUALITY_POLICY)
 
 
+_REPOSITORY_AUTHORITY_MODEL: dict | None = None
+_SECURITY_SCAN_POLICY: dict | None = None
+
+
+def repository_authority_model() -> dict:
+    global _REPOSITORY_AUTHORITY_MODEL
+    if _REPOSITORY_AUTHORITY_MODEL is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("repository_authority_model")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.repository_authority_model")
+        model = ruby_yaml(relative)
+        if (
+            model.get("architecture_authority") != "architecture.lock.yaml"
+            or model.get("scope") != "entire-repository"
+            or model.get("status") != "exact"
+        ):
+            raise RuntimeError("repository authority model must inherit architecture.lock.yaml for the entire repository")
+        _REPOSITORY_AUTHORITY_MODEL = model
+    return copy.deepcopy(_REPOSITORY_AUTHORITY_MODEL)
+
+
+def security_scan_policy() -> dict:
+    global _SECURITY_SCAN_POLICY
+    if _SECURITY_SCAN_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("security_scan_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.security_scan_policy")
+        policy = ruby_yaml(relative)
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "entire-repository"
+            or policy.get("status") != "exact"
+        ):
+            raise RuntimeError("security scan policy must inherit architecture.lock.yaml for the entire repository")
+        _SECURITY_SCAN_POLICY = policy
+    return copy.deepcopy(_SECURITY_SCAN_POLICY)
+
+
+def write_gitleaks_policy_config(path: Path, policy: dict | None = None) -> None:
+    contract = policy or security_scan_policy()
+    config = contract.get("configuration", {})
+    allowlist = config.get("allowlist", {})
+    patterns = allowlist.get("paths", [])
+    if not isinstance(patterns, list) or any(not isinstance(item, str) for item in patterns):
+        raise RuntimeError("security scan allowlist paths must be strings")
+    lines = [
+        'title = "Generated from central security-scan-policy"',
+        "",
+        "[extend]",
+        f"useDefault = {'true' if config.get('use_default_rules') is True else 'false'}",
+        "",
+        "[allowlist]",
+        f"description = {json.dumps(str(allowlist.get('description', '')))}",
+        "paths = [",
+    ]
+    lines.extend(f"  {json.dumps(pattern)}," for pattern in patterns)
+    lines.extend(["]", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def repository_authority_check() -> int:
+    """Validate the repository-wide authority hierarchy and all declared projections."""
+    lock = ruby_yaml("architecture.lock.yaml")
+    registry = lock.get("machine_contracts", {})
+    if not isinstance(registry, dict):
+        raise RuntimeError("architecture.lock.yaml machine_contracts must be a mapping")
+
+    model = repository_authority_model()
+    for domain, entry in model.get("domains", {}).items():
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"repository authority domain {domain} must be a mapping")
+        machine_contract = entry.get("machine_contract")
+        if machine_contract:
+            if machine_contract not in registry:
+                raise RuntimeError(f"repository authority domain {domain} references missing machine contract {machine_contract}")
+            if not (ROOT / str(registry[machine_contract])).is_file():
+                raise RuntimeError(f"repository authority domain {domain} contract path is missing")
+
+    for relative in model.get("forbidden_parallel_policy_files", []):
+        if (ROOT / str(relative)).exists():
+            raise RuntimeError(f"parallel local policy is forbidden by repository authority model: {relative}")
+
+    for projection in model.get("native_projections", []):
+        if not isinstance(projection, dict):
+            raise RuntimeError("repository native projection entries must be mappings")
+        relative = projection.get("path")
+        authority = projection.get("authority")
+        if not isinstance(relative, str) or not relative or not (ROOT / relative).is_file():
+            raise RuntimeError(f"repository projection missing: {relative!r}")
+        if not isinstance(authority, str) or "machine_contracts." not in authority:
+            raise RuntimeError(f"repository projection {relative} must name a machine-contract authority")
+        authority_key = authority.split("machine_contracts.", 1)[1].split("#", 1)[0].split(".", 1)[0]
+        if authority_key not in registry:
+            raise RuntimeError(f"repository projection {relative} references unknown authority {authority_key}")
+
+    for adapter in model.get("orchestration_adapters", []):
+        relative = adapter.get("path") if isinstance(adapter, dict) else None
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            raise RuntimeError(f"repository orchestration adapter missing: {relative!r}")
+        content = (ROOT / relative).read_text(encoding="utf-8")
+        if "repoctl.py" not in content:
+            raise RuntimeError(f"repository orchestration adapter must delegate to repoctl: {relative}")
+
+    for manifest in model.get("component_manifests", []):
+        pattern = manifest.get("pattern") if isinstance(manifest, dict) else None
+        if not isinstance(pattern, str) or not list(ROOT.glob(pattern)):
+            raise RuntimeError(f"component manifest pattern has no repository matches: {pattern!r}")
+
+    from capability_bootstrap import load_toolchain_lock, validate_toolchain_projections
+
+    toolchain = load_toolchain_lock()
+    validate_toolchain_projections(toolchain)
+
+    go_policy = toolchain.get("language_contracts", {}).get("go", {})
+    expected_go_directive = str(go_policy.get("workspace_language_directive", ""))
+    if expected_go_directive:
+        go_manifests = [ROOT / "go.work", ROOT / "frontend" / "go.mod"]
+        go_manifests.extend(sorted((ROOT / "services").glob("*/go.mod")))
+        for manifest in go_manifests:
+            text = manifest.read_text(encoding="utf-8")
+            match = re.search(r"^go\s+([0-9.]+)\s*$", text, re.MULTILINE)
+            if not match or match.group(1) != expected_go_directive:
+                raise RuntimeError(
+                    f"{manifest.relative_to(ROOT)} Go directive must project central language version {expected_go_directive}"
+                )
+
+    templ_version = toolchain["versions"].get("TEMPL_VERSION")
+    frontend_go_mod = (ROOT / "frontend" / "go.mod").read_text(encoding="utf-8")
+    if templ_version and f"github.com/a-h/templ v{templ_version}" not in frontend_go_mod:
+        raise RuntimeError("frontend/go.mod templ version drifted from central toolchain lock")
+
+    security_policy = security_scan_policy()
+    scanner = security_policy.get("scanner", {})
+    version_key = scanner.get("version_key")
+    checksum_key = scanner.get("checksum_key")
+    for key in (version_key, checksum_key):
+        if not isinstance(key, str) or key not in toolchain["versions"]:
+            raise RuntimeError(f"security scan policy references missing toolchain key: {key!r}")
+
+    print("PASS repository maximal authority model")
+    return 0
+
+
 def source_quality_adapter(name: str) -> dict:
     adapter = source_quality_policy().get("adapters", {}).get(name)
     if not isinstance(adapter, dict):
