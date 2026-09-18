@@ -333,6 +333,7 @@ machine_contracts:
   source_quality_policy: config/contracts/source-quality-policy.yaml
   tekton_trigger_runtime: config/contracts/tekton-trigger-runtime.yaml
   telemetry_data_policy: config/contracts/telemetry-data-policy.yaml
+  terraform_provider_lock: config/contracts/terraform-provider-lock.yaml
   time_authority_policy: config/contracts/time-authority-policy.yaml
   traffic_class_policy: config/contracts/traffic-class-policy.yaml
   waypoint_scope: config/contracts/waypoint-scope.yaml
