@@ -1373,8 +1373,8 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
 
     def terminate_process_tree(process: subprocess.Popen, *, force: bool) -> None:
         if os.name == "nt":
-            if process.poll() is not None:
-                return
+            # The group leader may already have exited while descendants survive.
+            # taskkill /T is therefore attempted for every started gate PID.
             command = ["taskkill", "/PID", str(process.pid), "/T"]
             if force:
                 command.append("/F")
