@@ -25,6 +25,7 @@ class ExactEvidenceValidationTest(unittest.TestCase):
             "base_sha": "b",
             "head_tree_sha": "t",
             "changed_paths": ["x"],
+            "affected_components": ["global"],
             "qualification_identity": "identity",
             "created_at_epoch": time.time(),
             "gates": [{"gate": name, "status": "PASS"} for name, _ in REPOCTL._global_gate_commands("base", "h")],
@@ -54,6 +55,31 @@ class ExactEvidenceValidationTest(unittest.TestCase):
 
     def test_accepts_current_exact_identity(self):
         self.assertIsNotNone(self.validate(self.evidence()))
+
+    def test_derives_five_deterministic_merge_verifications(self):
+        evidence = self.evidence()
+        values = {
+            ("rev-parse", "h"): "h",
+            ("rev-parse", "base"): "b",
+        }
+        with mock.patch.object(REPOCTL, "git", side_effect=lambda *args: values[args]):
+            checks = REPOCTL._derive_merge_verifications(evidence, "base", "h")
+        self.assertEqual(set(REPOCTL.MERGE_VERIFICATION_NAMES), set(checks))
+        self.assertTrue(all(check["status"] == "PASS" for check in checks.values()))
+        self.assertNotIn("security", checks["deterministic-code"]["source_gates"])
+        self.assertIn("security", checks["deterministic-security"]["source_gates"])
+
+    def test_worktree_provenance_is_not_mergeable(self):
+        evidence = self.evidence()
+        evidence["exact_commit_evidence"] = False
+        evidence["head_sha"] = "h"
+        values = {
+            ("rev-parse", "WORKTREE"): "h",
+            ("rev-parse", "base"): "b",
+        }
+        with mock.patch.object(REPOCTL, "git", side_effect=lambda *args: values[args]):
+            checks = REPOCTL._derive_merge_verifications(evidence, "base", "WORKTREE")
+        self.assertEqual("BLOCKED", checks["provenance-integrity"]["status"])
 
     def test_rejects_stale_or_tampered_evidence(self):
         for field, value in (
