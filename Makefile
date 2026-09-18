@@ -63,9 +63,8 @@ format: ## Format Python and Go frontend sources
 	@ruff format scripts tests
 	@gofmt -w frontend
 
-format-check: ## Check Ruff and Go formatting without mutation
-	@ruff format --check scripts tests
-	@output="$$(gofmt -l frontend)" || exit $$?; test -z "$$output" || { printf '%s\n' "$$output"; exit 1; }
+format-check: ## Run repository-wide non-mutating format diagnostics from the central quality policy
+	@$(PYTHON) scripts/repoctl.py format-check
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
