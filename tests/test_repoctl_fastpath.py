@@ -24,19 +24,62 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
     def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
         calls = []
+        policy = {
+            "formatter": {
+                "executable_preference": ["tofu", "terraform"],
+                "args": ["fmt", "-check", "-recursive", "-diff"],
+                "drift_exit_codes": [3],
+            },
+            "validation": {
+                "init_args": ["init", "-backend=false", "-input=false"],
+                "validate_args": ["validate"],
+                "module_validation_in_temporary_copy": True,
+            },
+        }
 
         def fake_which(command):
             return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
 
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
         with (
             mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
+            mock.patch.object(MOD, "source_quality_adapter", return_value=policy),
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
-            mock.patch.object(MOD, "run", side_effect=lambda argv, **kwargs: calls.append(argv)),
+            mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
             self.assertEqual(0, MOD.terraform_check())
 
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+
+    def test_source_quality_policy_is_central_repository_authority(self):
+        policy = MOD.source_quality_policy()
+        self.assertEqual("architecture.lock.yaml", policy["architecture_authority"])
+        self.assertEqual("entire-repository", policy["scope"])
+        self.assertEqual("advisory", policy["principles"]["formatter_drift"])
+        self.assertEqual("blocking", policy["principles"]["syntax_validation"])
+        self.assertEqual("blocking", policy["principles"]["semantic_validation"])
+        self.assertEqual("forbidden", policy["principles"]["file_specific_quality_exceptions"])
+        self.assertFalse((ROOT / ".ansible-lint").exists())
+
+        advisory = set(policy["adapters"]["ansible"]["lint"]["advisory_rules"])
+        self.assertTrue(
+            {"partial-become", "latest[git]", "no-handler", "yaml[empty-lines]"}.issubset(advisory)
+        )
+
+    def test_declared_formatter_drift_is_advisory_but_execution_errors_block(self):
+        command = ["terraform", "fmt", "-check", "-recursive", "-diff"]
+        drift = subprocess.CompletedProcess(command, 3, "format diff", "")
+        with mock.patch.object(MOD, "run", return_value=drift):
+            MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
+
+        failure = subprocess.CompletedProcess(command, 2, "", "formatter crashed")
+        with mock.patch.object(MOD, "run", return_value=failure):
+            with self.assertRaisesRegex(RuntimeError, "formatter crashed"):
+                MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
 
     def test_exact_state_skips_ansible_startup(self):
         with (
