@@ -1,0 +1,17 @@
+version: 1
+kind: CodegenPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: generated-source
+authority_claims: [repository.codegen]
+principles:
+  generators_are_pinned: true
+  qualification_is_check_only: true
+  generated_drift: blocking
+generators:
+  templ: {capability: go, version_key: TEMPL_VERSION, source_scope: frontend}
+  sqlc: {capability: sqlc, source_scope: services}
+  openapi: {capability: oapi-codegen, source_registry: config/contracts/public-api-contracts.yaml}
+materialization:
+  qualification: temporary-copy
+  committed_generated_outputs: verified-against-canonical-inputs

@@ -1,0 +1,33 @@
+version: 1
+kind: SecurityScanPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+authority_claims:
+  - repository.security.secret-scanning
+  - repository.security.scan-exceptions
+principles:
+  fail_closed: true
+  local_parallel_policy: forbidden
+  inline_per_file_bypass: forbidden
+  machine_readable_evidence: required
+engines:
+  secrets:
+    capability: gitleaks
+    use_default_rules: true
+    blocking: true
+allowlist:
+  description: Ignore repository metadata, vendored dependencies and explicit test fixtures
+  paths:
+    - '(^|/)\.git/'
+    - '(^|/)node_modules/'
+    - '(^|/)vendor/'
+    - '(^|/)test-results/'
+    - '(^|/)tests/fixtures/'
+projections:
+  committed_gitleaks_toml: forbidden
+  generated_root: .context/generated/security
+exceptions:
+  authority: architecture.lock.yaml#machine_contracts.policy_exceptions
+evidence:
+  exact_head_sha: required

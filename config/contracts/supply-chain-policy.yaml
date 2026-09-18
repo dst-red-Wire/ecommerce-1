@@ -1,0 +1,21 @@
+version: 1
+kind: SupplyChainPolicy
+status: declared
+architecture_authority: architecture.lock.yaml
+scope: build-and-delivery
+authority_claims: [repository.supply-chain]
+principles:
+  immutable_images: true
+  latest_tag: forbidden
+  sbom: required-before-production
+  signature: required-before-production
+  provenance: exact-source-sha
+engines: {vulnerability_scan: trivy, sbom: syft, signing: cosign}
+registry: {authority: harbor}
+promotion:
+  strategy: build-once-promote-many
+  same_digest_across_environments: required
+milestone_enforcement:
+  M1-monorepo-bootstrap: contract-only
+  M7-qualification: enforce-scan-and-sbom
+  M8-preprod-certification: enforce-signature-and-provenance

@@ -1,0 +1,25 @@
+version: 1
+kind: DependencyLockPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+authority_claims: [repository.dependencies.lock-semantics]
+principles:
+  dependency_resolution_must_be_reproducible: true
+  unlocked_installation_in_qualification: forbidden
+  native_lockfiles_are_resolution_state_not_policy_authority: true
+required_paths:
+  - config/python/requirements.lock
+  - MODULE.bazel.lock
+  - platform/ansible/requirements.yml
+ecosystems:
+  python: {lock: config/python/requirements.lock, hashes: required}
+  bazel: {manifest: MODULE.bazel, lock: MODULE.bazel.lock}
+  go:
+    manifests: [frontend/go.mod, services/*/go.mod]
+    semantics: lock-when-dependency-resolution-produces-sums
+  ansible: {lock: platform/ansible/requirements.yml, exact_collection_versions: required}
+  terraform:
+    canonical_provider_authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
+    committed_native_lock_authority: false
+    qualification_projection: temporary
