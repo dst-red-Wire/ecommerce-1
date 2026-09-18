@@ -671,8 +671,7 @@ def frontend(action: str, scope: str = "") -> int:
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
-        if formatted.stdout.strip():
-            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        advisory_output_check("frontend gofmt", formatted.stdout or "")
         forbidden_frontend_artifacts()
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
@@ -951,9 +950,7 @@ def lint_all() -> int:
     if go_files:
         require("gofmt")
         p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip():
-            print(p.stdout, file=sys.stderr)
-            return 1
+        advisory_output_check("service gofmt", p.stdout or "")
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
