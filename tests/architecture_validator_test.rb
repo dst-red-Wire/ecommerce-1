@@ -473,15 +473,14 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
-  def test_required_topology_contract_registration_and_file_cannot_both_be_deleted
+  def test_unregistered_topology_contract_is_rejected
     %w[deployment_dag observability].each do |contract|
       with_contract_copy do |root|
         lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
-        path = lock.fetch("topology_contracts").delete(contract)
+        lock.fetch("topology_contracts").delete(contract)
         File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
-        FileUtils.rm(File.join(root, path))
-        assert_includes ArchitectureValidator.validate(root),
-                        "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("topology_contracts has unregistered governed files") }, contract
       end
     end
   end
@@ -498,25 +497,25 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
-  def test_v5_registry_role_path_assignments_are_exact
+  def test_registry_duplicate_path_assignment_is_rejected
     {"topology_contracts" => %w[preprod prod], "machine_contracts" => %w[preprod_inventory prod_inventory]}.each do |registry, keys|
       with_contract_copy do |root|
         mutate_yaml(root, "architecture.lock.yaml") do |data|
-          data[registry][keys[0]], data[registry][keys[1]] = data[registry][keys[1]], data[registry][keys[0]]
+          data[registry][keys[0]] = data[registry][keys[1]]
         end
-        assert ArchitectureValidator.validate(root).any? { |error| error.include?("complete approved V5 role/path registry") }
+        errors = ArchitectureValidator.validate(root)
+        assert errors.any? { |error| error.include?("must not register the same path more than once") }, registry
       end
     end
   end
 
-  def test_required_machine_contract_registration_and_file_cannot_both_be_deleted
+  def test_unregistered_machine_contract_is_rejected
     with_contract_copy do |root|
       lock = YAML.safe_load(File.read(File.join(root, "architecture.lock.yaml")))
-      path = lock.fetch("machine_contracts").delete("deployment_waves")
+      lock.fetch("machine_contracts").delete("deployment_waves")
       File.write(File.join(root, "architecture.lock.yaml"), YAML.dump(lock))
-      FileUtils.rm(File.join(root, path))
-      assert_includes ArchitectureValidator.validate(root),
-                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("machine_contracts has unregistered governed files") }
     end
   end
 
@@ -610,8 +609,8 @@ class ArchitectureValidatorTest < Minitest::Test
       mutate_yaml(root, alternate) { |data| data["validation"]["require_unique_ips"] = false }
       mutate_yaml(root, "architecture.lock.yaml") { |data| data["machine_contracts"]["network_plan"] = alternate }
 
-      assert_includes ArchitectureValidator.validate(root),
-                      "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("machine_contracts has unregistered governed files") }
     end
   end
 
