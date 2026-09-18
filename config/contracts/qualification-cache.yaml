@@ -8,6 +8,7 @@ scope:
   cacheable:
     - deterministic-static-parsing
     - deterministic-static-global-gates
+    - deterministic-static-component-gates
     - deterministic-code-generation-inputs
   forbidden:
     - git-status
@@ -111,6 +112,35 @@ consumers:
           - "**/*.sh"
           - platform/tekton/**/*
           - scripts/repoctl.py
+  repoctl_component_static_gates:
+    enabled: true
+    persistence: l2
+    gates:
+      platform:ansible:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/source-quality-policy.yaml
+          - config/toolchain/versions.env
+          - platform/ansible/**/*
+          - scripts/repoctl.py
+        fresh_prechecks:
+          - project-owned-collection-version-reconciliation
+        tools:
+          - ansible-lint
+          - ansible-playbook
+          - ansible-galaxy
+      platform:terraform:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/source-quality-policy.yaml
+          - config/toolchain/versions.env
+          - platform/terraform/**/*
+          - scripts/repoctl.py
+        fresh_prechecks:
+          - approved-terraform-provider-availability
+        tools:
+          - tofu
+          - terraform
   security_scan:
     persistence: forbidden
     reason: exact Git history and worktree state must be scanned fresh
