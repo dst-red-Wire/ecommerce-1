@@ -129,10 +129,21 @@ consumers:
           - ansible-lint
           - ansible-playbook
           - ansible-galaxy
-  uncached_component_gates:
-    platform:terraform:
-      persistence: forbidden
-      reason: standalone module validation may resolve provider state externally until a canonical module provider lock is enforced
+      platform:terraform:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/source-quality-policy.yaml
+          - config/contracts/terraform-provider-lock.yaml
+          - config/toolchain/versions.env
+          - platform/terraform/**/*.tf
+          - platform/terraform/**/*.tftpl
+          - scripts/repoctl.py
+        fresh_prechecks:
+          - approved-terraform-executable-availability
+          - canonical-provider-lock-contract
+        tools:
+          - tofu
+          - terraform
   security_scan:
     persistence: forbidden
     reason: exact Git history and worktree state must be scanned fresh
