@@ -251,6 +251,11 @@ def repository_authority_check() -> int:
         content = (ROOT / relative).read_text(encoding="utf-8")
         if "repoctl.py" not in content:
             raise RuntimeError(f"repository orchestration adapter must delegate to repoctl: {relative}")
+        for marker in adapter.get("forbidden_markers", []):
+            if not isinstance(marker, str) or not marker:
+                raise RuntimeError(f"repository orchestration adapter {relative} has invalid forbidden marker")
+            if marker in content:
+                raise RuntimeError(f"repository orchestration adapter contains local policy marker {marker!r}: {relative}")
 
     for manifest in model.get("component_manifests", []):
         pattern = manifest.get("pattern") if isinstance(manifest, dict) else None
