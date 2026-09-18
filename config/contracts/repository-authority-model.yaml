@@ -70,6 +70,8 @@ orchestration_adapters:
       - TEMPL_VERSION
   - path: .pre-commit-config.yaml
     forbidden_markers:
+      - minimum_pre_commit_version
+      - PRE_COMMIT_VERSION
       - ruff
       - gitleaks
       - ansible-lint
