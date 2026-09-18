@@ -46,6 +46,7 @@ V5_ROOT_KEYS = frozenset(
         "supply_chain",
         "topology_contracts",
         "machine_contracts",
+        "developer_platform",
         "prod_certified_topology",
         "superseded",
         "build_milestones",
@@ -80,6 +81,7 @@ V5_SECTION_KEYS = {
             "workload_identity",
             "iam",
             "runtime_security",
+            "infrastructure_api",
             "autoscaling",
         }
     ),
@@ -101,6 +103,7 @@ V5_SECTION_KEYS = {
             "ci",
             "registry",
             "gitops",
+            "developer_portal",
             "bootstrap",
         }
     ),
@@ -111,6 +114,136 @@ V5_SECTION_KEYS = {
             "requires_human_apply_gate",
         }
     ),
+    "developer_platform": frozenset(
+        {
+            "status",
+            "scope",
+            "principles",
+            "runtime_boundary",
+            "backstage_pr_contract",
+            "git_contract",
+            "pull_request_contract",
+            "platform_request_api",
+            "preview_environment_api",
+            "execution_contract",
+            "infrastructure_ownership",
+            "preview_lifecycle",
+            "promotion",
+            "milestone_contract",
+        }
+    ),
+    "developer_platform.principles": frozenset(
+        {
+            "portal",
+            "catalog",
+            "source_of_truth",
+            "change_unit",
+            "forge",
+            "ci",
+            "registry",
+            "gitops",
+            "infrastructure_api",
+            "progressive_delivery",
+            "foundation_iac",
+        }
+    ),
+    "developer_platform.runtime_boundary": frozenset(
+        {
+            "commerce_runtime_nodejs",
+            "backstage_management_plane_nodejs",
+            "backstage_only_exception",
+        }
+    ),
+    "developer_platform.backstage_pr_contract": frozenset(
+        {
+            "role",
+            "allowed_operations",
+            "forbidden_operations",
+            "gitea_pull_request_action",
+        }
+    ),
+    "developer_platform.git_contract": frozenset(
+        {
+            "default_branch",
+            "request_branch_pattern",
+            "request_path_pattern",
+            "force_push",
+            "direct_default_branch_write",
+        }
+    ),
+    "developer_platform.pull_request_contract": frozenset(
+        {
+            "required",
+            "exact_head_sha_required",
+            "human_review_required",
+            "required_context",
+        }
+    ),
+    "developer_platform.platform_request_api": frozenset(
+        {
+            "api_version",
+            "kind",
+            "authoritative_representation",
+            "path_pattern",
+            "required_fields",
+        }
+    ),
+    "developer_platform.preview_environment_api": frozenset(
+        {
+            "api_version",
+            "kind",
+            "lifecycle_owner",
+            "create_on",
+            "delete_on",
+            "unique_url_required",
+        }
+    ),
+    "developer_platform.execution_contract": frozenset(
+        {
+            "plan_before_apply",
+            "mutating_platform_action_requires_git_change",
+            "tekton_direct_workload_deploy",
+            "tekton_outputs",
+            "harbor_reference",
+            "gitops_desired_state_required",
+            "fleet_reconciles_git",
+            "crossplane_materializes_platform_api",
+        }
+    ),
+    "developer_platform.infrastructure_ownership": frozenset({"terraform_opentofu", "crossplane"}),
+    "developer_platform.preview_lifecycle": frozenset(
+        {
+            "creation",
+            "cleanup",
+            "cleanup_trigger",
+            "direct_runtime_delete",
+        }
+    ),
+    "developer_platform.promotion": frozenset(
+        {
+            "strategy",
+            "rebuild_between_preview_preprod_prod",
+            "same_digest_required",
+            "environment_change",
+        }
+    ),
+    "developer_platform.milestone_contract": frozenset(
+        {
+            "M1-monorepo-bootstrap",
+            "M4-platform-baseline",
+            "M5-commerce-vertical-slice",
+        }
+    ),
+    "developer_platform.milestone_contract.M1-monorepo-bootstrap": frozenset(
+        {
+            "outcome",
+            "implementation_required",
+            "requires",
+            "does_not_require",
+        }
+    ),
+    "developer_platform.milestone_contract.M4-platform-baseline": frozenset({"outcome", "components"}),
+    "developer_platform.milestone_contract.M5-commerce-vertical-slice": frozenset({"outcome"}),
     "stateful": frozenset({"database", "events", "jobs", "cache", "search", "object_storage"}),
     "dns": frozenset({"critical_ttl_seconds"}),
     "observability": frozenset(
@@ -264,6 +397,164 @@ V5_MILESTONE_DEPENDENCIES = {
     for name, parents in zip(V5_MILESTONES, V5_MILESTONE_PREREQUISITES)
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
+
+V5_DEVELOPER_PLATFORM = {
+    "status": "contract-locked-in-m1-implemented-from-m4",
+    "scope": "management-plane",
+    "principles": {
+        "portal": "backstage",
+        "catalog": "backstage-software-catalog",
+        "source_of_truth": "git",
+        "change_unit": "pull-request",
+        "forge": "gitea",
+        "ci": "tekton",
+        "registry": "harbor",
+        "gitops": "rancher-fleet",
+        "infrastructure_api": "crossplane",
+        "progressive_delivery": "argo-rollouts",
+        "foundation_iac": "terraform-opentofu",
+    },
+    "runtime_boundary": {
+        "commerce_runtime_nodejs": "forbidden",
+        "backstage_management_plane_nodejs": "allowed-required",
+        "backstage_only_exception": True,
+    },
+    "backstage_pr_contract": {
+        "role": "request-interface",
+        "allowed_operations": [
+            "read-catalog",
+            "create-branch",
+            "create-commit",
+            "create-pull-request",
+            "read-pull-request",
+        ],
+        "forbidden_operations": [
+            "direct-main-write",
+            "force-push",
+            "approve-pull-request",
+            "merge-pull-request",
+            "terraform-apply",
+            "kubectl-apply",
+            "crossplane-apply",
+            "direct-workload-deploy",
+            "direct-environment-promotion",
+        ],
+        "gitea_pull_request_action": "ecommerce:gitea:pull-request",
+    },
+    "git_contract": {
+        "default_branch": "main",
+        "request_branch_pattern": "platform/<request-kind>/<component>/<request-id>",
+        "request_path_pattern": "platform/requests/<request-id>.yaml",
+        "force_push": "forbidden",
+        "direct_default_branch_write": "forbidden",
+    },
+    "pull_request_contract": {
+        "required": True,
+        "exact_head_sha_required": True,
+        "human_review_required": True,
+        "required_context": [
+            "request-id",
+            "component",
+            "request-kind",
+            "exact-head-sha",
+            "expected-infrastructure-impact",
+            "immutable-image-digest",
+            "preview-state",
+            "preview-url-when-ready",
+            "cleanup-policy",
+        ],
+    },
+    "platform_request_api": {
+        "api_version": "platform.ecommerce.io/v1alpha1",
+        "kind": "PlatformRequest",
+        "authoritative_representation": "git-file",
+        "path_pattern": "platform/requests/<request-id>.yaml",
+        "required_fields": [
+            "metadata.name",
+            "spec.requester.entityRef",
+            "spec.component.entityRef",
+            "spec.request.kind",
+            "spec.request.operation",
+            "spec.lifecycle.owner",
+        ],
+    },
+    "preview_environment_api": {
+        "api_version": "platform.ecommerce.io/v1alpha1",
+        "kind": "PreviewEnvironment",
+        "lifecycle_owner": "pull-request",
+        "create_on": ["pull-request-opened", "pull-request-updated"],
+        "delete_on": ["pull-request-closed", "pull-request-merged"],
+        "unique_url_required": True,
+    },
+    "execution_contract": {
+        "plan_before_apply": "required",
+        "mutating_platform_action_requires_git_change": True,
+        "tekton_direct_workload_deploy": "forbidden",
+        "tekton_outputs": [
+            "qualification-evidence",
+            "immutable-oci-artifact",
+            "infrastructure-impact-plan",
+            "gitops-desired-state-change",
+        ],
+        "harbor_reference": "immutable-digest",
+        "gitops_desired_state_required": True,
+        "fleet_reconciles_git": True,
+        "crossplane_materializes_platform_api": True,
+    },
+    "infrastructure_ownership": {
+        "terraform_opentofu": "foundation",
+        "crossplane": "self-service-platform-resources",
+    },
+    "preview_lifecycle": {
+        "creation": "gitops-reconciliation",
+        "cleanup": "gitops-reconciliation",
+        "cleanup_trigger": ["pull-request-closed", "pull-request-merged"],
+        "direct_runtime_delete": "forbidden",
+    },
+    "promotion": {
+        "strategy": "build-once-promote-many",
+        "rebuild_between_preview_preprod_prod": "forbidden",
+        "same_digest_required": True,
+        "environment_change": "gitops-only",
+    },
+    "milestone_contract": {
+        "M1-monorepo-bootstrap": {
+            "outcome": "stable-pr-driven-contract-locked",
+            "implementation_required": False,
+            "requires": [
+                "pr-governance",
+                "exact-sha-review-and-evidence",
+                "reproducible-bootstrap",
+                "affected-routing",
+                "application-qualification",
+                "frontend-go-templ-qualification",
+                "developer-platform-contract-locked",
+            ],
+            "does_not_require": [
+                "backstage-deployed",
+                "crossplane-deployed",
+                "harbor-operational",
+                "fleet-previews-operational",
+                "argo-rollouts-operational",
+                "m4-tekton-runner-operational",
+            ],
+        },
+        "M4-platform-baseline": {
+            "outcome": "implement-pr-driven-platform-contract",
+            "components": [
+                "backstage",
+                "tekton",
+                "harbor",
+                "rancher-fleet",
+                "crossplane",
+                "argo-rollouts",
+            ],
+        },
+        "M5-commerce-vertical-slice": {
+            "outcome": "prove-first-pr-driven-preview-and-promotion",
+        },
+    },
+}
 
 V5_DEPLOYMENT_WAVES = {
     "version": 2,
@@ -1048,6 +1339,12 @@ def validate(root):
             errors.append("observability must match the complete approved V5 mapping")
         if lock["business"].get("frontend_runtime") != EXPECTED_V5_FRONTEND_RUNTIME:
             errors.append("business.frontend_runtime must match the approved V5 mapping")
+        if lock.get("developer_platform") != V5_DEVELOPER_PLATFORM:
+            errors.append("developer_platform must match the approved V5 PR-driven platform contract")
+        if lock.get("platform", {}).get("infrastructure_api") != "crossplane":
+            errors.append("platform.infrastructure_api must remain crossplane")
+        if lock.get("management_plane", {}).get("developer_portal") != "backstage":
+            errors.append("management_plane.developer_portal must remain backstage")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
             errors.append("critical DNS TTL must remain 60 seconds")
         if lock.get("superseded") != V5_SUPERSEDED:
