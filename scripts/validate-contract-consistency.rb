@@ -6,23 +6,29 @@ require "yaml"
 module ContractConsistency
   module_function
 
-  FILES = {
-    lock: "architecture.lock.yaml",
-    ownership: "config/contracts/service-ownership.yaml",
-    dependencies: "config/contracts/dependency-map.yaml",
-    events: "config/contracts/event-contracts.yaml",
-    public_api: "config/contracts/public-api-contracts.yaml"
-  }.freeze
-
   def load_yaml(root, relative)
     YAML.safe_load(File.read(File.join(root, relative)), aliases: false) || {}
   end
 
+  def registry_path(lock, role)
+    registry = lock.fetch("machine_contracts")
+    path = registry.fetch(role)
+    raise KeyError, "machine_contracts.#{role} must be a non-empty string" unless path.is_a?(String) && !path.strip.empty?
+
+    path
+  end
+
   def validate(root)
-    data = FILES.transform_values { |path| load_yaml(root, path) }
+    lock = load_yaml(root, "architecture.lock.yaml")
+    data = {
+      ownership: load_yaml(root, registry_path(lock, "service_ownership")),
+      dependencies: load_yaml(root, registry_path(lock, "dependency_map")),
+      events: load_yaml(root, registry_path(lock, "event_contracts")),
+      public_api: load_yaml(root, registry_path(lock, "public_api_contracts"))
+    }
     errors = []
-    canonical_services = Array(data[:lock].dig("business", "services"))
-    frontends = Array(data[:lock].dig("business", "frontends"))
+    canonical_services = Array(lock.dig("business", "services"))
+    frontends = Array(lock.dig("business", "frontends"))
     ownership = data[:ownership].fetch("services", {})
     dependencies = data[:dependencies].fetch("services", {})
 
