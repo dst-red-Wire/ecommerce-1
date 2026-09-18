@@ -60,4 +60,4 @@ platform_services:
 bootstrap:
   infrastructure: terraform-opentofu
   configuration: ansible
-  human_apply_gate: true
+  owner_authorization: required
