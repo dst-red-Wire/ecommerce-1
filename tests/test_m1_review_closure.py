@@ -37,7 +37,7 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('ensure_developer("go,cgo")', frontend)
+        self.assertIn('ensure_developer("go,cgo,templ")', frontend)
         self.assertIn("TemporaryDirectory", frontend)
         self.assertIn("frontend templ generated code is stale", frontend)
 
@@ -55,8 +55,16 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_tests_cover_shared_packages_once(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('[str(go), "test", "-race", "./..."]', frontend)
-        self.assertNotIn('[str(go), "test", "-race", f"./apps/{target}"]', frontend)
+        self.assertIn('packages = ["./..."] if scope == "all"', frontend)
+        self.assertIn('[f"./apps/{scope}", "./internal/..."]', frontend)
+
+    def test_frontend_drift_copies_only_template_inputs_and_uses_prepared_generator(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        frontend = source[source.index("def frontend(") : source.index("def site(")]
+        self.assertIn('frontend_root.rglob("*.templ")', frontend)
+        self.assertIn('[str(templ), "generate"]', frontend)
+        self.assertNotIn("shutil.copytree(frontend_root", frontend)
+        self.assertNotIn('"go", "run"', frontend)
 
     def test_frontend_executes_the_managed_go_pair_it_validates(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
