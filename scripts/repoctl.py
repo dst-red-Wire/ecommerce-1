@@ -55,7 +55,18 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+
+
+def managed_bin_dirs() -> tuple[Path, ...]:
+    contract = json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    policy = contract.get("capability_policy", {})
+    relatives = policy.get("managed_bin_subdirectories", [])
+    if not isinstance(relatives, list) or not relatives or any(not isinstance(item, str) or not item for item in relatives):
+        raise RuntimeError("central toolchain lock must declare managed_bin_subdirectories")
+    return tuple(Path.home() / item for item in relatives)
+
+
+os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
@@ -919,7 +930,7 @@ def frontend(action: str, scope: str = "") -> int:
     if action not in {"check", "lint", "test", "build", "generate"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
     ensure_developer("go,cgo")
-    managed_bin = Path.home() / ".local/bin"
+    managed_bin = managed_bin_dirs()[0]
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
     # repository-managed binary must discover and execute its own toolchain.
@@ -992,7 +1003,7 @@ def frontend(action: str, scope: str = "") -> int:
 def site() -> int:
     """Run both independently deployable Go frontends until interrupted."""
     ensure_developer("go")
-    env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
+    env = dict(os.environ, PATH=f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}")
     with tempfile.TemporaryDirectory(prefix="ecommerce-site-") as output_dir:
         binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
         for target, binary in zip(("storefront", "admin"), binaries, strict=True):
@@ -1093,7 +1104,7 @@ def service_check(service: str) -> int:
     needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
-    env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{env.get('PATH', '')}"
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
