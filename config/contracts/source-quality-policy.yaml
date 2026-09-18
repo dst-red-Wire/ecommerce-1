@@ -14,6 +14,20 @@ principles:
   file_specific_quality_exceptions: forbidden
   parallel_local_quality_policy: forbidden
 
+parallel_policy_files:
+  forbidden:
+    - .ansible-lint
+    - ruff.toml
+    - .ruff.toml
+    - .golangci.yml
+    - .golangci.yaml
+    - .yamllint
+
+orchestration_adapters:
+  pre_commit:
+    path: .pre-commit-config.yaml
+    required_delegate: scripts/repoctl.py
+
 adapters:
   terraform:
     formatter:
