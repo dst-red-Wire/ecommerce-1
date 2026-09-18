@@ -345,7 +345,7 @@ graph LR
                     policy.write_text(original.replace(before, after, 1))
                     self.assertTrue(
                         any(
-                            "five-verification AI merge policy" in error
+                            "five-verification deterministic merge policy" in error
                             for error in authority.validate(root)
                         )
                     )
