@@ -137,6 +137,23 @@ def source_quality_policy() -> dict:
         policy = ruby_yaml(relative)
         if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
             raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+
+        forbidden = policy.get("parallel_policy_files", {}).get("forbidden", [])
+        for local_policy in forbidden:
+            if not isinstance(local_policy, str) or not local_policy.strip():
+                raise RuntimeError("source quality parallel policy paths must be non-empty strings")
+            if (ROOT / local_policy).exists():
+                raise RuntimeError(f"parallel local quality policy is forbidden: {local_policy}")
+
+        adapters = policy.get("orchestration_adapters", {})
+        pre_commit = adapters.get("pre_commit", {})
+        pre_commit_path = pre_commit.get("path")
+        required_delegate = pre_commit.get("required_delegate")
+        if pre_commit_path and required_delegate:
+            adapter_path = ROOT / str(pre_commit_path)
+            if not adapter_path.is_file() or str(required_delegate) not in adapter_path.read_text(encoding="utf-8"):
+                raise RuntimeError("pre-commit adapter must delegate to the central repoctl quality authority")
+
         _SOURCE_QUALITY_POLICY = policy
     return copy.deepcopy(_SOURCE_QUALITY_POLICY)
 
@@ -941,6 +958,8 @@ def terraform_check() -> int:
             run(validate_args, cwd=directory)
     print("PASS terraform checks completed")
     return 0
+
+
 def ansible_check() -> int:
     reconcile_ansible_collections()
     require("ansible-lint")
@@ -978,6 +997,8 @@ def ansible_check() -> int:
         return 1
     print("PASS ansible checks completed")
     return 0
+
+
 def system_check() -> int:
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
     run_ruby_tests(tests)
@@ -988,17 +1009,39 @@ def system_check() -> int:
     return 0
 
 
+def write_ruff_policy_config(path: Path) -> None:
+    """Materialize Ruff's adapter config from the central source-quality contract."""
+    config = source_quality_adapter("python")["configuration"]
+    target_version = str(config["target_version"])
+    line_length = int(config["line_length"])
+    extend_exclude = [str(item) for item in config["extend_exclude"]]
+    lint_select = [str(item) for item in config["lint_select"]]
+    path.write_text(
+        f'target-version = "{target_version}"\n'
+        f"line-length = {line_length}\n"
+        + "extend-exclude = "
+        + json.dumps(extend_exclude)
+        + "\n\n[lint]\nselect = "
+        + json.dumps(lint_select)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def format_check() -> int:
     """Run repository-wide non-mutating formatter diagnostics from the central policy."""
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
         formatter = source_quality_adapter("python")["formatter"]
-        advisory_exit_check(
-            "ruff format",
-            [formatter["command"], *formatter["args"], *python_files],
-            drift_exit_codes=formatter["drift_exit_codes"],
-        )
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
 
     go_files = sorted(
         str(path)
@@ -1045,13 +1088,16 @@ def lint_all() -> int:
         require("ruff")
         python_policy = source_quality_adapter("python")
         formatter = python_policy["formatter"]
-        advisory_exit_check(
-            "ruff format",
-            [formatter["command"], *formatter["args"], *python_files],
-            drift_exit_codes=formatter["drift_exit_codes"],
-        )
         lint_policy = python_policy["lint"]
-        run([lint_policy["command"], *lint_policy["args"], *python_files])
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+            run([lint_policy["command"], *lint_policy["args"], "--config", str(config), *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
