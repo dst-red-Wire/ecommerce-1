@@ -265,6 +265,66 @@ graph LR
             contract["milestone_contract"]["M4-platform-baseline"]["outcome"],
         )
 
+    def test_qce_contract_has_nine_verifiable_sectors(self):
+        qce = authority.V5_DEVELOPER_PLATFORM["quality_cloud_engineering"]
+        self.assertEqual("contract-locked-in-m1", qce["status"])
+        self.assertEqual("M4-platform-baseline", qce["implementation_milestone"])
+        self.assertEqual("M5-commerce-vertical-slice", qce["proof_milestone"])
+        self.assertEqual(9, qce["sector_count"])
+        self.assertEqual(set(authority.V5_QCE_SECTORS), set(qce["sectors"]))
+        for sector_name in authority.V5_QCE_SECTORS:
+            with self.subTest(sector=sector_name):
+                sector = qce["sectors"][sector_name]
+                self.assertEqual(set(authority.V5_QCE_SECTOR_FIELDS), set(sector))
+                for field in authority.V5_QCE_SECTOR_FIELDS:
+                    self.assertIsInstance(sector[field], str)
+                    self.assertTrue(sector[field].strip())
+
+        cross_cutting = qce["cross_cutting"]
+        self.assertTrue(cross_cutting["security"]["applies_to_all_sectors"])
+        self.assertTrue(cross_cutting["culture"]["applies_to_all_sectors"])
+        self.assertTrue(cross_cutting["culture"]["explicit_ownership_required"])
+        self.assertTrue(cross_cutting["culture"]["documentation_as_code_required"])
+        self.assertEqual("assistant", cross_cutting["ai_agent"]["role"])
+        self.assertFalse(cross_cutting["ai_agent"]["authoritative_gate"])
+        self.assertFalse(cross_cutting["ai_agent"]["may_bypass_required_gates"])
+        self.assertFalse(cross_cutting["ai_agent"]["may_merge"])
+        self.assertFalse(cross_cutting["ai_agent"]["may_deploy_production_directly"])
+        self.assertIn(
+            "quality-cloud-engineering-contract-locked",
+            authority.V5_DEVELOPER_PLATFORM["milestone_contract"]["M1-monorepo-bootstrap"]["requires"],
+        )
+
+    def test_qce_contract_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            mutations = (
+                (
+                    "    sector_count: 9",
+                    "    sector_count: 8",
+                    "quality_cloud_engineering must declare exactly the nine approved QCE sectors",
+                ),
+                (
+                    "        evidence: exact-sha-qualification-evidence",
+                    "        evidence:",
+                    "must define non-empty owner/input/output/evidence",
+                ),
+                (
+                    "        authoritative_gate: false",
+                    "        authoritative_gate: true",
+                    "quality_cloud_engineering AI agent must remain non-authoritative",
+                ),
+            )
+            for before, after, expected_error in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    lock.write_text(original.replace(before, after, 1))
+                    self.assertTrue(any(expected_error in error for error in authority.validate(root)))
+                    lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_pr_driven_platform_contract_mutation_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
