@@ -38,16 +38,13 @@
       ansible.builtin.git:
         repo: "{{ qualification_repository_url }}"
         dest: "{{ qualification_repository_path }}"
-        version: "{{ qualification_pr_head }}"
         update: false
-      become: true
       become_user: "{{ qualification_user }}"
 
     - name: Fetch the exact qualification head and base objects
       ansible.builtin.command:
         argv: [git, fetch, origin, "{{ qualification_pr_head }}", "{{ qualification_pr_base }}"]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -55,7 +52,6 @@
       ansible.builtin.command:
         argv: [git, rev-parse, HEAD]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       register: qualification_current_head
       changed_when: false
@@ -64,7 +60,6 @@
       ansible.builtin.command:
         argv: [git, checkout, --detach, "{{ qualification_pr_head }}"]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       when: qualification_current_head.stdout != qualification_pr_head
       changed_when: true
@@ -73,7 +68,6 @@
       ansible.builtin.command:
         argv: [make, seed]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -81,7 +75,6 @@
       ansible.builtin.command:
         argv: [make, bootstrap]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
 
@@ -89,6 +82,5 @@
       ansible.builtin.command:
         argv: [make, env-check]
         chdir: "{{ qualification_repository_path }}"
-      become: true
       become_user: "{{ qualification_user }}"
       changed_when: false
