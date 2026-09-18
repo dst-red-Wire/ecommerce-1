@@ -131,6 +131,17 @@ class CapabilityGraphTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "requirements.yml drifted"):
                     MOD.validate_toolchain_projections(lock)
 
+    def test_bazel_native_files_are_toolchain_projections(self):
+        lock = MOD.load_toolchain_lock()
+        bazel = lock["native_tool_configs"]["bazel"]
+        expected_version = lock["versions"][bazel["version_ref"]]
+        self.assertEqual(expected_version, (ROOT / ".bazelversion").read_text(encoding="utf-8").strip())
+        self.assertEqual(
+            bazel["bazelrc_lines"],
+            [line for line in (ROOT / ".bazelrc").read_text(encoding="utf-8").splitlines() if line.strip()],
+        )
+        MOD.validate_toolchain_projections(lock)
+
     def test_qualification_virtualenv_is_ignored(self):
         ignored = subprocess.run(
             ["git", "check-ignore", ".venv/qualification/pyvenv.cfg"],
