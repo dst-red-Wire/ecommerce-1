@@ -1125,6 +1125,19 @@ def validate(root):
         for relative in lock["machine_contracts"].values():
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
+
+        review_policy = load_yaml(root / lock["machine_contracts"]["review_policy"])
+        inherited_owner_authorization = (
+            review_policy.get("pull_request_review", {}).get("owner_authorization", {})
+        )
+        if inherited_owner_authorization != {
+            "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
+            "local_override": "forbidden",
+        }:
+            errors.append(
+                "review policy must inherit repository_governance.owner_authorization without local override"
+            )
+
         management = lock["management_plane"]
         inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
