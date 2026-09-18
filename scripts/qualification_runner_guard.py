@@ -11,6 +11,7 @@ import subprocess
 # Only an independently reviewed controller revision may extend this authority.
 TRUSTED_BASE_REVISIONS = frozenset(
     {
+        "3e2436f8426f7d98878e586c5d48e5b44b844974",
         "91c636997a3d62595c65f815319c1342c93ea956",
         "45433013f97a94a8acf94c51a913ff071e6f74b2",
     }
