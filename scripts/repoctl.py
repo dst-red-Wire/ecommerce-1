@@ -264,10 +264,11 @@ def repository_authority_check() -> int:
         if not isinstance(pattern, str) or not list(ROOT.glob(pattern)):
             raise RuntimeError(f"component manifest pattern has no repository matches: {pattern!r}")
 
-    from capability_bootstrap import load_toolchain_lock, validate_toolchain_projections
+    from capability_bootstrap import load_contract, load_toolchain_lock, validate_contract, validate_toolchain_projections
 
     toolchain = load_toolchain_lock()
     validate_toolchain_projections(toolchain)
+    validate_contract(load_contract(), toolchain["versions"])
 
     go_policy = toolchain.get("language_contracts", {}).get("go", {})
     expected_go_directive = str(go_policy.get("workspace_language_directive", ""))
