@@ -1074,7 +1074,7 @@ def frontend(action: str, scope: str = "") -> int:
     # `repoctl frontend check storefront` used by existing Tekton tasks.
     if not scope:
         scope, action = action, "check"
-    if action not in {"check", "lint", "test", "build", "generate"} or scope not in {"all", "storefront", "admin"}:
+    if action not in {"check", "lint", "test", "build", "generate", "run"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
     ensure_developer("go,cgo")
     managed_bin = managed_bin_dirs()[0]
@@ -1092,6 +1092,11 @@ def frontend(action: str, scope: str = "") -> int:
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
         raise RuntimeError("TEMPL_VERSION is missing from central toolchain lock")
+    if action == "run":
+        if scope == "all":
+            return site()
+        return run([str(go), "run", f"./apps/{scope}"], cwd=frontend_root, env=env, check=False).returncode
+
     if action == "generate":
         if scope != "all":
             return fail("frontend generate is repository-wide; scope must be all")
@@ -1189,6 +1194,82 @@ def site() -> int:
                 signal.signal(signum, handler)
         failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
         return failed[0] if failed else 0
+
+
+def reconcile(tags: str, target_repo_root: str = "") -> int:
+    selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
+    if not selected:
+        return fail("reconcile requires at least one Ansible tag")
+    require("ansible-playbook")
+    repo_root = Path(target_repo_root).expanduser().resolve() if target_repo_root else ROOT
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={repo_root}",
+            "--tags",
+            selected,
+        ]
+    )
+    print(f"PASS reconcile tags={selected}")
+    return 0
+
+
+def bazel_verify(base: str, head: str) -> int:
+    require("bazel")
+    return run(
+        ["bazel", "run", "//:repoctl", "--", "verify-change", "--base", base, "--head", head],
+        check=False,
+    ).returncode
+
+
+def resource_candidate(evidence: str) -> int:
+    if not evidence:
+        return fail("resource-candidate requires EVIDENCE")
+    require("ruby")
+    return run(["ruby", "scripts/resource-sizing.rb", evidence], check=False).returncode
+
+
+def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: str) -> int:
+    missing = [
+        name
+        for name, value in (
+            ("RUNTIME_CONFIG", runtime_config),
+            ("BASE_SHA", base_sha),
+            ("PARENT_SHA", parent_sha),
+            ("HEAD_SHA", head_sha),
+        )
+        if not value
+    ]
+    if missing:
+        return fail("tekton-proof missing required values: " + ", ".join(missing))
+    require("ansible-playbook")
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/tekton-proof.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "-e",
+            f"tekton_runtime_config={runtime_config}",
+            "-e",
+            f"proof_base_sha={base_sha}",
+            "-e",
+            f"proof_parent_sha={parent_sha}",
+            "-e",
+            f"proof_head_sha={head_sha}",
+        ]
+    )
+    return 0
 
 
 def product_run() -> int:
@@ -2615,6 +2696,19 @@ def main() -> int:
     sg = sub.add_parser("service-new")
     sg.add_argument("--service", required=True)
     sg.add_argument("--dry-run", action="store_true")
+    rec = sub.add_parser("reconcile")
+    rec.add_argument("--tags", required=True)
+    rec.add_argument("--target-repo-root", default="")
+    bz = sub.add_parser("bazel-verify")
+    bz.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    bz.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    rc = sub.add_parser("resource-candidate")
+    rc.add_argument("--evidence", default=os.environ.get("EVIDENCE", ""))
+    tkp = sub.add_parser("tekton-proof")
+    tkp.add_argument("--runtime-config", default=os.environ.get("RUNTIME_CONFIG", ""))
+    tkp.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
+    tkp.add_argument("--parent-sha", default=os.environ.get("PARENT_SHA", ""))
+    tkp.add_argument("--head-sha", default=os.environ.get("HEAD_SHA", ""))
     pub = sub.add_parser("publish")
     pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
@@ -2719,6 +2813,14 @@ def main() -> int:
                 ["--dry-run"] if args.dry_run else []
             )
             return run(cmd, check=False).returncode
+        if args.cmd == "reconcile":
+            return reconcile(args.tags, args.target_repo_root)
+        if args.cmd == "bazel-verify":
+            return bazel_verify(args.base, args.head)
+        if args.cmd == "resource-candidate":
+            return resource_candidate(args.evidence)
+        if args.cmd == "tekton-proof":
+            return tekton_proof(args.runtime_config, args.base_sha, args.parent_sha, args.head_sha)
         if args.cmd == "doctor":
             return doctor()
         if args.cmd == "git-sync":
