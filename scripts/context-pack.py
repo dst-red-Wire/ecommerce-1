@@ -30,9 +30,9 @@ class MissingManagedYq(RuntimeError):
 
 def managed_yq() -> str:
     """Resolve only the repository-provisioned yq, never an unpinned system copy."""
-    candidate = Path.home() / ".local" / "bin" / "yq"
+    candidate = ROOT / ".tools" / "bin" / "yq"
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
-        raise MissingManagedYq(f"managed yq missing: run `make context-tools` ({candidate})")
+        raise MissingManagedYq(f"repository yq missing: run `make tools-yq` ({candidate})")
     return str(candidate)
 
 

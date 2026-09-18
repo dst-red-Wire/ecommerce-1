@@ -813,8 +813,7 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("YQ_VERSION", yq["version_key"])
         self.assertEqual({"type": "ansible", "tags": "context_tools"}, yq["provision"])
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn('checksum: "sha256:{{ yq_sha256 }}"', tasks)
-        self.assertIn('dest: "{{ local_bin }}/yq"', tasks)
+        self.assertIn('"{{ repo_root }}/scripts/repository_tools.py", yq', tasks)
 
     def test_node_tooling_honors_ephemeral_runner_proxy_environment(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
@@ -1035,7 +1034,7 @@ class CapabilityAuditTest(unittest.TestCase):
 
     def test_checksum_invalid_is_rejected_by_existing_ansible_mechanism(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
+        self.assertIn('"{{ repo_root }}/scripts/repository_tools.py", oasdiff', tasks)
         self.assertNotIn("ignore_errors: true", tasks)
 
     def test_single_version_authority_and_no_global_docker_dependency(self):

@@ -53,6 +53,13 @@ remains the owner of repeatable project-tool installation. Its invocation is rep
 a provisioning dependency, not falsely as a runtime dependency. Downloads continue to
 consume pinned versions and checksums from the existing authority.
 
+The gate-critical `yq` and `oasdiff` binaries are a narrower bootstrap boundary: Make and
+Ansible both invoke the same deterministic Python provisioner, which installs into
+`.tools/bin` and caches verified release assets below `.tools/cache`. This lets context and
+contract gates bootstrap without a home-directory or system-PATH dependency while retaining
+Ansible as the aggregate reconciliation owner. Linux amd64 and arm64 assets, archive hashes,
+and installed-binary hashes are all selected from the committed version authority.
+
 ## Gate executable closure
 
 The contract also owns `gate_requirements`, the explicit executable closure for bootstrap,

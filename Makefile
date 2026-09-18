@@ -6,13 +6,23 @@ ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
 MANAGED_BIN := $(HOME)/.local/bin
+REPOSITORY_BIN := $(CURDIR)/.tools/bin
 ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
 ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
 export ANSIBLE_CONFIG
 export ANSIBLE_COLLECTIONS_PATH
 ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
 
-.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help tools tools-yq tools-oasdiff seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+
+tools: ## Reconcile checksum-pinned repository-local gate tools
+	@$(PYTHON) scripts/repository_tools.py
+
+tools-yq: ## Reconcile repository-local yq only
+	@$(PYTHON) scripts/repository_tools.py yq
+
+tools-oasdiff: ## Reconcile repository-local oasdiff only
+	@$(PYTHON) scripts/repository_tools.py oasdiff
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
 	@$(PYTHON) scripts/capability_bootstrap.py seed
@@ -35,8 +45,8 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: ## Run global + affected repository CI and cache promotable worktree evidence
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+ci: tools-oasdiff ## Run global + affected repository CI and cache promotable worktree evidence
+	@PATH="$(REPOSITORY_BIN):$$PATH" $(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks
 
@@ -50,8 +60,8 @@ governance: runtime-efficiency ## Validate canonical architecture, service polic
 runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
 	@$(PYTHON) scripts/repoctl.py runtime-efficiency
 
-contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
-	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
+contracts: tools-oasdiff ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
+	@PATH="$(REPOSITORY_BIN):$$PATH" $(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
 
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
@@ -163,8 +173,8 @@ perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities 
 
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify
 
-context: ## Build bounded task-aware context pack; use TASK="..."
-	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
+context: tools-yq ## Build bounded task-aware context pack; use TASK="..."
+	@PATH="$(REPOSITORY_BIN):$$PATH" $(PYTHON) scripts/repoctl.py context "$(TASK)"
 
 diff-context: ## Build compact diff-only context pack
 	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-origin/main}"
