@@ -294,6 +294,40 @@ def validate_workstation_projections(policy: dict | None = None) -> None:
         raise RuntimeError(".config/configuration.winget drifted from central workstation policy")
 
 
+def validate_terraform_lockfile_projections(provider_contract: dict | None = None) -> None:
+    """Verify committed Terraform lockfiles project the canonical provider identity."""
+    contract = provider_contract or terraform_provider_lock_contract()
+    expected = contract.get("providers", {})
+    lockfiles = (
+        ROOT / "platform/terraform/environments/mgmt/.terraform.lock.hcl",
+        ROOT / "platform/terraform/environments/qualification/.terraform.lock.hcl",
+    )
+    for lockfile in lockfiles:
+        text = lockfile.read_text(encoding="utf-8")
+        for name, provider in expected.items():
+            source = str(provider["source"])
+            version = str(provider["version"])
+            hashes = {str(value) for value in provider["hashes"]}
+            block_match = re.search(
+                rf'provider\s+"{re.escape(source)}"\s*\{{(?P<body>.*?)\n\}}',
+                text,
+                re.DOTALL,
+            )
+            if not block_match:
+                raise RuntimeError(f"{lockfile.relative_to(ROOT)} missing canonical provider {source}")
+            body = block_match.group("body")
+            version_match = re.search(r'^\s*version\s*=\s*"([^"]+)"\s*$', body, re.MULTILINE)
+            if not version_match or version_match.group(1) != version:
+                raise RuntimeError(
+                    f"{lockfile.relative_to(ROOT)} provider {name} version drifted from central lock"
+                )
+            actual_hashes = set(re.findall(r'"((?:h1|zh):[^"]+)"', body))
+            if actual_hashes != hashes:
+                raise RuntimeError(
+                    f"{lockfile.relative_to(ROOT)} provider {name} hashes drifted from central lock"
+                )
+
+
 def repository_authority_check() -> int:
     """Validate the repository-wide authority hierarchy and all declared projections."""
     lock = ruby_yaml("architecture.lock.yaml")
@@ -383,6 +417,7 @@ def repository_authority_check() -> int:
         raise RuntimeError("frontend/go.mod templ version drifted from central toolchain lock")
 
     validate_workstation_projections()
+    validate_terraform_lockfile_projections()
 
     security_policy = security_scan_policy()
     scanner = security_policy.get("scanner", {})
