@@ -1,5 +1,6 @@
-version: 1
+version: 2
 status: exact
+architecture_authority: architecture.lock.yaml
 
 pull_request_review:
   forge: github
@@ -13,18 +14,35 @@ pull_request_review:
 
   ai_reviewer:
     enabled: true
-    advisory_only: true
+    advisory_only: false
     may_comment: true
     may_request_changes: true
-    may_approve: false
-    may_merge: false
+    may_approve: true
+    may_merge: true
     may_sign: false
     may_promote: false
     may_push: false
+    automatic_merge:
+      enabled: true
+      verification_count: 3
+      required_verifications:
+        - deterministic-qualification
+        - code-review
+        - security-review
+      binds_exact_commit_sha: true
+      all_verifications_same_head_sha: true
+      require_pr_mergeable: true
+      require_no_unresolved_blocking_threads: true
+      fail_closed_on_missing_or_stale_evidence: true
+      forbid_force_push: true
+      forbid_branch_protection_bypass: true
+      blocking_findings:
+        - P1
+        - P2
 
   human_gate:
     required_for:
-      - architecture_changes
+      - review_policy_changes
       - infrastructure_apply
       - destructive_changes
       - state_migrations
