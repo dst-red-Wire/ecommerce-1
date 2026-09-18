@@ -57,8 +57,12 @@ except ModuleNotFoundError as exc:
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 
 
+def _raw_toolchain_lock() -> dict:
+    return json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+
+
 def managed_bin_dirs() -> tuple[Path, ...]:
-    contract = json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    contract = _raw_toolchain_lock()
     policy = contract.get("capability_policy", {})
     relatives = policy.get("managed_bin_subdirectories", [])
     if not isinstance(relatives, list) or not relatives or any(not isinstance(item, str) or not item for item in relatives):
@@ -66,12 +70,28 @@ def managed_bin_dirs() -> tuple[Path, ...]:
     return tuple(Path.home() / item for item in relatives)
 
 
+def toolchain_projection_path(name: str) -> Path:
+    projection = _raw_toolchain_lock().get("projections", {}).get(name, {})
+    relative = projection.get("path") if isinstance(projection, dict) else None
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError(f"central toolchain lock missing projection path: {name}")
+    return ROOT / relative
+
+
+def ansible_collections_root() -> Path:
+    config = _raw_toolchain_lock().get("native_tool_configs", {}).get("ansible", {})
+    relative = config.get("collections_install_root") if isinstance(config, dict) else None
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError("central toolchain lock missing Ansible collections_install_root")
+    return ROOT / relative
+
+
 os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
-PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
+PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
-os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
+os.environ["ANSIBLE_CONFIG"] = str(toolchain_projection_path("ansible_config"))
 CONTEXT = ROOT / ".context"
 
 
