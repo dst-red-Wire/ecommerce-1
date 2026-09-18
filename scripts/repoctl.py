@@ -119,6 +119,52 @@ def ruby_yaml(path: str) -> dict:
     return json.loads(output(["ruby", "-e", script, path]))
 
 
+_CANONICAL_CONTRACT_CACHE: dict[str, dict] = {}
+
+
+def canonical_contract(name: str) -> dict:
+    """Load a machine contract only through architecture.lock.yaml."""
+    if name not in _CANONICAL_CONTRACT_CACHE:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get(name)
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError(f"architecture.lock.yaml must register machine_contracts.{name}")
+        data = ruby_yaml(relative)
+        if data.get("architecture_authority") != "architecture.lock.yaml":
+            raise RuntimeError(f"{name} must inherit architecture.lock.yaml")
+        _CANONICAL_CONTRACT_CACHE[name] = data
+    return copy.deepcopy(_CANONICAL_CONTRACT_CACHE[name])
+
+
+def canonical_contract_audit() -> int:
+    return run([sys.executable, "scripts/canonical_contracts.py", "audit-authority"], check=False).returncode
+
+
+def security_scan_policy() -> dict:
+    return canonical_contract("security_scan_policy")
+
+
+def write_gitleaks_policy_config(path: Path) -> None:
+    policy = security_scan_policy()
+    allowlist = policy.get("allowlist", {})
+    lines = [
+        f"title = {json.dumps('E-Commerce repository gitleaks configuration (generated)')}",
+        "",
+        "[extend]",
+        "useDefault = true",
+        "",
+        "[allowlist]",
+        f"description = {json.dumps(str(allowlist.get('description', 'Canonical repository allowlist')))}",
+        "paths = [",
+    ]
+    for value in allowlist.get("paths", []):
+        if not isinstance(value, str) or "'''" in value:
+            raise RuntimeError("security scan allowlist paths must be safe strings")
+        lines.append("  '''" + value + "''',")
+    lines.extend(["]", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 _SOURCE_QUALITY_POLICY: dict | None = None
 
 
@@ -282,15 +328,10 @@ def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | 
 
 
 def pinned_versions() -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
-
+    values = canonical_contract("toolchain_lock").get("versions", {})
+    if not isinstance(values, dict) or not values:
+        raise RuntimeError("canonical toolchain lock must declare versions")
+    return {str(key): str(value) for key, value in values.items()}
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
     """Read the canonical Ansible collection lock without duplicating its pins."""
@@ -441,6 +482,8 @@ def runtime_efficiency_check() -> int:
 
 
 def governance() -> int:
+    if canonical_contract_audit():
+        return 1
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
@@ -733,18 +776,16 @@ def automation_policy() -> int:
 
 
 def documentation_policy() -> int:
-    """Reject active documentation that contradicts the canonical automation model."""
-    rules = {
-        "AGENTS.md": [r"portable POSIX `sh`", r"repository shell helpers"],
-        "README.md": [r"scripts/ci-\*\.sh"],
-        "docs/project/CODEX_HANDOFFS.md": [r"shared POSIX `sh` helpers", r"shared repository scripts factored"],
-        "docs/api/README.md": [r"bootstrap CI Woodpecker"],
-    }
+    """Reject active documentation that contradicts canonical contracts."""
+    policy = canonical_contract("documentation_drift_policy")
     failures: list[str] = []
-    for relative, patterns in rules.items():
-        text = (ROOT / relative).read_text(encoding="utf-8")
+    for relative, patterns in policy.get("forbidden_patterns", {}).items():
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
         for pattern in patterns:
-            if re.search(pattern, text, flags=re.IGNORECASE):
+            if re.search(str(pattern), text, flags=re.IGNORECASE):
                 failures.append(f"{relative}: {pattern}")
     if failures:
         print("FAIL documentation policy: active legacy automation references found", file=sys.stderr)
@@ -752,7 +793,6 @@ def documentation_policy() -> int:
         return 1
     print("PASS documentation policy: active automation references are canonical")
     return 0
-
 
 def frontend(action: str, scope: str = "") -> int:
     # Accept both `repoctl frontend storefront` and the compatibility form
@@ -973,23 +1013,25 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     require("gitleaks")
-    if os.environ.get("HEAD", "").strip() == "WORKTREE":
-        tree_sha = worktree_tree_sha()
-        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
-            temp_root = Path(temp_dir)
-            archive = temp_root / "tree.tar"
-            scan_root = temp_root / "tree"
-            scan_root.mkdir()
-            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
-            shutil.unpack_archive(str(archive), str(scan_root), "tar")
-            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
-    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-        run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    else:
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    print("PASS secret scan completed")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
+        config = Path(policy_dir) / "gitleaks.toml"
+        write_gitleaks_policy_config(config)
+        if os.environ.get("HEAD", "").strip() == "WORKTREE":
+            tree_sha = worktree_tree_sha()
+            with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+                temp_root = Path(temp_dir)
+                archive = temp_root / "tree.tar"
+                scan_root = temp_root / "tree"
+                scan_root.mkdir()
+                run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+                shutil.unpack_archive(str(archive), str(scan_root), "tar")
+                run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", str(scan_root)])
+        elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+            run(["gitleaks", "git", "--config", str(config), "--redact", "--no-banner", "."])
+        else:
+            run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", "."])
+    print("PASS secret scan completed from canonical security policy")
     return 0
-
 
 def terraform_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
@@ -2205,6 +2247,7 @@ def main() -> int:
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
+    c.add_argument("action", nargs="?", default="validate", choices=("validate", "audit-authority"))
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     c.add_argument("--generate", action="store_true")
@@ -2285,6 +2328,8 @@ def main() -> int:
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
+            if args.action == "audit-authority":
+                return canonical_contract_audit()
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()

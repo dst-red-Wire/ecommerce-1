@@ -17,8 +17,10 @@ from pathlib import Path
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "config/toolchain/capabilities.json"
-VERSIONS = ROOT / "config/toolchain/versions.env"
+CONTRACT = ROOT / "config/contracts/toolchain-lock.yaml"
+VERSIONS = CONTRACT
+LEGACY_CONTRACT_PROJECTION = ROOT / "config/toolchain/capabilities.json"
+LEGACY_VERSIONS_PROJECTION = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 REQUIREMENTS = {"required-static", "optional-runtime"}
@@ -36,6 +38,13 @@ class Result:
 
 
 def load_versions(path: Path = VERSIONS) -> dict[str, str]:
+    if path.suffix.lower() in {".yaml", ".yml", ".json"}:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        values = data.get("versions")
+        if not isinstance(values, dict) or not values:
+            raise ValueError(f"{path}: canonical toolchain lock must declare versions")
+        return {str(key): str(value) for key, value in values.items()}
+
     values = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
@@ -45,7 +54,6 @@ def load_versions(path: Path = VERSIONS) -> dict[str, str]:
                 raise ValueError(f"duplicate version authority: {key}")
             values[key] = value
     return values
-
 
 def load_contract(path: Path = CONTRACT) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
