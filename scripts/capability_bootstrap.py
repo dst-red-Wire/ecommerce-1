@@ -35,6 +35,11 @@ class Result:
     detail: str = ""
 
 
+def templ_version_matches(stdout: str, stderr: str, expected: str) -> bool:
+    """templ version emits one v-prefixed version on stdout, with no diagnostics."""
+    return bool(expected) and stdout.strip() == f"v{expected}" and not stderr.strip()
+
+
 def load_versions(path: Path = VERSIONS) -> dict[str, str]:
     values = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -398,6 +403,8 @@ class Auditor:
             elif item.get("expected_output") is not None and detail != str(item["expected_output"]):
                 state = "BLOCKED" if item.get("external_failure") else "FAIL"
                 last = Result(state, f"expected output {item['expected_output']}; got {detail or 'empty'}")
+            elif command == "templ" and not templ_version_matches(proc.stdout, proc.stderr, expected or ""):
+                last = Result("FAIL", f"wrong templ version: expected exact v{expected}")
             elif expected and self.installed_version(
                 detail, item.get("version_parser", "first_semver")
             ) != expected.removeprefix("v"):
