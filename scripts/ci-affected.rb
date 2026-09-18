@@ -35,7 +35,7 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, strict_unknown: false)
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, service_consumers: {}, strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
@@ -55,6 +55,7 @@ module AffectedComponents
         raise ArgumentError, "unknown service path changed: #{service}" unless services.include?(service)
 
         components << "service:#{service}"
+        Array(service_consumers[service]).each { |consumer| components << "service:#{consumer}" }
       when %r{\Afrontend/apps/(storefront|admin)/}
         components << "frontend:#{Regexp.last_match(1)}"
       when %r{\Afrontend/(?:internal|static|templates)/},
@@ -68,7 +69,7 @@ module AffectedComponents
       when %r{\Aplatform/ansible/}
         components << "platform:ansible"
       when %r{\Acontracts/openapi/}
-        if path == common_openapi
+        if Array(common_openapi).include?(path)
           FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }
           services.each { |service| components << "service:#{service}" }
         elsif (contract = public_contracts[path])
@@ -103,10 +104,13 @@ module AffectedComponents
       when %r{\Atests/}, %r{\Ascripts/}
         # Other repository-level tests and native helpers are exercised by system.
         components << "system"
+      when %r{\A(?:docs|instruction)/}, "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE"
+        # Documentation remains covered by the global governance/security gates.
+        force_all!(components, services) if strict_unknown
       else
         # Incremental reuse needs stronger guarantees than ordinary affected routing.
         # Unknown deltas may not inherit component PASS evidence.
-        force_all!(components, services) if strict_unknown
+        force_all!(components, services)
       end
     end
 
@@ -123,13 +127,13 @@ module AffectedComponents
 
   def changed_paths(root, base, head)
     if head == "WORKTREE"
-      output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--") || ""
-      untracked = run_git(root, "ls-files", "--others", "--exclude-standard") || ""
-      return (output.lines + untracked.lines).map(&:strip).reject(&:empty?).uniq.sort
+      output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--") || ""
+      untracked = run_git(root, "ls-files", "--others", "--exclude-standard", "-z") || ""
+      return (output.b.split("\0") + untracked.b.split("\0")).reject(&:empty?).uniq.sort
     end
 
-    output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--")
-    output.lines.map(&:strip).reject(&:empty?).uniq.sort
+    output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--")
+    output.b.split("\0").reject(&:empty?).uniq.sort
   end
 
   def yaml_at(root, ref, path)
@@ -284,6 +288,52 @@ module AffectedComponents
 
     [services, public_contract_index(public_api), public_api["common_components"]]
   end
+
+  def project_for_change(root, base, head)
+    services, current, common = load_project(root, head)
+    base_services, previous, previous_common = load_project(root, base)
+    [(services | base_services).sort, previous.merge(current), [common, previous_common].compact.uniq]
+  end
+
+  def service_consumers(root, base, head, services)
+    reverse = Hash.new { |hash, key| hash[key] = Set.new }
+    [base, head].each do |ref|
+      data = yaml_at(root, ref, "config/contracts/dependency-map.yaml")
+      events = yaml_at(root, ref, "config/contracts/event-contracts.yaml")
+      producers = {}
+      events.fetch("events", {}).each do |name, spec|
+        provider = event_producer(name)
+        next unless services.include?(provider)
+        producers[name] = provider
+        producers[event_tail(name)] = provider
+        Array(spec && spec["consumers"]).each do |consumer|
+          reverse[provider] << consumer if services.include?(consumer)
+        end
+      end
+      data.fetch("services", {}).each do |consumer, spec|
+        next unless services.include?(consumer)
+        Array(spec && spec["events_in"]).each do |event|
+          provider = producers[event]
+          reverse[provider] << consumer if provider
+        end
+        %w[sync sync_external].each do |kind|
+          Array(spec && spec[kind]).each do |provider|
+            reverse[provider] << consumer if services.include?(provider)
+          end
+        end
+      end
+    end
+    services.to_h do |provider|
+      found = Set.new
+      pending = reverse[provider].to_a
+      until pending.empty?
+        consumer = pending.shift
+        next unless found.add?(consumer)
+        pending.concat(reverse[consumer].to_a)
+      end
+      [provider, found.to_a.sort]
+    end
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -301,17 +351,19 @@ if $PROGRAM_NAME == __FILE__
   abort "format must be lines or json" unless %w[lines json].include?(options[:format])
 
   root = File.expand_path("..", __dir__)
-  services, public_contracts, common_openapi = AffectedComponents.load_project(root, options[:head])
+  services, public_contracts, common_openapi = AffectedComponents.project_for_change(root, options[:base], options[:head])
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
   contract_impact = AffectedComponents.contract_impact_map(
     root, options[:base], options[:head], paths, services: services
   )
+  consumers = AffectedComponents.service_consumers(root, options[:base], options[:head], services)
   affected = AffectedComponents.classify(
     paths,
     services: services,
     public_contracts: public_contracts,
     common_openapi: common_openapi,
     contract_impact: contract_impact,
+    service_consumers: consumers,
     strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"
