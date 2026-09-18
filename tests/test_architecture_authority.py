@@ -465,6 +465,7 @@ graph LR
         for relative in ("architecture.lock.yaml", "AGENTS.md", "README.md"):
             shutil.copy2(ROOT / relative, root / relative)
         shutil.copytree(ROOT / "config", root / "config")
+        shutil.copytree(ROOT / "contracts", root / "contracts")
         shutil.copytree(ROOT / "docs", root / "docs")
         shutil.copytree(ROOT / "instruction", root / "instruction")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
