@@ -87,10 +87,16 @@ orchestration_adapters:
       - versions.env
       - MANAGED_BIN
       - $(HOME)/.local/bin
+      - ANSIBLE_LOCAL
+      - "@ansible-playbook"
+      - "@bazel "
+      - "@ruby "
+      - $(HOME)/.local/bin
   - path: frontend/Makefile
     forbidden_markers:
       - versions.env
       - TEMPL_VERSION
+      - "@go "
   - path: .pre-commit-config.yaml
     forbidden_markers:
       - minimum_pre_commit_version
