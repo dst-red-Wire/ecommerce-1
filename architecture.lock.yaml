@@ -119,7 +119,15 @@ developer_platform:
   pull_request_contract:
     required: true
     exact_head_sha_required: true
-    human_review_required: true
+    human_review_required: false
+    ai_auto_merge_allowed: true
+    ai_auto_merge_required_verifications:
+      - deterministic-qualification
+      - code-review
+      - security-review
+    ai_auto_merge_same_head_sha_required: true
+    ai_auto_merge_fail_closed: true
+    review_policy_changes_require_human_gate: true
     required_context:
       - request-id
       - component
