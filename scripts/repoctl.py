@@ -9,8 +9,11 @@ toolchain reconciliation belongs to platform/ansible/developer.yml.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import copy
+import http.client
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -20,6 +23,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -62,6 +67,82 @@ PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
 CONTEXT = ROOT / ".context"
+
+GITHUB_API = "https://api.github.com"
+CODEX_REVIEW_AUTHOR = "chatgpt-codex-connector"
+GITHUB_HTTP_TIMEOUT_SECONDS = 15
+# Leave 25% of GitHub's documented 60-request/hour unauthenticated allowance
+# unused. This also bounds pagination without weakening authenticated polling.
+GITHUB_UNAUTHENTICATED_REQUEST_BUDGET = 45
+GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS = 10
+MAX_WAIT_REVIEWS_INTERVAL_SECONDS = 3600
+
+
+class GitHubAPIError(RuntimeError):
+    """A sanitized, observation-only GitHub API failure."""
+
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+def _validate_github_token(token: str | None) -> None:
+    """Reject values that cannot safely cross the stdlib HTTP header boundary."""
+    if token and (not token.isascii() or re.search(r"[\x00-\x1f\x7f]", token)):
+        raise GitHubAPIError("invalid GitHub authentication token format")
+
+
+class GitHubReader:
+    """Small GET-only GitHub REST reader; deliberately has no mutation method."""
+
+    def __init__(self, token: str | None = None, opener=urllib.request.urlopen):
+        _validate_github_token(token)
+        self.token = token
+        self.opener = opener
+        self.request_budget = None if token else GITHUB_UNAUTHENTICATED_REQUEST_BUDGET
+        self.request_count = 0
+
+    def get(self, path: str):
+        if self.request_budget is not None and self.request_count >= self.request_budget:
+            raise GitHubAPIError("GitHub API unauthenticated request budget exhausted")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "dst-red-Wire-ecommerce-1-repoctl",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            request = urllib.request.Request(f"{GITHUB_API}{path}", headers=headers, method="GET")
+            self.request_count += 1
+            with self.opener(request, timeout=GITHUB_HTTP_TIMEOUT_SECONDS) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise GitHubAPIError(
+                    f"GitHub API authentication/authorization failed (HTTP {exc.code})", status=exc.code
+                ) from None
+            raise GitHubAPIError(f"GitHub API request failed (HTTP {exc.code})", status=exc.code) from None
+        except (
+            urllib.error.URLError,
+            OSError,
+            json.JSONDecodeError,
+            http.client.HTTPException,
+            ValueError,
+        ) as exc:
+            raise GitHubAPIError(f"GitHub API request failed ({type(exc).__name__})") from None
+
+    def pages(self, path: str, *, max_pages: int = 100) -> list[dict]:
+        items: list[dict] = []
+        separator = "&" if "?" in path else "?"
+        for page in range(1, max_pages + 1):
+            payload = self.get(f"{path}{separator}per_page=100&page={page}")
+            if not isinstance(payload, list):
+                raise GitHubAPIError("GitHub API collection response was not a list")
+            items.extend(payload)
+            if len(payload) < 100:
+                return items
+        raise GitHubAPIError(f"GitHub API pagination exceeded {max_pages} pages")
 
 
 class MissingRunnerPrerequisite(RuntimeError):
@@ -1898,7 +1979,482 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
-def main() -> int:
+def _event_order(item: Mapping) -> tuple[str, int]:
+    """Return an ordering key without trusting API-controlled numeric values."""
+    return (str(item.get("submitted_at") or item.get("created_at") or ""), _validated_event_id(item.get("id")))
+
+
+def _validated_event_id(value: object) -> int:
+    if isinstance(value, bool) or not (isinstance(value, int) or isinstance(value, str) and value.isdecimal()):
+        raise GitHubAPIError("GitHub event has invalid event id")
+    return int(value)
+
+
+def _codex_author(item: dict) -> bool:
+    user = item.get("user")
+    if not isinstance(user, dict):
+        return False
+    login_value = user.get("login")
+    if not isinstance(login_value, str):
+        return False
+    login = login_value.removesuffix("[bot]")
+    return login == CODEX_REVIEW_AUTHOR
+
+
+CODE_REVIEW_HEADING = "### 💡 Codex Review"
+SECURITY_REVIEW_HEADING = "### 🛡️ Codex Security Review"
+SECURITY_METADATA = re.compile(r"^<!-- codex-security-review:v1 (\{[^\r\n]*\}) -->$", re.MULTILINE)
+REVIEW_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
+REVIEW_SUMMARY_HEADER = ("Review", "Status", "Commit", "Review trigger")
+
+
+def _full_sha(value: object) -> str:
+    candidate = str(value or "").lower()
+    return candidate if re.fullmatch(r"[0-9a-f]{40}", candidate) else ""
+
+
+def _validated_pull_head_sha(payload: object) -> str:
+    """Decode the exact head identity from GitHub pull metadata."""
+    if not isinstance(payload, Mapping):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    head = payload.get("head")
+    if not isinstance(head, Mapping):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    sha = head.get("sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+        raise GitHubAPIError("GitHub pull metadata has invalid shape")
+    return sha.lower()
+
+
+def _validated_review_collection(payload: object, name: str) -> list[Mapping]:
+    """Decode a GitHub reviews/comments collection before event processing."""
+    if not isinstance(payload, list):
+        raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        if "user" not in item:
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        user = item.get("user")
+        if user is not None and (not isinstance(user, Mapping) or not isinstance(user.get("login"), str)):
+            raise GitHubAPIError(f"GitHub {name} collection has invalid member shape")
+        try:
+            _validated_event_id(item.get("id"))
+        except GitHubAPIError:
+            raise GitHubAPIError(f"GitHub {name} collection has invalid event id") from None
+    return payload
+
+
+def _validated_resolved_code_sha(value: object, announced_prefix: str) -> str:
+    """Validate a resolved CODE identity while allowing unresolved refs to fail closed."""
+    resolved_sha = _full_sha(value)
+    if value and not resolved_sha:
+        raise GitHubAPIError("GitHub CODE commit resolution has invalid shape")
+    if resolved_sha and not resolved_sha.startswith(announced_prefix):
+        raise GitHubAPIError("GitHub CODE commit resolution contradicted its announced prefix")
+    return resolved_sha
+
+
+def _first_nonempty_line(body: object) -> str:
+    """Return the first meaningful line without searching later body prose."""
+    if not isinstance(body, str):
+        return ""
+    return next((line.strip(" \t") for line in body.splitlines() if line.strip()), "")
+
+
+def _security_metadata(body: str, expected_repo: str, expected_pr: int | None) -> dict | None:
+    markers = SECURITY_METADATA.findall(body)
+    if len(markers) != 1:
+        return None
+    try:
+        metadata = json.loads(markers[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("status") != "completed" or not _full_sha(metadata.get("headSha")):
+        return None
+    repository = metadata.get("repository")
+    if repository is not None and (not isinstance(repository, str) or repository.casefold() != expected_repo.casefold()):
+        return None
+    if "pullRequestNumber" in metadata and metadata["pullRequestNumber"] != expected_pr:
+        return None
+    return metadata
+
+
+def _summary_table_rows(body: str) -> list[tuple[str, str, str, str]] | None:
+    """Parse the single canonical review-summary table, not surrounding prose."""
+    lines = body.splitlines()
+    tables: list[list[tuple[str, str, str, str]]] = []
+    for index in range(len(lines) - 1):
+        header = tuple(cell.strip() for cell in lines[index].strip().strip("|").split("|"))
+        if header != REVIEW_SUMMARY_HEADER:
+            continue
+        separator = tuple(cell.strip() for cell in lines[index + 1].strip().strip("|").split("|"))
+        if len(separator) != 4 or any(not re.fullmatch(r":?-{3,}:?", cell) for cell in separator):
+            return None
+        rows: list[tuple[str, str, str, str]] = []
+        for line in lines[index + 2 :]:
+            if not line.strip().startswith("|"):
+                break
+            cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+            if len(cells) != 4:
+                return None
+            rows.append(cells)
+        tables.append(rows)
+    return tables[0] if len(tables) == 1 else None
+
+
+def _summary_cell_text(value: str) -> str:
+    """Remove only the formatting used by canonical summary cells."""
+    value = re.sub(r"<relative-time\b[^>]*>.*?</relative-time>", "", value).strip()
+    value = value.replace("**", "").strip()
+    return re.sub(r"^[^A-Za-z0-9]+", "", value).strip()
+
+
+def _classify_summary_code(item: dict) -> tuple[str, str]:
+    """Return a CODE-owned abbreviated ref from one canonical completed row."""
+    if not _codex_author(item):
+        return "OTHER", ""
+    raw_body = item.get("body")
+    if not isinstance(raw_body, str) or raw_body.splitlines().count(REVIEW_SUMMARY_MARKER) != 1:
+        return "OTHER", ""
+    rows = _summary_table_rows(raw_body)
+    if rows is None:
+        return "OTHER", ""
+    code_rows = [row for row in rows if _summary_cell_text(row[0]) == "Code Review"]
+    if len(code_rows) != 1 or _summary_cell_text(code_rows[0][1]) != "Completed":
+        return "OTHER", ""
+    display_sha_match = re.fullmatch(r"`([0-9a-fA-F]+)`", code_rows[0][2])
+    if not display_sha_match:
+        return "OTHER", ""
+    display_sha = display_sha_match.group(1).lower()
+    if len(display_sha) > 40 or len(display_sha) < 7:
+        return "OTHER", ""
+    return "CODE_REF", display_sha
+
+
+def _classify_review_event(item: dict, source: str, expected_repo: str, expected_pr: int | None) -> tuple[str, str]:
+    """Classify one Codex event before evaluating its completion identity."""
+    if not _codex_author(item):
+        return "OTHER", ""
+    raw_body = item.get("body")
+    body = raw_body if isinstance(raw_body, str) else ""
+    first_line = _first_nonempty_line(raw_body)
+    code_heading = first_line == CODE_REVIEW_HEADING
+    security_heading = first_line == SECURITY_REVIEW_HEADING
+    metadata = _security_metadata(body, expected_repo, expected_pr)
+    has_security_marker = bool(SECURITY_METADATA.search(body))
+
+    # Mixed type evidence is deliberately ambiguous and therefore proves neither type.
+    if code_heading and (security_heading or has_security_marker):
+        return "OTHER", ""
+    if metadata is not None:
+        return "SECURITY", _full_sha(metadata["headSha"])
+    if source == "review" and security_heading:
+        return "SECURITY", _full_sha(item.get("commit_id"))
+    if source == "review" and code_heading:
+        return "CODE", _full_sha(item.get("commit_id"))
+    return "OTHER", ""
+
+
+def _request_kind(body: str) -> str | None:
+    """Match only a command at the start of a trimmed, non-quoted comment."""
+    text = body.strip()
+    if re.match(r"^@codex\s+security\s+review(?:\s|$)", text, re.IGNORECASE):
+        return "security"
+    if re.match(r"^@codex\s+review(?:\s|$)", text, re.IGNORECASE):
+        return "code"
+    return None
+
+
+def codex_review_states(
+    reviews: list[dict],
+    comments: list[dict],
+    expected_sha: str,
+    expected_repo: str = "",
+    expected_pr: int | None = None,
+    resolve_code_ref=None,
+) -> tuple[str, str]:
+    reviews = _validated_review_collection(reviews, "reviews")
+    comments = _validated_review_collection(comments, "comments")
+    events = [(_classify_review_event(item, "review", expected_repo, expected_pr), item) for item in reviews]
+    events += [(_classify_review_event(item, "comment", expected_repo, expected_pr), item) for item in comments]
+    # A canonical review submission already owns an exact CODE commit_id and
+    # takes precedence. Summary refs are resolved only when that evidence is
+    # absent; SECURITY metadata is never consulted to expand a CODE ref.
+    exact_code_submission = any(evidence == ("CODE", expected_sha) for evidence, _ in events)
+    if not exact_code_submission and resolve_code_ref is not None:
+        for item in comments:
+            evidence = _classify_summary_code(item)
+            if evidence[0] != "CODE_REF":
+                continue
+            resolved_sha = _validated_resolved_code_sha(resolve_code_ref(evidence[1]), evidence[1])
+            if resolved_sha:
+                events.append((("CODE", resolved_sha), item))
+    states = []
+    for kind in ("code", "security"):
+        classified_kind = kind.upper()
+        completed = [(evidence, item) for evidence, item in events if evidence[0] == classified_kind and evidence[1]]
+        exact = [item for evidence, item in completed if evidence[1] == expected_sha]
+        latest = max((item for _, item in completed), key=_event_order) if completed else None
+        requests = [item for item in comments if _request_kind(str(item.get("body") or "")) == kind]
+        latest_request = max(requests, key=_event_order) if requests else None
+        # Exact commit identity is authoritative even if a later completion or
+        # request exists; moving away and back does not invalidate that evidence.
+        if exact:
+            state = "COMPLETED"
+        # IDs from reviews and issue comments have unrelated namespaces.  At
+        # equal timestamps, conservatively retain the pending request rather
+        # than using incomparable IDs to call an older completion authoritative.
+        elif latest_request and (
+            not latest
+            or str(latest_request.get("created_at") or "") >= str(latest.get("submitted_at") or latest.get("created_at") or "")
+        ):
+            state = "REQUESTED_OR_RUNNING"
+        elif latest:
+            state = "STALE_SHA"
+        elif latest_request:
+            state = "REQUESTED_OR_RUNNING"
+        else:
+            state = "NOT_REQUESTED"
+        states.append(state)
+    return states[0], states[1]
+
+
+def wait_reviews_command(
+    repo: str,
+    pr: int | str,
+    expected_sha: str,
+    interval: float | str,
+    max_attempts: int | str,
+    json_mode: bool,
+    *,
+    reader: GitHubReader | None = None,
+    sleeper=time.sleep,
+) -> int:
+    result = _wait_reviews_result(repo, pr, expected_sha)
+
+    def invalid(message: str) -> int:
+        result["result"] = "INVALID_INPUT"
+        return _render_wait_reviews_invalid(result, message, json_mode)
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo or ""):
+        return invalid("INVALID_INPUT: --repo must be OWNER/REPO")
+    try:
+        pr = int(pr)
+        interval = float(interval)
+        max_attempts = int(max_attempts)
+    except (TypeError, ValueError):
+        return invalid("INVALID_INPUT: PR and max-attempts must be integers; interval must be a finite number")
+    result["pr"] = pr
+    if (
+        pr <= 0
+        or not math.isfinite(interval)
+        or interval <= 0
+        or interval > MAX_WAIT_REVIEWS_INTERVAL_SECONDS
+        or max_attempts <= 0
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha or "")
+    ):
+        return invalid(
+            "INVALID_INPUT: PR and max-attempts must be positive; interval must be greater than zero and at most "
+            f"{MAX_WAIT_REVIEWS_INTERVAL_SECONDS} seconds; SHA must be exactly 40 hex characters",
+        )
+    expected_sha = expected_sha.lower()
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token and max_attempts > GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS:
+        return invalid(
+            "INVALID_INPUT: unauthenticated polling permits at most "
+            f"{GITHUB_UNAUTHENTICATED_MAX_ATTEMPTS} attempts; provide GH_TOKEN/GITHUB_TOKEN or lower --max-attempts"
+        )
+    result.update(expected_sha=expected_sha, result="TIMEOUT")
+    try:
+        _validate_github_token(token)
+        api = reader or GitHubReader(token)
+        resolved_code_refs: dict[str, str] = {}
+
+        def resolve_code_ref(commit_ref: str) -> str:
+            if commit_ref not in resolved_code_refs:
+                try:
+                    payload = api.get(f"/repos/{repo}/commits/{commit_ref}")
+                except GitHubAPIError as exc:
+                    # GitHub reports missing and ambiguous commit refs as 404
+                    # and 422 respectively. Neither is authoritative identity.
+                    if exc.status not in (404, 422):
+                        raise
+                    payload = {}
+                if payload:
+                    if not isinstance(payload, Mapping):
+                        raise GitHubAPIError("GitHub CODE commit resolution has invalid shape")
+                resolved_code_refs[commit_ref] = _validated_resolved_code_sha(
+                    payload.get("sha") if isinstance(payload, Mapping) else "", commit_ref
+                )
+            return resolved_code_refs[commit_ref]
+
+        for attempt in range(1, max_attempts + 1):
+            result["attempt"] = attempt
+            metadata = api.get(f"/repos/{repo}/pulls/{pr}")
+            live_sha = _validated_pull_head_sha(metadata)
+            result["live_sha"] = live_sha
+            if live_sha != expected_sha:
+                result["result"] = "HEAD_MOVED"
+                if json_mode:
+                    print(json.dumps(result, sort_keys=True))
+                else:
+                    print(f"HEAD_MOVED\nexpected_sha={expected_sha}\nlive_sha={live_sha}")
+                return 2
+            reviews = _validated_review_collection(
+                api.pages(f"/repos/{repo}/pulls/{pr}/reviews"), "reviews"
+            )
+            comments = _validated_review_collection(
+                api.pages(f"/repos/{repo}/issues/{pr}/comments"), "comments"
+            )
+            code, security = codex_review_states(
+                reviews, comments, expected_sha, repo, pr, resolve_code_ref=resolve_code_ref
+            )
+            result.update(code_review=code, security_review=security)
+            progress = f"attempt={attempt} code={code} security={security} sha={expected_sha[:10]}"
+            print(progress, file=sys.stderr if json_mode else sys.stdout)
+            if code == security == "COMPLETED":
+                final_metadata = api.get(f"/repos/{repo}/pulls/{pr}")
+                final_live_sha = _validated_pull_head_sha(final_metadata)
+                result["live_sha"] = final_live_sha
+                if final_live_sha != expected_sha:
+                    result["result"] = "HEAD_MOVED"
+                    if json_mode:
+                        print(json.dumps(result, sort_keys=True))
+                    else:
+                        print(f"HEAD_MOVED\nexpected_sha={expected_sha}\nlive_sha={final_live_sha}")
+                    return 2
+                result["result"] = "REVIEWS_COMPLETE"
+                if json_mode:
+                    print(json.dumps(result, sort_keys=True))
+                else:
+                    print(f"REVIEWS_COMPLETE\nsame_sha=YES\nsha={expected_sha}")
+                return 0
+            if attempt < max_attempts:
+                try:
+                    sleeper(interval)
+                except (OverflowError, ValueError):
+                    return invalid("INVALID_INPUT: polling interval cannot be represented safely by this platform")
+    except GitHubAPIError as exc:
+        result["result"] = "API_FAILURE"
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+            print(str(exc), file=sys.stderr)
+        else:
+            print(f"API_FAILURE\n{exc}")
+        return 5
+    except KeyboardInterrupt:
+        result["result"] = "INTERRUPTED"
+        if json_mode:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print("INTERRUPTED\nAutomatic retrigger: FORBIDDEN")
+        return 130
+    result["result"] = "TIMEOUT"
+    if json_mode:
+        print(json.dumps(result, sort_keys=True))
+    else:
+        print(
+            f"TIMEOUT\ncode={result['code_review']}\nsecurity={result['security_review']}\n"
+            f"expected_sha={expected_sha}\nAutomatic retrigger: FORBIDDEN"
+        )
+    return 3
+
+
+def _wait_reviews_result(repo: object = None, pr: object = None, expected_sha: object = None) -> dict:
+    return {
+        "repo": repo,
+        "pr": pr,
+        "expected_sha": expected_sha.lower() if isinstance(expected_sha, str) else None,
+        "live_sha": None,
+        "attempt": 0,
+        "code_review": "NOT_REQUESTED",
+        "security_review": "NOT_REQUESTED",
+        "result": "INVALID_INPUT",
+    }
+
+
+def _render_wait_reviews_invalid(result: dict, message: str, json_mode: bool) -> int:
+    if json_mode:
+        print(json.dumps(result, sort_keys=True))
+        print(message, file=sys.stderr)
+        return 4
+    return fail(message, 4)
+
+
+def wait_reviews_with_signals(*args, **kwargs) -> int:
+    """Translate SIGTERM into the same clean interruption path as SIGINT."""
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        return wait_reviews_command(*args, **kwargs)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+class WaitReviewsArgumentError(Exception):
+    """A token-structure error owned by the wait-reviews result contract."""
+
+
+class WaitReviewsArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise WaitReviewsArgumentError(message)
+
+
+def _wait_reviews_parser() -> WaitReviewsArgumentParser:
+    parser = WaitReviewsArgumentParser(
+        prog="repoctl.py wait-reviews",
+        description="Observe GET-only Codex code and security reviews for one exact PR head SHA.",
+        allow_abbrev=False,
+        epilog=(
+            "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
+            "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
+            "header. Public repositories support unauthenticated access for at most 10 attempts and a guarded "
+            "45-request total budget; the 40-attempt default therefore requires a token. Exit codes: 0 REVIEWS_COMPLETE, "
+            "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
+        ),
+    )
+    for option, help_text in (
+        ("--repo", "GitHub OWNER/REPO"),
+        ("--pr", "positive pull request number"),
+        ("--sha", "immutable full 40-character PR head SHA"),
+        ("--interval", "poll interval in seconds (default: 75)"),
+        ("--max-attempts", "bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)"),
+    ):
+        parser.add_argument(option, action="append", help=help_text)
+    parser.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
+    return parser
+
+
+def wait_reviews_main(raw_argv: list[str]) -> int:
+    json_mode = "--json" in raw_argv
+    try:
+        args = _wait_reviews_parser().parse_args(raw_argv)
+    except WaitReviewsArgumentError as exc:
+        return _render_wait_reviews_invalid(
+            _wait_reviews_result(), f"INVALID_INPUT: {exc}", json_mode
+        )
+    values = {}
+    for name, default in (("repo", None), ("pr", None), ("sha", None), ("interval", "75"), ("max_attempts", "40")):
+        supplied = getattr(args, name)
+        if supplied is not None and len(supplied) != 1:
+            return _render_wait_reviews_invalid(
+                _wait_reviews_result(), f"INVALID_INPUT: --{name.replace('_', '-')} may be supplied exactly once", json_mode
+            )
+        values[name] = supplied[0] if supplied else default
+    return wait_reviews_with_signals(
+        values["repo"], values["pr"], values["sha"], values["interval"], values["max_attempts"], json_mode
+    )
+
+
+def main(raw_argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if raw_argv is None else raw_argv)
+    if raw_argv and raw_argv[0] == "wait-reviews":
+        return wait_reviews_main(raw_argv[1:])
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in [
@@ -1992,7 +2548,28 @@ def main() -> int:
     ec = sub.add_parser("evidence-compare")
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
-    args = p.parse_args()
+    wr = sub.add_parser(
+        "wait-reviews",
+        description="Observe GET-only Codex code and security reviews for one exact PR head SHA.",
+        epilog=(
+            "The SHA must be exactly 40 hexadecimal characters. Stale reviews never count; this command never "
+            "requests or retriggers a review. Optional GH_TOKEN/GITHUB_TOKEN is sent only in the Authorization "
+            "header. Public repositories support unauthenticated access for at most 10 attempts and a guarded "
+            "45-request total budget; the 40-attempt default therefore requires a token. Exit codes: 0 REVIEWS_COMPLETE, "
+            "2 HEAD_MOVED, 3 TIMEOUT, 4 INVALID_INPUT, 5 API_FAILURE. --json emits one final JSON document."
+        ),
+    )
+    wr.add_argument("--repo", help="GitHub OWNER/REPO")
+    wr.add_argument("--pr", help="positive pull request number")
+    wr.add_argument("--sha", help="immutable full 40-character PR head SHA")
+    wr.add_argument("--interval", default="75", help="poll interval in seconds (default: 75)")
+    wr.add_argument(
+        "--max-attempts",
+        default="40",
+        help="bounded attempts (default: 40 authenticated; unauthenticated maximum: 10)",
+    )
+    wr.add_argument("--json", action="store_true", help="write only the final JSON document to stdout")
+    args = p.parse_args(raw_argv)
     try:
         if args.cmd == "governance":
             return governance()
@@ -2075,6 +2652,8 @@ def main() -> int:
             return evidence_fetch_command(args.sha)
         if args.cmd == "evidence-compare":
             return evidence_compare_command(args.full, args.incremental)
+        if args.cmd == "wait-reviews":
+            return wait_reviews_with_signals(args.repo, args.pr, args.sha, args.interval, args.max_attempts, args.json)
         if args.cmd == "precommit":
             return precommit()
         if args.cmd == "prepush":
