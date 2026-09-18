@@ -45,7 +45,7 @@ adapters:
       blocking_default: true
       advisory_rules:
         - partial-become
-        - latest
+        - latest[git]
         - no-handler
         - yaml[empty-lines]
         - run-once[play]
