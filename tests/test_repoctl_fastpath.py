@@ -86,11 +86,15 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             self.assertEqual(0, MOD._run_cached_static_gate("governance", {}, producer))
         producer.assert_not_called()
 
-    def test_static_gate_cache_key_changes_with_worktree_tree(self):
+    def test_static_gate_cache_key_changes_with_scoped_inputs(self):
         approved = {
             "consumers": {
                 "repoctl_global_static_gates": {
-                    "gates": ["automation"],
+                    "gates": {
+                        "automation": {
+                            "inputs": ["**/*.sh", "platform/tekton/**/*"],
+                        }
+                    },
                 }
             }
         }
@@ -102,17 +106,52 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 "executable_identity",
                 side_effect=lambda executable: {"path": executable, "sha256": "tool"},
             ),
-            mock.patch.object(MOD, "worktree_tree_sha", side_effect=["a" * 40, "b" * 40]),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "digest_globs",
+                side_effect=["a" * 64, "b" * 64],
+            ),
         ):
             first, _ = MOD._static_gate_cache_key("automation", {})
             second, _ = MOD._static_gate_cache_key("automation", {})
         self.assertNotEqual(first, second)
 
+    def test_static_gate_cache_ignores_files_outside_declared_scope(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": {
+                        "governance": {
+                            "inputs": ["architecture.lock.yaml", "config/contracts/**/*"],
+                        }
+                    },
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="c" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": executable, "sha256": "tool"},
+            ),
+        ):
+            first, _ = MOD._static_gate_cache_key("governance", {})
+            second, _ = MOD._static_gate_cache_key("governance", {})
+        self.assertEqual(first, second)
+
     def test_security_gate_is_never_cacheable(self):
         approved = {
             "consumers": {
                 "repoctl_global_static_gates": {
-                    "gates": ["governance", "runtime-efficiency", "contracts", "automation"],
+                    "gates": {
+                        "governance": {"inputs": ["architecture.lock.yaml"]},
+                        "runtime-efficiency": {"inputs": ["config/contracts/runtime-efficiency.yaml"]},
+                        "contracts": {"inputs": ["contracts/openapi/**/*"]},
+                        "automation": {"inputs": ["**/*.sh"]},
+                    },
                 }
             }
         }
