@@ -1,0 +1,14 @@
+[Interface]
+Address = {{ wireguard_gateway_tunnel_ip }}/{{ wireguard_tunnel_cidr.split('/')[1] }}
+ListenPort = {{ wireguard_listen_port }}
+PrivateKey = {{ wireguard_private_key }}
+{% for route in wireguard_allowed_routes %}
+PostUp = firewall-cmd --add-rich-rule='rule family=ipv4 source address={{ wireguard_tunnel_cidr }} destination address={{ route }} accept'
+PostDown = firewall-cmd --remove-rich-rule='rule family=ipv4 source address={{ wireguard_tunnel_cidr }} destination address={{ route }} accept'
+{% endfor %}
+{% for peer in wireguard_peers %}
+
+[Peer]
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.allowed_ip }}
+{% endfor %}

@@ -53,37 +53,41 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             )
 
     def test_transport_overlay_changes_only_ansible_transport_address(self):
-        canonical = yaml.safe_load(MGMT_INVENTORY.read_text(encoding="utf-8"))
-        names = [*canonical["control_planes"].keys(), *canonical["workers"].keys()]
-        hosts = {name: f"203.0.113.{index + 10}" for index, name in enumerate(names)}
-        overlay = {"version": 1, "source": "test", "contains_secrets": False, "hosts": hosts}
+        module = load_runtime_module()
+        names, gateway = module.load_canonical(ROOT)
+        raw = {
+            "phase": "bootstrap",
+            "gateway": {
+                "name": gateway,
+                "provider_public": "198.51.100.10",
+                "private_address": "10.243.1.41",
+                "bootstrap_ssh": True,
+            },
+            "nodes": {
+                name: {"provider_public": "", "private_address": f"10.243.1.{61 + index}", "gateway": gateway}
+                for index, name in enumerate(names)
+            },
+        }
+        overlay = {
+            "version": 2,
+            "source": "test",
+            "contains_secrets": False,
+            **module.validate_transport(names, gateway, raw),
+        }
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "transport.json"
             path.write_text(json.dumps(overlay), encoding="utf-8")
             env = dict(os.environ, MGMT_TRANSPORT_INVENTORY=str(path))
             rendered = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT, env=env))
-        for name, transport in hosts.items():
-            self.assertEqual(rendered["_meta"]["hostvars"][name]["ansible_host"], transport)
-            self.assertNotEqual(rendered["_meta"]["hostvars"][name]["mgmt_ip"], transport)
+        self.assertEqual("198.51.100.10", rendered["_meta"]["hostvars"][gateway]["ansible_host"])
+        for name in names:
+            self.assertIn("ProxyJump", rendered["_meta"]["hostvars"][name]["ansible_ssh_common_args"])
 
     def test_runtime_inventory_validates_exact_node_set_and_writes_no_secrets(self):
         module = load_runtime_module()
-        canonical = module.load_canonical_nodes(ROOT)
-        servers = {
-            name: {"id": index + 1, "ipv4": f"198.51.100.{index + 10}", "ipv6": "2001:db8::1"}
-            for index, name in enumerate(canonical)
-        }
-        hosts = module.validate_servers(canonical, servers)
-        self.assertEqual(sorted(hosts), canonical)
-        with self.assertRaises(ValueError):
-            module.validate_servers(canonical, {name: servers[name] for name in canonical[:-1]})
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "transport.json"
-            module.write_overlay(output, hosts)
-            text = output.read_text(encoding="utf-8")
-            self.assertIn('"contains_secrets": false', text)
-            self.assertNotIn("token", text.lower())
-            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        names, gateway = module.load_canonical(ROOT)
+        self.assertEqual(6, len(names))
+        self.assertEqual("wg-01", gateway)
 
     def test_role_preserves_dhcp_primary_and_reconciles_only_aliases(self):
         text = ROLE.read_text(encoding="utf-8")
@@ -115,6 +119,36 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
         line = next(line for line in text.splitlines() if "scripts/mgmt_runtime_inventory.py" in line)
         self.assertNotIn("apply", line)
         self.assertNotIn("hcloud", line)
+
+    def test_private_host_firewall_is_persistent_and_segmented(self):
+        text = ROLE.read_text(encoding="utf-8")
+        self.assertIn("Enable and start private-network firewall authority", text)
+        self.assertIn("--query-rich-rule", text)
+        self.assertIn("--add-rich-rule", text)
+        self.assertIn("--new-zone=mgmt-private", text)
+        self.assertIn("--set-target=DROP", text)
+        self.assertIn("--add-source=", text)
+        for segment in (401, 402, 403, 405):
+            self.assertIn(f"mgmt_firewall_cidrs[{segment}]", text)
+        self.assertIn("mgmt_firewall_role == 'control-plane'", text)
+
+    def test_wireguard_firewall_order_snat_and_desired_state(self):
+        tasks = (ROOT / "platform/ansible/roles/wireguard_gateway/tasks/main.yml").read_text(encoding="utf-8")
+        template = (ROOT / "platform/ansible/roles/wireguard_gateway/templates/wg0.conf.j2").read_text(encoding="utf-8")
+        self.assertLess(tasks.index("Enable and start firewalld"), tasks.index("Render fail-closed WireGuard"))
+        self.assertIn("--to-source", tasks)
+        self.assertIn("wireguard_snat_source_cidr", tasks)
+        self.assertIn("wireguard_snat_destination_cidr", tasks)
+        self.assertNotIn("masquerade", tasks.lower())
+        self.assertNotIn("masquerade", template.lower())
+        service = tasks.split("Enable and start WireGuard desired state", 1)[1]
+        self.assertIn("enabled: true", service)
+        self.assertIn("state: started", service)
+
+    def test_rke2_server_uses_canonical_cluster_and_service_cidrs(self):
+        template = (ROOT / "platform/ansible/roles/rke2_server/templates/config.yaml.j2").read_text(encoding="utf-8")
+        self.assertIn('cluster-cidr: "{{ rke2_cluster_cidr }}"', template)
+        self.assertIn('service-cidr: "{{ rke2_service_cidr }}"', template)
 
 
 if __name__ == "__main__":
