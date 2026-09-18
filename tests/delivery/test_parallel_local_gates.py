@@ -29,7 +29,7 @@ class ParallelLocalGateTest(unittest.TestCase):
 
     def test_windows_parallel_runner_uses_process_group_and_taskkill(self):
         process = mock.Mock(pid=4242, returncode=0)
-        process.poll.side_effect = [None, 0]
+        process.poll.side_effect = [None, 0, 0, 0]
         process.wait.return_value = 0
         popen = mock.Mock(return_value=process)
         with (
