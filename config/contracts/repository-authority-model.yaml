@@ -50,6 +50,9 @@ native_projections:
   - path: platform/ansible/requirements.yml
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: platform/ansible/ansible.cfg
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
   - path: config/python/requirements.lock
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.toolchain_lock
