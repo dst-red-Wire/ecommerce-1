@@ -263,6 +263,16 @@ graph LR
         self.assertEqual("crossplane", contract["principles"]["infrastructure_api"])
         self.assertEqual("forbidden", contract["execution_contract"]["tekton_direct_workload_deploy"])
         self.assertTrue(contract["execution_contract"]["mutating_platform_action_requires_git_change"])
+        pr_contract = contract["pull_request_contract"]
+        self.assertFalse(pr_contract["human_review_required"])
+        self.assertTrue(pr_contract["ai_auto_merge_allowed"])
+        self.assertEqual(
+            ["deterministic-qualification", "code-review", "security-review"],
+            pr_contract["ai_auto_merge_required_verifications"],
+        )
+        self.assertTrue(pr_contract["ai_auto_merge_same_head_sha_required"])
+        self.assertTrue(pr_contract["ai_auto_merge_fail_closed"])
+        self.assertTrue(pr_contract["review_policy_changes_require_human_gate"])
         self.assertEqual(
             "stable-pr-driven-contract-locked",
             contract["milestone_contract"]["M1-monorepo-bootstrap"]["outcome"],
@@ -284,6 +294,8 @@ graph LR
                 ("    backstage_management_plane_nodejs: allowed-required", "    backstage_management_plane_nodejs: forbidden"),
                 ("    source_of_truth: git", "    source_of_truth: backstage"),
                 ("    tekton_direct_workload_deploy: forbidden", "    tekton_direct_workload_deploy: allowed"),
+                ("    ai_auto_merge_allowed: true", "    ai_auto_merge_allowed: false"),
+                ("    ai_auto_merge_same_head_sha_required: true", "    ai_auto_merge_same_head_sha_required: false"),
                 ("      implementation_required: false", "      implementation_required: true"),
                 ("      outcome: implement-pr-driven-platform-contract", "      outcome: redesign-pr-driven-platform-contract"),
             )
@@ -298,6 +310,32 @@ graph LR
                         )
                     )
                     lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_review_policy_requires_three_exact_sha_verifications(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            mutations = (
+                ("    may_approve: true", "    may_approve: false"),
+                ("    may_merge: true", "    may_merge: false"),
+                ("      verification_count: 3", "      verification_count: 2"),
+                ("        - security-review", ""),
+                ("      all_verifications_same_head_sha: true", "      all_verifications_same_head_sha: false"),
+                ("      - review_policy_changes", ""),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    policy.write_text(original.replace(before, after, 1))
+                    self.assertTrue(
+                        any(
+                            "three-verification AI merge policy" in error
+                            for error in authority.validate(root)
+                        )
+                    )
+                    policy.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
     def test_topology_assertions_and_operational_subsets(self):
