@@ -21,6 +21,10 @@ domains:
     machine_contract: terraform_provider_lock
   qualification_cache:
     machine_contract: qualification_cache
+  context_routing:
+    machine_contract: context_router
+  workstation:
+    machine_contract: workstation_policy
   contract_registry:
     authority: architecture.lock.yaml#machine_contracts
 
@@ -52,6 +56,21 @@ native_projections:
   - path: config/toolchain/capabilities.json
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .bazelversion
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .bazelrc
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .config/configuration.winget
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
+  - path: config/workstation/git-local.conf
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
+  - path: config/workstation/wslconfig.template
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
   - path: platform/terraform/environments/mgmt/.terraform.lock.hcl
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
@@ -86,6 +105,18 @@ component_manifests:
     kind: go-module
   - pattern: services/*/sqlc.yaml
     kind: sqlc-component
+  - pattern: frontend/go.sum
+    kind: go-module-lock
+  - pattern: services/*/go.sum
+    kind: go-module-lock
+  - pattern: MODULE.bazel
+    kind: bazel-module
+  - pattern: MODULE.bazel.lock
+    kind: bazel-module-lock
+  - pattern: BUILD.bazel
+    kind: bazel-build
+  - pattern: services/*/Containerfile
+    kind: container-build
   - pattern: contracts/openapi/*.yaml
     kind: openapi-component
 
