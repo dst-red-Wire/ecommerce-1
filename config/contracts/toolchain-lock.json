@@ -126,6 +126,11 @@
       "path": ".bazelrc",
       "mode": "generated-projection",
       "authority": "toolchain_lock.native_tool_configs.bazel.bazelrc_lines"
+    },
+    "ansible_config": {
+      "path": "platform/ansible/ansible.cfg",
+      "mode": "generated-projection",
+      "authority": "toolchain_lock.native_tool_configs.ansible"
     }
   },
   "rules": {
@@ -170,6 +175,26 @@
         "build --show_timestamps",
         "test --test_output=errors"
       ]
+    },
+    "ansible": {
+      "projection": "platform/ansible/ansible.cfg",
+      "sections": {
+        "defaults": {
+          "forks": "30",
+          "inventory": "inventories/mgmt/inventory.rb",
+          "roles_path": "roles",
+          "collections_path": "../../.ansible/collections",
+          "collections_scan_sys_path": "False",
+          "host_key_checking": "True",
+          "retry_files_enabled": "False",
+          "interpreter_python": "/usr/bin/python3",
+          "stdout_callback": "default",
+          "callback_result_format": "yaml"
+        },
+        "ssh_connection": {
+          "pipelining": "True"
+        }
+      }
     }
   }
 }
