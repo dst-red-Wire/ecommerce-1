@@ -191,13 +191,11 @@ site: ## Run Storefront and Admin Go frontends locally
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product
 
-product-run: ## Run local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
-	@$(ANSIBLE_LOCAL) --tags go
-	@$(HOME)/.local/bin/go run ./services/product/cmd/product-api
+product-run: ## Run local Product REST runtime through the central tool resolver
+	@$(PYTHON) scripts/repoctl.py product-run
 
-product-benchmark: ## Benchmark the Product HTTP hot path with allocations; not production sizing evidence
-	@$(ANSIBLE_LOCAL) --tags go
-	@cd services/product && $(HOME)/.local/bin/go test -run '^$$' -bench '^BenchmarkListProductsEmpty$$' -benchmem ./internal/transport/rest
+product-benchmark: ## Benchmark Product through the central tool resolver
+	@$(PYTHON) scripts/repoctl.py product-benchmark
 
 resource-candidate: ## Derive a deterministic candidate from representative preprod evidence; use EVIDENCE=path.json
 	@ruby scripts/resource-sizing.rb "$(EVIDENCE)"
