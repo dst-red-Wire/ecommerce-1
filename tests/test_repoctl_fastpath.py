@@ -73,6 +73,53 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             (repo / "ignored.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
 
+    def test_static_gate_cache_hit_skips_producer(self):
+        producer = mock.Mock(side_effect=AssertionError("producer must not run on cache hit"))
+        with (
+            mock.patch.object(MOD, "_static_gate_cache_key", return_value=("cache-key", "a" * 40)),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "load_success",
+                return_value={"duration_seconds": 12.5},
+            ),
+        ):
+            self.assertEqual(0, MOD._run_cached_static_gate("governance", {}, producer))
+        producer.assert_not_called()
+
+    def test_static_gate_cache_key_changes_with_worktree_tree(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": ["automation"],
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": executable, "sha256": "tool"},
+            ),
+            mock.patch.object(MOD, "worktree_tree_sha", side_effect=["a" * 40, "b" * 40]),
+        ):
+            first, _ = MOD._static_gate_cache_key("automation", {})
+            second, _ = MOD._static_gate_cache_key("automation", {})
+        self.assertNotEqual(first, second)
+
+    def test_security_gate_is_never_cacheable(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": ["governance", "runtime-efficiency", "contracts", "automation"],
+                }
+            }
+        }
+        with mock.patch.object(MOD.qualification_cache, "contract", return_value=approved):
+            with self.assertRaisesRegex(RuntimeError, "not approved"):
+                MOD._static_gate_cache_key("security", {})
+
     def test_exact_managed_go_pair_is_detected_without_ansible(self):
         pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
         commands = {
