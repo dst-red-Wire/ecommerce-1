@@ -887,20 +887,35 @@ def terraform_check() -> int:
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-    tool = shutil.which("tofu") or shutil.which("terraform")
+
+    policy = source_quality_adapter("terraform")
+    formatter = policy["formatter"]
+    validation = policy["validation"]
+    tool = next(
+        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
+        None,
+    )
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
-    run([tool, "fmt", "-check", "-recursive", "-diff"])
+        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+
+    advisory_exit_check(
+        "terraform fmt",
+        [tool, *formatter["args"]],
+        drift_exit_codes=formatter["drift_exit_codes"],
+    )
+
+    init_args = [tool, *validation["init_args"]]
+    validate_args = [tool, *validation["validate_args"]]
     for directory in sorted({p.parent for p in tf_files}):
         print(f"CHECK terraform: {directory.relative_to(ROOT)}")
-        if "modules" in directory.parts and "platform" in directory.parts:
+        if "modules" in directory.parts and "platform" in directory.parts and validation["module_validation_in_temporary_copy"]:
             with tempfile.TemporaryDirectory(prefix="tf-module-") as temp:
                 shutil.copytree(directory, temp, dirs_exist_ok=True)
-                run([tool, "init", "-backend=false", "-input=false"], cwd=Path(temp))
-                run([tool, "validate"], cwd=Path(temp))
+                run(init_args, cwd=Path(temp))
+                run(validate_args, cwd=Path(temp))
         else:
-            run([tool, "init", "-backend=false", "-input=false"], cwd=directory)
-            run([tool, "validate"], cwd=directory)
+            run(init_args, cwd=directory)
+            run(validate_args, cwd=directory)
     print("PASS terraform checks completed")
     return 0
 
@@ -913,7 +928,18 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+
+    lint_policy = source_quality_adapter("ansible")["lint"]
+    advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
+    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+        config = Path(temp_dir) / "ansible-lint.yml"
+        config.write_text(
+            "---\nwarn_list:\n"
+            + "".join(f"  - {rule}\n" for rule in advisory_rules),
+            encoding="utf-8",
+        )
+        run(["ansible-lint", "--config-file", str(config), *files])
+
     run(
         [
             "ansible-playbook",
@@ -954,7 +980,15 @@ def lint_all() -> int:
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        python_policy = source_quality_adapter("python")
+        formatter = python_policy["formatter"]
+        advisory_exit_check(
+            "ruff format",
+            [formatter["command"], *formatter["args"], *python_files],
+            drift_exit_codes=formatter["drift_exit_codes"],
+        )
+        lint_policy = python_policy["lint"]
+        run([lint_policy["command"], *lint_policy["args"], *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
