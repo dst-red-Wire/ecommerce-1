@@ -85,7 +85,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual(self.wg["gateway_mgmt_ip"], gateway["mgmt_ip"])
         self.assertFalse(gateway["kubernetes_member"])
         self.assertEqual("provider-runtime-output", gateway["public_endpoint"])
-        self.assertTrue(self.gateway_inventory["implementation"]["human_apply_gate"])
+        self.assertEqual("required", self.gateway_inventory["implementation"]["owner_authorization"])
         self.assertEqual(
             "future-pr-after-contract-merge",
             self.gateway_inventory["implementation"]["terraform_wiring"],
@@ -120,7 +120,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertNotIn("address", endpoint)
         self.assertNotIn("ip", endpoint)
 
-    def test_access_policy_preserves_control_plane_ownership_and_human_gates(self):
+    def test_access_policy_preserves_control_plane_ownership_and_owner_authorizations(self):
         self.assertEqual("exact", self.policy["status"])
         self.assertEqual("Z5", self.policy["gateway"]["trust_zone"])
         self.assertFalse(self.policy["gateway"]["kubernetes_member"])
@@ -142,7 +142,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
                 "routing_change": "required",
                 "peer_or_key_change": "required",
             },
-            self.policy["human_gates"],
+            self.policy["owner_authorizations"],
         )
 
     def test_non_kubernetes_secret_delivery_is_exact(self):
