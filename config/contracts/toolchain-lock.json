@@ -122,5 +122,34 @@
     "native_projection_drift": "block",
     "duplicate_version_authority": "forbidden",
     "unmanaged_cross_cutting_version": "forbidden"
+  },
+  "capability_policy": {
+    "supported": {
+      "os": [
+        "linux",
+        "darwin",
+        "windows"
+      ],
+      "arch": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "classifications": [
+      "managed",
+      "seed-prerequisite",
+      "platform-provided",
+      "conditional"
+    ],
+    "requirements": [
+      "required-static",
+      "optional-runtime"
+    ],
+    "managed_provision_types": [
+      "ansible"
+    ],
+    "managed_bin_subdirectories": [
+      ".local/bin"
+    ]
   }
 }
