@@ -160,6 +160,16 @@ class ArchitectureValidatorTest < Minitest::Test
     end
   end
 
+  def test_platform_infrastructure_api_is_derived_from_root_authority
+    with_contract_copy do |root|
+      mutate_yaml(root, "architecture.lock.yaml") do |data|
+        data["platform"]["infrastructure_api"] = "terraform"
+      end
+      errors = ArchitectureValidator.validate(root)
+      assert errors.any? { |error| error.include?("platform.infrastructure_api") }
+    end
+  end
+
   def test_management_plane_provider_and_human_gate_are_cross_checked
     {
       "MGMT inventory provider" => lambda { |data| data["management_plane"]["provider"] = "aws" },
