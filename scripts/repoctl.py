@@ -1171,6 +1171,44 @@ def site() -> int:
         return failed[0] if failed else 0
 
 
+def product_run() -> int:
+    ensure_developer("go")
+    managed_bin = managed_bin_dirs()[0]
+    go = managed_bin / "go"
+    if not go.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    env = dict(os.environ, PATH=f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    return run([str(go), "run", "./services/product/cmd/product-api"], env=env, check=False).returncode
+
+
+def product_benchmark() -> int:
+    ensure_developer("go")
+    managed_bin = managed_bin_dirs()[0]
+    go = managed_bin / "go"
+    if not go.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    env = dict(os.environ, PATH=f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    return run(
+        [
+            str(go),
+            "test",
+            "-run",
+            "^$",
+            "-bench",
+            "^BenchmarkListProductsEmpty$",
+            "-benchmem",
+            "./internal/transport/rest",
+        ],
+        cwd=ROOT / "services/product",
+        env=env,
+        check=False,
+    ).returncode
+
+
 def forbidden_frontend_artifacts() -> None:
     forbidden_names = {
         "package.json",
@@ -2522,6 +2560,8 @@ def main() -> int:
         "precommit",
         "prepush",
         "site",
+        "product-run",
+        "product-benchmark",
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
@@ -2626,6 +2666,10 @@ def main() -> int:
             return frontend(args.action, args.scope)
         if args.cmd == "site":
             return site()
+        if args.cmd == "product-run":
+            return product_run()
+        if args.cmd == "product-benchmark":
+            return product_benchmark()
         if args.cmd == "service":
             return service_check(args.service)
         if args.cmd == "affected":
