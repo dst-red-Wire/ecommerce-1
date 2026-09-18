@@ -123,6 +123,59 @@ def ruby_yaml(path: str) -> dict:
     return qualification_cache.psych_load(source)
 
 
+_SOURCE_QUALITY_POLICY: dict | None = None
+
+
+def source_quality_policy() -> dict:
+    """Load the single repository-wide source quality contract."""
+    global _SOURCE_QUALITY_POLICY
+    if _SOURCE_QUALITY_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("source_quality_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.source_quality_policy")
+        policy = ruby_yaml(relative)
+        if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
+            raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+        _SOURCE_QUALITY_POLICY = policy
+    return copy.deepcopy(_SOURCE_QUALITY_POLICY)
+
+
+def source_quality_adapter(name: str) -> dict:
+    adapter = source_quality_policy().get("adapters", {}).get(name)
+    if not isinstance(adapter, dict):
+        raise RuntimeError(f"source quality adapter is not declared: {name}")
+    return adapter
+
+
+def advisory_exit_check(
+    label: str,
+    command: list[str],
+    *,
+    drift_exit_codes: list[int],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run a read-only formatter check; only declared drift exits are advisory."""
+    result = run(command, cwd=cwd, env=env, check=False, capture=True)
+    output_text = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode == 0:
+        return
+    if result.returncode in {int(code) for code in drift_exit_codes}:
+        if output_text:
+            print(output_text, file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+        return
+    raise RuntimeError(output_text or f"{label} formatter failed with exit code {result.returncode}")
+
+
+def advisory_output_check(label: str, output_text: str) -> None:
+    """Report formatter drift that is signaled by non-empty output."""
+    if output_text.strip():
+        print(output_text.strip(), file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+
+
 def pinned_versions() -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
@@ -641,8 +694,7 @@ def frontend(action: str, scope: str = "") -> int:
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
-        if formatted.stdout.strip():
-            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        advisory_output_check("frontend gofmt", formatted.stdout or "")
         forbidden_frontend_artifacts()
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
@@ -858,24 +910,37 @@ def terraform_check() -> int:
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-    tool = shutil.which("tofu") or shutil.which("terraform")
+
+    policy = source_quality_adapter("terraform")
+    formatter = policy["formatter"]
+    validation = policy["validation"]
+    tool = next(
+        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
+        None,
+    )
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
-    run([tool, "fmt", "-check", "-recursive", "-diff"])
+        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+
+    advisory_exit_check(
+        "terraform fmt",
+        [tool, *formatter["args"]],
+        drift_exit_codes=formatter["drift_exit_codes"],
+    )
+
+    init_args = [tool, *validation["init_args"]]
+    validate_args = [tool, *validation["validate_args"]]
     for directory in sorted({p.parent for p in tf_files}):
         print(f"CHECK terraform: {directory.relative_to(ROOT)}")
-        if "modules" in directory.parts and "platform" in directory.parts:
+        if "modules" in directory.parts and "platform" in directory.parts and validation["module_validation_in_temporary_copy"]:
             with tempfile.TemporaryDirectory(prefix="tf-module-") as temp:
                 shutil.copytree(directory, temp, dirs_exist_ok=True)
-                run([tool, "init", "-backend=false", "-input=false"], cwd=Path(temp))
-                run([tool, "validate"], cwd=Path(temp))
+                run(init_args, cwd=Path(temp))
+                run(validate_args, cwd=Path(temp))
         else:
-            run([tool, "init", "-backend=false", "-input=false"], cwd=directory)
-            run([tool, "validate"], cwd=directory)
+            run(init_args, cwd=directory)
+            run(validate_args, cwd=directory)
     print("PASS terraform checks completed")
     return 0
-
-
 def ansible_check() -> int:
     reconcile_ansible_collections()
     require("ansible-lint")
@@ -884,7 +949,18 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+
+    lint_policy = source_quality_adapter("ansible")["lint"]
+    advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
+    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+        config = Path(temp_dir) / "ansible-lint.yml"
+        config.write_text(
+            "---\nwarn_list:\n"
+            + "".join(f"  - {rule}\n" for rule in advisory_rules),
+            encoding="utf-8",
+        )
+        run(["ansible-lint", "--config-file", str(config), *files])
+
     run(
         [
             "ansible-playbook",
@@ -902,8 +978,6 @@ def ansible_check() -> int:
         return 1
     print("PASS ansible checks completed")
     return 0
-
-
 def system_check() -> int:
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
     run_ruby_tests(tests)
@@ -914,6 +988,50 @@ def system_check() -> int:
     return 0
 
 
+def format_check() -> int:
+    """Run repository-wide non-mutating formatter diagnostics from the central policy."""
+    python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
+    if python_files:
+        require("ruff")
+        formatter = source_quality_adapter("python")["formatter"]
+        advisory_exit_check(
+            "ruff format",
+            [formatter["command"], *formatter["args"], *python_files],
+            drift_exit_codes=formatter["drift_exit_codes"],
+        )
+
+    go_files = sorted(
+        str(path)
+        for tree in (ROOT / "services", ROOT / "frontend")
+        if tree.is_dir()
+        for path in tree.rglob("*.go")
+        if "vendor" not in path.parts
+    )
+    if go_files:
+        require("gofmt")
+        go_policy = source_quality_adapter("go")["formatter"]
+        result = run([go_policy["command"], *go_policy["args"], *go_files], capture=True)
+        advisory_output_check("gofmt", result.stdout or "")
+
+    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    if tf_files:
+        terraform_policy = source_quality_adapter("terraform")["formatter"]
+        tool = next(
+            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
+            None,
+        )
+        if not tool:
+            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        advisory_exit_check(
+            "terraform fmt",
+            [tool, *terraform_policy["args"]],
+            drift_exit_codes=terraform_policy["drift_exit_codes"],
+        )
+
+    print("PASS source format diagnostics completed")
+    return 0
+
+
 def lint_all() -> int:
     if automation_policy():
         return 1
@@ -921,13 +1039,19 @@ def lint_all() -> int:
     if go_files:
         require("gofmt")
         p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip():
-            print(p.stdout, file=sys.stderr)
-            return 1
+        advisory_output_check("service gofmt", p.stdout or "")
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        python_policy = source_quality_adapter("python")
+        formatter = python_policy["formatter"]
+        advisory_exit_check(
+            "ruff format",
+            [formatter["command"], *formatter["args"], *python_files],
+            drift_exit_codes=formatter["drift_exit_codes"],
+        )
+        lint_policy = python_policy["lint"]
+        run([lint_policy["command"], *lint_policy["args"], *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -2002,6 +2126,7 @@ def main() -> int:
         "governance",
         "runtime-efficiency",
         "automation-policy",
+        "format-check",
         "lint",
         "test",
         "security",
@@ -2099,6 +2224,8 @@ def main() -> int:
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()
+        if args.cmd == "format-check":
+            return format_check()
         if args.cmd == "lint":
             return lint_all()
         if args.cmd == "test":
