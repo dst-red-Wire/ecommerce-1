@@ -23,6 +23,7 @@ FILES = [
     "config/contracts/traffic-class-policy.yaml",
     "config/contracts/mesh-observability-policy.yaml",
     "config/contracts/public-api-contracts.yaml",
+    "config/contracts/edge-protocol-policy.yaml",
     "contracts/payment-security.yaml",
     "contracts/payment-runtime.yaml",
 ]
