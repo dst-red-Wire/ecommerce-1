@@ -24,11 +24,13 @@ pull_request_review:
     may_push: false
     automatic_merge:
       enabled: true
-      verification_count: 3
+      verification_count: 5
       required_verifications:
         - deterministic-qualification
         - code-review
         - security-review
+        - provenance-integrity
+        - governance-policy
       binds_exact_commit_sha: true
       all_verifications_same_head_sha: true
       require_pr_mergeable: true
