@@ -91,7 +91,6 @@ orchestration_adapters:
       - "@ansible-playbook"
       - "@bazel "
       - "@ruby "
-      - $(HOME)/.local/bin
   - path: frontend/Makefile
     forbidden_markers:
       - versions.env
