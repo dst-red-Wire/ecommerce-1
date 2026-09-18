@@ -987,15 +987,17 @@ _STATIC_GATE_TOOLS = {
 
 
 def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
-    approved = set(
+    gate_contracts = (
         qualification_cache.contract()
         .get("consumers", {})
         .get("repoctl_global_static_gates", {})
-        .get("gates", [])
+        .get("gates", {})
     )
-    if name not in approved or name not in _STATIC_GATE_TOOLS:
+    gate_contract = gate_contracts.get(name) if isinstance(gate_contracts, dict) else None
+    patterns = gate_contract.get("inputs", []) if isinstance(gate_contract, dict) else []
+    if name not in _STATIC_GATE_TOOLS or not patterns:
         raise RuntimeError(f"static qualification cache is not approved for gate {name}")
-    tree_sha = worktree_tree_sha()
+    input_digest = qualification_cache.digest_globs(patterns, root=ROOT)
     validator_digest = qualification_cache.digest_paths(
         [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
         root=ROOT,
@@ -1004,23 +1006,27 @@ def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
         tool: qualification_cache.executable_identity(tool)
         for tool in _STATIC_GATE_TOOLS[name]
     }
+    cache_options = {
+        "gate_inputs": list(patterns),
+        "gate_options": options,
+    }
     key = qualification_cache.build_key(
         f"static-gate:{name}",
-        input_content_digest=tree_sha,
+        input_content_digest=input_digest,
         validator_content_digest=validator_digest,
         tool_identity=tool_identity,
-        options=options,
+        options=cache_options,
     )
-    return key, tree_sha
+    return key, input_digest
 
 
 def _run_cached_static_gate(name: str, options: dict, producer) -> int:
     namespace = f"static-gate-{name}"
-    key, tree_sha = _static_gate_cache_key(name, options)
+    key, input_digest = _static_gate_cache_key(name, options)
     cached = qualification_cache.load_success(namespace, key)
     if isinstance(cached, dict):
         saved = float(cached.get("duration_seconds", 0.0) or 0.0)
-        print(f"PASS {name} qualification cache hit tree={tree_sha[:12]} saved~{saved:.3f}s")
+        print(f"PASS {name} qualification cache hit inputs={input_digest[:12]} saved~{saved:.3f}s")
         return 0
 
     started = time.monotonic()
@@ -1031,7 +1037,7 @@ def _run_cached_static_gate(name: str, options: dict, producer) -> int:
             namespace,
             key,
             {
-                "tree_sha": tree_sha,
+                "input_digest": input_digest,
                 "duration_seconds": duration,
                 "options": options,
             },
