@@ -7,16 +7,19 @@ require "yaml"
 
 module ArchitectureValidator
   LOCK_STATUS = "locked-for-build"
-  V5_FRONTENDS = %w[storefront admin].freeze
-  DEPLOYABLE_MLOPS = %w[lakefs mlflow kserve-vllm evidently-tekton-batch].freeze
-  V5_MLOPS = {
-    "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
-    "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
-    "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
-    "orchestration" => "tekton", "desired_state" => "rancher-fleet",
-    "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
-    "drift" => "evidently-tekton-batch"
-  }.freeze
+  CANONICAL_ROOT = File.expand_path("..", __dir__)
+  CANONICAL_LOCK = YAML.safe_load(
+    File.read(File.join(CANONICAL_ROOT, "architecture.lock.yaml")),
+    aliases: false
+  ).freeze
+  V5_FRONTENDS = Array(CANONICAL_LOCK.dig("business", "frontends")).freeze
+  V5_MLOPS = CANONICAL_LOCK.fetch("mlops").freeze
+  DEPLOYABLE_MLOPS = [
+    V5_MLOPS.fetch("dataset_versioner"),
+    V5_MLOPS.fetch("experiments_lineage"),
+    V5_MLOPS.fetch("runtime"),
+    V5_MLOPS.fetch("drift")
+  ].freeze
   DERIVED_TOPOLOGY_ROLES = %w[
     architecture_boundaries service_mesh_topology service_policy_chain
   ].freeze
