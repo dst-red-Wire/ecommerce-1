@@ -6,23 +6,184 @@ scope: qualification-and-bootstrap
 authority_claims:
   - repository.cache.identity
   - repository.cache.invalidation
+  - repository.cache.qualification-reuse
+
 principles:
   cache_is_acceleration_not_authority: true
   cache_miss_must_preserve_correctness: true
   successful_results_only: true
-identity_inputs:
-  - exact-tool-version
-  - platform
-  - architecture
-  - canonical-contract-digest
-  - dependency-lock-digest
-  - relevant-source-digest
-persistent_root: {environment: ECOMMERCE_TOOL_HOME, fallback: ~/.cache/ecommerce-1}
+  deterministic_inputs_only: true
+  dynamic_state_cache_authority: forbidden
+  floating_tool_identity: forbidden
+
+pinning:
+  digest_algorithm: sha256
+  toolchain_authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  floating_versions: forbidden
+  executable_sha256_in_cache_key: required
+  remote_managed_artifact_checksum: sha256
+  immutable_oci_reference: digest-only
+
+eligibility:
+  cacheable:
+    - deterministic-static-parsing
+    - deterministic-static-global-gates
+    - deterministic-static-component-gates
+    - deterministic-code-generation-inputs
+  forbidden:
+    - git-status
+    - current-head-sha
+    - remote-ci-state
+    - review-state
+    - owner-authorization
+    - docker-runtime-state
+    - kubernetes-runtime-state
+    - network-state
+    - secrets-and-authentication
+    - provisioning-state
+
+layers:
+  l1:
+    type: process-memory
+    enabled: true
+  l2:
+    type: persistent-disk
+    enabled: true
+    root_source: ECOMMERCE_TOOL_HOME
+    fallback_root: ~/.cache/ecommerce-1
+    subdirectory: qualification-cache/v1
+
+identity:
+  algorithm: sha256
+  required_key_material:
+    - namespace
+    - input-content-digest
+    - validator-content-digest
+    - tool-identity
+    - normalized-options
+  repository-paths-must-be-content-addressed: true
+  file-name-only-keying: forbidden
+  successful-results-only: true
+  tool_identity:
+    executable_sha256: required
+    exact_version_contract: architecture.lock.yaml#machine_contracts.toolchain_lock
+
+safety:
+  cache-hit-must-not-authorize-dynamic-state: true
+  caller-mutation-must-not-modify-memory-cache: true
+  atomic-disk-write-required: true
+  corrupt-entry-behavior: miss
+  cache-io-failure-behavior: miss-without-skipping-qualification
+  tool-identity-change-behavior: miss
+  validator-change-behavior: miss
+  input-change-behavior: miss
+
 invalidation:
   contract_change: miss
   tool_version_change: miss
+  tool_executable_sha256_change: miss
   dependency_lock_change: miss
   relevant_source_change: miss
+
 consumers:
-  qualification: scripts/repoctl.py
-  bootstrap: scripts/capability_bootstrap.py
+  psych_yaml:
+    enabled: true
+    persistence: l1-l2
+  repoctl_global_static_gates:
+    enabled: true
+    persistence: l2
+    gates:
+      governance:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/**/*
+          - config/infrastructure/**/*
+          - config/toolchain/**/*
+          - contracts/**/*
+          - docs/architecture/**/*
+          - platform/ansible/**/*
+          - platform/tekton/**/*
+          - scripts/*.py
+          - scripts/*.rb
+          - tests/**/*.py
+          - tests/**/*.rb
+          - .pre-commit-config.yaml
+          - BUILD.bazel
+          - Makefile
+          - go.work
+          - AGENTS.md
+          - README.md
+          - docs/api/README.md
+          - docs/project/CODEX_HANDOFFS.md
+      runtime-efficiency:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/runtime-efficiency.yaml
+          - frontend/go.mod
+          - frontend/apps/storefront/main.go
+          - frontend/apps/admin/main.go
+          - frontend/internal/web/layout.templ
+          - services/*/Containerfile
+          - scripts/validate-runtime-efficiency.rb
+          - scripts/resource-sizing.rb
+          - tests/runtime_efficiency_test.rb
+          - tests/resource_sizing_test.rb
+      contracts:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/public-api-contracts.yaml
+          - config/contracts/service-ownership.yaml
+          - config/contracts/dependency-map.yaml
+          - config/contracts/event-contracts.yaml
+          - contracts/openapi/**/*
+          - scripts/validate-openapi.rb
+          - scripts/validate-contract-consistency.rb
+          - scripts/validate-architecture.rb
+          - tests/openapi_validator_test.rb
+          - tests/contract_consistency_test.rb
+      automation:
+        inputs:
+          - .gitignore
+          - BUILD.bazel
+          - "**/*.sh"
+          - platform/tekton/**/*
+          - scripts/repoctl.py
+  repoctl_component_static_gates:
+    enabled: true
+    persistence: l2
+    gates:
+      platform:ansible:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/source-quality-policy.yaml
+          - config/contracts/toolchain-lock.yaml
+          - platform/ansible/**/*
+          - scripts/repoctl.py
+          - scripts/qualification_cache.py
+        fresh_prechecks:
+          - project-owned-collection-version-reconciliation
+        tools:
+          - ansible-lint
+          - ansible-playbook
+          - ansible-galaxy
+      platform:terraform:
+        inputs:
+          - architecture.lock.yaml
+          - config/contracts/source-quality-policy.yaml
+          - config/contracts/terraform-provider-lock.yaml
+          - config/contracts/toolchain-lock.yaml
+          - platform/terraform/**/*.tf
+          - platform/terraform/**/*.tftpl
+          - scripts/repoctl.py
+          - scripts/qualification_cache.py
+        fresh_prechecks:
+          - approved-terraform-executable-availability
+          - canonical-provider-lock-contract
+        tools:
+          - tofu
+          - terraform
+  security_scan:
+    persistence: forbidden
+    reason: exact Git history and worktree state must be scanned fresh
+  dynamic_checks:
+    persistence: forbidden

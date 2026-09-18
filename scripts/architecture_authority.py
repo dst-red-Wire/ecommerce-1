@@ -6,6 +6,13 @@ import hashlib
 import json
 import re
 import subprocess
+import sys
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import qualification_cache
 
 AUTHORITY = "architecture.lock.yaml"
 LOCK_STATUS = "locked-for-build"
@@ -13,22 +20,8 @@ CANONICAL_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_canonical_yaml(relative):
-    """Load canonical YAML/JSON without creating a second in-code contract snapshot."""
-    path = CANONICAL_ROOT / relative
-    ruby = (
-        "require 'yaml'; require 'json'; "
-        "data=YAML.safe_load(File.read(ARGV[0]), aliases: false); "
-        "print JSON.generate(data)"
-    )
-    completed = subprocess.run(
-        ["ruby", "-e", ruby, str(path)],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if completed.returncode:
-        raise RuntimeError(completed.stderr.strip() or f"cannot load canonical contract {relative}")
-    return json.loads(completed.stdout)
+    """Load canonical YAML/JSON through the content-addressed qualification cache."""
+    return qualification_cache.psych_load(CANONICAL_ROOT / relative)
 
 
 _CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
@@ -425,45 +418,12 @@ _YAML_PARSE_CACHE = {}
 
 
 def clear_yaml_parse_cache():
-    """Clear the process-local content-addressed Psych parse cache."""
-    _YAML_PARSE_CACHE.clear()
+    """Compatibility wrapper for tests; cache ownership is centralized."""
+    qualification_cache.clear_memory_cache("psych-yaml")
 
 
 def load_yaml(path):
-    """Parse YAML with Ruby/Psych, caching successful results by exact file content."""
-    path = Path(path)
-    contents = path.read_bytes()
-    digest = hashlib.sha256(contents).digest()
-    cached = _YAML_PARSE_CACHE.get(digest)
-    if cached is not None:
-        return copy.deepcopy(cached)
-
-    ruby = """
-document = Psych.parse_file(ARGV[0])
-walk = lambda do |node|
-  if node.is_a?(Psych::Nodes::Mapping)
-    keys = node.children.each_slice(2).map { |key, _| key.value }
-    duplicate = keys.group_by(&:itself).find { |_, values| values.length > 1 }
-    raise "duplicate YAML mapping key: #{duplicate[0]}" if duplicate
-  end
-  Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
-end
-walk.call(document)
-data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
-puts JSON.generate(data)
-"""
-    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
-    if completed.returncode:
-        raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
-
-    parsed = json.loads(completed.stdout)
-
-    # Do not cache a parse if the file changed between the initial read and Psych.
-    if path.read_bytes() == contents:
-        _YAML_PARSE_CACHE[digest] = parsed
-    return copy.deepcopy(parsed)
-
+    return qualification_cache.psych_load(path)
 
 def validate_exact_keys(name, actual, expected_keys):
     """Validate an exact mapping schema without allowing unknown or missing fields."""

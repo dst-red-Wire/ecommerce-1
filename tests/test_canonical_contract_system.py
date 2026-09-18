@@ -38,6 +38,23 @@ class CanonicalContractSystemTest(unittest.TestCase):
             ROOT, "config/contracts/terraform-provider-lock.yaml"
         )["kind"])
 
+    def test_toolchain_pins_are_exact_and_sha256_checksums_are_valid(self):
+        lock = MOD.load_yaml(ROOT, "config/contracts/toolchain-lock.yaml")
+        floating = {"latest", "stable", "main", "master", "head", "edge", "nightly", "*"}
+        for key, raw_value in lock["versions"].items():
+            value = str(raw_value)
+            if "SHA256" in key.upper():
+                self.assertRegex(value, r"^[0-9a-fA-F]{64}$", key)
+            else:
+                self.assertNotIn(value.lower(), floating, key)
+                self.assertNotRegex(value, r"[<>^~*]|\.x$", key)
+
+    def test_cache_policy_requires_sha256_and_forbids_floating_versions(self):
+        policy = MOD.load_yaml(ROOT, "config/contracts/cache-policy.yaml")
+        self.assertEqual("sha256", policy["pinning"]["digest_algorithm"])
+        self.assertEqual("forbidden", policy["pinning"]["floating_versions"])
+        self.assertEqual("required", policy["pinning"]["executable_sha256_in_cache_key"])
+
 
 if __name__ == "__main__":
     unittest.main()

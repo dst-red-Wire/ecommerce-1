@@ -15,7 +15,12 @@
     "unmanaged_version_authority": "forbidden",
     "unmanaged_checksum_authority": "forbidden",
     "consumer_embedded_tool_versions": "forbidden",
-    "projection_drift": "blocking"
+    "projection_drift": "blocking",
+    "floating_versions": "forbidden",
+    "managed_tool_version_authority": "required",
+    "managed_download_sha256": "required-when-downloaded-as-release-asset",
+    "mutable_oci_tags": "forbidden",
+    "immutable_oci_digest": "required"
   },
   "legacy_projections": {
     "versions_env": {

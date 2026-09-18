@@ -29,17 +29,17 @@ class ArchitectureAuthorityTest(unittest.TestCase):
 
             authority.clear_yaml_parse_cache()
             first = authority.load_yaml(first_path)
-            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+            self.assertEqual(1, authority.qualification_cache.memory_entry_count("psych-yaml"))
 
             first["root"]["value"] = "mutated-in-caller"
             second = authority.load_yaml(second_path)
             self.assertEqual("one", second["root"]["value"])
-            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+            self.assertEqual(1, authority.qualification_cache.memory_entry_count("psych-yaml"))
 
             second_path.write_text("root:\n  value: two\n", encoding="utf-8")
             changed = authority.load_yaml(second_path)
             self.assertEqual("two", changed["root"]["value"])
-            self.assertEqual(2, len(authority._YAML_PARSE_CACHE))
+            self.assertEqual(2, authority.qualification_cache.memory_entry_count("psych-yaml"))
 
     def test_active_superseded_statements(self):
         for statement in (

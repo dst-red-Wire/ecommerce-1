@@ -156,6 +156,25 @@ def validate_repository(root: Path = ROOT) -> None:
     if legacy!=expected_caps:
         raise ContractError("config/toolchain/capabilities.json drifted from canonical toolchain-lock.yaml")
 
+    floating_tokens={"latest","stable","main","master","head","edge","nightly","*"}
+    for key,raw_value in expected.items():
+        value=str(raw_value).strip()
+        if "SHA256" in key.upper():
+            if not re.fullmatch(r"[0-9a-fA-F]{64}",value):
+                raise ContractError(f"{key}: SHA-256 pin must be exactly 64 hexadecimal characters")
+            continue
+        if value.lower() in floating_tokens or value.endswith(".x") or any(marker in value for marker in ("<",">","^","~","*")):
+            raise ContractError(f"{key}: floating tool version is forbidden: {value}")
+
+    for item in toolchain.get("capabilities",[]):
+        if not isinstance(item,dict) or item.get("classification")!="managed" or not item.get("provision"):
+            continue
+        if not (item.get("version_key") or item.get("version_file") or item.get("provision_authority")):
+            raise ContractError(f"{item.get('name','<unnamed>')}: managed tool requires an exact version authority")
+        checksum_key=item.get("checksum_key")
+        if checksum_key and not re.fullmatch(r"[0-9a-fA-F]{64}",str(expected.get(checksum_key,""))):
+            raise ContractError(f"{item.get('name')}: managed artifact requires pinned SHA-256 {checksum_key}")
+
     for relative in canonical["dependency_lock_policy"].get("required_paths",[]):
         if not (root/relative).is_file():
             raise ContractError(f"required dependency lock is missing: {relative}")

@@ -53,10 +53,6 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         def fake_which(command):
             return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
 
-        def fake_run(argv, **kwargs):
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
-
         with (
             mock.patch.object(
                 pathlib.Path,
@@ -65,14 +61,14 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             ),
             mock.patch.object(MOD, "source_quality_adapter", return_value=policy),
             mock.patch.object(MOD, "terraform_provider_lock_contract", return_value=provider_lock),
-            mock.patch.object(MOD, "terraform_provider_plugin_cache_dir", return_value=None),
+            mock.patch.object(MOD, "_run_cached_static_gate", return_value=0) as cached_gate,
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
-            mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
             self.assertEqual(0, MOD.terraform_check())
 
-        self.assertTrue(calls)
-        self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+        cached_gate.assert_called_once()
+        self.assertEqual("platform:terraform", cached_gate.call_args.args[0])
+        self.assertEqual("/opt/bin/tofu", cached_gate.call_args.args[1]["selected_tool"])
 
     def test_terraform_provider_lock_is_central_and_exact(self):
         contract = MOD.terraform_provider_lock_contract()
@@ -190,6 +186,173 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             (repo / ".gitignore").write_text("ignored.sh\n", encoding="utf-8")
             (repo / "ignored.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
+
+    def test_static_gate_cache_hit_skips_producer(self):
+        producer = mock.Mock(side_effect=AssertionError("producer must not run on cache hit"))
+        with (
+            mock.patch.object(MOD, "_static_gate_cache_key", return_value=("cache-key", "a" * 40)),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "load_success",
+                return_value={"duration_seconds": 12.5},
+            ),
+        ):
+            self.assertEqual(0, MOD._run_cached_static_gate("governance", {}, producer))
+        producer.assert_not_called()
+
+    def test_static_gate_cache_key_changes_with_scoped_inputs(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": {
+                        "automation": {
+                            "inputs": ["**/*.sh", "platform/tekton/**/*"],
+                        }
+                    },
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": executable, "sha256": "tool"},
+            ),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "digest_globs",
+                side_effect=["a" * 64, "b" * 64],
+            ),
+        ):
+            first, _ = MOD._static_gate_cache_key("automation", {})
+            second, _ = MOD._static_gate_cache_key("automation", {})
+        self.assertNotEqual(first, second)
+
+    def test_static_gate_cache_ignores_files_outside_declared_scope(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": {
+                        "governance": {
+                            "inputs": ["architecture.lock.yaml", "config/contracts/**/*"],
+                        }
+                    },
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="c" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": executable, "sha256": "tool"},
+            ),
+        ):
+            first, _ = MOD._static_gate_cache_key("governance", {})
+            second, _ = MOD._static_gate_cache_key("governance", {})
+        self.assertEqual(first, second)
+
+    def test_platform_ansible_component_cache_is_centrally_approved(self):
+        approved = {
+            "consumers": {
+                "repoctl_component_static_gates": {
+                    "gates": {
+                        "platform:ansible": {
+                            "inputs": [
+                                "config/contracts/source-quality-policy.yaml",
+                                "platform/ansible/**/*",
+                            ],
+                            "tools": ["ansible-lint", "ansible-playbook", "ansible-galaxy"],
+                        }
+                    }
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="d" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": str(executable), "sha256": "tool"},
+            ),
+        ):
+            key, digest = MOD._static_gate_cache_key(
+                "platform:ansible",
+                {"collection_versions": {"community.docker": "3.7.0"}},
+            )
+        self.assertEqual("d" * 64, digest)
+        self.assertEqual(64, len(key))
+
+    def test_platform_terraform_component_cache_is_centrally_approved(self):
+        approved = {
+            "consumers": {
+                "repoctl_component_static_gates": {
+                    "gates": {
+                        "platform:terraform": {
+                            "inputs": [
+                                "config/contracts/terraform-provider-lock.yaml",
+                                "platform/terraform/**/*.tf",
+                                "platform/terraform/**/*.tftpl",
+                            ],
+                            "tools": ["tofu", "terraform"],
+                        }
+                    }
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="e" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": str(executable), "sha256": "tool"},
+            ),
+        ):
+            key, digest = MOD._static_gate_cache_key(
+                "platform:terraform",
+                {
+                    "selected_tool": "/opt/bin/terraform",
+                    "provider_versions": {"hcloud": "1.68.0"},
+                },
+            )
+
+        self.assertEqual("e" * 64, digest)
+        self.assertEqual(64, len(key))
+
+    def test_platform_terraform_cache_inputs_include_provider_lock(self):
+        contract = MOD.qualification_cache.contract()
+        patterns = (
+            contract["consumers"]["repoctl_component_static_gates"]["gates"]["platform:terraform"]["inputs"]
+        )
+        self.assertIn("config/contracts/terraform-provider-lock.yaml", patterns)
+        self.assertIn("platform/terraform/**/*.tf", patterns)
+        self.assertIn("platform/terraform/**/*.tftpl", patterns)
+
+
+    def test_security_gate_is_never_cacheable(self):
+        approved = {
+            "consumers": {
+                "repoctl_global_static_gates": {
+                    "gates": {
+                        "governance": {"inputs": ["architecture.lock.yaml"]},
+                        "runtime-efficiency": {"inputs": ["config/contracts/runtime-efficiency.yaml"]},
+                        "contracts": {"inputs": ["contracts/openapi/**/*"]},
+                        "automation": {"inputs": ["**/*.sh"]},
+                    },
+                }
+            }
+        }
+        with mock.patch.object(MOD.qualification_cache, "contract", return_value=approved):
+            with self.assertRaisesRegex(RuntimeError, "not approved"):
+                MOD._static_gate_cache_key("security", {})
 
     def test_exact_managed_go_pair_is_detected_without_ansible(self):
         pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
