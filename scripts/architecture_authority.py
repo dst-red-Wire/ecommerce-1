@@ -364,47 +364,35 @@ V5_SUPERSEDED = {
     "woodpecker-ci": "tekton",
 }
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
-V5_TOPOLOGY_CONTRACTS = {
-    "exact_index": "docs/architecture/EXACT_TOPOLOGY_V5.md",
-    "preprod": "docs/architecture/PREPROD_TOPOLOGY_V2.md",
-    "prod": "docs/architecture/PROD_TOPOLOGY_V2.md",
-    "network_ipam": "docs/architecture/NETWORK_IPAM_CONTRACT.md",
-    "mgmt_wireguard_access": "docs/architecture/MGMT_WIREGUARD_ACCESS.md",
-    "storage": "docs/architecture/STORAGE_TOPOLOGY_V2.md",
-    "service_ownership": "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md",
-    "data_ownership": "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
-    "events": "docs/architecture/EVENT_CONTRACT_MATRIX.md",
-    "security_zones": "docs/architecture/SECURITY_TRUST_ZONES.md",
-    "deployment_dag": "docs/architecture/DEPLOYMENT_DAG.md",
-    "aiops": "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-    "mlops": "docs/architecture/MLOPS_TOPOLOGY_V1.md",
-    "observability": "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md",
-}
-V5_MACHINE_CONTRACTS = {
-    "resilience_governance": "config/contracts/resilience-governance.yaml",
-    "security_trust_zones": "config/contracts/security-trust-zones.yaml",
-    "review_policy": "config/contracts/review-policy.yaml",
-    "mgmt_inventory": "config/infrastructure/mgmt-inventory.yaml",
-    "preprod_inventory": "config/infrastructure/preprod-inventory.yaml",
-    "prod_inventory": "config/infrastructure/prod-inventory.yaml",
-    "network_plan": "config/infrastructure/network-plan.yaml",
-    "mgmt_wireguard_access": "config/contracts/mgmt-wireguard-access.yaml",
-    "mgmt_access_gateways": "config/infrastructure/mgmt-access-gateways.yaml",
-    "storage_plan": "config/infrastructure/storage-plan.yaml",
-    "deployment_waves": "config/infrastructure/deployment-waves.yaml",
-    "service_ownership": "config/contracts/service-ownership.yaml",
-    "event_contracts": "config/contracts/event-contracts.yaml",
-    "dependency_map": "config/contracts/dependency-map.yaml",
-    "public_api_contracts": "config/contracts/public-api-contracts.yaml",
-    "ci_topology": "config/contracts/ci-topology.yaml",
-    "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
-    "observability_topology": "config/contracts/observability-topology.yaml",
+DERIVED_TOPOLOGY_ROLES = frozenset(
+    {
+        "architecture_boundaries",
+        "service_mesh_topology",
+        "service_policy_chain",
+    }
+)
+REGISTRY_GLOBS = {
+    "topology_contracts": (
+        "docs/architecture/*.md",
+    ),
+    "machine_contracts": (
+        "config/contracts/*.yaml",
+        "config/contracts/*.yml",
+        "config/contracts/*.json",
+        "config/infrastructure/*.yaml",
+        "config/infrastructure/*.yml",
+        "config/infrastructure/*.json",
+        "contracts/*.yaml",
+        "contracts/*.yml",
+        "contracts/*.json",
+        "contracts/**/*.yaml",
+        "contracts/**/*.yml",
+        "contracts/**/*.json",
+    ),
 }
 V5_SECTION_KEYS.update(
     {
         "superseded": frozenset(V5_SUPERSEDED),
-        "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
-        "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
     }
 )
 V5_MILESTONES = [
@@ -870,13 +858,6 @@ puts JSON.generate(data)
 
 def validate_exact_keys(name, actual, expected_keys):
     """Validate an exact mapping schema without allowing unknown or missing fields."""
-    if name in ("topology_contracts", "machine_contracts"):
-        label = name
-        return (
-            []
-            if isinstance(actual, dict) and set(actual) == set(expected_keys)
-            else [f"{label} must match the complete approved V5 role/path registry"]
-        )
     contract_name = "complete approved V5 registry" if name == "superseded" else "complete approved V5 schema"
     if not isinstance(actual, dict):
         return [f"{name} must be a mapping with the {contract_name}"]
@@ -906,6 +887,18 @@ def lock_schema_errors(lock):
                 break
             current = current[part]
         errors.extend(validate_exact_keys(name, current, expected_keys))
+    if errors:
+        return errors
+    for registry_name in ("topology_contracts", "machine_contracts"):
+        registry = lock.get(registry_name)
+        if not isinstance(registry, dict):
+            errors.append(f"{registry_name} must be a mapping")
+            continue
+        for role, relative in registry.items():
+            if not isinstance(role, str) or not role.strip():
+                errors.append(f"{registry_name} keys must be non-empty strings")
+            if not isinstance(relative, str) or not relative.strip():
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
     if errors:
         return errors
     if not isinstance(lock.get("build_milestones"), list):
@@ -1410,6 +1403,49 @@ def documentation_errors(text):
     return errors
 
 
+def registry_coverage_errors(root, lock):
+    """Ensure every governed contract file is registered exactly once in the root authority."""
+    errors = []
+    root = Path(root)
+    for registry_name, patterns in REGISTRY_GLOBS.items():
+        declared = lock.get(registry_name, {})
+        if not isinstance(declared, dict):
+            continue
+        values = list(declared.values())
+        if len(values) != len(set(values)):
+            errors.append(f"{registry_name} must not register the same path more than once")
+        for role, relative in declared.items():
+            if (
+                not isinstance(relative, str)
+                or not relative.strip()
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
+                continue
+            if not (root / relative).is_file():
+                errors.append(f"{registry_name}.{role} declared file does not exist: {relative}")
+        discovered = set()
+        for pattern in patterns:
+            discovered.update(
+                str(path.relative_to(root))
+                for path in root.glob(pattern)
+                if path.is_file()
+            )
+        registered = {
+            relative
+            for relative in values
+            if isinstance(relative, str) and relative.strip()
+        }
+        missing = sorted(discovered - registered)
+        extra = sorted(registered - discovered)
+        if missing:
+            errors.append(f"{registry_name} has unregistered governed files: {', '.join(missing)}")
+        if extra:
+            errors.append(f"{registry_name} registers files outside its governed set: {', '.join(extra)}")
+    return errors
+
+
 def validate(root):
     root = Path(root)
     errors = []
@@ -1425,8 +1461,9 @@ def validate(root):
         if lock["version"] != 5:
             errors.append("architecture.lock.yaml must be version 5")
         topology_contracts = lock.get("topology_contracts")
-        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
-            return [*errors, "topology_contracts must match the complete approved V5 role/path registry"]
+        errors.extend(registry_coverage_errors(root, lock))
+        if errors:
+            return errors
         if topology_contracts["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
         if lock.get("observability") != V5_OBSERVABILITY:
@@ -1469,17 +1506,16 @@ def validate(root):
         ):
             errors.append("milestone dependencies must match the approved V5 DAG")
         for key in ("resilience_governance", "security_trust_zones"):
-            relative = "config/contracts/" + key.replace("_", "-") + ".yaml"
-            if lock["machine_contracts"].get(key) != relative:
-                errors.append(f"missing canonical machine contract: {key}")
+            relative = lock["machine_contracts"].get(key)
+            if not relative:
+                errors.append(f"missing canonical machine contract role: {key}")
+                continue
             contract = load_yaml(root / relative)
             if contract != EXACT_CONTRACTS[key]:
                 errors.append(f"{relative} must match its exact V5 invariants")
             if key == "security_trust_zones" and contract == EXACT_CONTRACTS[key]:
                 source = (root / contract["source"]).read_text()
                 errors.extend(security_source_errors(source, contract))
-        if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
-            errors.append("machine_contracts must match the complete approved V5 role/path registry")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
@@ -1534,23 +1570,19 @@ def validate(root):
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
         for role, relative in topology_contracts.items():
-            if (
-                not isinstance(relative, str)
-                or not relative.strip()
-                or Path(relative).is_absolute()
-                or ".." in Path(relative).parts
-            ):
-                errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
-                continue
             path = root / relative
-            if not path.is_file():
-                errors.append(f"missing topology contract: {relative}")
-                continue
             contents = path.read_text()
-            status = re.search(r"^Status:\s*`([^`]*)`\s*$", contents, re.M | re.I)
+            status = re.search(r"^Status:\s*\`([^\`]*)\`\s*$", contents, re.M | re.I)
             status_value = status.group(1).strip().upper() if status else None
-            if not contents.strip() or status_value != "EXACT":
-                errors.append(f"topology contract must be readable and EXACT: {relative}")
+            expected_status = "ACTIVE" if role in DERIVED_TOPOLOGY_ROLES else "EXACT"
+            if not contents.strip() or status_value != expected_status:
+                errors.append(
+                    f"topology contract {role} must be readable and {expected_status}: {relative}"
+                )
+            if role in DERIVED_TOPOLOGY_ROLES and "Architecture authority: `architecture.lock.yaml`" not in contents:
+                errors.append(
+                    f"derived architecture document must name architecture.lock.yaml as authority: {relative}"
+                )
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
