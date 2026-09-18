@@ -5,12 +5,6 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
-export ANSIBLE_CONFIG
-export ANSIBLE_COLLECTIONS_PATH
-ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
-
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
@@ -112,22 +106,22 @@ workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
-	@$(ANSIBLE_LOCAL) --tags quality_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools
 
 agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
-	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags toolchain,node,agent_tools,context_tools
 
 context-tools: ## Reconcile token-efficient context tooling with Ansible
-	@$(ANSIBLE_LOCAL) --tags context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags context_tools
 
 product-bootstrap-persistence: ## Reconcile Product persistence generation/dependencies with Ansible
-	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
+	@$(PYTHON) scripts/repoctl.py reconcile --tags go,cgo,sqlc,docker,product_persistence
 
 git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target another checkout
-	@ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
+	@$(PYTHON) scripts/repoctl.py reconcile --tags git --target-repo-root "${TARGET_REPO_ROOT:-$(CURDIR)}"
 
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
@@ -173,7 +167,7 @@ nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph
 
 bazel-verify: ## Run affected-only verification through pinned Bazel
-	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+	@$(PYTHON) scripts/repoctl.py bazel-verify --base "${BASE:-origin/main}" --head "${HEAD:-WORKTREE}"
 
 .PHONY: api-generate service-new
 
@@ -198,9 +192,9 @@ product-benchmark: ## Benchmark Product through the central tool resolver
 	@$(PYTHON) scripts/repoctl.py product-benchmark
 
 resource-candidate: ## Derive a deterministic candidate from representative preprod evidence; use EVIDENCE=path.json
-	@ruby scripts/resource-sizing.rb "$(EVIDENCE)"
+	@$(PYTHON) scripts/repoctl.py resource-candidate --evidence "$(EVIDENCE)"
 
 .PHONY: tekton-proof
 
 tekton-proof: ## Reconcile Tekton and run one exact remote proof; RUNTIME_CONFIG/BASE_SHA/PARENT_SHA/HEAD_SHA required
-	@ansible-playbook -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"
+	@$(PYTHON) scripts/repoctl.py tekton-proof --runtime-config "$(RUNTIME_CONFIG)" --base-sha "$(BASE_SHA)" --parent-sha "$(PARENT_SHA)" --head-sha "$(HEAD_SHA)"
