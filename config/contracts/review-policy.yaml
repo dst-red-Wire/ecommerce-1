@@ -46,10 +46,23 @@ pull_request_review:
       - P1
       - P2
 
-  human_gate:
+  owner_authorization:
+    enabled: true
+    decision_authority: repository-owner
+    recording_agent: chatgpt-allowed-after-explicit-owner-instruction
+    transport: github-pull-request-comment
+    command: /owner-authorization approve scope=<scope> sha=<exact-head-sha>
+    binds_exact_commit_sha: true
+    binds_scope: true
+    stale_on_head_change: true
+    fail_closed: true
     required_for:
       - review_policy_changes
       - infrastructure_apply
       - destructive_changes
       - state_migrations
       - dns_network_iam_secret_changes
+      - mgmt_bootstrap_apply
+      - public_ingress_activation
+      - routing_change
+      - peer_or_key_change
