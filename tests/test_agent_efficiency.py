@@ -1,3 +1,4 @@
+import json
 import pathlib
 import unittest
 
@@ -27,9 +28,12 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("role: frontend-task-scheduling-and-local-cache", topology)
 
     def test_node_and_corepack_are_reconciled_by_ansible(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
-        self.assertIn(
-            "NODE_SHA256_LINUX_X64=2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2", versions
+        versions = json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        )["versions"]
+        self.assertEqual(
+            "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+            versions["NODE_SHA256_LINUX_X64"],
         )
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         self.assertIn("Download pinned Node archive", tasks)
@@ -47,12 +51,14 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Stateful workstation and", controller)
 
     def test_oasdiff_checksum_matches_downloaded_tarball_asset(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
+        versions = json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        )["versions"]
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("OASDIFF_VERSION=1.28.0", versions)
-        self.assertIn(
-            "OASDIFF_SHA256_LINUX_AMD64_TARGZ=e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
-            versions,
+        self.assertEqual("1.28.0", versions["OASDIFF_VERSION"])
+        self.assertEqual(
+            "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
+            versions["OASDIFF_SHA256_LINUX_AMD64_TARGZ"],
         )
         self.assertIn("oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz", tasks)
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)
