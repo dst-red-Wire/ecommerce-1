@@ -146,6 +146,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("security_scan_policy", domains["security_scan"]["machine_contract"])
         self.assertEqual("terraform_provider_lock", domains["terraform_provider"]["machine_contract"])
         self.assertEqual("qualification_cache", domains["qualification_cache"]["machine_contract"])
+        self.assertEqual("context_router", domains["context_routing"]["machine_contract"])
+        self.assertEqual("workstation_policy", domains["workstation"]["machine_contract"])
 
         forbidden = set(model["forbidden_parallel_policy_files"])
         for relative in (
@@ -167,6 +169,17 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("generated-projection", contract["projections"]["versions_env"]["mode"])
         self.assertEqual("generated-projection", contract["projections"]["ansible_collections"]["mode"])
         self.assertEqual("operational-projection", contract["projections"]["capability_graph"]["mode"])
+
+    def test_workstation_native_files_are_central_projections(self):
+        policy = MOD.workstation_policy()
+        self.assertEqual("architecture.lock.yaml", policy["architecture_authority"])
+        self.assertEqual("developer-workstation", policy["scope"])
+        MOD.validate_workstation_projections(policy)
+
+    def test_terraform_repository_lockfiles_project_central_provider(self):
+        MOD.validate_terraform_lockfile_projections()
+        provider = MOD.terraform_provider_lock_contract()["providers"]["hcloud"]
+        self.assertEqual("1.68.0", provider["version"])
 
     def test_security_scan_policy_generates_native_config(self):
         policy = MOD.security_scan_policy()
