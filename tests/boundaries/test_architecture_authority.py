@@ -27,6 +27,7 @@ class ArchitectureBoundariesAuthorityTest(unittest.TestCase):
 
     def copy_contracts(self, temp_root: Path) -> None:
         shutil.copytree(ROOT / "config", temp_root / "config")
+        shutil.copytree(ROOT / "contracts", temp_root / "contracts")
         shutil.copy2(ROOT / "architecture.lock.yaml", temp_root / "architecture.lock.yaml")
 
     def test_repository_boundaries_pass(self) -> None:
