@@ -29,6 +29,7 @@ module ArchitectureValidator
     ],
     "machine_contracts" => [
       "config/contracts/*.yaml", "config/contracts/*.yml", "config/contracts/*.json",
+      "config/context/*.yaml", "config/context/*.yml", "config/context/*.json",
       "config/infrastructure/*.yaml", "config/infrastructure/*.yml", "config/infrastructure/*.json",
       "contracts/*.yaml", "contracts/*.yml", "contracts/*.json",
       "contracts/**/*.yaml", "contracts/**/*.yml", "contracts/**/*.json"
