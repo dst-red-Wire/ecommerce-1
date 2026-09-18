@@ -20,7 +20,8 @@ module ArchitectureBoundariesValidator
     egress: "egress_policy",
     egress_runtime: "egress_runtime_policy",
     resilience: "service_resilience_policy",
-    mesh: "service_mesh_policy"
+    mesh: "service_mesh_policy",
+    payment_runtime: "payment_runtime"
   }.freeze
 
   module_function
@@ -129,7 +130,7 @@ module ArchitectureBoundariesValidator
     end
 
     if mesh.dig("services", "payment", "l7", "traffic_policy") == true
-      errors << "payment resilience source contract must exist" unless resilience.dig("services", "payment", "source_contract") == "contracts/payment-runtime.yaml"
+      errors << "payment resilience source contract must exist" unless resilience.dig("services", "payment", "source_contract") == paths[:payment_runtime]
       errors << "payment retry must require idempotency" unless resilience.dig("services", "payment", "retry_requires_idempotency") == true
     end
 
