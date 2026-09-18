@@ -303,6 +303,7 @@ machine_contracts:
   ci_evidence: config/contracts/ci-evidence.yaml
   ci_topology: config/contracts/ci-topology.yaml
   commerce_transaction_policy: config/contracts/commerce-transaction-policy.yaml
+  context_router: config/context/router.yaml
   dependency_map: config/contracts/dependency-map.yaml
   dns_authority_policy: config/contracts/dns-authority-policy.yaml
   edge_policy_authority: config/contracts/edge-policy-authority.yaml
@@ -339,6 +340,7 @@ machine_contracts:
   terraform_provider_lock: config/contracts/terraform-provider-lock.yaml
   time_authority_policy: config/contracts/time-authority-policy.yaml
   traffic_class_policy: config/contracts/traffic-class-policy.yaml
+  workstation_policy: config/contracts/workstation-policy.yaml
   waypoint_scope: config/contracts/waypoint-scope.yaml
   deployment_waves: config/infrastructure/deployment-waves.yaml
   mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
