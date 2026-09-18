@@ -15,7 +15,7 @@ import tempfile
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_PATH = ROOT / "config" / "contracts" / "qualification-cache.yaml"
+LOCK_PATH = ROOT / "architecture.lock.yaml"
 _SCHEMA_VERSION = 1
 _MEMORY: dict[tuple[str, str], Any] = {}
 _TOOL_VERSIONS: dict[tuple[str, tuple[str, ...]], str] = {}
@@ -58,7 +58,11 @@ _CONTRACT: dict | None = None
 def contract() -> dict:
     global _CONTRACT
     if _CONTRACT is None:
-        _CONTRACT = _raw_psych(CONTRACT_PATH)
+        lock = _raw_psych(LOCK_PATH)
+        relative = lock.get("machine_contracts", {}).get("qualification_cache")
+        if not isinstance(relative, str) or not relative.strip():
+            raise ValueError("architecture.lock.yaml must register machine_contracts.qualification_cache")
+        _CONTRACT = _raw_psych(ROOT / relative)
     return copy.deepcopy(_CONTRACT)
 
 
