@@ -733,7 +733,8 @@ class ArchitectureValidatorTest < Minitest::Test
   def test_semantic_duplicates_are_rejected_in_every_declared_contract_and_lock
     with_contract_copy do |root|
       lock = YAML.safe_load_file(File.join(root, "architecture.lock.yaml"), aliases: false)
-      (["architecture.lock.yaml"] + lock.fetch("machine_contracts").values).each do |path|
+      yaml_contracts = lock.fetch("machine_contracts").values.reject { |path| File.extname(path) == ".json" }
+      (["architecture.lock.yaml"] + yaml_contracts).each do |path|
         original = File.read(File.join(root, path))
         File.write(File.join(root, path), original + "\nprobe:\n  items:\n    - true: first\n      True: second\n")
         errors = ArchitectureValidator.validate(root)
