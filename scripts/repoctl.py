@@ -119,6 +119,59 @@ def ruby_yaml(path: str) -> dict:
     return json.loads(output(["ruby", "-e", script, path]))
 
 
+_SOURCE_QUALITY_POLICY: dict | None = None
+
+
+def source_quality_policy() -> dict:
+    """Load the single repository-wide source quality contract."""
+    global _SOURCE_QUALITY_POLICY
+    if _SOURCE_QUALITY_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("source_quality_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.source_quality_policy")
+        policy = ruby_yaml(relative)
+        if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
+            raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+        _SOURCE_QUALITY_POLICY = policy
+    return copy.deepcopy(_SOURCE_QUALITY_POLICY)
+
+
+def source_quality_adapter(name: str) -> dict:
+    adapter = source_quality_policy().get("adapters", {}).get(name)
+    if not isinstance(adapter, dict):
+        raise RuntimeError(f"source quality adapter is not declared: {name}")
+    return adapter
+
+
+def advisory_exit_check(
+    label: str,
+    command: list[str],
+    *,
+    drift_exit_codes: list[int],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run a read-only formatter check; only declared drift exits are advisory."""
+    result = run(command, cwd=cwd, env=env, check=False, capture=True)
+    output_text = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode == 0:
+        return
+    if result.returncode in {int(code) for code in drift_exit_codes}:
+        if output_text:
+            print(output_text, file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+        return
+    raise RuntimeError(output_text or f"{label} formatter failed with exit code {result.returncode}")
+
+
+def advisory_output_check(label: str, output_text: str) -> None:
+    """Report formatter drift that is signaled by non-empty output."""
+    if output_text.strip():
+        print(output_text.strip(), file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+
+
 def pinned_versions() -> dict[str, str]:
     values: dict[str, str] = {}
     for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
