@@ -275,38 +275,45 @@ def run_ruby_tests(paths: list[str]) -> None:
 
 
 def runtime_efficiency_check() -> int:
-    require("ruby")
-    run(["ruby", "scripts/validate-runtime-efficiency.rb"])
-    run_ruby_tests(["tests/runtime_efficiency_test.rb", "tests/resource_sizing_test.rb"])
-    print("PASS runtime efficiency checks completed")
-    return 0
+    def execute() -> int:
+        require("ruby")
+        run(["ruby", "scripts/validate-runtime-efficiency.rb"])
+        run_ruby_tests(["tests/runtime_efficiency_test.rb", "tests/resource_sizing_test.rb"])
+        print("PASS runtime efficiency checks completed")
+        return 0
+
+    return _run_cached_static_gate("runtime-efficiency", {}, execute)
 
 
 def governance() -> int:
-    run([sys.executable, "scripts/architecture_authority.py"])
-    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
-    require("ruby")
-    for validator in (
-        "scripts/validate-architecture.rb",
-        "scripts/validate-architecture-boundaries.rb",
-        "scripts/validate-service-policy-chain.rb",
-        "scripts/validate-service-mesh-policy.rb",
-        "scripts/validate-contract-consistency.rb",
-        "scripts/validate-observability.rb",
-    ):
-        run(["ruby", validator])
-    run_ruby_tests(
-        [
-            "tests/architecture_validator_test.rb",
-            "tests/observability_topology_test.rb",
-            "tests/ci_authority_test.rb",
-            "tests/ci_affected_test.rb",
-        ]
-    )
-    if documentation_policy():
-        return 1
-    print("PASS governance checks completed")
-    return 0
+    def execute() -> int:
+        run([sys.executable, "scripts/architecture_authority.py"])
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
+        require("ruby")
+        for validator in (
+            "scripts/validate-architecture.rb",
+            "scripts/validate-architecture-boundaries.rb",
+            "scripts/validate-service-policy-chain.rb",
+            "scripts/validate-service-mesh-policy.rb",
+            "scripts/validate-contract-consistency.rb",
+            "scripts/validate-observability.rb",
+        ):
+            run(["ruby", validator])
+        run_ruby_tests(
+            [
+                "tests/architecture_validator_test.rb",
+                "tests/observability_topology_test.rb",
+                "tests/ci_authority_test.rb",
+                "tests/ci_affected_test.rb",
+            ]
+        )
+        if documentation_policy():
+            return 1
+        print("PASS governance checks completed")
+        return 0
+
+    return _run_cached_static_gate("governance", {}, execute)
 
 
 def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
