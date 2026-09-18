@@ -1,6 +1,8 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -437,8 +439,23 @@ def owner_authorization_errors(
     return errors
 
 
+_YAML_PARSE_CACHE = {}
+
+
+def clear_yaml_parse_cache():
+    """Clear the process-local content-addressed Psych parse cache."""
+    _YAML_PARSE_CACHE.clear()
+
+
 def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
+    """Parse YAML with Ruby/Psych, caching successful results by exact file content."""
+    path = Path(path)
+    contents = path.read_bytes()
+    digest = hashlib.sha256(contents).digest()
+    cached = _YAML_PARSE_CACHE.get(digest)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
     ruby = """
 document = Psych.parse_file(ARGV[0])
 walk = lambda do |node|
@@ -457,7 +474,13 @@ puts JSON.generate(data)
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
-    return json.loads(completed.stdout)
+
+    parsed = json.loads(completed.stdout)
+
+    # Do not cache a parse if the file changed between the initial read and Psych.
+    if path.read_bytes() == contents:
+        _YAML_PARSE_CACHE[digest] = parsed
+    return copy.deepcopy(parsed)
 
 
 def validate_exact_keys(name, actual, expected_keys):
