@@ -19,8 +19,6 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/contracts/toolchain-lock.yaml"
 VERSIONS = CONTRACT
-LEGACY_CONTRACT_PROJECTION = ROOT / "config/toolchain/capabilities.json"
-LEGACY_VERSIONS_PROJECTION = ROOT / "config/toolchain/versions.env"
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
 REQUIREMENTS = {"required-static", "optional-runtime"}
@@ -56,7 +54,15 @@ def load_versions(path: Path = VERSIONS) -> dict[str, str]:
     return values
 
 def load_contract(path: Path = CONTRACT) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if path.resolve() == CONTRACT.resolve():
+        if (
+            data.get("kind") != "ToolchainLock"
+            or data.get("architecture_authority") != "architecture.lock.yaml"
+            or data.get("scope") != "entire-repository"
+        ):
+            raise ValueError("canonical toolchain contract envelope is invalid")
+    return data
 
 
 def validate_contract(contract: dict, versions: dict[str, str] | None = None) -> None:

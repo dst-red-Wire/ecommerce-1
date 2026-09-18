@@ -23,6 +23,21 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertEqual("derived-projection", lock["legacy_projections"]["versions_env"]["authority"])
         self.assertEqual("derived-projection", lock["legacy_projections"]["capabilities_json"]["authority"])
 
+    def test_materializers_do_not_treat_legacy_versions_as_authority(self):
+        ansible_defaults = (
+            ROOT / "platform/ansible/roles/developer_toolchain/defaults/main.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("config/contracts/toolchain-lock.yaml", ansible_defaults)
+        self.assertNotIn("config/toolchain/versions.env", ansible_defaults)
+
+    def test_inherited_contracts_use_the_common_envelope(self):
+        self.assertEqual("SourceQualityPolicy", MOD.load_yaml(
+            ROOT, "config/contracts/source-quality-policy.yaml"
+        )["kind"])
+        self.assertEqual("TerraformProviderLock", MOD.load_yaml(
+            ROOT, "config/contracts/terraform-provider-lock.yaml"
+        )["kind"])
+
 
 if __name__ == "__main__":
     unittest.main()

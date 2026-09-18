@@ -73,9 +73,17 @@ class CIAffectedTest < Minitest::Test
   end
 
   def classify(*paths, contract_impact: {}, strict_unknown: false)
-    AffectedComponents.classify(paths, services: SERVICES, public_contracts: PUBLIC,
-                                 common_openapi: "contracts/openapi/common.v1.yaml",
-                                 contract_impact: contract_impact, strict_unknown: strict_unknown)
+    _services, _public, _common, canonical_contracts, semantic_contracts, global_only_contracts =
+      AffectedComponents.load_project(ROOT, "WORKTREE")
+    AffectedComponents.classify(
+      paths, services: SERVICES, public_contracts: PUBLIC,
+      common_openapi: "contracts/openapi/common.v1.yaml",
+      contract_impact: contract_impact,
+      semantic_contracts: semantic_contracts,
+      canonical_contracts: canonical_contracts,
+      global_only_contracts: global_only_contracts,
+      strict_unknown: strict_unknown
+    )
   end
 
   def test_storefront_change_is_component_scoped
@@ -162,6 +170,17 @@ class CIAffectedTest < Minitest::Test
     ].each do |path|
       assert_equal %w[global], classify(path), path
     end
+  end
+
+  def test_registered_generic_contract_fails_closed_to_all_components
+    affected = classify("config/contracts/security-scan-policy.yaml")
+    %w[global system platform:terraform platform:ansible frontend:storefront frontend:admin service:product].each do |component|
+      assert_includes affected, component
+    end
+  end
+
+  def test_unregistered_contract_is_rejected
+    assert_raises(ArgumentError) { classify("config/contracts/not-registered.yaml") }
   end
 
   def test_other_repository_native_helper_change_routes_to_system

@@ -172,11 +172,7 @@ def source_quality_policy() -> dict:
     """Load the single repository-wide source quality contract."""
     global _SOURCE_QUALITY_POLICY
     if _SOURCE_QUALITY_POLICY is None:
-        lock = ruby_yaml("architecture.lock.yaml")
-        relative = lock.get("machine_contracts", {}).get("source_quality_policy")
-        if not isinstance(relative, str) or not relative.strip():
-            raise RuntimeError("architecture.lock.yaml must register machine_contracts.source_quality_policy")
-        policy = ruby_yaml(relative)
+        policy = canonical_contract("source_quality_policy")
         if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
             raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
 
@@ -242,12 +238,7 @@ def terraform_provider_lock_contract() -> dict:
     """Load and validate the single canonical Terraform provider lock contract."""
     global _TERRAFORM_PROVIDER_LOCK
     if _TERRAFORM_PROVIDER_LOCK is None:
-        lock = ruby_yaml("architecture.lock.yaml")
-        relative = lock.get("machine_contracts", {}).get("terraform_provider_lock")
-        if not isinstance(relative, str) or not relative.strip():
-            raise RuntimeError("architecture.lock.yaml must register machine_contracts.terraform_provider_lock")
-
-        contract = ruby_yaml(relative)
+        contract = canonical_contract("terraform_provider_lock")
         if (
             contract.get("architecture_authority") != "architecture.lock.yaml"
             or contract.get("scope") != "platform/terraform"
@@ -816,7 +807,7 @@ def frontend(action: str, scope: str = "") -> int:
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
-        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+        raise RuntimeError("TEMPL_VERSION is missing from the canonical toolchain lock")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
