@@ -632,7 +632,7 @@ def developer_state_ready(tags: str) -> bool:
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
     if "go" in wanted or "cgo" in wanted:
-        managed_bin = Path.home() / ".local" / "bin"
+        managed_bin = managed_bin_dirs()[0]
         go = str(managed_bin / "go") if (managed_bin / "go").is_file() else None
         gofmt = str(managed_bin / "gofmt") if (managed_bin / "gofmt").is_file() else None
         if not go or not gofmt:
