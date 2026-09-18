@@ -411,6 +411,22 @@ def repository_authority_check() -> int:
                     f"{manifest.relative_to(ROOT)} Go directive must project central language version {expected_go_directive}"
                 )
 
+        workspace = (ROOT / "go.work").read_text(encoding="utf-8")
+        use_block = re.search(r"(?ms)^use\s*\((?P<body>.*?)^\)", workspace)
+        if not use_block:
+            raise RuntimeError("go.work must use the canonical multi-module workspace block")
+        actual_modules = {
+            line.strip().removeprefix("./")
+            for line in use_block.group("body").splitlines()
+            if line.strip() and not line.strip().startswith("//")
+        }
+        expected_modules = {str(lock["business"]["frontend_runtime"]["module"])}
+        expected_modules.update(f"services/{service}" for service in lock["business"]["services"])
+        if actual_modules != expected_modules:
+            raise RuntimeError(
+                "go.work module set must match architecture.lock.yaml business services and frontend module"
+            )
+
     templ_version = toolchain["versions"].get("TEMPL_VERSION")
     frontend_go_mod = (ROOT / "frontend" / "go.mod").read_text(encoding="utf-8")
     if templ_version and f"github.com/a-h/templ v{templ_version}" not in frontend_go_mod:
