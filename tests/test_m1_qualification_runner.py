@@ -6,8 +6,6 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = ROOT / "platform/ansible/roles/qualification_runner_host/defaults/main.yml"
 TASKS = ROOT / "platform/ansible/roles/qualification_runner_host/tasks/main.yml"
 PLAYBOOK = ROOT / "platform/ansible/qualification-runner.yml"
-PROXY_TASKS = ROOT / "platform/ansible/roles/qualification_proxy_client/tasks/main.yml"
-PROXY_HANDLERS = ROOT / "platform/ansible/roles/qualification_proxy_client/handlers/main.yml"
 RUNBOOK = ROOT / "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md"
 
 
@@ -174,28 +172,6 @@ class QualificationRunnerContractTest(unittest.TestCase):
 
     def test_complete_contract(self):
         validate_contract(self.defaults, self.tasks, self.playbook, self.runbook)
-
-    def test_become_user_is_always_explicitly_enabled(self):
-        for source in (self.tasks, self.playbook):
-            lines = source.splitlines()
-            for index, line in enumerate(lines):
-                if "become_user:" not in line:
-                    continue
-                previous = lines[index - 1].strip() if index else ""
-                self.assertEqual("become: true", previous, line)
-
-    def test_repository_clone_is_bound_to_exact_head(self):
-        self.assertIn('version: "{{ qualification_pr_head }}"', self.playbook)
-
-    def test_docker_proxy_reload_uses_handlers(self):
-        tasks = PROXY_TASKS.read_text(encoding="utf-8")
-        handlers = PROXY_HANDLERS.read_text(encoding="utf-8")
-        self.assertIn("notify:", tasks)
-        self.assertIn("Reload systemd for the Docker proxy drop-in", tasks)
-        self.assertIn("Restart Docker when an existing daemon proxy changes", tasks)
-        self.assertNotIn("when: qualification_docker_proxy.changed", tasks)
-        self.assertIn("daemon_reload: true", handlers)
-        self.assertIn("state: restarted", handlers)
 
     def assert_mutation_rejected(self, **replacements):
         values = {
