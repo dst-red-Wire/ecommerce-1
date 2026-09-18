@@ -282,8 +282,15 @@ def governance() -> int:
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
-    run(["ruby", "scripts/validate-architecture.rb"])
-    run(["ruby", "scripts/validate-observability.rb"])
+    for validator in (
+        "scripts/validate-architecture.rb",
+        "scripts/validate-architecture-boundaries.rb",
+        "scripts/validate-service-policy-chain.rb",
+        "scripts/validate-service-mesh-policy.rb",
+        "scripts/validate-contract-consistency.rb",
+        "scripts/validate-observability.rb",
+    ):
+        run(["ruby", validator])
     run_ruby_tests(
         [
             "tests/architecture_validator_test.rb",
