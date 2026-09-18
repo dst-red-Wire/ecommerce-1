@@ -986,7 +986,13 @@ _STATIC_GATE_TOOLS = {
 
 
 def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
-    if name not in _STATIC_GATE_TOOLS:
+    approved = set(
+        qualification_cache.contract()
+        .get("consumers", {})
+        .get("repoctl_global_static_gates", {})
+        .get("gates", [])
+    )
+    if name not in approved or name not in _STATIC_GATE_TOOLS:
         raise RuntimeError(f"static qualification cache is not approved for gate {name}")
     tree_sha = worktree_tree_sha()
     validator_digest = qualification_cache.digest_paths(
