@@ -112,12 +112,10 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("blocking", policy["principles"]["syntax_validation"])
         self.assertEqual("blocking", policy["principles"]["semantic_validation"])
         self.assertEqual("forbidden", policy["principles"]["file_specific_quality_exceptions"])
-
-        forbidden_policies = set(policy["parallel_policy_files"]["forbidden"])
-        self.assertIn(".ansible-lint", forbidden_policies)
-        self.assertIn("ruff.toml", forbidden_policies)
-        for relative in forbidden_policies:
-            self.assertFalse((ROOT / relative).exists(), relative)
+        self.assertEqual(
+            "delegated-to-repository-authority-model",
+            policy["principles"]["parallel_local_quality_policy"],
+        )
 
         pre_commit = policy["orchestration_adapters"]["pre_commit"]
         self.assertEqual(".pre-commit-config.yaml", pre_commit["path"])
@@ -134,6 +132,56 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
             policy["adapters"]["terraform"]["validation"]["provider_lock_authority"],
         )
+
+    def test_repository_maximal_authority_model_is_root(self):
+        model = MOD.repository_authority_model()
+        self.assertEqual("architecture.lock.yaml", model["architecture_authority"])
+        self.assertEqual("entire-repository", model["scope"])
+        self.assertEqual("architecture.lock.yaml", model["principle"]["one_root_authority"])
+        self.assertEqual("central-contract-only", model["principle"]["cross_cutting_policy"])
+
+        domains = model["domains"]
+        self.assertEqual("source_quality_policy", domains["source_quality"]["machine_contract"])
+        self.assertEqual("toolchain_lock", domains["toolchain"]["machine_contract"])
+        self.assertEqual("security_scan_policy", domains["security_scan"]["machine_contract"])
+        self.assertEqual("terraform_provider_lock", domains["terraform_provider"]["machine_contract"])
+        self.assertEqual("qualification_cache", domains["qualification_cache"]["machine_contract"])
+
+        forbidden = set(model["forbidden_parallel_policy_files"])
+        for relative in (
+            ".ansible-lint",
+            "ruff.toml",
+            ".gitleaks.toml",
+            ".golangci.yml",
+            ".yamllint",
+            ".tflint.hcl",
+        ):
+            self.assertIn(relative, forbidden)
+            self.assertFalse((ROOT / relative).exists(), relative)
+
+        self.assertEqual(0, MOD.repository_authority_check())
+
+    def test_toolchain_versions_are_central_and_native_files_are_projections(self):
+        contract = MOD.json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+        self.assertEqual(contract["versions"], MOD.pinned_versions())
+        self.assertEqual("generated-projection", contract["projections"]["versions_env"]["mode"])
+        self.assertEqual("generated-projection", contract["projections"]["ansible_collections"]["mode"])
+        self.assertEqual("operational-projection", contract["projections"]["capability_graph"]["mode"])
+
+    def test_security_scan_policy_generates_native_config(self):
+        policy = MOD.security_scan_policy()
+        self.assertEqual("architecture.lock.yaml", policy["architecture_authority"])
+        self.assertEqual("gitleaks", policy["scanner"]["name"])
+        self.assertEqual("forbidden", policy["scanner"]["local_config"])
+        self.assertFalse((ROOT / ".gitleaks.toml").exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "gitleaks.toml"
+            MOD.write_gitleaks_policy_config(config, policy)
+            text = config.read_text(encoding="utf-8")
+        self.assertIn("useDefault = true", text)
+        self.assertIn("tests/fixtures/", text)
+        self.assertIn("node_modules/", text)
 
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
         with tempfile.TemporaryDirectory() as directory:
