@@ -319,7 +319,7 @@ module ArchitectureValidator
                 %w[health-evidence quorum-fencing write-authority-decision stateful-promotion-recovery application-routing dns-gslb-change],
                 resilience.dig("site_recovery", "sequence"))
 
-    service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
+    service_rows = markdown_rows(root, lock.fetch("topology_contracts").fetch("service_ownership"), "| Service |")
     service_sets = {
       "architecture.lock.yaml" => lock.dig("business", "services"),
       File.basename(ownership_path) => ownership.fetch("services").keys,
@@ -426,7 +426,7 @@ module ArchitectureValidator
     }.each do |field, expected|
       check_equal(errors, "#{File.basename(events_path)} semantics.#{field}", expected, semantics[field])
     end
-    event_rows = markdown_rows(root, "docs/architecture/EVENT_CONTRACT_MATRIX.md", "| Producer |")
+    event_rows = markdown_rows(root, lock.fetch("topology_contracts").fetch("events"), "| Producer |")
     markdown_events = event_rows.to_h { |row| ["#{row[0]}.#{row[1]}", list(row[2])] }
     machine_events = events.fetch("events").transform_values { |entry| entry.fetch("consumers") }
     check_equal(errors, "active event catalogue", machine_events, markdown_events)
