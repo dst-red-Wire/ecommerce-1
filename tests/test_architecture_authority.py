@@ -531,7 +531,11 @@ graph LR
                 "platform keys",
             ),
             ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
-            (\n                "  gitops: rancher-fleet\\n  developer_portal: backstage\\n  bootstrap:",\n                "  developer_portal: backstage\\n  bootstrap:",\n                "management_plane keys",\n            ),
+            (
+                "  gitops: rancher-fleet\n  developer_portal: backstage\n  bootstrap:",
+                "  developer_portal: backstage\n  bootstrap:",
+                "management_plane keys",
+            ),
             (
                 "    migration_source: nextjs-react-node",
                 "    migration_source: nextjs-react-node\n    package_manager: npm",
