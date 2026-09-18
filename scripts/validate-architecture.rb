@@ -560,36 +560,9 @@ module ArchitectureValidator
       check_equal(errors, "prod_certified_topology.#{field}", expected, topology.fetch(field))
     end
 
-    active_contracts = {
-      "platform" => {
-        "kubernetes" => "rke2", "node_os" => "rocky-linux-9", "cni" => "cilium", "mesh" => "istio",
-        "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
-        "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
-        "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon",
-        "autoscaling" => {
-          "synchronous_pods" => "kubernetes-hpa", "event_driven_pods" => "keda",
-          "certified_nodes" => "fixed", "preprod_perf_burst" => "gate-only"
-        }
-      },
-      "stateful" => {
-        "database" => "cloudnativepg-postgresql", "events" => "strimzi-kafka-kraft",
-        "jobs" => "rabbitmq-quorum-queues", "cache" => "redis-cluster", "search" => "opensearch",
-        "object_storage" => "seaweedfs-s3"
-      },
-      "observability" => {
-        "telemetry" => "opentelemetry", "application_gateway" => "rotel",
-        "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
-        "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
-        "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
-        "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
-        "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
-        "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
-      },
-      "supply_chain" => {
-        "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",
-        "immutable_images" => true, "forbid_latest" => true
-      }
-    }
+    active_contracts = %w[platform stateful observability supply_chain].to_h do |section|
+      [section, CANONICAL_LOCK.fetch(section)]
+    end
     active_contracts.each do |section, expected_contract|
       actual_contract = lock.fetch(section)
       check_equal(errors, "#{section} active contract keys", expected_contract.keys.sort, actual_contract.keys.sort)
