@@ -652,6 +652,7 @@ class ArchitectureValidatorTest < Minitest::Test
       %w[platform progressive_delivery] => "flagger",
       %w[platform registry] => "docker-hub",
       %w[platform runtime_security] => "falco",
+      %w[platform infrastructure_api] => "terraform",
       %w[stateful object_storage] => "minio-community",
       %w[observability application_gateway] => "opentelemetry-collector",
       %w[observability hyperdx_metadata_store] => "postgresql",
