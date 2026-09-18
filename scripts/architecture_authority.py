@@ -36,6 +36,7 @@ V5_ROOT_KEYS = frozenset(
         "version",
         "status",
         "project",
+        "repository_governance",
         "business",
         "platform",
         "management_plane",
@@ -54,6 +55,34 @@ V5_ROOT_KEYS = frozenset(
     }
 )
 V5_SECTION_KEYS = {
+    "repository_governance": frozenset(
+        {
+            "scope",
+            "transverse_rule_contract",
+            "owner_authorization",
+        }
+    ),
+    "repository_governance.transverse_rule_contract": frozenset(
+        {
+            "source_of_truth",
+            "rule_definition",
+            "enforcement",
+            "per_file_rule_propagation",
+            "consumer_changes",
+        }
+    ),
+    "repository_governance.owner_authorization": frozenset(
+        {
+            "syntax",
+            "decision_authority",
+            "recording_agent",
+            "recording_requires_explicit_owner_instruction",
+            "sha_binding",
+            "scope_binding",
+            "head_change",
+            "absence_or_mismatch",
+        }
+    ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
     "business.frontend_runtime": frozenset(
         {
@@ -397,6 +426,31 @@ V5_MILESTONE_DEPENDENCIES = {
     for name, parents in zip(V5_MILESTONES, V5_MILESTONE_PREREQUISITES)
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
+
+V5_REPOSITORY_GOVERNANCE = {
+    "scope": "entire-repository",
+    "transverse_rule_contract": {
+        "source_of_truth": "architecture.lock.yaml",
+        "rule_definition": "central-contract-only",
+        "enforcement": "generic-validator",
+        "per_file_rule_propagation": "forbidden",
+        "consumer_changes": "only-if-required-to-consume-contract",
+    },
+    "owner_authorization": {
+        "syntax": "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
+        "decision_authority": "repository-owner",
+        "recording_agent": "ChatGPT",
+        "recording_requires_explicit_owner_instruction": True,
+        "sha_binding": "exact",
+        "scope_binding": "exact",
+        "head_change": "authorization-expired",
+        "absence_or_mismatch": "block",
+    },
+}
+OWNER_AUTHORIZATION_PATTERN = re.compile(
+    r"^/owner-authorization approve scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
+    r"sha=(?P<sha>[0-9a-f]{40})$"
+)
 
 V5_DEVELOPER_PLATFORM = {
     "status": "contract-locked-in-m1-implemented-from-m4",
@@ -749,6 +803,46 @@ EXACT_CONTRACTS = {
         "mgmt_access_source": "config/contracts/mgmt-wireguard-access.yaml",
     },
 }
+
+
+def owner_authorization_errors(
+    command,
+    *,
+    expected_scope,
+    head_sha,
+    decision_authority,
+    recording_agent,
+    explicit_owner_instruction,
+):
+    """Fail-closed evaluation for repository-owner authorization records."""
+    policy = V5_REPOSITORY_GOVERNANCE["owner_authorization"]
+    errors = []
+
+    if decision_authority != policy["decision_authority"]:
+        errors.append("BLOCK owner authorization decision authority mismatch")
+    if recording_agent != policy["recording_agent"]:
+        errors.append("BLOCK owner authorization recording agent mismatch")
+    if policy["recording_requires_explicit_owner_instruction"] and not explicit_owner_instruction:
+        errors.append("BLOCK owner authorization requires explicit repository-owner instruction")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", expected_scope or ""):
+        errors.append("BLOCK owner authorization expected scope is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha or ""):
+        errors.append("BLOCK owner authorization current HEAD SHA is not exact")
+
+    if not command:
+        errors.append("BLOCK owner authorization missing")
+        return errors
+
+    match = OWNER_AUTHORIZATION_PATTERN.fullmatch(command)
+    if not match:
+        errors.append("BLOCK owner authorization syntax mismatch")
+        return errors
+
+    if match.group("scope") != expected_scope:
+        errors.append("BLOCK owner authorization scope mismatch")
+    if match.group("sha") != head_sha:
+        errors.append("BLOCK owner authorization SHA mismatch or authorization expired after HEAD change")
+    return errors
 
 
 def load_yaml(path):
@@ -1339,6 +1433,8 @@ def validate(root):
             errors.append("observability must match the complete approved V5 mapping")
         if lock["business"].get("frontend_runtime") != EXPECTED_V5_FRONTEND_RUNTIME:
             errors.append("business.frontend_runtime must match the approved V5 mapping")
+        if lock.get("repository_governance") != V5_REPOSITORY_GOVERNANCE:
+            errors.append("repository_governance must match the approved repository-wide contract")
         if lock.get("developer_platform") != V5_DEVELOPER_PLATFORM:
             errors.append("developer_platform must match the approved V5 PR-driven platform contract")
         if lock.get("platform", {}).get("infrastructure_api") != "crossplane":
