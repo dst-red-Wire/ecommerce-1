@@ -267,7 +267,13 @@ graph LR
         self.assertFalse(pr_contract["human_review_required"])
         self.assertTrue(pr_contract["ai_auto_merge_allowed"])
         self.assertEqual(
-            ["deterministic-qualification", "code-review", "security-review"],
+            [
+                "deterministic-qualification",
+                "code-review",
+                "security-review",
+                "provenance-integrity",
+                "governance-policy",
+            ],
             pr_contract["ai_auto_merge_required_verifications"],
         )
         self.assertTrue(pr_contract["ai_auto_merge_same_head_sha_required"])
@@ -312,7 +318,7 @@ graph LR
                     lock.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
-    def test_review_policy_requires_three_exact_sha_verifications(self):
+    def test_review_policy_requires_five_exact_sha_verifications(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             policy = root / "config/contracts/review-policy.yaml"
@@ -320,8 +326,10 @@ graph LR
             mutations = (
                 ("    may_approve: true", "    may_approve: false"),
                 ("    may_merge: true", "    may_merge: false"),
-                ("      verification_count: 3", "      verification_count: 2"),
+                ("      verification_count: 5", "      verification_count: 4"),
                 ("        - security-review", ""),
+                ("        - provenance-integrity", ""),
+                ("        - governance-policy", ""),
                 ("      all_verifications_same_head_sha: true", "      all_verifications_same_head_sha: false"),
                 ("      - review_policy_changes", ""),
             )
@@ -331,7 +339,7 @@ graph LR
                     policy.write_text(original.replace(before, after, 1))
                     self.assertTrue(
                         any(
-                            "three-verification AI merge policy" in error
+                            "five-verification AI merge policy" in error
                             for error in authority.validate(root)
                         )
                     )
