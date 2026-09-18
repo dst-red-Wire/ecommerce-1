@@ -12,16 +12,7 @@ principles:
   security_validation: blocking
   generated_artifact_drift: blocking
   file_specific_quality_exceptions: forbidden
-  parallel_local_quality_policy: forbidden
-
-parallel_policy_files:
-  forbidden:
-    - .ansible-lint
-    - ruff.toml
-    - .ruff.toml
-    - .golangci.yml
-    - .golangci.yaml
-    - .yamllint
+  parallel_local_quality_policy: delegated-to-repository-authority-model
 
 orchestration_adapters:
   pre_commit:
