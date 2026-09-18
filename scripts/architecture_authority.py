@@ -403,11 +403,13 @@ V5_REVIEW_POLICY = {
             "may_push": False,
             "automatic_merge": {
                 "enabled": True,
-                "verification_count": 3,
+                "verification_count": 5,
                 "required_verifications": [
                     "deterministic-qualification",
                     "code-review",
                     "security-review",
+                    "provenance-integrity",
+                    "governance-policy",
                 ],
                 "binds_exact_commit_sha": True,
                 "all_verifications_same_head_sha": True,
@@ -517,6 +519,8 @@ V5_DEVELOPER_PLATFORM = {
             "deterministic-qualification",
             "code-review",
             "security-review",
+            "provenance-integrity",
+            "governance-policy",
         ],
         "ai_auto_merge_same_head_sha_required": True,
         "ai_auto_merge_fail_closed": True,
@@ -1468,7 +1472,7 @@ def validate(root):
             errors.append("machine_contracts must match the complete approved V5 role/path registry")
         review_policy = load_yaml(root / V5_MACHINE_CONTRACTS["review_policy"])
         if review_policy != V5_REVIEW_POLICY:
-            errors.append("config/contracts/review-policy.yaml must match the exact V5 three-verification AI merge policy")
+            errors.append("config/contracts/review-policy.yaml must match the exact V5 five-verification AI merge policy")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
