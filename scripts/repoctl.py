@@ -133,6 +133,23 @@ def source_quality_policy() -> dict:
         policy = ruby_yaml(relative)
         if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
             raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+
+        forbidden = policy.get("parallel_policy_files", {}).get("forbidden", [])
+        for local_policy in forbidden:
+            if not isinstance(local_policy, str) or not local_policy.strip():
+                raise RuntimeError("source quality parallel policy paths must be non-empty strings")
+            if (ROOT / local_policy).exists():
+                raise RuntimeError(f"parallel local quality policy is forbidden: {local_policy}")
+
+        adapters = policy.get("orchestration_adapters", {})
+        pre_commit = adapters.get("pre_commit", {})
+        pre_commit_path = pre_commit.get("path")
+        required_delegate = pre_commit.get("required_delegate")
+        if pre_commit_path and required_delegate:
+            adapter_path = ROOT / str(pre_commit_path)
+            if not adapter_path.is_file() or str(required_delegate) not in adapter_path.read_text(encoding="utf-8"):
+                raise RuntimeError("pre-commit adapter must delegate to the central repoctl quality authority")
+
         _SOURCE_QUALITY_POLICY = policy
     return copy.deepcopy(_SOURCE_QUALITY_POLICY)
 
