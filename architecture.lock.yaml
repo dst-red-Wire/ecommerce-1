@@ -125,6 +125,8 @@ developer_platform:
       - deterministic-qualification
       - code-review
       - security-review
+      - provenance-integrity
+      - governance-policy
     ai_auto_merge_same_head_sha_required: true
     ai_auto_merge_fail_closed: true
     review_policy_changes_require_human_gate: true
