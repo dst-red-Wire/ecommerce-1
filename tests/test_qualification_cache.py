@@ -38,14 +38,17 @@ class QualificationCacheTest(unittest.TestCase):
     def test_contract_is_central_and_dynamic_state_is_not_cacheable(self):
         contract = qualification_cache.contract()
         self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
+        self.assertEqual("CachePolicy", contract["kind"])
         self.assertEqual("sha256", contract["identity"]["algorithm"])
+        self.assertEqual("forbidden", contract["pinning"]["floating_versions"])
+        self.assertEqual("required", contract["pinning"]["executable_sha256_in_cache_key"])
         self.assertEqual(
             "forbidden",
             contract["consumers"]["security_scan"]["persistence"],
         )
-        self.assertIn("owner-authorization", contract["scope"]["forbidden"])
-        self.assertIn("remote-ci-state", contract["scope"]["forbidden"])
-        self.assertIn("kubernetes-runtime-state", contract["scope"]["forbidden"])
+        self.assertIn("owner-authorization", contract["eligibility"]["forbidden"])
+        self.assertIn("remote-ci-state", contract["eligibility"]["forbidden"])
+        self.assertIn("kubernetes-runtime-state", contract["eligibility"]["forbidden"])
 
     def test_key_changes_for_every_required_identity_dimension(self):
         base = dict(
@@ -65,6 +68,10 @@ class QualificationCacheTest(unittest.TestCase):
             changed = dict(base)
             changed[field] = value
             self.assertNotEqual(key, qualification_cache.build_key(**changed), field)
+
+    def test_executable_identity_is_sha256_bound(self):
+        identity = qualification_cache.executable_identity(sys.executable)
+        self.assertRegex(identity["sha256"], r"^[0-9a-f]{64}$")
 
     def test_l2_cache_is_persistent_and_caller_mutation_safe(self):
         tool_home = self.isolated_tool_home()

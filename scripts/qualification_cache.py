@@ -59,10 +59,17 @@ def contract() -> dict:
     global _CONTRACT
     if _CONTRACT is None:
         lock = _raw_psych(LOCK_PATH)
-        relative = lock.get("machine_contracts", {}).get("qualification_cache")
+        relative = lock.get("machine_contracts", {}).get("cache_policy")
         if not isinstance(relative, str) or not relative.strip():
-            raise ValueError("architecture.lock.yaml must register machine_contracts.qualification_cache")
-        _CONTRACT = _raw_psych(ROOT / relative)
+            raise ValueError("architecture.lock.yaml must register machine_contracts.cache_policy")
+        loaded = _raw_psych(ROOT / relative)
+        if (
+            loaded.get("kind") != "CachePolicy"
+            or loaded.get("architecture_authority") != "architecture.lock.yaml"
+            or loaded.get("identity", {}).get("algorithm") != "sha256"
+        ):
+            raise ValueError("canonical cache policy envelope or SHA-256 identity is invalid")
+        _CONTRACT = loaded
     return copy.deepcopy(_CONTRACT)
 
 
@@ -289,7 +296,10 @@ def psych_load(path: Path | str) -> dict:
         "psych-yaml",
         input_content_digest=input_digest,
         validator_content_digest=sha256_bytes(_PSYCH_SCRIPT.encode("utf-8")),
-        tool_identity=tool_version("ruby", "--version"),
+        tool_identity={
+            "version": tool_version("ruby", "--version"),
+            "executable": executable_identity("ruby"),
+        },
         options={"aliases": False, "result": "mapping"},
     )
 

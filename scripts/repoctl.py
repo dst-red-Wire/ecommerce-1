@@ -123,6 +123,52 @@ def ruby_yaml(path: str) -> dict:
     return qualification_cache.psych_load(source)
 
 
+_CANONICAL_CONTRACT_CACHE: dict[str, dict] = {}
+
+
+def canonical_contract(name: str) -> dict:
+    """Load a machine contract only through architecture.lock.yaml."""
+    if name not in _CANONICAL_CONTRACT_CACHE:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get(name)
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError(f"architecture.lock.yaml must register machine_contracts.{name}")
+        data = ruby_yaml(relative)
+        if data.get("architecture_authority") != "architecture.lock.yaml":
+            raise RuntimeError(f"{name} must inherit architecture.lock.yaml")
+        _CANONICAL_CONTRACT_CACHE[name] = data
+    return copy.deepcopy(_CANONICAL_CONTRACT_CACHE[name])
+
+
+def canonical_contract_audit() -> int:
+    return run([sys.executable, "scripts/canonical_contracts.py", "audit-authority"], check=False).returncode
+
+
+def security_scan_policy() -> dict:
+    return canonical_contract("security_scan_policy")
+
+
+def write_gitleaks_policy_config(path: Path) -> None:
+    policy = security_scan_policy()
+    allowlist = policy.get("allowlist", {})
+    lines = [
+        f"title = {json.dumps('E-Commerce repository gitleaks configuration (generated)')}",
+        "",
+        "[extend]",
+        "useDefault = true",
+        "",
+        "[allowlist]",
+        f"description = {json.dumps(str(allowlist.get('description', 'Canonical repository allowlist')))}",
+        "paths = [",
+    ]
+    for value in allowlist.get("paths", []):
+        if not isinstance(value, str) or "'''" in value:
+            raise RuntimeError("security scan allowlist paths must be safe strings")
+        lines.append("  '''" + value + "''',")
+    lines.extend(["]", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 _SOURCE_QUALITY_POLICY: dict | None = None
 
 
@@ -130,11 +176,7 @@ def source_quality_policy() -> dict:
     """Load the single repository-wide source quality contract."""
     global _SOURCE_QUALITY_POLICY
     if _SOURCE_QUALITY_POLICY is None:
-        lock = ruby_yaml("architecture.lock.yaml")
-        relative = lock.get("machine_contracts", {}).get("source_quality_policy")
-        if not isinstance(relative, str) or not relative.strip():
-            raise RuntimeError("architecture.lock.yaml must register machine_contracts.source_quality_policy")
-        policy = ruby_yaml(relative)
+        policy = canonical_contract("source_quality_policy")
         if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
             raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
 
@@ -200,12 +242,7 @@ def terraform_provider_lock_contract() -> dict:
     """Load and validate the single canonical Terraform provider lock contract."""
     global _TERRAFORM_PROVIDER_LOCK
     if _TERRAFORM_PROVIDER_LOCK is None:
-        lock = ruby_yaml("architecture.lock.yaml")
-        relative = lock.get("machine_contracts", {}).get("terraform_provider_lock")
-        if not isinstance(relative, str) or not relative.strip():
-            raise RuntimeError("architecture.lock.yaml must register machine_contracts.terraform_provider_lock")
-
-        contract = ruby_yaml(relative)
+        contract = canonical_contract("terraform_provider_lock")
         if (
             contract.get("architecture_authority") != "architecture.lock.yaml"
             or contract.get("scope") != "platform/terraform"
@@ -286,15 +323,10 @@ def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | 
 
 
 def pinned_versions() -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
-
+    values = canonical_contract("toolchain_lock").get("versions", {})
+    if not isinstance(values, dict) or not values:
+        raise RuntimeError("canonical toolchain lock must declare versions")
+    return {str(key): str(value) for key, value in values.items()}
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
     """Read the canonical Ansible collection lock without duplicating its pins."""
@@ -446,13 +478,14 @@ def runtime_efficiency_check() -> int:
 
     return _run_cached_static_gate("runtime-efficiency", {}, execute)
 
-
 def governance() -> int:
     def execute() -> int:
+        if canonical_contract_audit():
+            return 1
         run([sys.executable, "scripts/architecture_authority.py"])
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
-        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_repoctl_fastpath.py"])
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_canonical_contract_system.py"])
         require("ruby")
         for validator in (
             "scripts/validate-architecture.rb",
@@ -463,21 +496,13 @@ def governance() -> int:
             "scripts/validate-observability.rb",
         ):
             run(["ruby", validator])
-        run_ruby_tests(
-            [
-                "tests/architecture_validator_test.rb",
-                "tests/observability_topology_test.rb",
-                "tests/ci_authority_test.rb",
-                "tests/ci_affected_test.rb",
-            ]
-        )
+        run_ruby_tests(["tests/architecture_validator_test.rb","tests/observability_topology_test.rb","tests/ci_authority_test.rb","tests/ci_affected_test.rb"])
         if documentation_policy():
             return 1
         print("PASS governance checks completed")
         return 0
 
     return _run_cached_static_gate("governance", {}, execute)
-
 
 def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     """Return a single-document OpenAPI spec with canonical common components merged.
@@ -707,7 +732,6 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
     }
     return _run_cached_static_gate("contracts", options, execute)
 
-
 def repository_shell_paths(root: Path = ROOT) -> list[str]:
     """Return Shell files that exist in the effective Git worktree.
 
@@ -726,13 +750,9 @@ def repository_shell_paths(root: Path = ROOT) -> list[str]:
 
 def automation_policy() -> int:
     def execute() -> int:
-        # Shell source is forbidden repository-wide after the Ansible-first migration.
         shell_files = repository_shell_paths()
         if shell_files:
-            print(
-                "FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration",
-                file=sys.stderr,
-            )
+            print("FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration", file=sys.stderr)
             for path in shell_files:
                 print(f"  {path}", file=sys.stderr)
             return 1
@@ -754,20 +774,17 @@ def automation_policy() -> int:
 
     return _run_cached_static_gate("automation", {}, execute)
 
-
 def documentation_policy() -> int:
-    """Reject active documentation that contradicts the canonical automation model."""
-    rules = {
-        "AGENTS.md": [r"portable POSIX `sh`", r"repository shell helpers"],
-        "README.md": [r"scripts/ci-\*\.sh"],
-        "docs/project/CODEX_HANDOFFS.md": [r"shared POSIX `sh` helpers", r"shared repository scripts factored"],
-        "docs/api/README.md": [r"bootstrap CI Woodpecker"],
-    }
+    """Reject active documentation that contradicts canonical contracts."""
+    policy = canonical_contract("documentation_drift_policy")
     failures: list[str] = []
-    for relative, patterns in rules.items():
-        text = (ROOT / relative).read_text(encoding="utf-8")
+    for relative, patterns in policy.get("forbidden_patterns", {}).items():
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
         for pattern in patterns:
-            if re.search(pattern, text, flags=re.IGNORECASE):
+            if re.search(str(pattern), text, flags=re.IGNORECASE):
                 failures.append(f"{relative}: {pattern}")
     if failures:
         print("FAIL documentation policy: active legacy automation references found", file=sys.stderr)
@@ -775,7 +792,6 @@ def documentation_policy() -> int:
         return 1
     print("PASS documentation policy: active automation references are canonical")
     return 0
-
 
 def frontend(action: str, scope: str = "") -> int:
     # Accept both `repoctl frontend storefront` and the compatibility form
@@ -799,7 +815,7 @@ def frontend(action: str, scope: str = "") -> int:
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
-        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+        raise RuntimeError("TEMPL_VERSION is missing from the canonical toolchain lock")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
@@ -996,23 +1012,25 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     require("gitleaks")
-    if os.environ.get("HEAD", "").strip() == "WORKTREE":
-        tree_sha = worktree_tree_sha()
-        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
-            temp_root = Path(temp_dir)
-            archive = temp_root / "tree.tar"
-            scan_root = temp_root / "tree"
-            scan_root.mkdir()
-            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
-            shutil.unpack_archive(str(archive), str(scan_root), "tar")
-            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
-    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-        run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    else:
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    print("PASS secret scan completed")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
+        config = Path(policy_dir) / "gitleaks.toml"
+        write_gitleaks_policy_config(config)
+        if os.environ.get("HEAD", "").strip() == "WORKTREE":
+            tree_sha = worktree_tree_sha()
+            with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+                temp_root = Path(temp_dir)
+                archive = temp_root / "tree.tar"
+                scan_root = temp_root / "tree"
+                scan_root.mkdir()
+                run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+                shutil.unpack_archive(str(archive), str(scan_root), "tar")
+                run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", str(scan_root)])
+        elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+            run(["gitleaks", "git", "--config", str(config), "--redact", "--no-banner", "."])
+        else:
+            run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", "."])
+    print("PASS secret scan completed from canonical security policy")
     return 0
-
 
 def terraform_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
@@ -1020,46 +1038,26 @@ def terraform_check() -> int:
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-
     policy = source_quality_adapter("terraform")
     formatter = policy["formatter"]
     provider_lock = terraform_provider_lock_contract()
     qualification = provider_lock["qualification"]
-
-    tool = next(
-        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
-        None,
-    )
+    tool = next((shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)), None)
     if not tool:
         return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
-
     selected_tool = str(Path(tool).resolve())
-    provider_versions = {
-        name: provider["version"]
-        for name, provider in sorted(provider_lock["providers"].items())
-    }
+    provider_versions = {name: provider["version"] for name, provider in sorted(provider_lock["providers"].items())}
 
     def execute() -> int:
-        advisory_exit_check(
-            "terraform fmt",
-            [tool, *formatter["args"]],
-            drift_exit_codes=formatter["drift_exit_codes"],
-        )
-
+        advisory_exit_check("terraform fmt", [tool, *formatter["args"]], drift_exit_codes=formatter["drift_exit_codes"])
         provider_cache = terraform_provider_plugin_cache_dir(provider_lock)
         env = os.environ.copy()
         if provider_cache is not None:
             env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
-
         directories = sorted({p.parent for p in tf_files})
         with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
             temp_root = Path(temp_dir) / "terraform"
-            shutil.copytree(
-                terraform_root,
-                temp_root,
-                ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
-            )
-
+            shutil.copytree(terraform_root, temp_root, ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"))
             for directory in directories:
                 relative = directory.relative_to(terraform_root)
                 validation_dir = temp_root / relative
@@ -1067,23 +1065,12 @@ def terraform_check() -> int:
                 print(f"CHECK terraform: {relative}")
                 run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
                 run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
-
-        providers = ", ".join(
-            f"{name}={provider['version']}"
-            for name, provider in sorted(provider_lock["providers"].items())
-        )
+        providers = ", ".join(f"{name}={provider['version']}" for name, provider in sorted(provider_lock["providers"].items()))
         print(f"PASS terraform provider lock {providers}")
         print("PASS terraform checks completed")
         return 0
 
-    return _run_cached_static_gate(
-        "platform:terraform",
-        {
-            "selected_tool": selected_tool,
-            "provider_versions": provider_versions,
-        },
-        execute,
-    )
+    return _run_cached_static_gate("platform:terraform", {"selected_tool": selected_tool, "provider_versions": provider_versions}, execute)
 
 def ansible_check() -> int:
     reconcile_ansible_collections()
@@ -1093,48 +1080,23 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-
-    # Fresh precheck: local collection state is never trusted from cache.
     if ansible_collections_check():
         return 1
-    collection_versions = {
-        name: resolved_ansible_collection_version(name)
-        for name in required_ansible_collections()
-    }
+    collection_versions = {name: resolved_ansible_collection_version(name) for name in required_ansible_collections()}
 
     def execute() -> int:
         lint_policy = source_quality_adapter("ansible")["lint"]
         advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
         with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
             config = Path(temp_dir) / "ansible-lint.yml"
-            config.write_text(
-                "---\nwarn_list:\n"
-                + "".join(f"  - {rule}\n" for rule in advisory_rules),
-                encoding="utf-8",
-            )
+            config.write_text("---\nwarn_list:\n" + "".join(f"  - {rule}\n" for rule in advisory_rules), encoding="utf-8")
             run(["ansible-lint", "--config-file", str(config), *files])
-
-        run(
-            [
-                "ansible-playbook",
-                "-i",
-                "localhost,",
-                "-c",
-                "local",
-                "platform/ansible/developer.yml",
-                "--syntax-check",
-                "-e",
-                f"repo_root={ROOT}",
-            ]
-        )
+        run(["ansible-playbook","-i","localhost,","-c","local","platform/ansible/developer.yml","--syntax-check","-e",f"repo_root={ROOT}"])
         print("PASS ansible checks completed")
         return 0
 
-    return _run_cached_static_gate(
-        "platform:ansible",
-        {"collection_versions": collection_versions},
-        execute,
-    )
+    return _run_cached_static_gate("platform:ansible", {"collection_versions": collection_versions}, execute)
+
 def system_check() -> int:
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
     run_ruby_tests(tests)
@@ -1284,6 +1246,7 @@ def worktree_tree_sha() -> str:
     return tree_sha
 
 
+
 _STATIC_GATE_TOOLS = {
     "governance": (sys.executable, "ruby", "git"),
     "runtime-efficiency": (sys.executable, "ruby"),
@@ -1296,7 +1259,6 @@ def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
     consumers = qualification_cache.contract().get("consumers", {})
     global_contracts = consumers.get("repoctl_global_static_gates", {}).get("gates", {})
     component_contracts = consumers.get("repoctl_component_static_gates", {}).get("gates", {})
-
     gate_contract = None
     tool_names: list[str] = []
     if isinstance(global_contracts, dict) and name in global_contracts:
@@ -1306,30 +1268,18 @@ def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
         gate_contract = component_contracts[name]
         declared_tools = gate_contract.get("tools", []) if isinstance(gate_contract, dict) else []
         tool_names = [sys.executable, *[str(tool) for tool in declared_tools]]
-
     patterns = gate_contract.get("inputs", []) if isinstance(gate_contract, dict) else []
     if not patterns or not tool_names:
         raise RuntimeError(f"static qualification cache is not approved for gate {name}")
-
     input_digest = qualification_cache.digest_globs(patterns, root=ROOT)
-    validator_digest = qualification_cache.digest_paths(
-        [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
-        root=ROOT,
-    )
-    tool_identity = {
-        tool: qualification_cache.executable_identity(tool)
-        for tool in tool_names
-    }
-    cache_options = {
-        "gate_inputs": list(patterns),
-        "gate_options": options,
-    }
+    validator_digest = qualification_cache.digest_paths([SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"], root=ROOT)
+    tool_identity = {tool: qualification_cache.executable_identity(tool) for tool in tool_names}
     key = qualification_cache.build_key(
         f"static-gate:{name}",
         input_content_digest=input_digest,
         validator_content_digest=validator_digest,
         tool_identity=tool_identity,
-        options=cache_options,
+        options={"gate_inputs": list(patterns), "gate_options": options},
     )
     return key, input_digest
 
@@ -1342,20 +1292,11 @@ def _run_cached_static_gate(name: str, options: dict, producer) -> int:
         saved = float(cached.get("duration_seconds", 0.0) or 0.0)
         print(f"PASS {name} qualification cache hit inputs={input_digest[:12]} saved~{saved:.3f}s")
         return 0
-
     started = time.monotonic()
     result = producer()
     duration = round(time.monotonic() - started, 3)
     if result == 0:
-        qualification_cache.store_success(
-            namespace,
-            key,
-            {
-                "input_digest": input_digest,
-                "duration_seconds": duration,
-                "options": options,
-            },
-        )
+        qualification_cache.store_success(namespace, key, {"input_digest": input_digest, "duration_seconds": duration, "options": options})
     return result
 
 
@@ -2331,6 +2272,7 @@ def main() -> int:
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
+    c.add_argument("action", nargs="?", default="validate", choices=("validate", "audit-authority"))
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     c.add_argument("--generate", action="store_true")
@@ -2411,6 +2353,8 @@ def main() -> int:
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
+            if args.action == "audit-authority":
+                return canonical_contract_audit()
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()

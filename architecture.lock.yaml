@@ -10,6 +10,44 @@ repository_governance:
     enforcement: generic-validator
     per_file_rule_propagation: forbidden
     consumer_changes: only-if-required-to-consume-contract
+  canonical_contract_system:
+    version: 1
+    root_authority: architecture.lock.yaml
+    registry: machine_contracts
+    schema: config/contracts/contract-schema.yaml
+    validator: scripts/canonical_contracts.py
+    controller: scripts/repoctl.py
+    materializer: scripts/capability_bootstrap.py
+    generic_validation: required
+    projection_root: .context/generated
+    projection_drift: blocking
+    duplicate_authority: forbidden
+    unregistered_contract: forbidden
+    implicit_policy: forbidden
+    consumer_embedded_policy: forbidden
+    forbidden_parallel_authority_files:
+      - .gitleaks.toml
+      - .ansible-lint
+      - ruff.toml
+      - .ruff.toml
+      - .golangci.yml
+      - .golangci.yaml
+    required_contracts:
+      - contract_schema
+      - source_quality_policy
+      - terraform_provider_lock
+      - security_scan_policy
+      - toolchain_lock
+      - dependency_lock_policy
+      - cache_policy
+      - execution_environment_policy
+      - build_reproducibility_policy
+      - codegen_policy
+      - test_policy
+      - supply_chain_policy
+      - policy_exceptions
+      - documentation_drift_policy
+      - change_routing_policy
   owner_authorization:
     syntax: "/owner-authorization approve scope=<scope> sha=<exact-head-sha>"
     decision_authority: repository-owner
@@ -317,7 +355,6 @@ machine_contracts:
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
-  qualification_cache: config/contracts/qualification-cache.yaml
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
   review_budget: config/contracts/review-budget.json
@@ -338,6 +375,19 @@ machine_contracts:
   time_authority_policy: config/contracts/time-authority-policy.yaml
   traffic_class_policy: config/contracts/traffic-class-policy.yaml
   waypoint_scope: config/contracts/waypoint-scope.yaml
+  contract_schema: config/contracts/contract-schema.yaml
+  security_scan_policy: config/contracts/security-scan-policy.yaml
+  toolchain_lock: config/contracts/toolchain-lock.yaml
+  dependency_lock_policy: config/contracts/dependency-lock-policy.yaml
+  cache_policy: config/contracts/cache-policy.yaml
+  execution_environment_policy: config/contracts/execution-environment-policy.yaml
+  build_reproducibility_policy: config/contracts/build-reproducibility-policy.yaml
+  codegen_policy: config/contracts/codegen-policy.yaml
+  test_policy: config/contracts/test-policy.yaml
+  supply_chain_policy: config/contracts/supply-chain-policy.yaml
+  policy_exceptions: config/contracts/policy-exceptions.yaml
+  documentation_drift_policy: config/contracts/documentation-drift-policy.yaml
+  change_routing_policy: config/contracts/change-routing-policy.yaml
   deployment_waves: config/infrastructure/deployment-waves.yaml
   mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   mgmt_inventory: config/infrastructure/mgmt-inventory.yaml

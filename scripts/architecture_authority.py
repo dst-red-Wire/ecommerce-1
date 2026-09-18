@@ -1,6 +1,8 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -18,7 +20,7 @@ CANONICAL_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_canonical_yaml(relative):
-    """Load canonical YAML/JSON through the repository qualification cache."""
+    """Load canonical YAML/JSON through the content-addressed qualification cache."""
     return qualification_cache.psych_load(CANONICAL_ROOT / relative)
 
 
@@ -63,33 +65,15 @@ V5_ROOT_KEYS = frozenset(
     }
 )
 V5_SECTION_KEYS = {
-    "repository_governance": frozenset(
-        {
-            "scope",
-            "transverse_rule_contract",
-            "owner_authorization",
-        }
-    ),
+    "repository_governance": frozenset(_CANONICAL_LOCK["repository_governance"]),
     "repository_governance.transverse_rule_contract": frozenset(
-        {
-            "source_of_truth",
-            "rule_definition",
-            "enforcement",
-            "per_file_rule_propagation",
-            "consumer_changes",
-        }
+        _CANONICAL_LOCK["repository_governance"]["transverse_rule_contract"]
+    ),
+    "repository_governance.canonical_contract_system": frozenset(
+        _CANONICAL_LOCK["repository_governance"]["canonical_contract_system"]
     ),
     "repository_governance.owner_authorization": frozenset(
-        {
-            "syntax",
-            "decision_authority",
-            "recording_agent",
-            "recording_requires_explicit_owner_instruction",
-            "sha_binding",
-            "scope_binding",
-            "head_change",
-            "absence_or_mismatch",
-        }
+        _CANONICAL_LOCK["repository_governance"]["owner_authorization"]
     ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
     "business.frontend_runtime": frozenset(
@@ -428,6 +412,9 @@ def owner_authorization_errors(
     if match.group("sha") != head_sha:
         errors.append("BLOCK owner authorization SHA mismatch or authorization expired after HEAD change")
     return errors
+
+
+_YAML_PARSE_CACHE = {}
 
 
 def clear_yaml_parse_cache():
