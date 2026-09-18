@@ -407,6 +407,25 @@ graph LR
                     lock.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+    def test_review_policy_cannot_override_root_owner_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            policy.write_text(
+                original.replace(
+                    "    authority_source: architecture.lock.yaml#repository_governance.owner_authorization",
+                    "    authority_source: config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
+                    1,
+                )
+            )
+            self.assertIn(
+                "review policy must inherit repository_governance.owner_authorization without local override",
+                authority.validate(root),
+            )
+            policy.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
