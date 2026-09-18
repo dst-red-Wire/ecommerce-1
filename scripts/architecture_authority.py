@@ -113,7 +113,7 @@ V5_SECTION_KEYS = {
         {
             "terraform_opentofu",
             "ansible",
-            "requires_human_apply_gate",
+            "requires_owner_authorization",
         }
     ),
     "developer_platform": frozenset(
@@ -185,7 +185,8 @@ V5_SECTION_KEYS = {
             "automatic_merge_fail_closed",
             "ai_code_review",
             "ai_security_review",
-            "review_policy_changes_require_human_gate",
+            "sensitive_changes_require_owner_authorization",
+            "owner_authorization_contract",
             "required_context",
         }
     ),
@@ -427,14 +428,27 @@ V5_REVIEW_POLICY = {
             "forbid_branch_protection_bypass": True,
             "blocking_findings": ["P1", "P2"],
         },
-        "human_gate": {
+        "owner_authorization": {
+            "enabled": True,
+            "decision_authority": "repository-owner",
+            "recording_agent": "chatgpt-allowed-after-explicit-owner-instruction",
+            "transport": "github-pull-request-comment",
+            "command": "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
+            "binds_exact_commit_sha": True,
+            "binds_scope": True,
+            "stale_on_head_change": True,
+            "fail_closed": True,
             "required_for": [
                 "review_policy_changes",
                 "infrastructure_apply",
                 "destructive_changes",
                 "state_migrations",
                 "dns_network_iam_secret_changes",
-            ]
+                "mgmt_bootstrap_apply",
+                "public_ingress_activation",
+                "routing_change",
+                "peer_or_key_change",
+            ],
         },
     },
 }
@@ -533,7 +547,8 @@ V5_DEVELOPER_PLATFORM = {
         "automatic_merge_fail_closed": True,
         "ai_code_review": "advisory",
         "ai_security_review": "advisory",
-        "review_policy_changes_require_human_gate": True,
+        "sensitive_changes_require_owner_authorization": True,
+        "owner_authorization_contract": "config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
         "required_context": [
             "request-id",
             "component",
@@ -1527,14 +1542,14 @@ def validate(root):
             or inventory.get("bootstrap", {}).get("configuration") != "ansible"
         ):
             errors.append("management_plane.bootstrap contradicts the MGMT inventory")
-        human_gates = (
-            bootstrap.get("requires_human_apply_gate"),
-            inventory.get("bootstrap", {}).get("human_apply_gate"),
-            gateways.get("implementation", {}).get("human_apply_gate"),
-            wireguard.get("human_gates", {}).get("provider_apply") == "required",
+        owner_authorizations = (
+            bootstrap.get("requires_owner_authorization") is True,
+            inventory.get("bootstrap", {}).get("owner_authorization") == "required",
+            gateways.get("implementation", {}).get("owner_authorization") == "required",
+            wireguard.get("owner_authorizations", {}).get("provider_apply") == "required",
         )
-        if any(gate is not True for gate in human_gates):
-            errors.append("management_plane.bootstrap requires the locked human apply gate")
+        if any(authorization is not True for authorization in owner_authorizations):
+            errors.append("management_plane.bootstrap requires the locked owner authorization")
         for role, relative in topology_contracts.items():
             if (
                 not isinstance(relative, str)
