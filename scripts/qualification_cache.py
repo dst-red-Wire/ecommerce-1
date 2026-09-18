@@ -52,10 +52,13 @@ def _raw_psych(path: Path) -> dict:
     return parsed
 
 
-_CONTRACT = _raw_psych(CONTRACT_PATH)
+_CONTRACT: dict | None = None
 
 
 def contract() -> dict:
+    global _CONTRACT
+    if _CONTRACT is None:
+        _CONTRACT = _raw_psych(CONTRACT_PATH)
     return copy.deepcopy(_CONTRACT)
 
 
@@ -141,7 +144,7 @@ def build_key(
 
 
 def cache_root() -> Path:
-    layer = _CONTRACT["layers"]["l2"]
+    layer = contract()["layers"]["l2"]
     env_name = str(layer["root_source"])
     configured = os.environ.get(env_name, "").strip()
     base = Path(configured).expanduser() if configured else Path(str(layer["fallback_root"])).expanduser()
