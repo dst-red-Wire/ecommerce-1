@@ -281,7 +281,11 @@ graph LR
         self.assertTrue(pr_contract["automatic_merge_fail_closed"])
         self.assertEqual("advisory", pr_contract["ai_code_review"])
         self.assertEqual("advisory", pr_contract["ai_security_review"])
-        self.assertTrue(pr_contract["review_policy_changes_require_human_gate"])
+        self.assertTrue(pr_contract["sensitive_changes_require_owner_authorization"])
+        self.assertEqual(
+            "config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
+            pr_contract["owner_authorization_contract"],
+        )
         self.assertEqual(
             "stable-pr-driven-contract-locked",
             contract["milestone_contract"]["M1-monorepo-bootstrap"]["outcome"],
@@ -337,6 +341,8 @@ graph LR
                 ("      - provenance-integrity", ""),
                 ("      - governance-policy", ""),
                 ("    all_verifications_same_head_sha: true", "    all_verifications_same_head_sha: false"),
+                ("    decision_authority: repository-owner", "    decision_authority: ai"),
+                ("    binds_exact_commit_sha: true", "    binds_exact_commit_sha: false"),
                 ("      - review_policy_changes", ""),
             )
             for before, after in mutations:
@@ -1358,7 +1364,7 @@ graph LR
     def test_management_plane_mutations_are_rejected(self):
         mutations = (
             ("architecture.lock.yaml", "provider: hetzner-cloud", "provider: aws"),
-            ("architecture.lock.yaml", "requires_human_apply_gate: true", "requires_human_apply_gate: false"),
+            ("architecture.lock.yaml", "requires_owner_authorization: true", "requires_owner_authorization: false"),
             ("config/infrastructure/mgmt-inventory.yaml", "provider: hetzner-cloud", "provider: aws"),
         )
         with tempfile.TemporaryDirectory() as directory:
