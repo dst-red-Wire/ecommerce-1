@@ -86,6 +86,7 @@ orchestration_adapters:
     forbidden_markers:
       - versions.env
       - MANAGED_BIN
+      - $(HOME)/.local/bin
   - path: frontend/Makefile
     forbidden_markers:
       - versions.env
