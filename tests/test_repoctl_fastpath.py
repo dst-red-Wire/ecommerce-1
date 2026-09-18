@@ -207,6 +207,61 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             second, _ = MOD._static_gate_cache_key("governance", {})
         self.assertEqual(first, second)
 
+    def test_platform_ansible_component_cache_is_centrally_approved(self):
+        approved = {
+            "consumers": {
+                "repoctl_component_static_gates": {
+                    "gates": {
+                        "platform:ansible": {
+                            "inputs": [
+                                "config/contracts/source-quality-policy.yaml",
+                                "platform/ansible/**/*",
+                            ],
+                            "tools": ["ansible-lint", "ansible-playbook", "ansible-galaxy"],
+                        }
+                    }
+                }
+            }
+        }
+        with (
+            mock.patch.object(MOD.qualification_cache, "contract", return_value=approved),
+            mock.patch.object(MOD.qualification_cache, "digest_paths", return_value="validator"),
+            mock.patch.object(MOD.qualification_cache, "digest_globs", return_value="d" * 64),
+            mock.patch.object(
+                MOD.qualification_cache,
+                "executable_identity",
+                side_effect=lambda executable: {"path": str(executable), "sha256": "tool"},
+            ),
+        ):
+            key, digest = MOD._static_gate_cache_key(
+                "platform:ansible",
+                {"collection_versions": {"community.docker": "3.7.0"}},
+            )
+        self.assertEqual("d" * 64, digest)
+        self.assertEqual(64, len(key))
+
+    def test_platform_terraform_component_cache_is_forbidden(self):
+        approved = {
+            "consumers": {
+                "repoctl_component_static_gates": {
+                    "gates": {
+                        "platform:ansible": {
+                            "inputs": ["platform/ansible/**/*"],
+                            "tools": ["ansible-lint"],
+                        }
+                    }
+                },
+                "uncached_component_gates": {
+                    "platform:terraform": {
+                        "persistence": "forbidden",
+                    }
+                },
+            }
+        }
+        with mock.patch.object(MOD.qualification_cache, "contract", return_value=approved):
+            with self.assertRaisesRegex(RuntimeError, "not approved"):
+                MOD._static_gate_cache_key("platform:terraform", {})
+
     def test_security_gate_is_never_cacheable(self):
         approved = {
             "consumers": {
