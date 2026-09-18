@@ -25,6 +25,16 @@ spec:
   workspaces:
     - name: source
   steps:
+    - name: preflight
+      image: $(params.runner-image)
+      env:
+        - name: CI_PREFLIGHT_RUN_ID
+          value: $(params.record-dir)
+        - name: CI_RUNNER_IMAGE
+          value: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args: [preflight, --base, $(params.base), --head, $(params.head), --record-dir, $(params.record-dir)]
     - name: classify
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)

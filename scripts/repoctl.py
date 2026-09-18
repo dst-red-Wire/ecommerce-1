@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -95,6 +97,7 @@ def run(
         cwd=cwd or ROOT,
         env=env,
         text=True,
+        errors="surrogateescape",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
@@ -742,6 +745,10 @@ def ensure_developer(tags: str) -> None:
         raise RuntimeError(f"developer state reconciliation did not satisfy tags: {tags}")
 
 
+def service_needs_containers(module: Path) -> bool:
+    return any("testcontainers" in path.read_text(encoding="utf-8") for path in module.rglob("*_test.go"))
+
+
 def service_check(service: str) -> int:
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", service or ""):
         return fail("SERVICE must be a canonical lowercase service name")
@@ -753,8 +760,7 @@ def service_check(service: str) -> int:
     capabilities = ["go", "cgo"]
     if (module / "sqlc.yaml").is_file():
         capabilities.append("sqlc")
-    selected_tests = list(module.rglob("*_test.go"))
-    needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
+    needs_containers = service_needs_containers(module)
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
@@ -776,7 +782,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -890,14 +896,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -922,11 +928,11 @@ def test_all() -> int:
 
 def changed_paths(base: str, head: str) -> list[str]:
     if head == "WORKTREE":
-        tracked = git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--").splitlines()
-        untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+        tracked = git("diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--").split("\0")
+        untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
         return sorted(set(filter(None, tracked + untracked)))
     return sorted(
-        set(filter(None, git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--").splitlines()))
+        set(filter(None, git("diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--").split("\0")))
     )
 
 
@@ -1196,8 +1202,79 @@ def _component_command(component: str) -> tuple[list[str] | None, str | None]:
     raise RuntimeError(f"unsupported affected component: {component}")
 
 
+def preflight(base: str, head: str) -> int:
+    """Fail cheaply on missing runners and changed-source syntax before test gates."""
+    if _reject_staged_symlinks():
+        return 1
+    paths = changed_paths(base, head)
+    if any((ROOT / path).is_symlink() or not (ROOT / path).resolve().is_relative_to(ROOT.resolve()) for path in paths):
+        return fail("preflight refuses symbolic links or paths outside the checkout", 1)
+    components = affected(base, head)
+    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text())
+    requirements = contract["gate_requirements"]
+    required = {"ruby", "gitleaks"}
+    for gate in ("governance", "contracts", "automation", "security"):
+        required.update(requirements[gate])
+    for component in components:
+        if not component.startswith("service:"):
+            continue
+        module = ROOT / "services" / component.split(":", 1)[1]
+        if not (module / "go.mod").is_file():
+            continue
+        required.update(set(requirements["service"]) - {"sqlc", "diff", "docker"})
+        if (module / "sqlc.yaml").is_file():
+            required.update({"sqlc", "diff"})
+        if service_needs_containers(module):
+            required.update({"docker", "sysctl"})
+    if any(component.startswith("frontend:") for component in components):
+        required.update(requirements.get("frontend", ["go", "gofmt", "cc"]))
+    if "system" in components:
+        required.update(requirements["test"])
+    if "platform:terraform" in components:
+        required.update(requirements["terraform"])
+        if shutil.which("tofu"):
+            required.discard("terraform")
+            required.add("tofu")
+    if "platform:ansible" in components:
+        required.update(requirements["ansible"])
+    capabilities = {item["name"]: item for item in contract["capabilities"]}
+    for executable in sorted(required):
+        capability = capabilities.get(contract.get("command_capabilities", {}).get(executable, executable), {})
+        probe = capability.get("probe")
+        if probe:
+            require(probe[0])
+            result = run(probe, capture=True, check=False)
+            expected = capability.get("expected_output")
+            if result.returncode or (expected is not None and result.stdout.strip() != expected):
+                raise RuntimeError(f"preflight capability {executable} probe failed")
+        else:
+            require(executable)
+
+    python_files = [path for path in paths if path.endswith(".py") and (ROOT / path).is_file()]
+    ruby_files = [path for path in paths if path.endswith(".rb") and (ROOT / path).is_file()]
+    syntax_commands = []
+    if python_files:
+        require("ruff")
+        syntax_commands.extend(
+            [
+                ("Python lint", ["ruff", "check", "--", *python_files]),
+                ("Python syntax", [sys.executable, "-m", "py_compile", "--", *python_files]),
+            ]
+        )
+    syntax_commands.extend(("Ruby syntax", ["ruby", "-c", "--", path]) for path in ruby_files)
+    for label, command in syntax_commands:
+        # Syntax diagnostics can echo credentials before the redacting security gate.
+        # Keep raw output in memory only and emit a fixed, source-free failure message.
+        result = run(command, capture=True, check=False)
+        if result.returncode:
+            raise RuntimeError(f"preflight {label} failed; source diagnostics suppressed")
+    print(f"PASS preflight capabilities/syntax ({len(paths)} changed paths)")
+    return 0
+
+
 def _global_gate_commands(base: str, head: str) -> list[tuple[str, list[str]]]:
     return [
+        ("preflight", _controller_command("preflight", "--base", base, "--head", head)),
         ("governance", _controller_command("governance")),
         ("runtime-efficiency", _controller_command("runtime-efficiency")),
         ("contracts", _controller_command("contracts", "--base", base, "--head", head)),
@@ -1284,6 +1361,34 @@ def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
     return 0
 
 
+def ci_preflight(base: str, head: str, record_dir: str) -> int:
+    exact = _require_clean_exact_checkout("ci-preflight", head)
+    if exact is None:
+        return 2
+    requested, _ = exact
+    run_id = os.environ.get("CI_PREFLIGHT_RUN_ID", "")
+    runner_image = os.environ.get("CI_RUNNER_IMAGE", "")
+    if not run_id or not runner_image:
+        return fail("Tekton preflight recording requires PipelineRun and runner image identity", 1)
+    records: list[dict] = []
+    ok = _run_gate(
+        "preflight", _controller_command("preflight", "--base", base, "--head", head), records, os.environ.copy()
+    )
+    _write_record(
+        _record_path(Path(record_dir), "preflight"),
+        {
+            "head_sha": requested,
+            "base_sha": git("rev-parse", base).strip(),
+            "head_tree_sha": git("rev-parse", f"{requested}^{{tree}}").strip(),
+            "created_at_epoch": time.time(),
+            "pipeline_run_id": run_id,
+            "runner_image": runner_image,
+            "records": records,
+        },
+    )
+    return 0 if ok else 1
+
+
 def ci_global(base: str, head: str, record_dir: str) -> int:
     exact = _require_clean_exact_checkout("ci-global", head)
     if exact is None:
@@ -1293,7 +1398,34 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
     env = os.environ.copy()
     env.update({"BASE": base, "HEAD": head})
     rc = 0
+    preflight_path = Path(record_dir) / "preflight.json"
+    if preflight_path.is_file():
+        try:
+            prior = json.loads(preflight_path.read_text(encoding="utf-8"))
+            rows = prior["records"]
+            valid = (
+                bool(os.environ.get("CI_PREFLIGHT_RUN_ID"))
+                and prior["pipeline_run_id"] == os.environ["CI_PREFLIGHT_RUN_ID"]
+                and bool(os.environ.get("CI_RUNNER_IMAGE"))
+                and prior["runner_image"] == os.environ["CI_RUNNER_IMAGE"]
+                and prior["head_sha"] == requested
+                and prior["base_sha"] == git("rev-parse", base).strip()
+                and prior["head_tree_sha"] == git("rev-parse", f"{requested}^{{tree}}").strip()
+                and len(rows) == 1
+                and rows[0]["gate"] == "preflight"
+                and rows[0]["status"] == "PASS"
+                and type(rows[0]["duration_seconds"]) in (int, float)
+                and math.isfinite(rows[0]["duration_seconds"])
+                and rows[0]["duration_seconds"] >= 0
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            return fail("Tekton preflight record is invalid for this exact base/head", 1)
+        records.extend(rows)
     for name, command in _global_gate_commands(base, head):
+        if name == "preflight" and records:
+            continue
         if not _run_gate(name, command, records, env):
             rc = 1
             break
@@ -1587,13 +1719,14 @@ def diff_context(base: str) -> int:
     out = CONTEXT / "diff.md"
     out.write_text(
         "# Diff context\n\n## Files\n"
-        + "\n".join(f"- `{p}`" for p in paths)
+        + "\n".join(f"- {json.dumps(p, ensure_ascii=True)}" for p in paths)
         + "\n\n## Stat\n```text\n"
         + stat[:12000]
         + "\n```\n\n## Diff\n```diff\n"
         + diff[:28000]
         + "\n```\n",
         encoding="utf-8",
+        errors="backslashreplace",
     )
     print(out.relative_to(ROOT))
     return 0
@@ -1614,6 +1747,7 @@ def failure_context(gate: str, component: str) -> int:
         name = component.replace(":", "-")
     else:
         allowed = {
+            "preflight",
             "governance",
             "runtime-efficiency",
             "contracts",
@@ -1645,6 +1779,7 @@ def failure_context(gate: str, component: str) -> int:
         + "\n".join(relevant[:220])
         + "\n```\n",
         encoding="utf-8",
+        errors="backslashreplace",
     )
     print(path.relative_to(ROOT))
     return p.returncode
@@ -1737,10 +1872,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,8 +2005,119 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    for entry in filter(None, entries):
+        metadata, _path = entry.split("\t", 1)
+        mode, _oid, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            return fail("staged snapshot contains non-regular or unresolved entries; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--").split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        terraform_files = [
+            str(snapshot / path) for path in paths if path.endswith((".tf", ".tfvars")) and (snapshot / path).is_file()
+        ]
+        yaml_files = [
+            str(snapshot / path) for path in paths if path.endswith((".yaml", ".yml")) and (snapshot / path).is_file()
+        ]
+        ruby_files = [str(snapshot / path) for path in paths if path.endswith(".rb") and (snapshot / path).is_file()]
+        if terraform_files:
+            terraform = shutil.which("tofu") or require("terraform")
+            run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
+        if yaml_files:
+            require("ansible-lint")
+            env = dict(os.environ, ANSIBLE_CONFIG=str(snapshot / "platform/ansible/ansible.cfg"))
+            run(["ansible-lint", "--offline", "--", *yaml_files], cwd=snapshot, env=env)
+        if ruby_files:
+            require("ruby")
+            for path in ruby_files:
+                run(["ruby", "-c", "--", path], cwd=snapshot)
+        for path in paths:
+            if path.endswith(".json") and (snapshot / path).is_file():
+                json.loads((snapshot / path).read_bytes())
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+            go = require("go")
+            modules: set[Path] = set()
+            standalone: dict[Path, list[str]] = {}
+            for relative in go_files:
+                source = snapshot / relative
+                parent = source.parent
+                while parent != snapshot and not (parent / "go.mod").is_file():
+                    parent = parent.parent
+                if (parent / "go.mod").is_file():
+                    modules.add(parent)
+                else:
+                    standalone.setdefault(source.parent, []).append(str(source))
+            env = dict(os.environ, GOWORK="off")
+            env.pop("GOROOT", None)
+            env.pop("GOTOOLDIR", None)
+            for module in sorted(modules):
+                run([go, "vet", "./..."], cwd=module, env=env)
+            for parent, files in sorted(standalone.items()):
+                run([go, "vet", *files], cwd=parent, env=env)
+
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:
@@ -1918,6 +2166,10 @@ def main() -> int:
         "site",
     ]:
         sub.add_parser(name)
+    pf = sub.add_parser("preflight")
+    pf.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pf.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    pf.add_argument("--record-dir")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -1996,6 +2248,10 @@ def main() -> int:
     try:
         if args.cmd == "governance":
             return governance()
+        if args.cmd == "preflight":
+            if args.record_dir:
+                return ci_preflight(args.base, args.head, args.record_dir)
+            return preflight(args.base, args.head)
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
