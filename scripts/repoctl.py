@@ -959,6 +959,61 @@ def worktree_tree_sha() -> str:
     return tree_sha
 
 
+_STATIC_GATE_TOOLS = {
+    "governance": (sys.executable, "ruby", "git"),
+    "runtime-efficiency": (sys.executable, "ruby"),
+    "contracts": (sys.executable, "ruby", "git", "go", "oasdiff", "oapi-codegen"),
+    "automation": (sys.executable, "git"),
+}
+
+
+def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
+    if name not in _STATIC_GATE_TOOLS:
+        raise RuntimeError(f"static qualification cache is not approved for gate {name}")
+    tree_sha = worktree_tree_sha()
+    validator_digest = qualification_cache.digest_paths(
+        [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
+        root=ROOT,
+    )
+    tool_identity = {
+        tool: qualification_cache.executable_identity(tool)
+        for tool in _STATIC_GATE_TOOLS[name]
+    }
+    key = qualification_cache.build_key(
+        f"static-gate:{name}",
+        input_content_digest=tree_sha,
+        validator_content_digest=validator_digest,
+        tool_identity=tool_identity,
+        options=options,
+    )
+    return key, tree_sha
+
+
+def _run_cached_static_gate(name: str, options: dict, producer) -> int:
+    namespace = f"static-gate-{name}"
+    key, tree_sha = _static_gate_cache_key(name, options)
+    cached = qualification_cache.load_success(namespace, key)
+    if isinstance(cached, dict):
+        saved = float(cached.get("duration_seconds", 0.0) or 0.0)
+        print(f"PASS {name} qualification cache hit tree={tree_sha[:12]} saved~{saved:.3f}s")
+        return 0
+
+    started = time.monotonic()
+    result = producer()
+    duration = round(time.monotonic() - started, 3)
+    if result == 0:
+        qualification_cache.store_success(
+            namespace,
+            key,
+            {
+                "tree_sha": tree_sha,
+                "duration_seconds": duration,
+                "options": options,
+            },
+        )
+    return result
+
+
 def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     path = CONTEXT / "evidence" / "worktree.json"
     if not path.is_file():
