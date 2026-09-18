@@ -63,12 +63,34 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("blocking", policy["principles"]["syntax_validation"])
         self.assertEqual("blocking", policy["principles"]["semantic_validation"])
         self.assertEqual("forbidden", policy["principles"]["file_specific_quality_exceptions"])
-        self.assertFalse((ROOT / ".ansible-lint").exists())
+
+        forbidden_policies = set(policy["parallel_policy_files"]["forbidden"])
+        self.assertIn(".ansible-lint", forbidden_policies)
+        self.assertIn("ruff.toml", forbidden_policies)
+        for relative in forbidden_policies:
+            self.assertFalse((ROOT / relative).exists(), relative)
+
+        pre_commit = policy["orchestration_adapters"]["pre_commit"]
+        self.assertEqual(".pre-commit-config.yaml", pre_commit["path"])
+        self.assertIn(
+            pre_commit["required_delegate"],
+            (ROOT / pre_commit["path"]).read_text(encoding="utf-8"),
+        )
 
         advisory = set(policy["adapters"]["ansible"]["lint"]["advisory_rules"])
         self.assertTrue(
             {"partial-become", "latest[git]", "no-handler", "yaml[empty-lines]"}.issubset(advisory)
         )
+
+    def test_ruff_adapter_config_is_derived_from_central_policy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "ruff.toml"
+            MOD.write_ruff_policy_config(path)
+            text = path.read_text(encoding="utf-8")
+        self.assertIn('target-version = "py312"', text)
+        self.assertIn("line-length = 120", text)
+        self.assertIn('"E9"', text)
+        self.assertIn('"F82"', text)
 
     def test_declared_formatter_drift_is_advisory_but_execution_errors_block(self):
         command = ["terraform", "fmt", "-check", "-recursive", "-diff"]
