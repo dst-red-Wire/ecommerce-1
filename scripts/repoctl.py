@@ -290,6 +290,7 @@ def governance() -> int:
         run([sys.executable, "scripts/architecture_authority.py"])
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
         run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_repoctl_fastpath.py"])
         require("ruby")
         for validator in (
             "scripts/validate-architecture.rb",
