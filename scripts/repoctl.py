@@ -969,6 +969,50 @@ def system_check() -> int:
     return 0
 
 
+def format_check() -> int:
+    """Run repository-wide non-mutating formatter diagnostics from the central policy."""
+    python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
+    if python_files:
+        require("ruff")
+        formatter = source_quality_adapter("python")["formatter"]
+        advisory_exit_check(
+            "ruff format",
+            [formatter["command"], *formatter["args"], *python_files],
+            drift_exit_codes=formatter["drift_exit_codes"],
+        )
+
+    go_files = sorted(
+        str(path)
+        for tree in (ROOT / "services", ROOT / "frontend")
+        if tree.is_dir()
+        for path in tree.rglob("*.go")
+        if "vendor" not in path.parts
+    )
+    if go_files:
+        require("gofmt")
+        go_policy = source_quality_adapter("go")["formatter"]
+        result = run([go_policy["command"], *go_policy["args"], *go_files], capture=True)
+        advisory_output_check("gofmt", result.stdout or "")
+
+    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    if tf_files:
+        terraform_policy = source_quality_adapter("terraform")["formatter"]
+        tool = next(
+            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
+            None,
+        )
+        if not tool:
+            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        advisory_exit_check(
+            "terraform fmt",
+            [tool, *terraform_policy["args"]],
+            drift_exit_codes=terraform_policy["drift_exit_codes"],
+        )
+
+    print("PASS source format diagnostics completed")
+    return 0
+
+
 def lint_all() -> int:
     if automation_policy():
         return 1
@@ -1996,6 +2040,7 @@ def main() -> int:
         "governance",
         "runtime-efficiency",
         "automation-policy",
+        "format-check",
         "lint",
         "test",
         "security",
@@ -2093,6 +2138,8 @@ def main() -> int:
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()
+        if args.cmd == "format-check":
+            return format_check()
         if args.cmd == "lint":
             return lint_all()
         if args.cmd == "test":
