@@ -969,17 +969,39 @@ def system_check() -> int:
     return 0
 
 
+def write_ruff_policy_config(path: Path) -> None:
+    """Materialize Ruff's adapter config from the central source-quality contract."""
+    config = source_quality_adapter("python")["configuration"]
+    target_version = str(config["target_version"])
+    line_length = int(config["line_length"])
+    extend_exclude = [str(item) for item in config["extend_exclude"]]
+    lint_select = [str(item) for item in config["lint_select"]]
+    path.write_text(
+        f'target-version = "{target_version}"\n'
+        f"line-length = {line_length}\n"
+        + "extend-exclude = "
+        + json.dumps(extend_exclude)
+        + "\n\n[lint]\nselect = "
+        + json.dumps(lint_select)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def format_check() -> int:
     """Run repository-wide non-mutating formatter diagnostics from the central policy."""
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
         formatter = source_quality_adapter("python")["formatter"]
-        advisory_exit_check(
-            "ruff format",
-            [formatter["command"], *formatter["args"], *python_files],
-            drift_exit_codes=formatter["drift_exit_codes"],
-        )
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
 
     go_files = sorted(
         str(path)
@@ -1026,13 +1048,16 @@ def lint_all() -> int:
         require("ruff")
         python_policy = source_quality_adapter("python")
         formatter = python_policy["formatter"]
-        advisory_exit_check(
-            "ruff format",
-            [formatter["command"], *formatter["args"], *python_files],
-            drift_exit_codes=formatter["drift_exit_codes"],
-        )
         lint_policy = python_policy["lint"]
-        run([lint_policy["command"], *lint_policy["args"], *python_files])
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+            run([lint_policy["command"], *lint_policy["args"], "--config", str(config), *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
