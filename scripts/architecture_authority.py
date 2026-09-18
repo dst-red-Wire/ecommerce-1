@@ -330,8 +330,13 @@ V5_SECTION_KEYS = {
     "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
     "prod_certified_topology.sites.prod-b": V5_PROD_SITE_KEYS,
 }
-DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
 V5_MLOPS = dict(_CANONICAL_LOCK["mlops"])
+DEPLOYABLE_MLOPS = [
+    V5_MLOPS["dataset_versioner"],
+    V5_MLOPS["experiments_lineage"],
+    V5_MLOPS["runtime"],
+    V5_MLOPS["drift"],
+]
 V5_OBSERVABILITY = dict(_CANONICAL_LOCK["observability"])
 V5_SUPERSEDED = dict(_CANONICAL_LOCK["superseded"])
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
