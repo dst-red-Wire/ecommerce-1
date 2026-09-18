@@ -194,7 +194,8 @@
         "ssh_connection": {
           "pipelining": "True"
         }
-      }
+      },
+      "collections_install_root": ".ansible/collections"
     }
   }
 }
