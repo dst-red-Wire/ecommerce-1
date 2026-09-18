@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -95,6 +97,7 @@ def run(
         cwd=cwd or ROOT,
         env=env,
         text=True,
+        errors="surrogateescape",
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
@@ -776,7 +779,7 @@ def service_check(service: str) -> int:
     require("gofmt")
     go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
     if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return fail(f"gofmt required for {service}", 1)
@@ -890,14 +893,14 @@ def lint_all() -> int:
     go_files = [str(p) for p in (ROOT / "services").rglob("*.go") if "vendor" not in p.parts]
     if go_files:
         require("gofmt")
-        p = run(["gofmt", "-l", *go_files], capture=True)
+        p = run(["gofmt", "-l", "--", *go_files], capture=True)
         if p.stdout.strip():
             print(p.stdout, file=sys.stderr)
             return 1
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        run(["ruff", "check", "--", *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -1092,6 +1095,372 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     if p.returncode:
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
     return p.returncode == 0
+
+
+def _windows_resources() -> tuple[int, int]:
+    """Read Windows affinity and available memory without POSIX interfaces."""
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32)] + [
+            (name, ctypes.c_uint64)
+            for name in (
+                "total_phys",
+                "available_phys",
+                "total_page",
+                "available_page",
+                "total_virtual",
+                "available_virtual",
+                "available_extended",
+            )
+        ]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatus)]
+    kernel.GlobalMemoryStatusEx.restype = ctypes.c_int
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.GetProcessAffinityMask.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel.GetProcessAffinityMask.restype = ctypes.c_int
+    memory = MemoryStatus()
+    memory.length = ctypes.sizeof(memory)
+    available = memory.available_phys if kernel.GlobalMemoryStatusEx(ctypes.byref(memory)) else 1024**3
+    process_mask, system_mask = ctypes.c_size_t(), ctypes.c_size_t()
+    cpu = 1
+    if kernel.GetProcessAffinityMask(kernel.GetCurrentProcess(), ctypes.byref(process_mask), ctypes.byref(system_mask)):
+        cpu = max(1, process_mask.value.bit_count())
+    return min(max(1, os.cpu_count() or 1), cpu), available
+
+
+class _WindowsJob:
+    """Own a complete gate process tree, including children of exited leaders."""
+
+    def __init__(self):
+        import ctypes
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("process_time", ctypes.c_int64),
+                ("job_time", ctypes.c_int64),
+                ("flags", ctypes.c_uint32),
+                ("minimum_working_set", ctypes.c_size_t),
+                ("maximum_working_set", ctypes.c_size_t),
+                ("active_processes", ctypes.c_uint32),
+                ("affinity", ctypes.c_size_t),
+                ("priority", ctypes.c_uint32),
+                ("scheduling", ctypes.c_uint32),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("basic", BasicLimits),
+                ("io_counters", ctypes.c_uint64 * 6),
+                ("process_memory", ctypes.c_size_t),
+                ("job_memory", ctypes.c_size_t),
+                ("peak_process_memory", ctypes.c_size_t),
+                ("peak_job_memory", ctypes.c_size_t),
+            ]
+
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        for name, args, result in (
+            ("CreateJobObjectW", [ctypes.c_void_p, ctypes.c_wchar_p], ctypes.c_void_p),
+            (
+                "SetInformationJobObject",
+                [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32],
+                ctypes.c_int,
+            ),
+            ("AssignProcessToJobObject", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int),
+            ("TerminateJobObject", [ctypes.c_void_p, ctypes.c_uint32], ctypes.c_int),
+            ("CloseHandle", [ctypes.c_void_p], ctypes.c_int),
+        ):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = args, result
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("CreateJobObjectW failed")
+        limits = ExtendedLimits()
+        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+            raise OSError("SetInformationJobObject failed")
+
+    def attach(self, process):
+        if not self.kernel.AssignProcessToJobObject(self.handle, int(process._handle)):
+            raise OSError("AssignProcessToJobObject failed before gate execution")
+
+    def close(self):
+        if self.handle is not None:
+            handle, self.handle = self.handle, None
+            try:
+                if not self.kernel.TerminateJobObject(handle, 1):
+                    raise OSError("TerminateJobObject failed")
+            finally:
+                if not self.kernel.CloseHandle(handle):
+                    raise OSError("CloseHandle failed for gate job")
+
+
+def _linux_gate_supervisor():
+    """Keep gate processes in a private PID namespace owned by its init."""
+    import ctypes
+    import os
+    from pathlib import Path
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
+    uid, gid = os.getuid(), os.getgid()
+    # No host configuration or elevated host privilege: only this new process
+    # enters fresh user/mount/PID namespaces. Unsupported runners fail closed.
+    os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNS | os.CLONE_NEWPID)
+    Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
+    Path("/proc/self/setgroups").write_text("deny")
+    Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
+    if libc.mount(None, b"/", None, 16384 | (1 << 18), None):  # MS_REC | MS_PRIVATE
+        raise OSError(ctypes.get_errno(), "cannot isolate gate mounts")
+    cancelled = False
+
+    def cancel(_signum, _frame):
+        nonlocal cancelled
+        cancelled = True
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
+    reader, writer = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+    child = os.fork()
+    if child == 0:
+        os.close(writer)
+        # The kernel also tears down the namespace if the outer launcher dies.
+        if libc.prctl(1, signal.SIGKILL, 0, 0, 0):  # PR_SET_PDEATHSIG
+            os._exit(125)
+        try:
+            if os.read(reader, 1) == b"":
+                os._exit(125)
+        except BlockingIOError:
+            pass
+        os.close(reader)
+        if libc.mount(b"proc", b"/proc", b"proc", 2 | 4 | 8, None):
+            os._exit(125)
+        try:
+            leader = subprocess.Popen(sys.argv[1:])
+            while not cancelled and leader.poll() is None:
+                time.sleep(0.02)
+            result = 130 if cancelled else leader.returncode
+        except BaseException:
+            os._exit(125)
+        # Exiting namespace PID 1 makes the kernel kill/reap every descendant,
+        # including detached sessions. Gates cannot signal ancestor namespaces.
+        os._exit(result if result >= 0 else 128 - result)
+    os.close(reader)
+    try:
+        while True:
+            if cancelled:
+                os.kill(child, signal.SIGKILL)
+            completed, status = os.waitpid(child, os.WNOHANG)
+            if completed:
+                result = os.waitstatus_to_exitcode(status)
+                raise SystemExit(result if result >= 0 else 128 - result)
+            time.sleep(0.02)
+    finally:
+        os.close(writer)
+
+
+def _start_gate_process(command: list[str], handle, env: dict[str, str]):
+    options = dict(cwd=ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
+    if sys.platform.startswith("linux"):
+        import inspect
+
+        supervisor = inspect.getsource(_linux_gate_supervisor) + "\n_linux_gate_supervisor()\n"
+        command = [sys.executable, "-I", "-S", "-c", supervisor, *command]
+        return subprocess.Popen(command, start_new_session=True, **options), None
+    if sys.platform != "win32":
+        raise RuntimeError("local gate descendant containment is supported only on Linux and Windows")
+    job = _WindowsJob()
+    process = None
+    try:
+        # Wait before launching the gate so no descendant can escape assignment.
+        wrapper = (
+            "import sys\n"
+            "if sys.stdin.buffer.read(1) != b'1': raise SystemExit(125)\n"
+            "import subprocess\n"
+            "raise SystemExit(subprocess.call(sys.argv[1:]))\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-S", "-c", wrapper, *command], stdin=subprocess.PIPE, **options
+        )
+        job.attach(process)
+        process.stdin.write("1")
+        process.stdin.close()
+        return process, job
+    except BaseException:
+        try:
+            if process is not None:
+                process.kill()
+                process.wait()
+                process.stdin.close()
+        finally:
+            job.close()
+        raise
+
+
+def _local_resources() -> tuple[int, int]:
+    if sys.platform == "win32":
+        return _windows_resources()
+    cpu = max(1, os.cpu_count() or 1)
+    if hasattr(os, "sched_getaffinity"):
+        cpu = min(cpu, max(1, len(os.sched_getaffinity(0))))
+    try:
+        memory = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        memory = 1024**3
+    root = Path("/sys/fs/cgroup")
+    directories = [root]
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                relative = line.split("::", 1)[1].lstrip("/")
+                candidate = (root / relative).resolve()
+                if candidate.is_relative_to(root):
+                    directories += [candidate, *[p for p in candidate.parents if p.is_relative_to(root)]]
+    except OSError:
+        pass
+    for directory in set(directories):
+        try:
+            quota, period = (directory / "cpu.max").read_text().split()
+            if quota != "max" and int(period) > 0:
+                cpu = min(cpu, max(1, int(quota) // int(period)))
+        except (OSError, ValueError):
+            pass
+        try:
+            maximum = (directory / "memory.max").read_text().strip()
+            if maximum != "max":
+                current = int((directory / "memory.current").read_text())
+                memory = min(memory, max(0, int(maximum) - current))
+        except (OSError, ValueError):
+            pass
+    return cpu, memory
+
+
+def _local_parallelism(gate_count: int) -> int:
+    cpu, memory = _local_resources()
+    resource_bound = max(1, min(cpu, max(1, memory // (2 * 1024**3)), gate_count, 4))
+    try:
+        configured = int(os.environ.get("REPOCTL_LOCAL_JOBS", resource_bound))
+    except ValueError:
+        configured = 1
+    return max(1, min(configured, resource_bound))
+
+
+def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dict], env: dict[str, str]) -> bool:
+    """Run read-only local gates concurrently and stop siblings on first failure."""
+    jobs = _local_parallelism(len(gates))
+    pending = list(gates)
+    running: dict[str, tuple[subprocess.Popen, object, Path, float, list[str]]] = {}
+    lock = threading.Lock()
+    logs = CONTEXT / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    effective_cpu, _ = _local_resources()
+    child_env = dict(env)
+    ceiling = max(1, effective_cpu // jobs)
+    for setting in ("GOMAXPROCS", "ANSIBLE_FORKS"):
+        try:
+            inherited = int(child_env.get(setting, ceiling))
+        except (TypeError, ValueError):
+            inherited = ceiling
+        child_env[setting] = str(min(ceiling, inherited) if inherited > 0 else ceiling)
+
+    processes: list[subprocess.Popen] = []
+    windows_jobs: list[_WindowsJob] = []
+
+    def signal_groups(sig):
+        alive = False
+        for process in processes:
+            try:
+                os.killpg(process.pid, sig)
+                alive = True
+            except ProcessLookupError:
+                pass
+        return alive
+
+    def stop_all():
+        if sys.platform == "win32":
+            try:
+                errors = []
+                for job in windows_jobs:
+                    try:
+                        job.close()
+                    except OSError as exc:
+                        errors.append(exc)
+                if errors:
+                    raise errors[0]
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
+            return
+        # A group may outlive its leader, including the gate that failed.
+        signal_groups(signal.SIGTERM)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            for process in processes:
+                process.poll()
+            if not signal_groups(0):
+                break
+            time.sleep(0.05)
+        signal_groups(signal.SIGKILL)
+        for process in processes:
+            process.wait()
+
+    try:
+        while pending or running:
+            while pending and len(running) < jobs:
+                name, command = pending.pop(0)
+                log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+                handle = log_path.open("w", encoding="utf-8")
+                try:
+                    process, job = _start_gate_process(command, handle, child_env)
+                    if job is not None:
+                        windows_jobs.append(job)
+                except BaseException:
+                    handle.close()
+                    raise
+                processes.append(process)
+                running[name] = (process, handle, log_path, time.monotonic(), command)
+            finished = next((name for name, (process, *_rest) in running.items() if process.poll() is not None), None)
+            if finished is None:
+                time.sleep(0.05)
+                continue
+            process, handle, log_path, started, command = running.pop(finished)
+            handle.close()
+            record = {
+                "gate": finished,
+                "status": "PASS" if process.returncode == 0 else "FAIL",
+                "exit_code": process.returncode,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "command": command,
+                "log": str(log_path.relative_to(ROOT)),
+            }
+            with lock:
+                records.append(record)
+            print(f"{record['status']} {finished} ({record['duration_seconds']:.3f}s)")
+            if process.returncode:
+                print(
+                    "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]),
+                    file=sys.stderr,
+                )
+                return False
+        return True
+    finally:
+        stop_all()
+        for _process, handle, *_rest in running.values():
+            handle.close()
 
 
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
@@ -1524,10 +1893,29 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
-    for name, command in global_commands:
+    preparation = [(name, command) for name, command in global_commands if name == "preflight"]
+    independent = [(name, command) for name, command in global_commands if name != "preflight"]
+    for name, command in preparation:
         if not run_stable_gate(name, command):
             write_evidence(base, head, paths, components, records, verification)
             return 1
+    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_independent_gates(independent, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE" and worktree_tree_sha() != before_global_tree:
+        verification["tree_stable"] = False
+        records.append(
+            {
+                "gate": "worktree-stability",
+                "status": "FAIL",
+                "exit_code": 1,
+                "duration_seconds": 0.0,
+                "reason": "parallel global gates mutated worktree",
+            }
+        )
+        write_evidence(base, head, paths, components, records, verification)
+        return fail("parallel global gates mutated the worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
@@ -1737,10 +2125,12 @@ def publish(base: str, message: str) -> int:
         else:
             print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
-        commit_env = os.environ.copy()
-        commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
-        run(["git", "commit", "-m", message], env=commit_env)
+        if _reject_staged_symlinks():
+            return 1
+        run(["git", "commit", "-m", message])
 
+    if _reject_staged_symlinks():
+        return 1
     head = git("rev-parse", "HEAD").strip()
     exact_evidence: Path | None = None
     if promotable is not None:
@@ -1868,8 +2258,179 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _reject_staged_symlinks() -> int:
+    entries = git("ls-files", "--stage", "-z").split("\0")
+    for entry in filter(None, entries):
+        metadata, _path = entry.split("\t", 1)
+        mode, _oid, stage = metadata.split()
+        if mode not in {"100644", "100755"} or stage != "0":
+            return fail("staged snapshot contains non-regular or unresolved entries; refusing non-index content")
+    return 0
+
+
+def _materialize_staged_tree(snapshot: Path) -> None:
+    entries = []
+    directories: dict[tuple[int, int], tuple[str, ...]] = {}
+    for entry in git("ls-files", "--stage", "-z").split("\0"):
+        if not entry:
+            continue
+        metadata, path = entry.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        target = snapshot / path
+        if stage != "0" or mode not in {"100644", "100755"} or not target.resolve().is_relative_to(snapshot.resolve()):
+            raise RuntimeError("unsupported or unsafe indexed entry")
+        parent = snapshot
+        parts = Path(path).parts[:-1]
+        for index, component in enumerate(parts):
+            parent = parent / component
+            parent.mkdir(exist_ok=True)
+            identity = parent.stat()
+            key = (identity.st_dev, identity.st_ino)
+            spelling = parts[: index + 1]
+            previous = directories.setdefault(key, spelling)
+            if previous != spelling:
+                raise RuntimeError("filesystem-equivalent indexed directory aliases collide")
+        entries.append((mode, oid, target))
+    if not entries:
+        return
+    # --batch returns stored object bytes; checkout filters and worktree attributes never run.
+    blobs = subprocess.run(
+        ["git", "--no-replace-objects", "cat-file", "--batch"],
+        cwd=ROOT,
+        input=("\n".join(oid for _, oid, _ in entries) + "\n").encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout
+    stream = io.BytesIO(blobs)
+    for mode, oid, target in entries:
+        header = stream.readline().split()
+        if len(header) != 3 or header[0].decode() != oid or header[1] != b"blob":
+            raise RuntimeError("invalid indexed blob response")
+        size = int(header[2])
+        content = stream.read(size)
+        if len(content) != size or stream.read(1) != b"\n":
+            raise RuntimeError("truncated indexed blob response")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive creation also detects aliases on case-insensitive or
+        # Unicode-normalizing filesystems; never overwrite another indexed blob.
+        try:
+            with target.open("xb") as output:
+                output.write(content)
+        except FileExistsError as exc:
+            raise RuntimeError("filesystem-equivalent indexed paths collide") from exc
+        target.chmod(0o755 if mode == "100755" else 0o644)
+
+
 def precommit() -> int:
-    return verify_change("HEAD", "WORKTREE")
+    """Run fast checks against the index snapshot, never against unstaged content."""
+    paths = git(
+        "--no-replace-objects", "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", "--"
+    ).split("\0")[:-1]
+    if not paths:
+        print("SKIP precommit: no staged files")
+        return 0
+    with tempfile.TemporaryDirectory(prefix="ecommerce-staged-") as directory:
+        snapshot = Path(directory)
+        if _reject_staged_symlinks():
+            return 1
+        _materialize_staged_tree(snapshot)
+        require("gitleaks")
+        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."], cwd=snapshot)
+        python_files = [path for path in paths if path.endswith(".py") and (snapshot / path).is_file()]
+        go_files = [path for path in paths if path.endswith(".go") and (snapshot / path).is_file()]
+        terraform_files = [
+            str(snapshot / path) for path in paths if path.endswith((".tf", ".tfvars")) and (snapshot / path).is_file()
+        ]
+        yaml_files = [
+            str(snapshot / path) for path in paths if path.endswith((".yaml", ".yml")) and (snapshot / path).is_file()
+        ]
+        ruby_files = [str(snapshot / path) for path in paths if path.endswith(".rb") and (snapshot / path).is_file()]
+        if terraform_files:
+            terraform = shutil.which("tofu") or require("terraform")
+            run([terraform, "fmt", "-check", *terraform_files], cwd=snapshot)
+        if yaml_files:
+            require("ansible-lint")
+            # Execution configuration belongs to this controller, not the index.
+            # Retain only the existing canonical data-only lint exceptions.
+            with tempfile.TemporaryDirectory(prefix="ecommerce-staged-ansible-") as config_directory:
+                control = Path(config_directory)
+                inventory = control / "inventory.ini"
+                inventory.write_text("localhost ansible_connection=local\n", encoding="utf-8")
+                config = control / "ansible.cfg"
+                config.write_text(f"[defaults]\ninventory = {inventory}\n", encoding="utf-8")
+                lint_config = control / "lint.yml"
+                lint_config.write_text(
+                    '---\nskip_list: ["run-once[play]", "var-naming[no-role-prefix]", "yaml[line-length]"]\n',
+                    encoding="utf-8",
+                )
+                rules = control / "rules"
+                rules.mkdir()
+                ignore = control / "ignore.txt"
+                ignore.write_text("", encoding="utf-8")
+                env = {key: value for key, value in os.environ.items() if not key.startswith("ANSIBLE_")}
+                env.update(
+                    ANSIBLE_CONFIG=str(config),
+                    ANSIBLE_INVENTORY_ENABLED="ini",
+                    ANSIBLE_COLLECTIONS_PATH=str(ROOT / ".ansible/collections"),
+                )
+                run(
+                    [
+                        "ansible-lint",
+                        "--offline",
+                        "--config-file",
+                        str(lint_config),
+                        "--project-dir",
+                        str(control),
+                        "--ignore-file",
+                        str(ignore),
+                        "--rules-dir",
+                        str(rules),
+                        "-R",
+                        "--",
+                        *yaml_files,
+                    ],
+                    cwd=control,
+                    env=env,
+                )
+        if ruby_files:
+            require("ruby")
+            for path in ruby_files:
+                run(["ruby", "-c", "--", path], cwd=snapshot)
+        for path in paths:
+            if path.endswith(".json") and (snapshot / path).is_file():
+                json.loads((snapshot / path).read_bytes())
+        if python_files:
+            require("ruff")
+            run(["ruff", "format", "--check", "--", *python_files], cwd=snapshot)
+            run(["ruff", "check", "--", *python_files], cwd=snapshot)
+        if go_files:
+            require("gofmt")
+            formatted = run(["gofmt", "-l", "--", *go_files], cwd=snapshot, capture=True)
+            if formatted.stdout.strip():
+                return fail("staged Go format drift:\n" + formatted.stdout.strip())
+            go = require("go")
+            modules: set[Path] = set()
+            standalone: dict[Path, list[str]] = {}
+            for relative in go_files:
+                source = snapshot / relative
+                parent = source.parent
+                while parent != snapshot and not (parent / "go.mod").is_file():
+                    parent = parent.parent
+                if (parent / "go.mod").is_file():
+                    modules.add(parent)
+                else:
+                    standalone.setdefault(source.parent, []).append(str(source))
+            env = dict(os.environ, GOWORK="off")
+            env.pop("GOROOT", None)
+            env.pop("GOTOOLDIR", None)
+            for module in sorted(modules):
+                run([go, "vet", "./..."], cwd=module, env=env)
+            for parent, files in sorted(standalone.items()):
+                run([go, "vet", *files], cwd=parent, env=env)
+
+    print(f"PASS precommit: staged format/lint/secrets ({len(paths)} paths)")
+    return 0
 
 
 def prepush() -> int:

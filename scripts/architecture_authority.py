@@ -1,6 +1,8 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
+from functools import lru_cache
 from pathlib import Path
+import copy
 import json
 import re
 import subprocess
@@ -751,10 +753,12 @@ EXACT_CONTRACTS = {
 }
 
 
-def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
+@lru_cache(maxsize=256)
+def _load_yaml_with_psych(content):
+    """Parse one immutable file version with the contracted Ruby/Psych runtime."""
     ruby = """
-document = Psych.parse_file(ARGV[0])
+content = STDIN.read
+document = Psych.parse(content)
 walk = lambda do |node|
   if node.is_a?(Psych::Nodes::Mapping)
     keys = node.children.each_slice(2).map { |key, _| key.value }
@@ -764,14 +768,25 @@ walk = lambda do |node|
   Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
 end
 walk.call(document)
-data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
+data = Psych.safe_load(content, aliases: false)
 puts JSON.generate(data)
 """
-    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    command = ["ruby", "-rpsych", "-rjson", "-e", ruby]
+    completed = subprocess.run(command, input=content, text=True, capture_output=True, check=False)
     if completed.returncode:
-        raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
+        raise ValueError(completed.stderr.strip() or "Psych rejected YAML content")
     return json.loads(completed.stdout)
+
+
+def load_yaml(path):
+    """Load YAML with Psych, reusing only byte-identical parse results."""
+    path = Path(path)
+    try:
+        # Validators may freely transform their result without poisoning the
+        # byte-keyed cache observed by later negative mutation cases.
+        return copy.deepcopy(_load_yaml_with_psych(path.read_text()))
+    except ValueError as exc:
+        raise ValueError(f"cannot parse {path}: {exc}") from exc
 
 
 def validate_exact_keys(name, actual, expected_keys):
