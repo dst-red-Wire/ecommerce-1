@@ -160,6 +160,7 @@ def source_quality_policy() -> dict:
 
 _REPOSITORY_AUTHORITY_MODEL: dict | None = None
 _SECURITY_SCAN_POLICY: dict | None = None
+_WORKSTATION_POLICY: dict | None = None
 
 
 def repository_authority_model() -> dict:
@@ -178,6 +179,24 @@ def repository_authority_model() -> dict:
             raise RuntimeError("repository authority model must inherit architecture.lock.yaml for the entire repository")
         _REPOSITORY_AUTHORITY_MODEL = model
     return copy.deepcopy(_REPOSITORY_AUTHORITY_MODEL)
+
+
+def workstation_policy() -> dict:
+    global _WORKSTATION_POLICY
+    if _WORKSTATION_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("workstation_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.workstation_policy")
+        policy = ruby_yaml(relative)
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "developer-workstation"
+            or policy.get("status") != "exact"
+        ):
+            raise RuntimeError("workstation policy must inherit architecture.lock.yaml")
+        _WORKSTATION_POLICY = policy
+    return copy.deepcopy(_WORKSTATION_POLICY)
 
 
 def security_scan_policy() -> dict:
@@ -218,6 +237,61 @@ def write_gitleaks_policy_config(path: Path, policy: dict | None = None) -> None
     lines.extend(f"  {json.dumps(pattern)}," for pattern in patterns)
     lines.extend(["]", ""])
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def validate_workstation_projections(policy: dict | None = None) -> None:
+    contract = policy or workstation_policy()
+
+    git_contract = contract.get("git", {})
+    git_path = ROOT / str(git_contract.get("projection", ""))
+    git_actual: dict[str, str] = {}
+    for raw in git_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        git_actual[key.strip()] = value.strip()
+    git_expected = {str(key): str(value) for key, value in git_contract.get("settings", {}).items()}
+    if git_actual != git_expected:
+        raise RuntimeError("config/workstation/git-local.conf drifted from central workstation policy")
+
+    wsl_contract = contract.get("wsl2", {})
+    wsl_path = ROOT / str(wsl_contract.get("projection", ""))
+    wsl_actual: dict[str, str] = {}
+    for raw in wsl_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("[") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        wsl_actual[key.strip()] = value.strip()
+    wsl_expected = {str(key): str(value) for key, value in wsl_contract.get("settings", {}).items()}
+    if wsl_actual != wsl_expected:
+        raise RuntimeError("config/workstation/wslconfig.template drifted from central workstation policy")
+
+    winget_contract = contract.get("winget", {})
+    winget_path = ROOT / str(winget_contract.get("projection", ""))
+    winget = ruby_yaml(str(winget_path))
+    resources = winget.get("resources", [])
+    actual_packages = {}
+    for resource in resources:
+        if not isinstance(resource, dict) or resource.get("type") != "Microsoft.WinGet/Package":
+            continue
+        properties = resource.get("properties", {})
+        actual_packages[str(resource.get("name"))] = {
+            "id": str(properties.get("id")),
+            "source": str(properties.get("source")),
+            "useLatest": properties.get("useLatest"),
+        }
+    expected_packages = {
+        str(name): {
+            "id": str(values.get("id")),
+            "source": str(values.get("source")),
+            "useLatest": winget_contract.get("package_policy") == "latest-platform-provided",
+        }
+        for name, values in winget_contract.get("packages", {}).items()
+    }
+    if actual_packages != expected_packages:
+        raise RuntimeError(".config/configuration.winget drifted from central workstation policy")
 
 
 def repository_authority_check() -> int:
@@ -307,6 +381,8 @@ def repository_authority_check() -> int:
     frontend_go_mod = (ROOT / "frontend" / "go.mod").read_text(encoding="utf-8")
     if templ_version and f"github.com/a-h/templ v{templ_version}" not in frontend_go_mod:
         raise RuntimeError("frontend/go.mod templ version drifted from central toolchain lock")
+
+    validate_workstation_projections()
 
     security_policy = security_scan_policy()
     scanner = security_policy.get("scanner", {})
