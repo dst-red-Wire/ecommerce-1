@@ -8,7 +8,7 @@ check:
 	@python3 ../scripts/repoctl.py frontend check $(SCOPE)
 
 run-storefront:
-	@go run ./apps/storefront
+	@python3 ../scripts/repoctl.py frontend run storefront
 
 run-admin:
-	@go run ./apps/admin
+	@python3 ../scripts/repoctl.py frontend run admin
