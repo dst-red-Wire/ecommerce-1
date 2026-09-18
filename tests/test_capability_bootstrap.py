@@ -96,6 +96,41 @@ def contract(items):
 
 
 class CapabilityGraphTest(unittest.TestCase):
+    def test_toolchain_lock_is_the_version_and_capability_policy_authority(self):
+        lock = MOD.load_toolchain_lock()
+        self.assertEqual("architecture.lock.yaml", lock["architecture_authority"])
+        self.assertEqual("entire-repository", lock["scope"])
+        self.assertEqual(lock["versions"], MOD.load_versions())
+        self.assertEqual(set(lock["capability_policy"]["classifications"]), MOD.CLASSIFICATIONS)
+        self.assertEqual(set(lock["capability_policy"]["requirements"]), MOD.REQUIREMENTS)
+        self.assertEqual(set(lock["capability_policy"]["managed_provision_types"]), MOD.MANAGED_PROVISION_TYPES)
+        MOD.validate_toolchain_projections(lock)
+
+    def test_versions_env_projection_drift_fails_closed(self):
+        lock = MOD.load_toolchain_lock()
+        with tempfile.TemporaryDirectory() as directory:
+            projection = Path(directory) / "versions.env"
+            source = MOD.VERSIONS.read_text(encoding="utf-8")
+            self.assertIn("GO_VERSION=", source)
+            projection.write_text(
+                re.sub(r"^GO_VERSION=.*$", "GO_VERSION=0.0.0", source, count=1, flags=re.MULTILINE),
+                encoding="utf-8",
+            )
+            with mock.patch.object(MOD, "VERSIONS", projection):
+                with self.assertRaisesRegex(ValueError, "versions.env drifted"):
+                    MOD.validate_toolchain_projections(lock)
+
+    def test_ansible_collection_projection_drift_fails_closed(self):
+        lock = MOD.load_toolchain_lock()
+        with tempfile.TemporaryDirectory() as directory:
+            projection = Path(directory) / "requirements.yml"
+            source = MOD.ANSIBLE_COLLECTIONS.read_text(encoding="utf-8")
+            self.assertIn("community.docker", source)
+            projection.write_text(source.replace("version: 3.7.0", "version: 0.0.0", 1), encoding="utf-8")
+            with mock.patch.object(MOD, "ANSIBLE_COLLECTIONS", projection):
+                with self.assertRaisesRegex(ValueError, "requirements.yml drifted"):
+                    MOD.validate_toolchain_projections(lock)
+
     def test_qualification_virtualenv_is_ignored(self):
         ignored = subprocess.run(
             ["git", "check-ignore", ".venv/qualification/pyvenv.cfg"],
