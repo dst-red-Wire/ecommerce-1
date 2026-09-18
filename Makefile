@@ -59,9 +59,7 @@ lint: automation ## Lint Go, Python and frontend sources with declared toolchain
 
 format format-check: export PATH := $(MANAGED_BIN):$(PATH)
 
-format: ## Format Python and Go frontend sources
-	@ruff format scripts tests
-	@gofmt -w frontend
+format: format-check ## Non-mutating alias; repository quality automation never rewrites source files
 
 format-check: ## Run repository-wide non-mutating format diagnostics from the central quality policy
 	@$(PYTHON) scripts/repoctl.py format-check
