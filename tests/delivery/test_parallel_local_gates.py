@@ -17,6 +17,37 @@ SPEC.loader.exec_module(REPOCTL)
 
 
 class ParallelLocalGateTest(unittest.TestCase):
+    def test_windows_resource_probe_falls_back_without_sysconf(self):
+        with (
+            mock.patch.object(REPOCTL.os, "cpu_count", return_value=8),
+            mock.patch.object(REPOCTL.os, "sysconf", side_effect=AttributeError("sysconf unavailable")),
+            mock.patch.object(Path, "read_text", side_effect=OSError("no procfs")),
+        ):
+            cpu, memory = REPOCTL._local_resources()
+        self.assertEqual(8, cpu)
+        self.assertEqual(1024**3, memory)
+
+    def test_windows_parallel_runner_uses_process_group_and_taskkill(self):
+        process = mock.Mock(pid=4242, returncode=0)
+        process.poll.side_effect = [None, 0]
+        process.wait.return_value = 0
+        popen = mock.Mock(return_value=process)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(REPOCTL, "CONTEXT", Path(directory)),
+            mock.patch.object(REPOCTL, "ROOT", Path(directory)),
+            mock.patch.object(REPOCTL, "_local_parallelism", return_value=1),
+            mock.patch.object(REPOCTL, "_local_resources", return_value=(2, 4 * 1024**3)),
+            mock.patch.object(REPOCTL.os, "name", "nt"),
+            mock.patch.object(REPOCTL.subprocess, "Popen", popen),
+            mock.patch.object(REPOCTL.subprocess, "run") as run,
+        ):
+            self.assertTrue(REPOCTL._run_independent_gates([("windows", ["cmd", "/c", "exit", "0"])], [], {}))
+        self.assertEqual(REPOCTL.subprocess.CREATE_NEW_PROCESS_GROUP, popen.call_args.kwargs["creationflags"])
+        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertTrue(any(command[:4] == ["taskkill", "/PID", "4242", "/T"] for command in commands))
+
     def test_parallelism_is_bounded_by_gate_cpu_memory_and_four(self):
         with (
             mock.patch.object(REPOCTL.os, "cpu_count", return_value=32),
