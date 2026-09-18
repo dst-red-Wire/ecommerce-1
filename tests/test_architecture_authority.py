@@ -233,6 +233,63 @@ graph LR
             [], authority.documentation_errors("Next.js is only the migration source; target runtime is Go.")
         )
 
+    def test_backstage_nodejs_exception_is_management_plane_only(self):
+        self.assertFalse(authority.EXPECTED_V5_FRONTEND_RUNTIME["runtime_nodejs"])
+        contract = authority.V5_DEVELOPER_PLATFORM
+        self.assertEqual("forbidden", contract["runtime_boundary"]["commerce_runtime_nodejs"])
+        self.assertEqual(
+            "allowed-required",
+            contract["runtime_boundary"]["backstage_management_plane_nodejs"],
+        )
+        self.assertTrue(contract["runtime_boundary"]["backstage_only_exception"])
+        self.assertEqual("backstage", contract["principles"]["portal"])
+
+    def test_pr_driven_platform_contract_is_locked_and_m4_implemented(self):
+        contract = authority.V5_DEVELOPER_PLATFORM
+        self.assertEqual("git", contract["principles"]["source_of_truth"])
+        self.assertEqual("pull-request", contract["principles"]["change_unit"])
+        self.assertEqual("tekton", contract["principles"]["ci"])
+        self.assertEqual("rancher-fleet", contract["principles"]["gitops"])
+        self.assertEqual("crossplane", contract["principles"]["infrastructure_api"])
+        self.assertEqual("forbidden", contract["execution_contract"]["tekton_direct_workload_deploy"])
+        self.assertTrue(contract["execution_contract"]["mutating_platform_action_requires_git_change"])
+        self.assertEqual(
+            "stable-pr-driven-contract-locked",
+            contract["milestone_contract"]["M1-monorepo-bootstrap"]["outcome"],
+        )
+        self.assertFalse(
+            contract["milestone_contract"]["M1-monorepo-bootstrap"]["implementation_required"]
+        )
+        self.assertEqual(
+            "implement-pr-driven-platform-contract",
+            contract["milestone_contract"]["M4-platform-baseline"]["outcome"],
+        )
+
+    def test_pr_driven_platform_contract_mutation_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            mutations = (
+                ("    backstage_management_plane_nodejs: allowed-required", "    backstage_management_plane_nodejs: forbidden"),
+                ("    source_of_truth: git", "    source_of_truth: backstage"),
+                ("    tekton_direct_workload_deploy: forbidden", "    tekton_direct_workload_deploy: allowed"),
+                ("      implementation_required: false", "      implementation_required: true"),
+                ("      outcome: implement-pr-driven-platform-contract", "      outcome: redesign-pr-driven-platform-contract"),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    lock.write_text(original.replace(before, after, 1))
+                    self.assertTrue(
+                        any(
+                            "developer_platform must match the approved V5 PR-driven platform contract" in error
+                            for error in authority.validate(root)
+                        )
+                    )
+                    lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
