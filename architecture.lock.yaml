@@ -2,6 +2,24 @@ version: 5
 status: locked-for-build
 project: ecommerce
 
+repository_governance:
+  scope: entire-repository
+  transverse_rule_contract:
+    source_of_truth: architecture.lock.yaml
+    rule_definition: central-contract-only
+    enforcement: generic-validator
+    per_file_rule_propagation: forbidden
+    consumer_changes: only-if-required-to-consume-contract
+  owner_authorization:
+    syntax: "/owner-authorization approve scope=<scope> sha=<exact-head-sha>"
+    decision_authority: repository-owner
+    recording_agent: ChatGPT
+    recording_requires_explicit_owner_instruction: true
+    sha_binding: exact
+    scope_binding: exact
+    head_change: authorization-expired
+    absence_or_mismatch: block
+
 business:
   services:
     - catalog
