@@ -969,36 +969,47 @@ def ansible_check() -> int:
         print("SKIP ansible: no Ansible files found")
         return 0
 
-    lint_policy = source_quality_adapter("ansible")["lint"]
-    advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
-    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
-        config = Path(temp_dir) / "ansible-lint.yml"
-        config.write_text(
-            "---\nwarn_list:\n"
-            + "".join(f"  - {rule}\n" for rule in advisory_rules),
-            encoding="utf-8",
-        )
-        run(["ansible-lint", "--config-file", str(config), *files])
-
-    run(
-        [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            "platform/ansible/developer.yml",
-            "--syntax-check",
-            "-e",
-            f"repo_root={ROOT}",
-        ]
-    )
+    # Fresh precheck: local collection state is never trusted from cache.
     if ansible_collections_check():
         return 1
-    print("PASS ansible checks completed")
-    return 0
+    collection_versions = {
+        name: resolved_ansible_collection_version(name)
+        for name in required_ansible_collections()
+    }
 
+    def execute() -> int:
+        lint_policy = source_quality_adapter("ansible")["lint"]
+        advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+            config = Path(temp_dir) / "ansible-lint.yml"
+            config.write_text(
+                "---\nwarn_list:\n"
+                + "".join(f"  - {rule}\n" for rule in advisory_rules),
+                encoding="utf-8",
+            )
+            run(["ansible-lint", "--config-file", str(config), *files])
 
+        run(
+            [
+                "ansible-playbook",
+                "-i",
+                "localhost,",
+                "-c",
+                "local",
+                "platform/ansible/developer.yml",
+                "--syntax-check",
+                "-e",
+                f"repo_root={ROOT}",
+            ]
+        )
+        print("PASS ansible checks completed")
+        return 0
+
+    return _run_cached_static_gate(
+        "platform:ansible",
+        {"collection_versions": collection_versions},
+        execute,
+    )
 def system_check() -> int:
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
     run_ruby_tests(tests)
@@ -1157,16 +1168,24 @@ _STATIC_GATE_TOOLS = {
 
 
 def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
-    gate_contracts = (
-        qualification_cache.contract()
-        .get("consumers", {})
-        .get("repoctl_global_static_gates", {})
-        .get("gates", {})
-    )
-    gate_contract = gate_contracts.get(name) if isinstance(gate_contracts, dict) else None
+    consumers = qualification_cache.contract().get("consumers", {})
+    global_contracts = consumers.get("repoctl_global_static_gates", {}).get("gates", {})
+    component_contracts = consumers.get("repoctl_component_static_gates", {}).get("gates", {})
+
+    gate_contract = None
+    tool_names: list[str] = []
+    if isinstance(global_contracts, dict) and name in global_contracts:
+        gate_contract = global_contracts[name]
+        tool_names = list(_STATIC_GATE_TOOLS.get(name, ()))
+    elif isinstance(component_contracts, dict) and name in component_contracts:
+        gate_contract = component_contracts[name]
+        declared_tools = gate_contract.get("tools", []) if isinstance(gate_contract, dict) else []
+        tool_names = [sys.executable, *[str(tool) for tool in declared_tools]]
+
     patterns = gate_contract.get("inputs", []) if isinstance(gate_contract, dict) else []
-    if name not in _STATIC_GATE_TOOLS or not patterns:
+    if not patterns or not tool_names:
         raise RuntimeError(f"static qualification cache is not approved for gate {name}")
+
     input_digest = qualification_cache.digest_globs(patterns, root=ROOT)
     validator_digest = qualification_cache.digest_paths(
         [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
@@ -1174,7 +1193,7 @@ def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
     )
     tool_identity = {
         tool: qualification_cache.executable_identity(tool)
-        for tool in _STATIC_GATE_TOOLS[name]
+        for tool in tool_names
     }
     cache_options = {
         "gate_inputs": list(patterns),
