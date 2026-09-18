@@ -14,33 +14,37 @@ pull_request_review:
 
   ai_reviewer:
     enabled: true
-    advisory_only: false
+    advisory_only: true
+    execution_environment: chatgpt-plus-wsl2-evidence
     may_comment: true
     may_request_changes: true
-    may_approve: true
-    may_merge: true
+    may_approve: false
+    may_merge: false
     may_sign: false
     may_promote: false
     may_push: false
-    automatic_merge:
-      enabled: true
-      verification_count: 5
-      required_verifications:
-        - deterministic-qualification
-        - code-review
-        - security-review
-        - provenance-integrity
-        - governance-policy
-      binds_exact_commit_sha: true
-      all_verifications_same_head_sha: true
-      require_pr_mergeable: true
-      require_no_unresolved_blocking_threads: true
-      fail_closed_on_missing_or_stale_evidence: true
-      forbid_force_push: true
-      forbid_branch_protection_bypass: true
-      blocking_findings:
-        - P1
-        - P2
+
+  merge_controller:
+    enabled: true
+    authority: deterministic
+    execution_environment: wsl2-or-approved-runner
+    verification_count: 5
+    required_verifications:
+      - deterministic-qualification
+      - deterministic-code
+      - deterministic-security
+      - provenance-integrity
+      - governance-policy
+    binds_exact_commit_sha: true
+    all_verifications_same_head_sha: true
+    require_pr_mergeable: true
+    require_no_unresolved_blocking_threads: true
+    fail_closed_on_missing_or_stale_evidence: true
+    forbid_force_push: true
+    forbid_branch_protection_bypass: true
+    blocking_findings:
+      - P1
+      - P2
 
   human_gate:
     required_for:
