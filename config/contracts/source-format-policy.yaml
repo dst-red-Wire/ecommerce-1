@@ -1,0 +1,50 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+
+principles:
+  qualification_source_mutation: forbidden
+  format_drift: advisory
+  syntax_validation: blocking
+  semantic_validation: blocking
+  file_specific_format_exceptions: forbidden
+
+execution:
+  formatter_runs_read_only: true
+  formatter_may_emit_diff: true
+  formatter_drift_must_not_fail_qualification: true
+  formatter_execution_error_must_fail: true
+  validators_run_after_formatter_diagnostic: true
+
+formatters:
+  terraform:
+    discovery:
+      include:
+        - "**/*.tf"
+      exclude:
+        - "**/.terraform/**"
+    command:
+      executable_preference:
+        - tofu
+        - terraform
+      args:
+        - fmt
+        - -check
+        - -recursive
+        - -diff
+    drift_exit_codes:
+      - 3
+    validator:
+      init_args:
+        - init
+        - -backend=false
+        - -input=false
+      validate_args:
+        - validate
+      module_validation_in_temporary_copy: true
+
+evidence:
+  formatter_drift_label: ADVISORY
+  formatter_error_label: FAIL
+  semantic_validation_label: PASS
