@@ -1,0 +1,313 @@
+"""Exercise trusted admission against real, isolated candidate repositories."""
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class TrustedRunnerGuardTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.repo = self.directory / "candidate"
+        self.repo.mkdir()
+        self.guard = self.directory / "trusted-guard.py"
+        shutil.copyfile(ROOT / "scripts/qualification_runner_guard.py", self.guard)
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        self.git("init")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.write("platform/ansible/qualification-egress.yml", "---\n[]\n")
+        self.write("platform/ansible/roles/qualification_proxy_client/tasks/main.yml", "---\n[]\n")
+        self.write("docs/project/M1_LINUX_QUALIFICATION_RUNNER.md", "trusted fixture runbook\n")
+        self.write("platform/terraform/environments/qualification/README.md", "trusted fixture runbook\n")
+        self.write("scripts/qualification_runner_guard.py", "raise SystemExit(0)\n")
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        # The fixture controller independently pins its trusted base; the candidate
+        # cannot edit this external policy or supply a replacement through argv.
+        self.guard.write_text(self.guard.read_text().replace("91c636997a3d62595c65f815319c1342c93ea956", self.base))
+
+    def git(self, *args):
+        return subprocess.check_output(
+            ["git", *args], cwd=self.repo, env=self.env, text=True, stderr=subprocess.DEVNULL
+        )
+
+    def write(self, relative, content):
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+
+    def admit(self, base=None):
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(self.guard),
+                "--repo",
+                str(self.repo),
+                "--base",
+                base or self.base,
+                "--head",
+                self.git("rev-parse", "HEAD").strip(),
+            ],
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+
+    def test_trusted_guard_ignores_candidate_validator_and_rejects_controller_change(self):
+        self.assertEqual(0, self.admit().returncode)
+        self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
+        self.commit()
+        result = self.admit()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unapproved base-relative runner change", result.stdout)
+
+    def test_candidate_head_cannot_be_substituted_for_trusted_base(self):
+        self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
+        self.commit()
+        result = self.admit(base=self.git("rev-parse", "HEAD").strip())
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("base revision is not admitted", result.stdout)
+
+    def test_proxy_role_change_is_in_controller_execution_closure(self):
+        self.write("platform/ansible/roles/qualification_proxy_client/tasks/main.yml", "---\n- shell: unapproved\n")
+        self.commit()
+        self.assertNotEqual(0, self.admit().returncode)
+
+    def test_replacement_refs_cannot_hide_real_object_changes(self):
+        self.write("platform/ansible/qualification-egress.yml", "---\n- hosts: localhost\n  tasks: []\n")
+        self.commit()
+        self.git("replace", self.base, "HEAD")
+        self.assertEqual("", self.git("diff", "--name-only", self.base, "HEAD"))
+        result = self.admit()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("replacement refs are forbidden", result.stdout)
+
+    def test_symlinked_scope_ancestors_cannot_redirect_byte_identical_files(self):
+        for relative in ("platform", "platform/ansible", "platform/ansible/roles", "platform/terraform", "docs"):
+            with self.subTest(ancestor=relative):
+                target = self.repo / relative
+                shadow = self.repo / "unscoped-shadow"
+                target.rename(shadow)
+                target.symlink_to(os.path.relpath(shadow, target.parent), target_is_directory=True)
+                self.commit()
+                result = self.admit()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("unapproved runner ancestor", result.stdout)
+                target.unlink()
+                shadow.rename(target)
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_candidate_terraform_execution_closure_is_rejected(self):
+        for relative in (
+            "platform/terraform/environments/qualification/unapproved.tf",
+            "platform/terraform/modules/hcloud-qualification/unapproved.tf",
+        ):
+            with self.subTest(path=relative):
+                self.write(
+                    relative,
+                    'resource "terraform_data" "attack" { provisioner "local-exec" { command = "echo unapproved" } }\n',
+                )
+                self.commit()
+                self.assertNotEqual(0, self.admit().returncode)
+                (self.repo / relative).unlink()
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_remote_proof_rejects_replacement_refs_after_candidate_bootstrap(self):
+        check = "test -z \"$(git --no-replace-objects for-each-ref --format='%(refname)' refs/replace/)\""
+        for relative in (
+            "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+            "platform/terraform/environments/qualification/README.md",
+        ):
+            source = (ROOT / relative).read_text()
+            self.assertIn("readonly GIT_NO_REPLACE_OBJECTS", source)
+            self.assertIn(check, source[source.index("make env-check") :])
+            remote = source[source.index("<<'QUALIFICATION_RUNNER'") : source.index("\nQUALIFICATION_RUNNER")]
+            self.assertNotIn("git rev-parse", remote)
+            self.assertNotIn("git status", remote)
+        clean = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertEqual(0, clean.returncode)
+        self.write("substituted-tree.txt", "untrusted replacement\n")
+        self.commit()
+        replacement = self.git("rev-parse", "HEAD").strip()
+        self.git("replace", self.base, replacement)
+        self.git("reset", "--hard", self.base)
+        self.assertEqual(self.base, self.git("rev-parse", "HEAD").strip())
+        self.assertEqual("", self.git("status", "--porcelain"))
+        refused = subprocess.run(["bash", "-ec", check], cwd=self.repo, env=self.env, capture_output=True)
+        self.assertNotEqual(0, refused.returncode)
+
+    def test_mode_only_change_is_rejected_by_external_controller(self):
+        target = self.repo / "platform/ansible/qualification-egress.yml"
+        self.assertEqual(0, self.admit().returncode)
+        target.chmod(0o755)
+        self.commit()
+        result = self.admit()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unapproved runner mode change", result.stdout)
+
+    def test_controller_revisions_are_required_and_checkout_mismatch_fails(self):
+        import yaml
+
+        play = yaml.safe_load((ROOT / "platform/ansible/qualification-runner.yml").read_text())[0]
+        defaults = yaml.safe_load(
+            (ROOT / "platform/ansible/roles/qualification_runner_host/defaults/main.yml").read_text()
+        )
+        self.assertNotIn("qualification_pr_head", defaults)
+        self.assertNotIn("qualification_pr_base", defaults)
+        post = play["post_tasks"]
+        verification = next(
+            task for task in post if task["name"] == "Require the checkout to match the admitted qualification head"
+        )
+        self.assertLess(
+            post.index(verification),
+            next(i for i, task in enumerate(post) if task["name"] == "Reconcile the hash-locked qualification seed"),
+        )
+        for name, variables, passes in (
+            (
+                "matching",
+                {
+                    "qualification_pr_head": "a" * 40,
+                    "qualification_pr_base": "b" * 40,
+                    "qualification_selected_head": {"stdout": "a" * 40},
+                },
+                True,
+            ),
+            ("missing", {}, False),
+            ("mutable", {"qualification_pr_head": "main", "qualification_pr_base": "b" * 40}, False),
+            (
+                "mismatch",
+                {
+                    "qualification_pr_head": "a" * 40,
+                    "qualification_pr_base": "b" * 40,
+                    "qualification_selected_head": {"stdout": "c" * 40},
+                },
+                False,
+            ),
+        ):
+            with self.subTest(name=name):
+                fixture = self.directory / "assertions.yml"
+                fixture.write_text(
+                    yaml.safe_dump(
+                        [
+                            {
+                                "name": "Local immutable revision regression",
+                                "hosts": "localhost",
+                                "gather_facts": False,
+                                "vars": variables,
+                                "tasks": play["pre_tasks"] + [verification],
+                            }
+                        ]
+                    )
+                )
+                result = subprocess.run(
+                    [shutil.which("ansible-playbook"), "-i", "localhost,", "-c", "local", str(fixture)],
+                    env=self.env,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(passes, result.returncode == 0, result.stdout + result.stderr)
+
+    def test_both_runbooks_carry_admitted_revisions_through_provisioning_and_proof(self):
+        for relative in (
+            "docs/project/M1_LINUX_QUALIFICATION_RUNNER.md",
+            "platform/terraform/environments/qualification/README.md",
+        ):
+            with self.subTest(runbook=relative):
+                source = (ROOT / relative).read_text()
+                for marker in (
+                    "readonly QUALIFICATION_HEAD=FULL_HEAD_SHA QUALIFICATION_BASE=FULL_BASE_SHA",
+                    '--base "$QUALIFICATION_BASE" --head "$QUALIFICATION_HEAD"',
+                    '--extra-vars "qualification_pr_head=$QUALIFICATION_HEAD qualification_pr_base=$QUALIFICATION_BASE"',
+                    '"bash -se -- $QUALIFICATION_HEAD $QUALIFICATION_BASE"',
+                    'readonly qualification_head="$1" qualification_base="$2"',
+                    'test "$(git --no-replace-objects rev-parse HEAD)" = "$qualification_head"',
+                    'BASE="$qualification_base" make ci',
+                ):
+                    self.assertIn(marker, source)
+                self.assertNotIn("58e10fdb7122f9f3302e3fc5534b07021f7cc37f", source)
+                original = (self.repo / relative).read_text()
+                self.write(relative, "unapproved candidate provisioning commands\n")
+                self.commit()
+                self.assertNotEqual(0, self.admit().returncode)
+                self.write(relative, original)
+                self.commit()
+                self.assertEqual(0, self.admit().returncode)
+
+    def test_ansible_clone_fetches_head_reachable_only_through_pr_ref(self):
+        import shlex
+        from ansible.modules import git as ansible_git
+        import yaml
+
+        tasks = yaml.safe_load((ROOT / "platform/ansible/qualification-runner.yml").read_text())[0]["post_tasks"]
+        parameters = next(task["ansible.builtin.git"] for task in tasks if "ansible.builtin.git" in task)
+        self.assertEqual("{{ qualification_pr_head }}", parameters["refspec"])
+        remote = self.directory / "remote.git"
+        subprocess.run(["git", "init", "--bare", str(remote)], env=self.env, capture_output=True, check=True)
+        self.git("remote", "add", "origin", remote.as_uri())
+        self.git("push", "origin", "HEAD:refs/heads/main")
+        subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=remote, env=self.env, check=True)
+        self.write("private-head.txt", "PR-only content\n")
+        self.commit()
+        head = self.git("rev-parse", "HEAD").strip()
+        self.git("push", "origin", "HEAD:refs/pull/1/head")
+        env = self.env
+        commands = []
+
+        class LocalGitModule:
+            def run_command(module, command, check_rc=False, cwd=None):
+                argv = shlex.split(command) if isinstance(command, str) else command
+                commands.append(argv)
+                result = subprocess.run(
+                    argv,
+                    cwd=cwd if cwd and Path(cwd).exists() else remote.parent,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                if check_rc and result.returncode:
+                    raise AssertionError(result.stderr)
+                return result.returncode, result.stdout, result.stderr
+
+            def fail_json(module, **kwargs):
+                raise AssertionError(kwargs)
+
+        destination = self.directory / "module-clone"
+        module = LocalGitModule()
+        ansible_git.clone(
+            shutil.which("git"),
+            module,
+            remote.as_uri(),
+            str(destination),
+            "origin",
+            None,
+            head,
+            False,
+            None,
+            head,
+            None,
+            False,
+            None,
+            {},
+            [],
+            False,
+        )
+        self.assertTrue(any(command[1:4] == ["fetch", "origin", head] for command in commands))
+        subprocess.run(["git", "checkout", "--detach", head], cwd=destination, env=env, capture_output=True, check=True)
+        self.assertEqual("PR-only content\n", (destination / "private-head.txt").read_text())

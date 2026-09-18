@@ -15,7 +15,7 @@ ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/develo
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@$(PYTHON) scripts/capability_bootstrap.py seed
+	@$(PYTHON) -I -S scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
@@ -159,7 +159,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 	@$(PYTHON) scripts/repoctl.py evidence-compare --full "$(FULL_EVIDENCE)" --incremental "$(INCREMENTAL_EVIDENCE)"
 
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
-	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
+	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_CAMPAIGN),--campaign "$(PERF_CAMPAIGN)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify
 

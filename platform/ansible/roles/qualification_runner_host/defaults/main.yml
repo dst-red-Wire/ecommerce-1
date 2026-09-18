@@ -23,5 +23,3 @@ qualification_sysctl_file: /etc/sysctl.d/60-ecommerce-m1-qualification.conf
 qualification_repository_url: https://github.com/dst-red-Wire/ecommerce-1.git
 qualification_repository_path: "/home/{{ qualification_user }}/ecommerce-1"
 qualification_consumed_marker: /var/lib/ecommerce-m1-qualification-runner-consumed
-qualification_pr_head: 58e10fdb7122f9f3302e3fc5534b07021f7cc37f
-qualification_pr_base: 45433013f97a94a8acf94c51a913ff071e6f74b2

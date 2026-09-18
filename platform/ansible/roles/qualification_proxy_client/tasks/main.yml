@@ -94,11 +94,10 @@
       Environment="HTTPS_PROXY={{ qualification_proxy_url }}"
       Environment="NO_PROXY={{ qualification_proxy_no_proxy }}"
   register: qualification_docker_proxy
+  notify: Reload systemd for the Docker proxy drop-in
 
-- name: Reload systemd for the Docker proxy drop-in
-  ansible.builtin.systemd_service:
-    daemon_reload: true
-  when: qualification_docker_proxy.changed
+- name: Apply the Docker proxy systemd reload before service discovery
+  ansible.builtin.meta: flush_handlers
 
 - name: Discover installed services
   ansible.builtin.service_facts:
