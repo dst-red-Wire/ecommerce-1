@@ -1302,7 +1302,7 @@ def _local_resources() -> tuple[int, int]:
         cpu = min(cpu, max(1, len(os.sched_getaffinity(0))))
     try:
         memory = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         memory = 1024**3
     root = Path("/sys/fs/cgroup")
     directories = [root]
@@ -1362,29 +1362,48 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
 
     processes: list[subprocess.Popen] = []
 
-    def signal_groups(sig):
-        alive = False
-        for process in processes:
-            try:
-                os.killpg(process.pid, sig)
-                alive = True
-            except ProcessLookupError:
-                pass
-        return alive
+    def process_tree_alive(process: subprocess.Popen) -> bool:
+        if os.name == "nt":
+            return process.poll() is None
+        try:
+            os.killpg(process.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def terminate_process_tree(process: subprocess.Popen, *, force: bool) -> None:
+        if os.name == "nt":
+            if process.poll() is not None:
+                return
+            command = ["taskkill", "/PID", str(process.pid), "/T"]
+            if force:
+                command.append("/F")
+            subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
     def stop_all():
-        # A group may outlive its leader, including the gate that failed.
-        signal_groups(signal.SIGTERM)
+        # A process tree may outlive its leader, including the gate that failed.
+        for process in processes:
+            terminate_process_tree(process, force=False)
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             for process in processes:
                 process.poll()
-            if not signal_groups(0):
+            if not any(process_tree_alive(process) for process in processes):
                 break
             time.sleep(0.05)
-        signal_groups(signal.SIGKILL)
         for process in processes:
-            process.wait()
+            terminate_process_tree(process, force=True)
+        for process in processes:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                terminate_process_tree(process, force=True)
+                process.wait()
 
     try:
         while pending or running:
@@ -1393,15 +1412,18 @@ def _run_independent_gates(gates: list[tuple[str, list[str]]], records: list[dic
                 log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
                 handle = log_path.open("w", encoding="utf-8")
                 try:
-                    process = subprocess.Popen(
-                        command,
-                        cwd=ROOT,
-                        env=child_env,
-                        text=True,
-                        stdout=handle,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
+                    popen_kwargs = {
+                        "cwd": ROOT,
+                        "env": child_env,
+                        "text": True,
+                        "stdout": handle,
+                        "stderr": subprocess.STDOUT,
+                    }
+                    if os.name == "nt":
+                        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                    else:
+                        popen_kwargs["start_new_session"] = True
+                    process = subprocess.Popen(command, **popen_kwargs)
                 except BaseException:
                     handle.close()
                     raise
