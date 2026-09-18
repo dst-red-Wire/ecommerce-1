@@ -29,7 +29,7 @@ class ArchitectureAuthorityTest(unittest.TestCase):
 
             authority.clear_yaml_parse_cache()
             first = authority.load_yaml(first_path)
-            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+            self.assertEqual(1, authority.qualification_cache.memory_entry_count("psych-yaml"))
 
             first["root"]["value"] = "mutated-in-caller"
             second = authority.load_yaml(second_path)
