@@ -1129,11 +1129,11 @@ def security() -> int:
     with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
         config = Path(policy_dir) / "gitleaks.toml"
         write_gitleaks_policy_config(config, policy)
-        common = [command, "--config", str(config)]
+        flags = ["--config", str(config)]
         if execution.get("redact") is True:
-            common.append("--redact")
+            flags.append("--redact")
         if execution.get("no_banner") is True:
-            common.append("--no-banner")
+            flags.append("--no-banner")
 
         if os.environ.get("HEAD", "").strip() == "WORKTREE":
             tree_sha = worktree_tree_sha()
@@ -1144,11 +1144,11 @@ def security() -> int:
                 scan_root.mkdir()
                 run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
                 shutil.unpack_archive(str(archive), str(scan_root), "tar")
-                run([*common, "dir", str(scan_root)])
+                run([command, "dir", *flags, str(scan_root)])
         elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-            run([*common, "git", "."])
+            run([command, "git", *flags, "."])
         else:
-            run([*common, "dir", "."])
+            run([command, "dir", *flags, "."])
 
     print("PASS secret scan completed")
     return 0
