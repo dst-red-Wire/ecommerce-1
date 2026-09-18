@@ -1,0 +1,70 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+
+purpose: reuse deterministic qualification work without weakening exact-SHA evidence
+
+scope:
+  cacheable:
+    - deterministic-static-parsing
+    - deterministic-static-global-gates
+    - deterministic-code-generation-inputs
+  forbidden:
+    - git-status
+    - current-head-sha
+    - remote-ci-state
+    - review-state
+    - owner-authorization
+    - docker-runtime-state
+    - kubernetes-runtime-state
+    - network-state
+    - secrets-and-authentication
+    - provisioning-state
+
+layers:
+  l1:
+    type: process-memory
+    enabled: true
+  l2:
+    type: persistent-disk
+    enabled: true
+    root_source: ECOMMERCE_TOOL_HOME
+    fallback_root: ~/.cache/ecommerce-1
+    subdirectory: qualification-cache/v1
+
+identity:
+  algorithm: sha256
+  required_key_material:
+    - namespace
+    - input-content-digest
+    - validator-content-digest
+    - tool-identity
+    - normalized-options
+  repository-paths-must-be-content-addressed: true
+  file-name-only-keying: forbidden
+  successful-results-only: true
+
+safety:
+  cache-hit-must-not-authorize-dynamic-state: true
+  caller-mutation-must-not-modify-memory-cache: true
+  atomic-disk-write-required: true
+  corrupt-entry-behavior: miss
+  tool-identity-change-behavior: miss
+  validator-change-behavior: miss
+  input-change-behavior: miss
+
+consumers:
+  psych_yaml:
+    enabled: true
+    persistence: l1-l2
+  repoctl_global_static_gates:
+    enabled: true
+    gates:
+      - governance
+      - runtime-efficiency
+      - contracts
+      - automation
+      - security
+    persistence: l2
+  dynamic_checks:
+    persistence: forbidden
