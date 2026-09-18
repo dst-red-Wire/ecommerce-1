@@ -6,11 +6,11 @@ scope: entire-repository
 authority_claims:
   - repository.security.secret-scanning
   - repository.security.scan-exceptions
+evidence_authority: architecture.lock.yaml#machine_contracts.ci_evidence
 principles:
   fail_closed: true
   local_parallel_policy: forbidden
   inline_per_file_bypass: forbidden
-  machine_readable_evidence: required
 engines:
   secrets:
     capability: gitleaks
@@ -29,5 +29,3 @@ projections:
   generated_root: .context/generated/security
 exceptions:
   authority: architecture.lock.yaml#machine_contracts.policy_exceptions
-evidence:
-  exact_head_sha: required

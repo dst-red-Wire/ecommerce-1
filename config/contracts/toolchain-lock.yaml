@@ -17,15 +17,6 @@
     "consumer_embedded_tool_versions": "forbidden",
     "projection_drift": "blocking"
   },
-  "runtime_boundaries": {
-    "node": {
-      "repository_tooling": "allowed",
-      "backstage_management_plane": "allowed-required",
-      "commerce_runtime": "forbidden",
-      "commerce_frontends": "forbidden",
-      "commerce_services": "forbidden"
-    }
-  },
   "legacy_projections": {
     "versions_env": {
       "path": "config/toolchain/versions.env",
@@ -977,5 +968,8 @@
     "scripts/servicegen.py",
     "scripts/repository_delivery.py",
     "scripts/performance_audit.py"
-  ]
+  ],
+  "architecture_refs": {
+    "node_runtime_boundary": "architecture.lock.yaml#developer_platform.runtime_boundary"
+  }
 }

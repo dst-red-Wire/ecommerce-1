@@ -98,6 +98,17 @@ def validate_repository(root: Path = ROOT) -> None:
     if not isinstance(required,list) or not required:
         raise ContractError("canonical_contract_system.required_contracts must be non-empty")
 
+    schema_path=registry.get("contract_schema")
+    if system.get("schema") != schema_path:
+        raise ContractError("canonical_contract_system.schema must reference machine_contracts.contract_schema")
+    schema=load_yaml(root,schema_path)
+    envelope=schema.get("required_envelope",[])
+    statuses=set(schema.get("canonical_statuses",[]))
+    if not isinstance(envelope,list) or not envelope:
+        raise ContractError("contract schema required_envelope must be non-empty")
+    if not statuses:
+        raise ContractError("contract schema canonical_statuses must be non-empty")
+
     claims:dict[str,str]={}
     canonical:dict[str,dict]={}
     for key in required:
@@ -106,12 +117,19 @@ def validate_repository(root: Path = ROOT) -> None:
             raise ContractError(f"required canonical contract is not registered: {key}")
         data=load_yaml(root,relative)
         canonical[key]=data
-        for field in ("version","status","architecture_authority","scope"):
-            if data.get(field) in (None,""):
+        for field in envelope:
+            if data.get(field) in (None,"",[]):
                 raise ContractError(f"{key}: missing canonical envelope field {field}")
         if data.get("architecture_authority")!="architecture.lock.yaml":
             raise ContractError(f"{key}: architecture authority must be architecture.lock.yaml")
-        for claim in data.get("authority_claims",[]):
+        if data.get("status") not in statuses:
+            raise ContractError(f"{key}: unsupported canonical status {data.get('status')!r}")
+        if not isinstance(data.get("kind"),str):
+            raise ContractError(f"{key}: kind must be a string")
+        authority_claims=data.get("authority_claims")
+        if not isinstance(authority_claims,list) or not authority_claims:
+            raise ContractError(f"{key}: authority_claims must be a non-empty list")
+        for claim in authority_claims:
             if not isinstance(claim,str) or not claim:
                 raise ContractError(f"{key}: authority claims must be non-empty strings")
             if claim in claims:

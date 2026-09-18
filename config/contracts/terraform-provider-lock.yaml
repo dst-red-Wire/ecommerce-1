@@ -1,7 +1,10 @@
 version: 1
+kind: TerraformProviderLock
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: platform/terraform
+authority_claims:
+  - platform.terraform.providers
 
 terraform_cli:
   required_version: ">= 1.15.0, < 2.0.0"

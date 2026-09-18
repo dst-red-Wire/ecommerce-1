@@ -6,16 +6,20 @@ scope: entire-repository
 authority_claims:
   - repository.tests.selection
   - repository.tests.runtime-boundary
+evidence_authority: architecture.lock.yaml#machine_contracts.ci_evidence
 principles:
   global_gates_always_run_for_transverse_governance_change: true
   component_tests_are_affected-routed: true
-  exact_sha_evidence: required
   test_execution_must_not_mutate_source: true
 classes:
-  unit: {runtime: static}
-  integration: {runtime: conditional}
-  container-integration: {runtime: optional-runtime, unavailable_behavior: platform-not-capable}
-  architecture: {runtime: static}
+  unit:
+    runtime: static
+  integration:
+    runtime: conditional
+  container-integration:
+    runtime: optional-runtime
+    unavailable_behavior: platform-not-capable
+  architecture:
+    runtime: static
 routing:
-  authority: scripts/ci-affected.rb
-  dependency_contract: architecture.lock.yaml#machine_contracts.dependency_map
+  authority: architecture.lock.yaml#machine_contracts.change_routing_policy

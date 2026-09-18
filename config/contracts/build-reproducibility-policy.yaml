@@ -3,14 +3,15 @@ kind: BuildReproducibilityPolicy
 status: enforced
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
-authority_claims: [repository.build.reproducibility]
+authority_claims:
+  - repository.build.reproducibility
+architecture_refs:
+  promotion: architecture.lock.yaml#developer_platform.promotion
+  image_immutability: architecture.lock.yaml#supply_chain
 principles:
   pinned_toolchain: required
   dependency_locks: required
-  generated_artifact_drift: blocking
-  build_once_promote_many: true
   source_mutation_during_qualification: forbidden
-  latest_tags: forbidden
 inputs:
   toolchain: architecture.lock.yaml#machine_contracts.toolchain_lock
   dependencies: architecture.lock.yaml#machine_contracts.dependency_lock_policy

@@ -3,9 +3,19 @@ kind: CanonicalContractSchema
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
-authority_claims: [governance.contract-shape]
-required_envelope: [version, kind, status, architecture_authority, scope]
-canonical_statuses: [exact, enforced, declared]
+authority_claims:
+  - governance.contract-shape
+required_envelope:
+  - version
+  - kind
+  - status
+  - architecture_authority
+  - scope
+  - authority_claims
+canonical_statuses:
+  - exact
+  - enforced
+  - declared
 rules:
   root_registration: required
   duplicate_authority_claim: forbidden
