@@ -178,6 +178,11 @@ V5_SECTION_KEYS = {
             "required",
             "exact_head_sha_required",
             "human_review_required",
+            "ai_auto_merge_allowed",
+            "ai_auto_merge_required_verifications",
+            "ai_auto_merge_same_head_sha_required",
+            "ai_auto_merge_fail_closed",
+            "review_policy_changes_require_human_gate",
             "required_context",
         }
     ),
@@ -373,6 +378,59 @@ V5_MACHINE_CONTRACTS = {
     "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
     "observability_topology": "config/contracts/observability-topology.yaml",
 }
+V5_REVIEW_POLICY = {
+    "version": 2,
+    "status": "exact",
+    "architecture_authority": AUTHORITY,
+    "pull_request_review": {
+        "forge": "github",
+        "ci": "tekton",
+        "deterministic_gate": {
+            "authority": True,
+            "required_for_merge": True,
+            "binds_exact_commit_sha": True,
+            "fail_closed": True,
+        },
+        "ai_reviewer": {
+            "enabled": True,
+            "advisory_only": False,
+            "may_comment": True,
+            "may_request_changes": True,
+            "may_approve": True,
+            "may_merge": True,
+            "may_sign": False,
+            "may_promote": False,
+            "may_push": False,
+            "automatic_merge": {
+                "enabled": True,
+                "verification_count": 3,
+                "required_verifications": [
+                    "deterministic-qualification",
+                    "code-review",
+                    "security-review",
+                ],
+                "binds_exact_commit_sha": True,
+                "all_verifications_same_head_sha": True,
+                "require_pr_mergeable": True,
+                "require_no_unresolved_blocking_threads": True,
+                "fail_closed_on_missing_or_stale_evidence": True,
+                "forbid_force_push": True,
+                "forbid_branch_protection_bypass": True,
+                "blocking_findings": ["P1", "P2"],
+            },
+        },
+        "human_gate": {
+            "required_for": [
+                "review_policy_changes",
+                "infrastructure_apply",
+                "destructive_changes",
+                "state_migrations",
+                "dns_network_iam_secret_changes",
+            ]
+        },
+    },
+}
+
 V5_SECTION_KEYS.update(
     {
         "superseded": frozenset(V5_SUPERSEDED),
@@ -453,7 +511,16 @@ V5_DEVELOPER_PLATFORM = {
     "pull_request_contract": {
         "required": True,
         "exact_head_sha_required": True,
-        "human_review_required": True,
+        "human_review_required": False,
+        "ai_auto_merge_allowed": True,
+        "ai_auto_merge_required_verifications": [
+            "deterministic-qualification",
+            "code-review",
+            "security-review",
+        ],
+        "ai_auto_merge_same_head_sha_required": True,
+        "ai_auto_merge_fail_closed": True,
+        "review_policy_changes_require_human_gate": True,
         "required_context": [
             "request-id",
             "component",
@@ -1399,6 +1466,9 @@ def validate(root):
                 errors.extend(security_source_errors(source, contract))
         if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
             errors.append("machine_contracts must match the complete approved V5 role/path registry")
+        review_policy = load_yaml(root / V5_MACHINE_CONTRACTS["review_policy"])
+        if review_policy != V5_REVIEW_POLICY:
+            errors.append("config/contracts/review-policy.yaml must match the exact V5 three-verification AI merge policy")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
