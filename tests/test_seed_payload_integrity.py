@@ -97,6 +97,26 @@ class SeedPayloadIntegrity(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "externally mutable"):
             bootstrap.seed_wheels(self.wheels, self.lock)
 
+    def test_tool_home_creation_race_rejects_attacker_owned_directory(self):
+        shared = self.root / "shared"
+        shared.mkdir()
+        shared.chmod(0o1777)
+        configured = shared / "qualification"
+        real_mkdir = os.mkdir
+
+        def raced_mkdir(path, mode=0o777, *args, **kwargs):
+            if Path(path) == configured:
+                real_mkdir(path, 0o777)
+                Path(path).chmod(0o777)
+                raise FileExistsError(path)
+            return real_mkdir(path, mode, *args, **kwargs)
+
+        with (
+            mock.patch.object(bootstrap.os, "mkdir", side_effect=raced_mkdir),
+            self.assertRaisesRegex(bootstrap.SeedGenerationBoundaryError, "raced|mutable"),
+        ):
+            bootstrap.validated_seed_tool_home(configured)
+
     def test_mutable_tool_home_or_parent_is_refused_before_writes(self):
         cache = self.root / "mutable-cache"
         cache.mkdir()
