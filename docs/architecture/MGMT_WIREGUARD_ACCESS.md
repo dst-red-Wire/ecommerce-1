@@ -6,7 +6,7 @@ Status: `EXACT`
 
 Permanent administrative access to Z5 uses a dedicated WireGuard gateway named `wg-01`. The gateway is a persistent MGMT infrastructure VM, is not an RKE2 member, and must not host customer-facing or Kubernetes control-plane workloads.
 
-`config/infrastructure/network-plan.yaml` remains the sole machine-canonical source for WireGuard addresses, pools, routes, return-path policy and endpoint port. `config/contracts/mgmt-wireguard-access.yaml` is the machine-canonical source for access policy, ownership, human gates, secret delivery and threat-model controls. `config/infrastructure/mgmt-access-gateways.yaml` is the machine-canonical inventory/profile source for the dedicated non-Kubernetes access gateway.
+`config/infrastructure/network-plan.yaml` remains the sole machine-canonical source for WireGuard addresses, pools, routes, return-path policy and endpoint port. `config/contracts/mgmt-wireguard-access.yaml` is the machine-canonical source for access policy, ownership, owner authorizations, secret delivery and threat-model controls. `config/infrastructure/mgmt-access-gateways.yaml` is the machine-canonical inventory/profile source for the dedicated non-Kubernetes access gateway.
 
 ## Gateway inventory and profile
 
@@ -55,7 +55,7 @@ This policy is deliberately narrow:
 - no NAT policy is authorized for Pod, Service, PREPROD, PROD or Internet destinations;
 - no static route to `10.246.0.0/24` is required on MGMT nodes.
 
-The attribution consequence is explicit: downstream MGMT services see `10.243.1.41` as the network source. Per-operator attribution therefore belongs to audited WireGuard peer and forwarding records on `wg-01`, correlated with workforce identity. Any future change from SNAT to routed peer addresses is an architecture/network-policy change and requires the routing human gate.
+The attribution consequence is explicit: downstream MGMT services see `10.243.1.41` as the network source. Per-operator attribution therefore belongs to audited WireGuard peer and forwarding records on `wg-01`, correlated with workforce identity. Any future change from SNAT to routed peer addresses is an architecture/network-policy change and requires routing owner authorization.
 
 ## Identity and key boundary
 
@@ -78,16 +78,16 @@ Terraform/OpenTofu owns provider resources: the `wg-01` VM, provider network att
 
 A later implementation PR may encode those resources only after this contract is merged. This architecture PR does not create a VM, open UDP/51820, modify routes/NAT, retrieve secrets, or generate keys.
 
-## Human gates
+## Owner authorization
 
-Explicit human authorization is required immediately before:
+Explicit repository-owner authorization is required immediately before:
 
 - provider apply that creates or changes `wg-01`;
 - activation or widening of public ingress;
 - changes to allowed MGMT routes or return-path/NAT policy;
 - creation, rotation, revocation or replacement of gateway/operator/break-glass key material.
 
-Static validation and plans may run before those gates; remote state mutation may not.
+Static validation and plans may run before owner authorization; remote state mutation may not.
 
 ## Threat-model delta
 
@@ -97,7 +97,7 @@ The new boundary is an Internet-reachable encrypted transport from Z0 into perma
 - Stolen operator key: use per-operator peer identity, workforce-authorized issuance and deterministic peer revocation.
 - Over-broad routes: expose only the permanent MGMT route, deny forwarding by default, and never route Pod/Service CIDRs.
 - Gateway compromise: isolate WireGuard on a dedicated non-Kubernetes host, keep least privilege/audit, and rebuild rather than manually clean after compromise.
-- Break-glass misuse: use a separate address pool, separate control path, audited activation and explicit human authorization.
+- Break-glass misuse: use a separate address pool, separate control path, audited activation and explicit owner authorization.
 
 The SNAT design adds an audit requirement because downstream services see the gateway address. `wg-01` must therefore retain peer-to-flow audit evidence sufficient to correlate the translated flow with the authorized workforce or break-glass peer.
 
