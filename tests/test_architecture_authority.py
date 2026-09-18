@@ -265,19 +265,22 @@ graph LR
         self.assertTrue(contract["execution_contract"]["mutating_platform_action_requires_git_change"])
         pr_contract = contract["pull_request_contract"]
         self.assertFalse(pr_contract["human_review_required"])
-        self.assertTrue(pr_contract["ai_auto_merge_allowed"])
+        self.assertTrue(pr_contract["automatic_merge_allowed"])
+        self.assertEqual("deterministic", pr_contract["automatic_merge_authority"])
         self.assertEqual(
             [
                 "deterministic-qualification",
-                "code-review",
-                "security-review",
+                "deterministic-code",
+                "deterministic-security",
                 "provenance-integrity",
                 "governance-policy",
             ],
-            pr_contract["ai_auto_merge_required_verifications"],
+            pr_contract["automatic_merge_required_verifications"],
         )
-        self.assertTrue(pr_contract["ai_auto_merge_same_head_sha_required"])
-        self.assertTrue(pr_contract["ai_auto_merge_fail_closed"])
+        self.assertTrue(pr_contract["automatic_merge_same_head_sha_required"])
+        self.assertTrue(pr_contract["automatic_merge_fail_closed"])
+        self.assertEqual("advisory", pr_contract["ai_code_review"])
+        self.assertEqual("advisory", pr_contract["ai_security_review"])
         self.assertTrue(pr_contract["review_policy_changes_require_human_gate"])
         self.assertEqual(
             "stable-pr-driven-contract-locked",
@@ -300,8 +303,9 @@ graph LR
                 ("    backstage_management_plane_nodejs: allowed-required", "    backstage_management_plane_nodejs: forbidden"),
                 ("    source_of_truth: git", "    source_of_truth: backstage"),
                 ("    tekton_direct_workload_deploy: forbidden", "    tekton_direct_workload_deploy: allowed"),
-                ("    ai_auto_merge_allowed: true", "    ai_auto_merge_allowed: false"),
-                ("    ai_auto_merge_same_head_sha_required: true", "    ai_auto_merge_same_head_sha_required: false"),
+                ("    automatic_merge_allowed: true", "    automatic_merge_allowed: false"),
+                ("    automatic_merge_authority: deterministic", "    automatic_merge_authority: ai"),
+                ("    automatic_merge_same_head_sha_required: true", "    automatic_merge_same_head_sha_required: false"),
                 ("      implementation_required: false", "      implementation_required: true"),
                 ("      outcome: implement-pr-driven-platform-contract", "      outcome: redesign-pr-driven-platform-contract"),
             )
@@ -324,13 +328,15 @@ graph LR
             policy = root / "config/contracts/review-policy.yaml"
             original = policy.read_text()
             mutations = (
-                ("    may_approve: true", "    may_approve: false"),
-                ("    may_merge: true", "    may_merge: false"),
-                ("      verification_count: 5", "      verification_count: 4"),
-                ("        - security-review", ""),
-                ("        - provenance-integrity", ""),
-                ("        - governance-policy", ""),
-                ("      all_verifications_same_head_sha: true", "      all_verifications_same_head_sha: false"),
+                ("    advisory_only: true", "    advisory_only: false"),
+                ("    may_approve: false", "    may_approve: true"),
+                ("    may_merge: false", "    may_merge: true"),
+                ("    verification_count: 5", "    verification_count: 4"),
+                ("      - deterministic-code", ""),
+                ("      - deterministic-security", ""),
+                ("      - provenance-integrity", ""),
+                ("      - governance-policy", ""),
+                ("    all_verifications_same_head_sha: true", "    all_verifications_same_head_sha: false"),
                 ("      - review_policy_changes", ""),
             )
             for before, after in mutations:
