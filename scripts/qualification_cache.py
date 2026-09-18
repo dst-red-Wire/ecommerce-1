@@ -209,27 +209,39 @@ def store_success(namespace: str, key: str, value: Any) -> None:
     safe_value = copy.deepcopy(value)
     _MEMORY[memory_key] = safe_value
 
-    path = _entry_path(namespace, key)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": _SCHEMA_VERSION,
-        "namespace": namespace,
-        "key": key,
-        "status": "PASS",
-        "value": safe_value,
-    }
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=path.parent,
-        prefix=f".{key}.",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
+    temporary: Path | None = None
+    try:
+        path = _entry_path(namespace, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": _SCHEMA_VERSION,
+            "namespace": namespace,
+            "key": key,
+            "status": "PASS",
+            "value": safe_value,
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{key}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        os.replace(temporary, path)
+        temporary = None
+    except (OSError, TypeError, ValueError):
+        # Cache availability must never become qualification authority.
+        return
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def memoize_success(
