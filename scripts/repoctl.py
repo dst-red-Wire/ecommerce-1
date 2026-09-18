@@ -517,24 +517,32 @@ def api_compat(base: str, head: str) -> int:
 
 
 def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) -> int:
-    require("ruby")
-    run(["ruby", "scripts/validate-openapi.rb"])
-    run(["ruby", "scripts/validate-contract-consistency.rb"])
-    run_ruby_tests(["tests/openapi_validator_test.rb", "tests/contract_consistency_test.rb"])
-    contract_changed = False
-    if base:
-        args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
-        if head != "WORKTREE":
-            args.append(head)
-        args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
-        contract_changed = bool(git(*args).strip())
-        api_compat(base, head)
-    if generate or contract_changed:
-        result = api_generate("go", check=True)
-        if result:
-            return result
-    print("PASS OpenAPI and cross-registry contract checks completed")
-    return 0
+    def execute() -> int:
+        require("ruby")
+        run(["ruby", "scripts/validate-openapi.rb"])
+        run(["ruby", "scripts/validate-contract-consistency.rb"])
+        run_ruby_tests(["tests/openapi_validator_test.rb", "tests/contract_consistency_test.rb"])
+        contract_changed = False
+        if base:
+            args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
+            if head != "WORKTREE":
+                args.append(head)
+            args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
+            contract_changed = bool(git(*args).strip())
+            api_compat(base, head)
+        if generate or contract_changed:
+            result = api_generate("go", check=True)
+            if result:
+                return result
+        print("PASS OpenAPI and cross-registry contract checks completed")
+        return 0
+
+    options = {
+        "base_sha": git("rev-parse", base).strip() if base else "",
+        "head": "WORKTREE" if head == "WORKTREE" else git("rev-parse", head).strip(),
+        "generate": bool(generate),
+    }
+    return _run_cached_static_gate("contracts", options, execute)
 
 
 def repository_shell_paths(root: Path = ROOT) -> list[str]:
@@ -554,31 +562,34 @@ def repository_shell_paths(root: Path = ROOT) -> list[str]:
 
 
 def automation_policy() -> int:
-    # Shell source is forbidden repository-wide after the Ansible-first migration.
-    shell_files = repository_shell_paths()
-    if shell_files:
-        print(
-            "FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration",
-            file=sys.stderr,
-        )
-        for path in shell_files:
-            print(f"  {path}", file=sys.stderr)
-        return 1
-    bad = []
-    for path in (ROOT / "platform" / "tekton").rglob("*.yaml"):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if re.search(r"scripts/[^\s'\"]+\.sh\b", text) or "#!/bin/sh" in text or "#!/usr/bin/env bash" in text:
-            bad.append(path)
-    if bad:
-        print("FAIL automation policy: Tekton must invoke native commands/Make, not shell wrappers", file=sys.stderr)
-        for path in bad:
-            print(f"  {path.relative_to(ROOT)}", file=sys.stderr)
-        return 1
-    build = ROOT / "BUILD.bazel"
-    if build.is_file() and "sh_binary(" in build.read_text(encoding="utf-8"):
-        return fail("automation policy: Bazel sh_binary is forbidden; use py_binary/native targets", 1)
-    print("PASS automation policy: zero repository *.sh files and no Tekton shell wrappers")
-    return 0
+    def execute() -> int:
+        # Shell source is forbidden repository-wide after the Ansible-first migration.
+        shell_files = repository_shell_paths()
+        if shell_files:
+            print(
+                "FAIL shell automation policy: repository *.sh files are forbidden after Ansible-first migration",
+                file=sys.stderr,
+            )
+            for path in shell_files:
+                print(f"  {path}", file=sys.stderr)
+            return 1
+        bad = []
+        for path in (ROOT / "platform" / "tekton").rglob("*.yaml"):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"scripts/[^\s'\"]+\.sh\b", text) or "#!/bin/sh" in text or "#!/usr/bin/env bash" in text:
+                bad.append(path)
+        if bad:
+            print("FAIL automation policy: Tekton must invoke native commands/Make, not shell wrappers", file=sys.stderr)
+            for path in bad:
+                print(f"  {path.relative_to(ROOT)}", file=sys.stderr)
+            return 1
+        build = ROOT / "BUILD.bazel"
+        if build.is_file() and "sh_binary(" in build.read_text(encoding="utf-8"):
+            return fail("automation policy: Bazel sh_binary is forbidden; use py_binary/native targets", 1)
+        print("PASS automation policy: zero repository *.sh files and no Tekton shell wrappers")
+        return 0
+
+    return _run_cached_static_gate("automation", {}, execute)
 
 
 def documentation_policy() -> int:
