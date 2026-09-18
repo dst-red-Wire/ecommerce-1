@@ -129,6 +129,7 @@ V5_SECTION_KEYS = {
             "infrastructure_ownership",
             "preview_lifecycle",
             "promotion",
+            "quality_cloud_engineering",
             "milestone_contract",
         }
     ),
@@ -398,6 +399,53 @@ V5_MILESTONE_DEPENDENCIES = {
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
+V5_QCE_SECTORS = (
+    "continuous_testing",
+    "test_first",
+    "test_strategy",
+    "automation",
+    "monitoring_observability",
+    "release_governance_automation",
+    "golden_path",
+    "developer_hub",
+    "measuring_engineering",
+)
+V5_QCE_SECTOR_FIELDS = frozenset({"owner", "input", "output", "evidence"})
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering"] = frozenset(
+    {
+        "status",
+        "scope",
+        "implementation_milestone",
+        "proof_milestone",
+        "sector_count",
+        "sectors",
+        "cross_cutting",
+    }
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.sectors"] = frozenset(V5_QCE_SECTORS)
+for sector in V5_QCE_SECTORS:
+    V5_SECTION_KEYS[f"developer_platform.quality_cloud_engineering.sectors.{sector}"] = V5_QCE_SECTOR_FIELDS
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting"] = frozenset(
+    {"security", "culture", "ai_agent"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.security"] = frozenset(
+    {"owner", "applies_to_all_sectors", "evidence_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.culture"] = frozenset(
+    {"owner", "applies_to_all_sectors", "explicit_ownership_required", "documentation_as_code_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.ai_agent"] = frozenset(
+    {
+        "owner",
+        "applies_to_all_sectors",
+        "role",
+        "authoritative_gate",
+        "may_bypass_required_gates",
+        "may_merge",
+        "may_deploy_production_directly",
+    }
+)
+
 V5_DEVELOPER_PLATFORM = {
     "status": "contract-locked-in-m1-implemented-from-m4",
     "scope": "management-plane",
@@ -517,6 +565,91 @@ V5_DEVELOPER_PLATFORM = {
         "same_digest_required": True,
         "environment_change": "gitops-only",
     },
+    "quality_cloud_engineering": {
+        "status": "contract-locked-in-m1",
+        "scope": "platform-operating-model",
+        "implementation_milestone": "M4-platform-baseline",
+        "proof_milestone": "M5-commerce-vertical-slice",
+        "sector_count": 9,
+        "sectors": {
+            "continuous_testing": {
+                "owner": "quality-engineering",
+                "input": "exact-head-sha-and-affected-set",
+                "output": "qualification-result",
+                "evidence": "exact-sha-qualification-evidence",
+            },
+            "test_first": {
+                "owner": "quality-engineering",
+                "input": "behavioral-or-contract-change",
+                "output": "regression-test-contract",
+                "evidence": "failing-before-passing-after-or-equivalent-regression-proof",
+            },
+            "test_strategy": {
+                "owner": "quality-engineering",
+                "input": "risk-and-affected-components",
+                "output": "selected-test-levels",
+                "evidence": "impact-to-test-routing-record",
+            },
+            "automation": {
+                "owner": "cloud-platform",
+                "input": "approved-git-change",
+                "output": "reproducible-automated-execution",
+                "evidence": "tekton-run-and-gitops-state",
+            },
+            "monitoring_observability": {
+                "owner": "cloud-platform",
+                "input": "running-workload-and-platform",
+                "output": "metrics-logs-traces-alerts",
+                "evidence": "queryable-telemetry-and-slo-signals",
+            },
+            "release_governance_automation": {
+                "owner": "cloud-platform",
+                "input": "immutable-oci-digest-and-approved-git-state",
+                "output": "governed-environment-promotion",
+                "evidence": "digest-provenance-and-promotion-record",
+            },
+            "golden_path": {
+                "owner": "developer-experience",
+                "input": "platform-capability-request",
+                "output": "standardized-pr-change",
+                "evidence": "generated-pr-conformance",
+            },
+            "developer_hub": {
+                "owner": "developer-experience",
+                "input": "catalog-and-platform-capabilities",
+                "output": "backstage-self-service-interface",
+                "evidence": "catalog-template-and-action-conformance",
+            },
+            "measuring_engineering": {
+                "owner": "developer-experience",
+                "input": "pr-ci-preview-release-events",
+                "output": "engineering-performance-metrics",
+                "evidence": "reproducible-metric-records",
+            },
+        },
+        "cross_cutting": {
+            "security": {
+                "owner": "security-engineering",
+                "applies_to_all_sectors": True,
+                "evidence_required": "security-review-policy-and-runtime-controls",
+            },
+            "culture": {
+                "owner": "platform-and-product-teams",
+                "applies_to_all_sectors": True,
+                "explicit_ownership_required": True,
+                "documentation_as_code_required": True,
+            },
+            "ai_agent": {
+                "owner": "platform-engineering",
+                "applies_to_all_sectors": True,
+                "role": "assistant",
+                "authoritative_gate": False,
+                "may_bypass_required_gates": False,
+                "may_merge": False,
+                "may_deploy_production_directly": False,
+            },
+        },
+    },
     "milestone_contract": {
         "M1-monorepo-bootstrap": {
             "outcome": "stable-pr-driven-contract-locked",
@@ -529,6 +662,7 @@ V5_DEVELOPER_PLATFORM = {
                 "application-qualification",
                 "frontend-go-templ-qualification",
                 "developer-platform-contract-locked",
+                "quality-cloud-engineering-contract-locked",
             ],
             "does_not_require": [
                 "backstage-deployed",
@@ -822,6 +956,40 @@ def lock_schema_errors(lock):
         errors.append("business.forbidden_services must be a list")
     elif forbidden:
         errors.append("business.forbidden_services must be empty in the approved V5 schema")
+
+    qce = lock["developer_platform"]["quality_cloud_engineering"]
+    sectors = qce["sectors"]
+    if qce["sector_count"] != 9 or set(sectors) != set(V5_QCE_SECTORS):
+        errors.append("quality_cloud_engineering must declare exactly the nine approved QCE sectors")
+    for sector_name in V5_QCE_SECTORS:
+        sector = sectors[sector_name]
+        for field in V5_QCE_SECTOR_FIELDS:
+            value = sector[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"quality_cloud_engineering sector {sector_name} must define non-empty owner/input/output/evidence"
+                )
+                break
+    cross_cutting = qce["cross_cutting"]
+    if not cross_cutting["security"]["applies_to_all_sectors"]:
+        errors.append("quality_cloud_engineering security must apply to all sectors")
+    culture = cross_cutting["culture"]
+    if not (
+        culture["applies_to_all_sectors"]
+        and culture["explicit_ownership_required"]
+        and culture["documentation_as_code_required"]
+    ):
+        errors.append("quality_cloud_engineering culture must preserve ownership and documentation-as-code")
+    ai_agent = cross_cutting["ai_agent"]
+    if (
+        not ai_agent["applies_to_all_sectors"]
+        or ai_agent["role"] != "assistant"
+        or ai_agent["authoritative_gate"]
+        or ai_agent["may_bypass_required_gates"]
+        or ai_agent["may_merge"]
+        or ai_agent["may_deploy_production_directly"]
+    ):
+        errors.append("quality_cloud_engineering AI agent must remain non-authoritative")
 
     prod = lock["prod_certified_topology"]
     for field in V5_PROD_TOPOLOGY_KEYS - {"sites"}:
