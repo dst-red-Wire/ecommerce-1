@@ -31,9 +31,22 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 "drift_exit_codes": [3],
             },
             "validation": {
-                "init_args": ["init", "-backend=false", "-input=false"],
+                "provider_lock_authority": "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
+            },
+        }
+        provider_lock = {
+            "providers": {
+                "hcloud": {
+                    "source": "registry.terraform.io/hetznercloud/hcloud",
+                    "version": "1.68.0",
+                    "constraints": "= 1.68.0",
+                    "hashes": ["h1:test", "zh:test"],
+                }
+            },
+            "qualification": {
+                "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
-                "module_validation_in_temporary_copy": True,
+                "provider_plugin_cache": {},
             },
         }
 
@@ -45,8 +58,14 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         with (
-            mock.patch.object(pathlib.Path, "rglob", return_value=[MOD.ROOT / "platform/example.tf"]),
+            mock.patch.object(
+                pathlib.Path,
+                "rglob",
+                return_value=[MOD.ROOT / "platform/terraform/example.tf"],
+            ),
             mock.patch.object(MOD, "source_quality_adapter", return_value=policy),
+            mock.patch.object(MOD, "terraform_provider_lock_contract", return_value=provider_lock),
+            mock.patch.object(MOD, "terraform_provider_plugin_cache_dir", return_value=None),
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
             mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
@@ -54,6 +73,36 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+
+    def test_terraform_provider_lock_is_central_and_exact(self):
+        contract = MOD.terraform_provider_lock_contract()
+        self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
+        self.assertEqual("platform/terraform", contract["scope"])
+        self.assertEqual("exact", contract["status"])
+
+        provider = contract["providers"]["hcloud"]
+        self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])
+        self.assertEqual("1.68.0", provider["version"])
+        self.assertEqual("= 1.68.0", provider["constraints"])
+        self.assertTrue(any(value.startswith("h1:") for value in provider["hashes"]))
+        self.assertTrue(any(value.startswith("zh:") for value in provider["hashes"]))
+
+        qualification = contract["qualification"]
+        self.assertEqual("non-authoritative", qualification["repository_lockfiles"]["authority"])
+        self.assertFalse(qualification["repository_lockfiles"]["qualification_input"])
+        self.assertIn("-lockfile=readonly", qualification["init_args"])
+
+    def test_terraform_native_lockfile_is_generated_from_central_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".terraform.lock.hcl"
+            MOD.write_terraform_provider_lock(path)
+            text = path.read_text(encoding="utf-8")
+
+        self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
+        self.assertIn('version     = "1.68.0"', text)
+        self.assertIn('constraints = "= 1.68.0"', text)
+        self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
+
 
     def test_source_quality_policy_is_central_repository_authority(self):
         policy = MOD.source_quality_policy()
@@ -80,6 +129,10 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         advisory = set(policy["adapters"]["ansible"]["lint"]["advisory_rules"])
         self.assertTrue(
             {"partial-become", "latest[git]", "no-handler", "yaml[empty-lines]"}.issubset(advisory)
+        )
+        self.assertEqual(
+            "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
+            policy["adapters"]["terraform"]["validation"]["provider_lock_authority"],
         )
 
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
