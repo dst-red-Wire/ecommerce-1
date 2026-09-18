@@ -1926,6 +1926,85 @@ def github_exact_ci_status(gh: str, head_sha: str) -> str:
     return f"{latest.get('state', 'unknown')} | {REMOTE_STATUS_CONTEXT} | {head_sha}"
 
 
+MERGE_VERIFICATION_NAMES = (
+    "deterministic-qualification",
+    "deterministic-code",
+    "deterministic-security",
+    "provenance-integrity",
+    "governance-policy",
+)
+
+
+def _derive_merge_verifications(payload: dict, base: str, head: str) -> dict:
+    """Derive merge attestations from one exact, complete qualification run.
+
+    These checks do not replay the suites. They classify already-recorded gate
+    results and fail closed when the inventory is incomplete or provenance is
+    not exact-commit bound.
+    """
+    records = payload.get("gates", [])
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        records = []
+
+    by_name = {row.get("gate"): row for row in records if isinstance(row.get("gate"), str)}
+    global_names = {name for name, _ in _global_gate_commands(base, head)}
+    component_names = set(_normalized_component_gates(payload.get("affected_components", [])))
+    expected_names = global_names | component_names
+    inventory_complete = (
+        len(by_name) == len(records)
+        and set(by_name) == expected_names
+        and all(
+            row.get("status") == "PASS"
+            or (
+                row.get("status") == "SKIP"
+                and row.get("gate") in component_names
+                and _component_command(row["gate"])[0] is None
+            )
+            for row in records
+        )
+    )
+
+    def sources_pass(names: set[str]) -> bool:
+        return bool(names) and all(by_name.get(name, {}).get("status") == "PASS" for name in names)
+
+    code_sources = expected_names - {"security"}
+    security_sources = {"security", "governance", "contracts", "automation"}
+    security_sources |= {name for name in component_names if name in {"platform:terraform", "platform:ansible", "system"}}
+
+    qualification_ok = payload.get("status") == "PASS" and inventory_complete
+    code_ok = qualification_ok and sources_pass(code_sources)
+    security_ok = qualification_ok and sources_pass(security_sources)
+    provenance_ok = (
+        qualification_ok
+        and payload.get("exact_commit_evidence") is True
+        and head != "WORKTREE"
+        and payload.get("head_sha") == git("rev-parse", head).strip()
+        and payload.get("base_sha") == git("rev-parse", base).strip()
+        and isinstance(payload.get("qualification_identity"), str)
+        and bool(payload.get("qualification_identity"))
+        and isinstance(payload.get("head_tree_sha"), str)
+        and bool(payload.get("head_tree_sha"))
+    )
+    governance_ok = qualification_ok and by_name.get("governance", {}).get("status") == "PASS"
+
+    checks = {
+        "deterministic-qualification": (qualification_ok, sorted(expected_names)),
+        "deterministic-code": (code_ok, sorted(code_sources)),
+        "deterministic-security": (security_ok, sorted(security_sources)),
+        "provenance-integrity": (provenance_ok, []),
+        "governance-policy": (governance_ok, ["governance"]),
+    }
+    return {
+        name: {
+            "status": "PASS" if ok else "BLOCKED",
+            "head_sha": payload.get("head_sha"),
+            "base_sha": payload.get("base_sha"),
+            "source_gates": source_gates,
+        }
+        for name, (ok, source_gates) in checks.items()
+    }
+
+
 def write_evidence(
     base: str, head: str, paths: list[str], components: list[str], records: list[dict], verification: dict | None = None
 ) -> Path:
@@ -1957,6 +2036,7 @@ def write_evidence(
         "metrics": evidence_metrics(records),
         "verification": verification_data,
     }
+    payload["merge_verifications"] = _derive_merge_verifications(payload, base, head)
     if head == "WORKTREE":
         payload["source_head_sha"] = verification_data.get("source_head_sha", current_head_sha)
         payload["source_tree_sha"] = verification_data.get("source_tree_sha")
