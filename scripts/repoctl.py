@@ -907,7 +907,7 @@ def frontend(action: str, scope: str = "") -> int:
     # `repoctl frontend check storefront` used by existing Tekton tasks.
     if not scope:
         scope, action = action, "check"
-    if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
+    if action not in {"check", "lint", "test", "build", "generate"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
     ensure_developer("go,cgo")
     managed_bin = Path.home() / ".local/bin"
@@ -925,6 +925,17 @@ def frontend(action: str, scope: str = "") -> int:
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
         raise RuntimeError("TEMPL_VERSION is missing from central toolchain lock")
+    if action == "generate":
+        if scope != "all":
+            return fail("frontend generate is repository-wide; scope must be all")
+        run(
+            [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+            cwd=frontend_root,
+            env=env,
+        )
+        print("PASS frontend generated from central templ version")
+        return 0
+
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
