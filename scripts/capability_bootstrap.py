@@ -117,6 +117,21 @@ def validate_toolchain_projections(contract: dict | None = None) -> None:
     if projected_collections != expected_collections:
         raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
 
+    bazel = lock.get("native_tool_configs", {}).get("bazel", {})
+    version_ref = bazel.get("version_ref")
+    expected_bazel = lock["versions"].get(version_ref) if isinstance(version_ref, str) else None
+    if not expected_bazel or (ROOT / ".bazelversion").read_text(encoding="utf-8").strip() != expected_bazel:
+        raise ValueError(".bazelversion drifted from central toolchain lock")
+
+    expected_bazelrc = [str(line) for line in bazel.get("bazelrc_lines", [])]
+    actual_bazelrc = [
+        line.rstrip()
+        for line in (ROOT / ".bazelrc").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if actual_bazelrc != expected_bazelrc:
+        raise ValueError(".bazelrc drifted from central toolchain lock")
+
     seed = SEED_LOCK.read_text(encoding="utf-8").lower()
     roots = lock.get("language_contracts", {}).get("python", {}).get("seed_roots", {})
     for package, version_key in roots.items():
