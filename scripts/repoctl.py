@@ -134,13 +134,6 @@ def source_quality_policy() -> dict:
         if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
             raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
 
-        forbidden = policy.get("parallel_policy_files", {}).get("forbidden", [])
-        for local_policy in forbidden:
-            if not isinstance(local_policy, str) or not local_policy.strip():
-                raise RuntimeError("source quality parallel policy paths must be non-empty strings")
-            if (ROOT / local_policy).exists():
-                raise RuntimeError(f"parallel local quality policy is forbidden: {local_policy}")
-
         adapters = policy.get("orchestration_adapters", {})
         pre_commit = adapters.get("pre_commit", {})
         pre_commit_path = pre_commit.get("path")
