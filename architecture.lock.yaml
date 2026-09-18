@@ -330,6 +330,7 @@ machine_contracts:
   service_ownership: config/contracts/service-ownership.yaml
   service_resilience_policy: config/contracts/service-resilience-policy.yaml
   service_slo: config/contracts/service-slo.yaml
+  source_quality_policy: config/contracts/source-quality-policy.yaml
   tekton_trigger_runtime: config/contracts/tekton-trigger-runtime.yaml
   telemetry_data_policy: config/contracts/telemetry-data-policy.yaml
   time_authority_policy: config/contracts/time-authority-policy.yaml
