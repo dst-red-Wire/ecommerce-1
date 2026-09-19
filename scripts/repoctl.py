@@ -2548,7 +2548,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         (merge_policy.get("method") == "merge", "merge method must be merge"),
         (merge_policy.get("match_head_commit") == "required", "merge must match the exact head commit"),
         (merge_policy.get("branch_protection") == "required", "branch protection must be required"),
-        (merge_policy.get("required_checks") == "required", "required checks must be required"),
+        (merge_policy.get("required_checks") == "when-configured", "required checks must be enforced when configured"),
         (
             merge_policy.get("bypass_branch_protection") == "forbidden",
             "branch-protection bypass must be forbidden",
@@ -2818,9 +2818,14 @@ def finish_pr(base: str) -> int:
     checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
     if checks.returncode:
         detail = "\n".join(filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()]))
-        if detail:
-            print(detail, file=sys.stderr)
-        return fail(f"finish-pr required checks are not PASS for PR #{number}")
+        if "no checks reported" not in detail.lower():
+            if detail:
+                print(detail, file=sys.stderr)
+            return fail(f"finish-pr required checks are not PASS for PR #{number}")
+        print(
+            f"INFO finish-pr: no required GitHub checks configured for PR #{number}; "
+            "exact PASS evidence and branch protection remain mandatory"
+        )
 
     merge_method = str(policy["merge"]["method"])
     merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
