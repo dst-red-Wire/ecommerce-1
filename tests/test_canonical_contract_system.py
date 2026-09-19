@@ -73,12 +73,15 @@ class CanonicalContractSystemTest(unittest.TestCase):
         architecture_schema = schema["architecture_lock"]
         self.assertIn("repository_governance", architecture_schema["section_keys"])
         self.assertIn("prod_certified_topology", architecture_schema["section_keys"])
+        self.assertEqual(5, architecture_schema["expected_version"])
+        self.assertEqual("locked-for-build", architecture_schema["expected_status"])
 
         source = (ROOT / "scripts" / "architecture_authority.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("CONTRACT_SCHEMA_AUTHORITY", source)
+        self.assertIn("_discover_canonical_contract", source)
         self.assertIn("_ARCHITECTURE_LOCK_SCHEMA", source)
+        self.assertNotIn("config/contracts/contract-schema.yaml", source)
         self.assertNotIn('"repository_governance": frozenset(', source)
         self.assertNotIn('"milestone_dependencies"] = frozenset', source)
 

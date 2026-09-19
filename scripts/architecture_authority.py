@@ -8,8 +8,6 @@ import re
 import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
-CONTRACT_SCHEMA_AUTHORITY = "config/contracts/contract-schema.yaml"
-LOCK_STATUS = "locked-for-build"
 CANONICAL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -32,15 +30,36 @@ def _load_canonical_yaml(relative):
     return json.loads(completed.stdout)
 
 
+def _discover_canonical_contract(kind):
+    """Find exactly one canonical contract by declared kind without a path whitelist."""
+    contract_root = CANONICAL_ROOT / "config" / "contracts"
+    matches = []
+    for path in sorted(contract_root.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml", ".json"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not re.search(rf"(?m)^kind:\\s*{re.escape(kind)}\\s*$", text):
+            continue
+        relative = str(path.relative_to(CANONICAL_ROOT))
+        data = _load_canonical_yaml(relative)
+        if data.get("kind") == kind:
+            matches.append((relative, data))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one canonical contract kind {kind}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 _CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
 INDEX = _CANONICAL_LOCK["topology_contracts"]["exact_index"]
 V5_FRONTENDS = list(_CANONICAL_LOCK["business"]["frontends"])
 EXPECTED_V5_FRONTEND_RUNTIME = dict(_CANONICAL_LOCK["business"]["frontend_runtime"])
-_CONTRACT_SCHEMA = _load_canonical_yaml(CONTRACT_SCHEMA_AUTHORITY)
-if _CONTRACT_SCHEMA.get("kind") != "CanonicalContractSchema":
-    raise RuntimeError("contract schema authority must be CanonicalContractSchema")
+CONTRACT_SCHEMA_AUTHORITY, _CONTRACT_SCHEMA = _discover_canonical_contract(
+    "CanonicalContractSchema"
+)
 if _CANONICAL_LOCK.get("machine_contracts", {}).get("contract_schema") != CONTRACT_SCHEMA_AUTHORITY:
-    raise RuntimeError("architecture.lock.yaml must register the canonical contract schema authority")
+    raise RuntimeError("architecture.lock.yaml must register the discovered canonical contract schema")
 
 
 def _exact_schema_keys(value, label):
@@ -57,6 +76,13 @@ def _exact_schema_keys(value, label):
 _ARCHITECTURE_LOCK_SCHEMA = _CONTRACT_SCHEMA.get("architecture_lock")
 if not isinstance(_ARCHITECTURE_LOCK_SCHEMA, dict):
     raise RuntimeError("contract schema must declare architecture_lock")
+
+ARCHITECTURE_VERSION = _ARCHITECTURE_LOCK_SCHEMA.get("expected_version")
+LOCK_STATUS = _ARCHITECTURE_LOCK_SCHEMA.get("expected_status")
+if not isinstance(ARCHITECTURE_VERSION, int) or isinstance(ARCHITECTURE_VERSION, bool):
+    raise RuntimeError("contract schema architecture_lock.expected_version must be an integer")
+if not isinstance(LOCK_STATUS, str) or not LOCK_STATUS:
+    raise RuntimeError("contract schema architecture_lock.expected_status must be a non-empty string")
 
 V5_ROOT_KEYS = _exact_schema_keys(
     _ARCHITECTURE_LOCK_SCHEMA.get("root_keys"),
@@ -829,8 +855,8 @@ def validate(root):
             return structural_errors
         if lock.get("status") != LOCK_STATUS:
             errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
-        if lock["version"] != 5:
-            errors.append("architecture.lock.yaml must be version 5")
+        if lock["version"] != ARCHITECTURE_VERSION:
+            errors.append(f"architecture.lock.yaml must be version {ARCHITECTURE_VERSION}")
         topology_contracts = lock.get("topology_contracts")
         errors.extend(registry_coverage_errors(root, lock))
         if errors:

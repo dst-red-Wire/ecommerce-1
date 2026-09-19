@@ -25,6 +25,8 @@ rules:
   generic_validation: required
 
 architecture_lock:
+  expected_version: 5
+  expected_status: locked-for-build
   root_keys:
     - version
     - status
