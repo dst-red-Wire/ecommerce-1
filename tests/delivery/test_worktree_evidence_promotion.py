@@ -18,6 +18,13 @@ MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 
 class WorktreeEvidencePromotionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Load the repository-owned execution policy before individual tests
+        # replace REPOCTL.ROOT with intentionally minimal temporary Git repos.
+        REPOCTL.execution_environment_policy()
+
     def init_repo(self, root: Path) -> str:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
