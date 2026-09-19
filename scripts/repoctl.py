@@ -741,6 +741,14 @@ def developer_state_ready(tags: str) -> bool:
         got = run([go, "version"], check=False, capture=True)
         if got.returncode or f"go{pins.get('GO_VERSION', '')}" not in got.stdout:
             return False
+    if "templ" in wanted:
+        managed_bin = managed_bin_dirs()[0]
+        templ = managed_bin / "templ"
+        if not templ.is_file() or not os.access(templ, os.X_OK):
+            return False
+        got = run([str(templ), "version"], check=False, capture=True)
+        if got.returncode or got.stdout.strip() != f"v{pins.get('TEMPL_VERSION', '')}" or got.stderr.strip():
+            return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
     if "quality_tools" in wanted:
@@ -1106,7 +1114,7 @@ def frontend(action: str, scope: str = "") -> int:
         scope, action = action, "check"
     if action not in {"check", "lint", "test", "build", "generate", "run"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
-    ensure_developer("go,cgo")
+    ensure_developer("go,cgo,templ")
     managed_bin = managed_bin_dirs()[0]
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
@@ -1115,8 +1123,9 @@ def frontend(action: str, scope: str = "") -> int:
     env.pop("GOTOOLDIR", None)
     go = managed_bin / "go"
     gofmt = managed_bin / "gofmt"
-    if not go.is_file() or not gofmt.is_file():
-        raise RuntimeError("validated managed Go provider is unavailable")
+    templ = managed_bin / "templ"
+    if not go.is_file() or not gofmt.is_file() or not templ.is_file():
+        raise RuntimeError("validated managed Go/templ provider is unavailable")
     targets = ["storefront", "admin"] if scope == "all" else [scope]
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
@@ -1130,11 +1139,7 @@ def frontend(action: str, scope: str = "") -> int:
     if action == "generate":
         if scope != "all":
             return fail("frontend generate is repository-wide; scope must be all")
-        run(
-            [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
-            cwd=frontend_root,
-            env=env,
-        )
+        run([str(templ), "generate"], cwd=frontend_root, env=env)
         print("PASS frontend generated from central templ version")
         return 0
 
@@ -1147,11 +1152,7 @@ def frontend(action: str, scope: str = "") -> int:
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
                 generated_root = Path(temp_dir) / "frontend"
                 shutil.copytree(frontend_root, generated_root)
-                run(
-                    [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
-                    cwd=generated_root,
-                    env=env,
-                )
+                run([str(templ), "generate"], cwd=generated_root, env=env)
                 committed = sorted(frontend_root.rglob("*_templ.go"))
                 generated = sorted(generated_root.rglob("*_templ.go"))
                 relative_committed = [path.relative_to(frontend_root) for path in committed]
