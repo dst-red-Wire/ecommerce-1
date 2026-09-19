@@ -39,6 +39,41 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertEqual("CIEvidencePolicy", evidence["kind"])
         self.assertIn("repository.ci.base-resolution", evidence["authority_claims"])
 
+    def test_review_policy_is_required_and_agent_merge_is_fail_closed(self):
+        lock = MOD.load_yaml(ROOT, "architecture.lock.yaml")
+        required = lock["repository_governance"]["canonical_contract_system"]["required_contracts"]
+        self.assertIn("review_policy", required)
+
+        policy = MOD.load_yaml(ROOT, lock["machine_contracts"]["review_policy"])
+        self.assertEqual("PullRequestReviewPolicy", policy["kind"])
+        merge = policy["pull_request_review"]["merge_execution"]
+        ai = policy["pull_request_review"]["ai_reviewer"]
+
+        self.assertEqual("conditional", ai["may_merge"])
+        self.assertFalse(ai["may_approve"])
+        self.assertEqual("conditional", merge["allowed"])
+        self.assertEqual("block", merge["failure_mode"])
+
+        owner = merge["conditions"]["owner_authorization"]
+        evidence = merge["conditions"]["evidence"]
+        pr_state = merge["conditions"]["pull_request"]
+        invalidation = merge["conditions"]["invalidation"]
+
+        self.assertTrue(owner["required"])
+        self.assertTrue(owner["exact_head_sha_required"])
+        self.assertTrue(owner["exact_scope_required"])
+        self.assertEqual("PASS", evidence["status"])
+        self.assertEqual("exact_commit", evidence["evidence_kind"])
+        self.assertTrue(evidence["exact_commit_evidence"])
+        self.assertTrue(evidence["exact_head_sha_required"])
+        self.assertTrue(evidence["exact_base_sha_required"])
+        self.assertEqual("zero", evidence["failed_gates_required"])
+        self.assertFalse(pr_state["draft"])
+        self.assertTrue(pr_state["mergeable"])
+        self.assertEqual("zero", pr_state["unresolved_blocking_threads"])
+        self.assertTrue(invalidation["head_change_invalidates_authorization"])
+        self.assertTrue(invalidation["head_change_invalidates_evidence"])
+
     def test_materializers_do_not_treat_legacy_versions_as_authority(self):
         ansible_defaults = (
             ROOT / "platform/ansible/roles/developer_toolchain/defaults/main.yml"

@@ -35,6 +35,7 @@ repository_governance:
     required_contracts:
       - contract_schema
       - ci_evidence
+      - review_policy
       - source_quality_policy
       - terraform_provider_lock
       - security_scan_policy

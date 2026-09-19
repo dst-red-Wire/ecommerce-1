@@ -178,6 +178,98 @@ def validate_repository(root: Path = ROOT) -> None:
         if (root/relative).exists():
             raise ContractError(f"parallel policy authority is forbidden: {relative}")
 
+    review=canonical["review_policy"]
+    pull_request_review=review.get("pull_request_review")
+    if not isinstance(pull_request_review,dict):
+        raise ContractError("review policy must declare pull_request_review")
+
+    owner_authorization=pull_request_review.get("owner_authorization")
+    deterministic_gate=pull_request_review.get("deterministic_gate")
+    ai_reviewer=pull_request_review.get("ai_reviewer")
+    merge_execution=pull_request_review.get("merge_execution")
+    human_gate=pull_request_review.get("human_gate")
+
+    if not all(isinstance(value,dict) for value in (
+        owner_authorization,
+        deterministic_gate,
+        ai_reviewer,
+        merge_execution,
+        human_gate,
+    )):
+        raise ContractError("review policy merge governance sections must be mappings")
+
+    if owner_authorization.get("authority_source")!="architecture.lock.yaml#repository_governance.owner_authorization":
+        raise ContractError("review policy owner authorization must inherit architecture.lock.yaml")
+    if owner_authorization.get("local_override")!="forbidden":
+        raise ContractError("review policy owner authorization local override must be forbidden")
+
+    if (
+        deterministic_gate.get("required_for_merge") is not True
+        or deterministic_gate.get("binds_exact_commit_sha") is not True
+        or deterministic_gate.get("fail_closed") is not True
+    ):
+        raise ContractError("review policy deterministic merge gate must bind exact commit evidence and fail closed")
+
+    if ai_reviewer.get("may_approve") is not False:
+        raise ContractError("AI reviewer approval must remain forbidden")
+    if ai_reviewer.get("may_merge")!="conditional":
+        raise ContractError("AI merge permission must be conditional")
+    if ai_reviewer.get("may_sign") is not False or ai_reviewer.get("may_promote") is not False:
+        raise ContractError("AI signing and promotion must remain forbidden")
+
+    if (
+        merge_execution.get("actor")!="chatgpt-agent"
+        or merge_execution.get("allowed")!="conditional"
+        or merge_execution.get("failure_mode")!="block"
+    ):
+        raise ContractError("agent merge execution must be conditional and fail closed")
+
+    conditions=merge_execution.get("conditions")
+    if not isinstance(conditions,dict):
+        raise ContractError("agent merge execution must declare conditions")
+
+    merge_owner=conditions.get("owner_authorization")
+    evidence=conditions.get("evidence")
+    pr_state=conditions.get("pull_request")
+    invalidation=conditions.get("invalidation")
+    if not all(isinstance(value,dict) for value in (merge_owner,evidence,pr_state,invalidation)):
+        raise ContractError("agent merge condition groups must be mappings")
+
+    if (
+        merge_owner.get("required") is not True
+        or merge_owner.get("authority_source")!="architecture.lock.yaml#repository_governance.owner_authorization"
+        or merge_owner.get("exact_head_sha_required") is not True
+        or merge_owner.get("exact_scope_required") is not True
+    ):
+        raise ContractError("agent merge requires exact owner authorization")
+
+    if (
+        evidence.get("required") is not True
+        or evidence.get("status")!="PASS"
+        or evidence.get("evidence_kind")!="exact_commit"
+        or evidence.get("exact_commit_evidence") is not True
+        or evidence.get("exact_head_sha_required") is not True
+        or evidence.get("exact_base_sha_required") is not True
+        or evidence.get("failed_gates_required")!="zero"
+    ):
+        raise ContractError("agent merge requires exact PASS evidence with zero failed gates")
+
+    if (
+        pr_state.get("draft") is not False
+        or pr_state.get("mergeable") is not True
+        or pr_state.get("unresolved_blocking_threads")!="zero"
+    ):
+        raise ContractError("agent merge requires a non-draft mergeable PR with zero unresolved blocking threads")
+
+    if (
+        invalidation.get("head_change_invalidates_authorization") is not True
+        or invalidation.get("head_change_invalidates_evidence") is not True
+    ):
+        raise ContractError("agent merge authorization and evidence must expire on head change")
+
+    if human_gate.get("merge_execution_satisfaction")!="exact-owner-authorization":
+        raise ContractError("human merge gate must be satisfied only by exact owner authorization")
+
     toolchain=canonical["toolchain_lock"]
     if toolchain.get("serialization") != "json":
         raise ContractError("toolchain lock serialization must remain json for bootstrap/Ansible consumers")
