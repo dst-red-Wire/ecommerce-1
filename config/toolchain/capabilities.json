@@ -832,7 +832,8 @@
       "rg",
       "fd",
       "nx",
-      "ast-grep"
+      "ast-grep",
+      "bazel"
     ],
     "delivery": [
       "python3",
