@@ -68,6 +68,20 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertEqual("isolated", projection["projection_mutation"])
         self.assertEqual("forbidden", projection["symlinks"])
 
+    def test_architecture_schema_is_centralized_in_contract_schema(self):
+        schema = MOD.load_yaml(ROOT, "config/contracts/contract-schema.yaml")
+        architecture_schema = schema["architecture_lock"]
+        self.assertIn("repository_governance", architecture_schema["section_keys"])
+        self.assertIn("prod_certified_topology", architecture_schema["section_keys"])
+
+        source = (ROOT / "scripts" / "architecture_authority.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("CONTRACT_SCHEMA_AUTHORITY", source)
+        self.assertIn("_ARCHITECTURE_LOCK_SCHEMA", source)
+        self.assertNotIn('"repository_governance": frozenset(', source)
+        self.assertNotIn('"milestone_dependencies"] = frozenset', source)
+
     def test_architecture_governance_keys_are_not_self_authorizing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

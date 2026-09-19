@@ -109,6 +109,35 @@ def validate_repository(root: Path = ROOT) -> None:
     if not statuses:
         raise ContractError("contract schema canonical_statuses must be non-empty")
 
+    architecture_schema=schema.get("architecture_lock")
+    if not isinstance(architecture_schema,dict):
+        raise ContractError("contract schema must declare architecture_lock")
+    root_keys=architecture_schema.get("root_keys")
+    section_keys=architecture_schema.get("section_keys")
+    if (
+        not isinstance(root_keys,list)
+        or not root_keys
+        or any(not isinstance(key,str) or not key for key in root_keys)
+        or len(root_keys)!=len(set(root_keys))
+    ):
+        raise ContractError("contract schema architecture_lock.root_keys must be unique non-empty strings")
+    if not isinstance(section_keys,dict) or not section_keys:
+        raise ContractError("contract schema architecture_lock.section_keys must be a non-empty mapping")
+    for section,keys in section_keys.items():
+        if not isinstance(section,str) or not section:
+            raise ContractError("contract schema section names must be non-empty strings")
+        if section.split(".",1)[0] not in root_keys:
+            raise ContractError(f"contract schema section is outside architecture root: {section}")
+        if (
+            not isinstance(keys,list)
+            or not keys
+            or any(not isinstance(key,str) or not key for key in keys)
+            or len(keys)!=len(set(keys))
+        ):
+            raise ContractError(
+                f"contract schema section keys must be unique non-empty strings: {section}"
+            )
+
     claims:dict[str,str]={}
     canonical:dict[str,dict]={}
     for key in required:
