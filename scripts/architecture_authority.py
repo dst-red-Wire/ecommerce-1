@@ -38,7 +38,7 @@ def _discover_canonical_contract(kind):
         if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml", ".json"}:
             continue
         text = path.read_text(encoding="utf-8")
-        if not re.search(rf"(?m)^kind:\\s*{re.escape(kind)}\\s*$", text):
+        if not re.search(rf"(?m)^kind:\s*{re.escape(kind)}\s*$", text):
             continue
         relative = str(path.relative_to(CANONICAL_ROOT))
         data = _load_canonical_yaml(relative)

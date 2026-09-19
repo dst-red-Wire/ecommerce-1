@@ -112,6 +112,12 @@ def validate_repository(root: Path = ROOT) -> None:
     architecture_schema=schema.get("architecture_lock")
     if not isinstance(architecture_schema,dict):
         raise ContractError("contract schema must declare architecture_lock")
+    expected_version=architecture_schema.get("expected_version")
+    expected_status=architecture_schema.get("expected_status")
+    if not isinstance(expected_version,int) or isinstance(expected_version,bool):
+        raise ContractError("contract schema architecture_lock.expected_version must be an integer")
+    if not isinstance(expected_status,str) or not expected_status:
+        raise ContractError("contract schema architecture_lock.expected_status must be a non-empty string")
     root_keys=architecture_schema.get("root_keys")
     section_keys=architecture_schema.get("section_keys")
     if (
