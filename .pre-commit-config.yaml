@@ -6,6 +6,7 @@ repos:
         entry: python3 scripts/repoctl.py precommit
         language: system
         pass_filenames: false
+        stages: [pre-commit]
       - id: affected-prepush
         name: ecommerce-1 exact-SHA affected pre-push
         entry: python3 scripts/repoctl.py prepush
