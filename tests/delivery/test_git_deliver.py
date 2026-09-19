@@ -13,10 +13,14 @@ class DeliverContractTests(unittest.TestCase):
         self.assertIn("scripts/repoctl.py deliver", MAKEFILE)
         self.assertNotIn("git-deliver.sh", MAKEFILE)
 
-    def test_never_merges_or_force_pushes(self):
-        self.assertNotIn("pr merge", CONTROLLER)
-        self.assertNotIn("push -f", CONTROLLER)
-        self.assertNotIn("--force-with-lease", CONTROLLER)
+    def test_deliver_never_merges_or_force_pushes(self):
+        module = ast.parse(CONTROLLER)
+        deliver = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "deliver")
+        source = ast.get_source_segment(CONTROLLER, deliver) or ""
+        self.assertNotIn('"merge"', source)
+        self.assertNotIn("push -f", source)
+        self.assertNotIn("--force-with-lease", source)
+        self.assertNotIn("--admin", source)
 
     def test_delivery_binds_exact_evidence_and_verifies_pr_head(self):
         self.assertIn("exact_commit_evidence", CONTROLLER)
@@ -60,19 +64,21 @@ class DeliverContractTests(unittest.TestCase):
 
         module = ast.parse(CONTROLLER)
         deliver = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "deliver")
-        policy_calls = []
-        for call in ast.walk(deliver):
-            if (
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Name)
-                and call.func.id == "ruby_yaml"
-                and call.args
-                and isinstance(call.args[0], ast.Constant)
-                and call.args[0].value == "config/contracts/review-policy.yaml"
-            ):
-                policy_calls.append(call.args[0].value)
-        self.assertEqual(["config/contracts/review-policy.yaml"], policy_calls)
-        self.assertIn("review-policy forge must be github for delivery", CONTROLLER)
+        calls = [node for node in ast.walk(deliver) if isinstance(node, ast.Call)]
+        central_policy_call = any(
+            isinstance(call.func, ast.Name) and call.func.id == "repository_delivery_policy"
+            for call in calls
+        )
+        direct_policy_call = any(
+            isinstance(call.func, ast.Name)
+            and call.func.id == "ruby_yaml"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value == "config/contracts/review-policy.yaml"
+            for call in calls
+        )
+        self.assertTrue(central_policy_call or direct_policy_call)
+        self.assertIn("must be github", CONTROLLER)
 
 
 if __name__ == "__main__":

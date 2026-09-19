@@ -92,8 +92,10 @@ class TektonRuntimeWiringTests(unittest.TestCase):
 
     def test_make_exposes_one_thin_runtime_proof_launcher(self):
         makefile = self.read("Makefile")
+        repoctl = self.read("scripts/repoctl.py")
         self.assertIn("tekton-proof:", makefile)
-        self.assertIn("platform/ansible/tekton-proof.yml", makefile)
+        self.assertIn("scripts/repoctl.py tekton-proof", makefile)
+        self.assertIn("platform/ansible/tekton-proof.yml", repoctl)
         self.assertIn("BASE_SHA", makefile)
         self.assertIn("PARENT_SHA", makefile)
         self.assertIn("HEAD_SHA", makefile)
