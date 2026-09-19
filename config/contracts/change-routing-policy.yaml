@@ -1,0 +1,29 @@
+version: 1
+kind: ChangeRoutingPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: qualification-routing
+authority_claims:
+  - repository.change-routing
+principles:
+  transverse_contract_change_routes_global: true
+  unknown_path_fail_closed: true
+  affected_component_selection_is_deterministic: true
+authority:
+  classifier: scripts/ci-affected.rb
+  dependency_map: architecture.lock.yaml#machine_contracts.dependency_map
+routing:
+  registered_contract_default: force-all
+  unregistered_contract: reject
+  semantic_roles:
+    - service_ownership
+    - dependency_map
+    - event_contracts
+    - public_api_contracts
+  global_only_roles:
+    - runtime_efficiency
+global_inputs:
+  - architecture.lock.yaml
+  - config/contracts/**
+  - scripts/repoctl.py
+  - scripts/canonical_contracts.py

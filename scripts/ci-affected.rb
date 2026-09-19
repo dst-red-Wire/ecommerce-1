@@ -12,13 +12,6 @@ module AffectedComponents
 
   FRONTENDS = %w[storefront admin].freeze
   PLATFORM_COMPONENTS = %w[platform:terraform platform:ansible].freeze
-  SEMANTIC_CONTRACTS = %w[
-    config/contracts/service-ownership.yaml
-    config/contracts/dependency-map.yaml
-    config/contracts/event-contracts.yaml
-    config/contracts/public-api-contracts.yaml
-  ].freeze
-
   def public_contract_index(public_api)
     public_api.fetch("contracts", {}).each_with_object({}) do |(service, spec), index|
       index[spec.fetch("path")] = {
@@ -35,12 +28,27 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, strict_unknown: false)
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {},
+               semantic_contracts: Set.new, canonical_contracts: Set.new, global_only_contracts: Set.new,
+               strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
       path = raw_path.to_s.sub(%r{\A\./}, "")
       next if path.empty?
+
+      if semantic_contracts.include?(path)
+        impact = contract_impact[path]
+        if impact.nil?
+          services.each { |service| components << "service:#{service}" }
+          components << "system"
+        else
+          Array(impact).each { |component| components << component }
+          components << "system" unless impact.empty?
+        end
+        next
+      end
+      next if global_only_contracts.include?(path)
 
       case path
       when "architecture.lock.yaml", "Makefile", "go.work",
@@ -84,22 +92,15 @@ module AffectedComponents
         # mapping. Fail closed until they do rather than guessing from filenames.
         services.each { |service| components << "service:#{service}" }
         components << "system"
-      when *SEMANTIC_CONTRACTS
-        impact = contract_impact[path]
-        if impact.nil?
-          # Callers that do not provide a base/head semantic delta are deliberately
-          # conservative. The CLI always provides one.
-          services.each { |service| components << "service:#{service}" }
-          components << "system"
-        else
-          Array(impact).each { |component| components << component }
-          components << "system" unless impact.empty?
-        end
-      when "config/contracts/runtime-efficiency.yaml",
-           "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
+      when "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
            "tests/resource_sizing_test.rb", "tests/runtime_efficiency_test.rb"
         # The runtime-efficiency gate is globally authoritative and always runs on
         # the new SHA, so these inputs do not require the broad system suite.
+      when %r{\Aconfig/contracts/}
+        unless canonical_contracts.include?(path)
+          raise ArgumentError, "unregistered canonical contract changed: #{path}"
+        end
+        force_all!(components, services)
       when %r{\Atests/}, %r{\Ascripts/}
         # Other repository-level tests and native helpers are exercised by system.
         components << "system"
@@ -255,12 +256,12 @@ module AffectedComponents
     impact.to_a.sort
   end
 
-  def contract_impact_map(root, base, head, paths, services:, frontends: FRONTENDS)
+  def contract_impact_map(root, base, head, paths, services:, semantic_contracts:, frontends: FRONTENDS)
     before_events = yaml_at(root, base, "config/contracts/event-contracts.yaml")
     after_events = yaml_at(root, head, "config/contracts/event-contracts.yaml")
     context = {before_events: before_events, after_events: after_events}
 
-    SEMANTIC_CONTRACTS.each_with_object({}) do |path, impacts|
+    semantic_contracts.each_with_object({}) do |path, impacts|
       next unless paths.include?(path)
 
       impacts[path] = semantic_contract_impact(
@@ -276,13 +277,33 @@ module AffectedComponents
 
   def load_project(root, ref)
     lock = yaml_at(root, ref, "architecture.lock.yaml")
-    ownership = yaml_at(root, ref, "config/contracts/service-ownership.yaml")
-    public_api = yaml_at(root, ref, "config/contracts/public-api-contracts.yaml")
+    machine_contracts = lock.fetch("machine_contracts")
+    ownership = yaml_at(root, ref, machine_contracts.fetch("service_ownership"))
+    public_api = yaml_at(root, ref, machine_contracts.fetch("public_api_contracts"))
+    routing = yaml_at(root, ref, machine_contracts.fetch("change_routing_policy"))
+    routing_rules = routing.fetch("routing")
+    unless routing_rules.fetch("registered_contract_default") == "force-all" &&
+           routing_rules.fetch("unregistered_contract") == "reject"
+      raise "change routing contract must fail closed for generic contracts"
+    end
+
     services = ownership.fetch("services").keys
     canonical = lock.dig("business", "services") || []
     raise "service ownership differs from architecture.lock.yaml" unless services.sort == canonical.sort
 
-    [services, public_contract_index(public_api), public_api["common_components"]]
+    canonical_contracts = Set.new(machine_contracts.values.select { |path| path.start_with?("config/contracts/") })
+    semantic_contracts = Set.new(
+      Array(routing_rules.fetch("semantic_roles")).map { |role| machine_contracts.fetch(role) }
+    )
+    global_only_contracts = Set.new(
+      Array(routing_rules.fetch("global_only_roles")).map { |role| machine_contracts.fetch(role) }
+    )
+    unless semantic_contracts.subset?(canonical_contracts) && global_only_contracts.subset?(canonical_contracts)
+      raise "change routing roles must resolve to registered canonical contracts"
+    end
+
+    [services, public_contract_index(public_api), public_api["common_components"],
+     canonical_contracts, semantic_contracts, global_only_contracts]
   end
 end
 
@@ -301,10 +322,11 @@ if $PROGRAM_NAME == __FILE__
   abort "format must be lines or json" unless %w[lines json].include?(options[:format])
 
   root = File.expand_path("..", __dir__)
-  services, public_contracts, common_openapi = AffectedComponents.load_project(root, options[:head])
+  services, public_contracts, common_openapi, canonical_contracts, semantic_contracts, global_only_contracts =
+    AffectedComponents.load_project(root, options[:head])
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
   contract_impact = AffectedComponents.contract_impact_map(
-    root, options[:base], options[:head], paths, services: services
+    root, options[:base], options[:head], paths, services: services, semantic_contracts: semantic_contracts
   )
   affected = AffectedComponents.classify(
     paths,
@@ -312,6 +334,9 @@ if $PROGRAM_NAME == __FILE__
     public_contracts: public_contracts,
     common_openapi: common_openapi,
     contract_impact: contract_impact,
+    semantic_contracts: semantic_contracts,
+    canonical_contracts: canonical_contracts,
+    global_only_contracts: global_only_contracts,
     strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"

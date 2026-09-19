@@ -1,0 +1,28 @@
+version: 1
+kind: CachePolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: qualification-and-bootstrap
+authority_claims:
+  - repository.cache.identity
+  - repository.cache.invalidation
+principles:
+  cache_is_acceleration_not_authority: true
+  cache_miss_must_preserve_correctness: true
+  successful_results_only: true
+identity_inputs:
+  - exact-tool-version
+  - platform
+  - architecture
+  - canonical-contract-digest
+  - dependency-lock-digest
+  - relevant-source-digest
+persistent_root: {environment: ECOMMERCE_TOOL_HOME, fallback: ~/.cache/ecommerce-1}
+invalidation:
+  contract_change: miss
+  tool_version_change: miss
+  dependency_lock_change: miss
+  relevant_source_change: miss
+consumers:
+  qualification: scripts/repoctl.py
+  bootstrap: scripts/capability_bootstrap.py

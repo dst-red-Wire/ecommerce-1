@@ -119,16 +119,685 @@ def ruby_yaml(path: str) -> dict:
     return json.loads(output(["ruby", "-e", script, path]))
 
 
-def pinned_versions() -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
+_CANONICAL_CONTRACT_CACHE: dict[str, dict] = {}
 
+
+def canonical_contract(name: str) -> dict:
+    """Load a machine contract only through architecture.lock.yaml."""
+    if name not in _CANONICAL_CONTRACT_CACHE:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get(name)
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError(f"architecture.lock.yaml must register machine_contracts.{name}")
+        data = ruby_yaml(relative)
+        if data.get("architecture_authority") != "architecture.lock.yaml":
+            raise RuntimeError(f"{name} must inherit architecture.lock.yaml")
+        _CANONICAL_CONTRACT_CACHE[name] = data
+    return copy.deepcopy(_CANONICAL_CONTRACT_CACHE[name])
+
+
+def canonical_contract_audit() -> int:
+    return run([sys.executable, "scripts/canonical_contracts.py", "audit-authority"], check=False).returncode
+
+
+_EXECUTION_ENVIRONMENT_POLICY: dict | None = None
+
+
+def execution_environment_policy() -> dict:
+    """Load and fail closed on the canonical execution isolation contract."""
+    global _EXECUTION_ENVIRONMENT_POLICY
+
+    if _EXECUTION_ENVIRONMENT_POLICY is None:
+        policy = canonical_contract("execution_environment_policy")
+
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "repository-execution"
+            or policy.get("status") != "enforced"
+        ):
+            raise RuntimeError(
+                "execution environment policy must inherit architecture.lock.yaml"
+            )
+
+        isolation = policy.get("qualification_isolation")
+        if not isinstance(isolation, dict):
+            raise RuntimeError(
+                "execution environment policy must declare qualification_isolation"
+            )
+
+        git_policy = isolation.get("git")
+        if not isinstance(git_policy, dict):
+            raise RuntimeError(
+                "execution environment policy must declare qualification_isolation.git"
+            )
+
+        if git_policy.get("inherited_repository_context") != "forbidden":
+            raise RuntimeError("qualification must reject inherited Git repository context")
+
+        prefixes = git_policy.get("drop_inherited_prefixes")
+        if not isinstance(prefixes, list) or "GIT_" not in prefixes:
+            raise RuntimeError("qualification Git isolation must remove inherited GIT_* state")
+
+        if git_policy.get("nested_hooks") != "disabled":
+            raise RuntimeError("nested Git hooks must be disabled during qualification")
+
+        projection = isolation.get("temporary_repository_projection")
+        if (
+            not isinstance(projection, dict)
+            or projection.get("preserve_repository_relative_paths") is not True
+        ):
+            raise RuntimeError(
+                "temporary qualification projections must preserve repository-relative paths"
+            )
+        if projection.get("symlinks") != "forbidden":
+            raise RuntimeError(
+                "temporary qualification projections must reject symbolic links"
+            )
+
+        _EXECUTION_ENVIRONMENT_POLICY = policy
+
+    return copy.deepcopy(_EXECUTION_ENVIRONMENT_POLICY)
+
+
+def qualification_environment(
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the canonical environment inherited by every qualification gate."""
+    policy = execution_environment_policy()
+    git_policy = policy["qualification_isolation"]["git"]
+
+    env = os.environ.copy()
+
+    for prefix in git_policy["drop_inherited_prefixes"]:
+        for name in tuple(env):
+            if name.startswith(str(prefix)):
+                env.pop(name, None)
+
+    if git_policy.get("system_config") == "disabled":
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    if git_policy.get("global_config") == "disabled":
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+
+    if git_policy.get("nested_hooks") == "disabled":
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+        env["GIT_CONFIG_VALUE_0"] = str(
+            git_policy.get("hooks_path", os.devnull)
+        )
+
+    if extra:
+        env.update({str(key): str(value) for key, value in extra.items()})
+
+    return env
+
+
+def validate_projection_source(
+    source: Path,
+    repository_root: Path,
+    *,
+    ignored_names: tuple[str, ...] = (),
+) -> None:
+    """Reject symlinks in qualification inputs before any source content is copied."""
+    ignored = set(ignored_names)
+
+    if source.is_symlink():
+        raise RuntimeError(
+            f"temporary repository projection rejects symlink: {source}"
+        )
+
+    if not source.is_dir():
+        return
+
+    for current, directories, files in os.walk(source, topdown=True, followlinks=False):
+        current_path = Path(current)
+
+        kept_directories: list[str] = []
+        for name in directories:
+            if name in ignored:
+                continue
+            candidate = current_path / name
+            if candidate.is_symlink():
+                raise RuntimeError(
+                    f"temporary repository projection rejects symlink: {candidate}"
+                )
+            kept_directories.append(name)
+        directories[:] = kept_directories
+
+        for name in files:
+            if name in ignored:
+                continue
+            candidate = current_path / name
+            if candidate.is_symlink():
+                raise RuntimeError(
+                    f"temporary repository projection rejects symlink: {candidate}"
+                )
+
+
+def materialize_repository_projection(
+    destination: Path,
+    roots: list[str],
+    *,
+    ignored_names: tuple[str, ...] = (),
+) -> None:
+    """Copy canonical source roots while preserving their repository paths."""
+    repository_root = ROOT.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    for relative in roots:
+        relative_path = Path(str(relative))
+
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(
+                f"temporary repository projection path escapes repository: {relative}"
+            )
+
+        declared_source = ROOT / relative_path
+        if declared_source.is_symlink():
+            raise RuntimeError(
+                f"temporary repository projection rejects symlink: {relative}"
+            )
+        source = declared_source.resolve()
+
+        try:
+            source.relative_to(repository_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"temporary repository projection path escapes repository: {relative}"
+            ) from exc
+
+        if not source.exists():
+            raise RuntimeError(
+                f"temporary repository projection source is missing: {relative}"
+            )
+
+        validate_projection_source(
+            source,
+            repository_root,
+            ignored_names=ignored_names,
+        )
+
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                target,
+                symlinks=True,
+                ignore=shutil.ignore_patterns(*ignored_names),
+            )
+        elif source.is_file():
+            shutil.copy2(source, target)
+        else:
+            raise RuntimeError(
+                f"unsupported temporary repository projection source: {relative}"
+            )
+
+        validate_projection_source(
+            target,
+            destination.resolve(),
+            ignored_names=ignored_names,
+        )
+
+
+
+_CI_EVIDENCE_POLICY: dict | None = None
+
+
+def ci_evidence_policy() -> dict:
+    """Canonical authority for evidence reuse and base resolution."""
+    global _CI_EVIDENCE_POLICY
+
+    if _CI_EVIDENCE_POLICY is None:
+        policy = canonical_contract("ci_evidence")
+        rules = policy.get("base_resolution")
+
+        if not isinstance(rules, dict):
+            raise RuntimeError("ci evidence policy must declare base_resolution")
+
+        if rules.get("implicit_default_base") != "forbidden":
+            raise RuntimeError("implicit CI base resolution is forbidden")
+
+        if rules.get("assume_main") != "forbidden":
+            raise RuntimeError("qualification must never assume main")
+
+        if rules.get("recorded_base_must_be_ancestor_of_head") is not True:
+            raise RuntimeError("recorded evidence base must be an ancestor of HEAD")
+
+        if rules.get("exact_evidence_recorded_base_may_authorize_reuse") != "symbolic-ref-only":
+            raise RuntimeError("base-less exact evidence reuse must require a symbolic recorded base")
+
+        if rules.get("prepush_explicit_base_required") is not True:
+            raise RuntimeError("prepush must require an explicit BASE")
+
+        if rules.get("recorded_base_must_be_strict_ancestor_of_exact_head") is not True:
+            raise RuntimeError("exact evidence base must be a strict ancestor of HEAD")
+
+        if rules.get("bare_branch_remote_precedence") is not True:
+            raise RuntimeError("bare base branches must prefer origin tracking refs")
+
+        if rules.get("git_special_refs_preserved") is not True:
+            raise RuntimeError("Git special refs must preserve explicit local semantics")
+
+        _CI_EVIDENCE_POLICY = policy
+
+    return copy.deepcopy(_CI_EVIDENCE_POLICY)
+
+
+def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
+    """Resolve one explicit base without inventing main/origin-main."""
+    value = str(base).strip()
+    if not value:
+        raise RuntimeError("explicit BASE is required")
+
+    is_sha = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value))
+    git_special_refs = {
+        "HEAD",
+        "ORIG_HEAD",
+        "FETCH_HEAD",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+    }
+    if (
+        is_sha
+        or value in git_special_refs
+        or value.startswith("origin/")
+        or value.startswith("refs/")
+    ):
+        candidates = [value]
+    else:
+        # Bare branch names mean the forge-tracking branch first. A stale local
+        # branch must never outrank the fetched PR base used by publish/deliver.
+        candidates = [f"origin/{value}", value]
+
+    resolved_ref = None
+    resolved_sha = None
+
+    for candidate in candidates:
+        result = run(
+            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            check=False,
+            capture=True,
+        )
+        if result.returncode == 0:
+            resolved_ref = candidate
+            resolved_sha = result.stdout.strip()
+            break
+
+    if not resolved_ref or not resolved_sha:
+        raise RuntimeError(f"cannot resolve explicit BASE {value!r}")
+
+    comparison_head = "HEAD" if head == "WORKTREE" else head
+    comparison_head_sha = git("rev-parse", comparison_head).strip()
+
+    if run(
+        ["git", "merge-base", "--is-ancestor", resolved_sha, comparison_head],
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError(
+            f"BASE {resolved_sha} is not an ancestor of {comparison_head}"
+        )
+
+    if head != "WORKTREE" and resolved_sha == comparison_head_sha:
+        raise RuntimeError(
+            f"BASE {resolved_sha} must be a strict ancestor of exact HEAD {comparison_head_sha}"
+        )
+
+    return resolved_ref, resolved_sha
+
+
+def reusable_exact_evidence(
+    head: str = "HEAD",
+    *,
+    expected_base: str = "",
+) -> tuple[Path, dict] | None:
+    """Return exact PASS evidence only when its base identity is still exact."""
+    policy = ci_evidence_policy()
+    evidence_policy = policy["evidence"]
+
+    requested = git("rev-parse", head).strip()
+    current = git("rev-parse", "HEAD").strip()
+
+    if requested != current:
+        return None
+
+    if (
+        evidence_policy.get("dirty_worktree_reuse") == "forbidden"
+        and git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        return None
+
+    path = CONTEXT / "evidence" / f"{requested}.json"
+    if not path.is_file():
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    base_sha = str(data.get("base_sha", "")).strip()
+    recorded_base_ref = str(data.get("base_ref", "")).strip()
+
+    if (
+        data.get("status") != "PASS"
+        or data.get("exact_commit_evidence") is not True
+        or data.get("head_sha") != requested
+        or not base_sha
+    ):
+        return None
+
+    if base_sha == requested:
+        return None
+
+    if run(
+        ["git", "merge-base", "--is-ancestor", base_sha, requested],
+        check=False,
+        capture=True,
+    ).returncode:
+        return None
+
+    if expected_base:
+        try:
+            _expected_ref, expected_base_sha = resolve_base_ref(
+                expected_base,
+                head=requested,
+            )
+        except RuntimeError:
+            return None
+        if expected_base_sha != base_sha:
+            return None
+    else:
+        # Without an explicit caller-supplied base, only a symbolic recorded ref
+        # may authorize reuse. A raw SHA cannot detect branch retargeting/drift.
+        if (
+            not recorded_base_ref
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", recorded_base_ref)
+        ):
+            return None
+        try:
+            _recorded_ref, recorded_base_sha = resolve_base_ref(
+                recorded_base_ref,
+                head=requested,
+            )
+        except RuntimeError:
+            return None
+        if recorded_base_sha != base_sha:
+            return None
+
+    return path, data
+
+
+def pull_request_base_name(base: str) -> str:
+    value = str(base).strip()
+
+    if not value:
+        raise RuntimeError("pull-request delivery requires explicit BASE branch")
+
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+        raise RuntimeError(
+            "pull-request BASE must be a symbolic branch, not a commit SHA"
+        )
+
+    if value.startswith("origin/"):
+        return value[len("origin/"):]
+
+    if value.startswith("refs/remotes/origin/"):
+        return value[len("refs/remotes/origin/"):]
+
+    if value.startswith("refs/heads/"):
+        return value[len("refs/heads/"):]
+
+    if value.startswith("refs/"):
+        raise RuntimeError(f"unsupported pull-request BASE ref: {value}")
+
+    return value
+
+
+def security_scan_policy() -> dict:
+    return canonical_contract("security_scan_policy")
+
+
+def write_gitleaks_policy_config(path: Path) -> None:
+    policy = security_scan_policy()
+    allowlist = policy.get("allowlist", {})
+    lines = [
+        f"title = {json.dumps('E-Commerce repository gitleaks configuration (generated)')}",
+        "",
+        "[extend]",
+        "useDefault = true",
+        "",
+        "[allowlist]",
+        f"description = {json.dumps(str(allowlist.get('description', 'Canonical repository allowlist')))}",
+        "paths = [",
+    ]
+    for value in allowlist.get("paths", []):
+        if not isinstance(value, str) or "'''" in value:
+            raise RuntimeError("security scan allowlist paths must be safe strings")
+        lines.append("  '''" + value + "''',")
+    lines.extend(["]", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+_SOURCE_QUALITY_POLICY: dict | None = None
+
+
+def source_quality_policy() -> dict:
+    """Load the single repository-wide source quality contract."""
+    global _SOURCE_QUALITY_POLICY
+    if _SOURCE_QUALITY_POLICY is None:
+        policy = canonical_contract("source_quality_policy")
+        if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
+            raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+
+        forbidden = policy.get("parallel_policy_files", {}).get("forbidden", [])
+        for local_policy in forbidden:
+            if not isinstance(local_policy, str) or not local_policy.strip():
+                raise RuntimeError("source quality parallel policy paths must be non-empty strings")
+            if (ROOT / local_policy).exists():
+                raise RuntimeError(f"parallel local quality policy is forbidden: {local_policy}")
+
+        adapters = policy.get("orchestration_adapters", {})
+        pre_commit = adapters.get("pre_commit", {})
+        pre_commit_path = pre_commit.get("path")
+        required_delegate = pre_commit.get("required_delegate")
+        if pre_commit_path and required_delegate:
+            adapter_path = ROOT / str(pre_commit_path)
+            if not adapter_path.is_file() or str(required_delegate) not in adapter_path.read_text(encoding="utf-8"):
+                raise RuntimeError("pre-commit adapter must delegate to the central repoctl quality authority")
+
+        _SOURCE_QUALITY_POLICY = policy
+    return copy.deepcopy(_SOURCE_QUALITY_POLICY)
+
+
+def source_quality_adapter(name: str) -> dict:
+    adapter = source_quality_policy().get("adapters", {}).get(name)
+    if not isinstance(adapter, dict):
+        raise RuntimeError(f"source quality adapter is not declared: {name}")
+    return adapter
+
+
+def advisory_exit_check(
+    label: str,
+    command: list[str],
+    *,
+    drift_exit_codes: list[int],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run a read-only formatter check; only declared drift exits are advisory."""
+    result = run(command, cwd=cwd, env=env, check=False, capture=True)
+    output_text = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode == 0:
+        return
+    if result.returncode in {int(code) for code in drift_exit_codes}:
+        if output_text:
+            print(output_text, file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+        return
+    raise RuntimeError(output_text or f"{label} formatter failed with exit code {result.returncode}")
+
+
+def advisory_output_check(label: str, output_text: str) -> None:
+    """Report formatter drift that is signaled by non-empty output."""
+    if output_text.strip():
+        print(output_text.strip(), file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+
+
+def _semantic_version_tuple(value: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", value.strip())
+    if not match:
+        raise RuntimeError(f"unsupported semantic version: {value!r}")
+    return tuple(int(part) for part in match.groups())
+
+
+def version_satisfies_constraint(version: str, constraint: str) -> bool:
+    current = _semantic_version_tuple(version)
+    for raw in constraint.split(","):
+        token = raw.strip()
+        match = re.fullmatch(r"(>=|<=|!=|=|>|<)?\s*(\d+\.\d+\.\d+)", token)
+        if not match:
+            raise RuntimeError(f"unsupported version constraint: {token!r}")
+        operator = match.group(1) or "="
+        expected = _semantic_version_tuple(match.group(2))
+        accepted = {
+            ">=": current >= expected,
+            "<=": current <= expected,
+            "!=": current != expected,
+            "=": current == expected,
+            ">": current > expected,
+            "<": current < expected,
+        }[operator]
+        if not accepted:
+            return False
+    return True
+
+
+_TERRAFORM_PROVIDER_LOCK: dict | None = None
+
+
+def terraform_provider_lock_contract() -> dict:
+    """Load and validate the single canonical Terraform provider lock contract."""
+    global _TERRAFORM_PROVIDER_LOCK
+    if _TERRAFORM_PROVIDER_LOCK is None:
+        contract = canonical_contract("terraform_provider_lock")
+        if (
+            contract.get("architecture_authority") != "architecture.lock.yaml"
+            or contract.get("scope") != "platform/terraform"
+            or contract.get("status") != "exact"
+        ):
+            raise RuntimeError("Terraform provider lock must inherit architecture.lock.yaml for platform/terraform")
+
+        quality_authority = source_quality_adapter("terraform").get("validation", {}).get("provider_lock_authority")
+        if quality_authority != "architecture.lock.yaml#machine_contracts.terraform_provider_lock":
+            raise RuntimeError("Terraform quality validation must delegate provider resolution to the central lock contract")
+
+        providers = contract.get("providers")
+        if not isinstance(providers, dict) or not providers:
+            raise RuntimeError("Terraform provider lock must declare at least one provider")
+
+        for name, provider in providers.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(provider, dict):
+                raise RuntimeError("Terraform provider lock entries must be named mappings")
+            for field in ("source", "version", "constraints"):
+                value = provider.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RuntimeError(f"Terraform provider {name} must declare {field}")
+            hashes = provider.get("hashes")
+            if not isinstance(hashes, list) or not hashes or any(not isinstance(value, str) or not value for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must declare non-empty hashes")
+            if not any(value.startswith("h1:") for value in hashes) or not any(value.startswith("zh:") for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must include both h1 and zh hashes")
+
+        qualification = contract.get("qualification")
+        if not isinstance(qualification, dict):
+            raise RuntimeError("Terraform provider lock must declare qualification behavior")
+        if qualification.get("canonical_lockfile_materialization") != "required":
+            raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
+        if qualification.get("init_lockfile_mode") != "readonly":
+            raise RuntimeError("Terraform qualification provider lock must be readonly")
+
+        pins = pinned_versions()
+        cli_contracts = {
+            "terraform_cli": ("TERRAFORM_VERSION", "versions.tf"),
+            "opentofu_cli": ("OPENTOFU_VERSION", "versions.tofu"),
+        }
+        for cli_name, (version_key, compatibility_file) in cli_contracts.items():
+            cli = contract.get(cli_name)
+            if not isinstance(cli, dict):
+                raise RuntimeError(f"Terraform provider lock must declare {cli_name}")
+            if cli.get("toolchain_version_key") != version_key:
+                raise RuntimeError(
+                    f"{cli_name} must bind canonical toolchain key {version_key}"
+                )
+            if cli.get("compatibility_file") != compatibility_file:
+                raise RuntimeError(
+                    f"{cli_name} must use compatibility file {compatibility_file}"
+                )
+            required_version = cli.get("required_version")
+            pinned = pins.get(version_key)
+            if not isinstance(required_version, str) or not required_version.strip():
+                raise RuntimeError(f"{cli_name} must declare required_version")
+            if not pinned or not version_satisfies_constraint(pinned, required_version):
+                raise RuntimeError(
+                    f"{cli_name} canonical pin {pinned or 'missing'} does not satisfy {required_version}"
+                )
+
+        _TERRAFORM_PROVIDER_LOCK = contract
+    return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
+
+
+def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> None:
+    """Materialize Terraform's native lockfile from the canonical YAML authority."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    lines = [
+        "# Generated from architecture.lock.yaml#machine_contracts.terraform_provider_lock.",
+        "# Do not edit this temporary projection.",
+        "",
+    ]
+    for name in sorted(provider_lock["providers"]):
+        provider = provider_lock["providers"][name]
+        constraints = str(provider["constraints"]).strip()
+        if constraints.startswith("="):
+            constraints = constraints[1:].strip()
+        lines.extend(
+            [
+                f'provider {json.dumps(provider["source"])} {{',
+                f'  version     = {json.dumps(provider["version"])}',
+                f'  constraints = {json.dumps(constraints)}',
+                "  hashes = [",
+            ]
+        )
+        lines.extend(f"    {json.dumps(value)}," for value in provider["hashes"])
+        lines.extend(["  ]", "}", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | None:
+    """Return the persistent provider package cache; availability is an acceleration only."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    cache = provider_lock["qualification"].get("provider_plugin_cache", {})
+    env_name = str(cache.get("root_source", "ECOMMERCE_TOOL_HOME"))
+    configured = os.environ.get(env_name, "").strip()
+    base = Path(configured).expanduser() if configured else Path(str(cache.get("fallback_root", "~/.cache/ecommerce-1"))).expanduser()
+    destination = base / str(cache.get("subdirectory", "terraform-provider-cache/v1"))
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ADVISORY terraform provider cache unavailable: {exc}", file=sys.stderr)
+        return None
+    return destination
+
+
+def pinned_versions() -> dict[str, str]:
+    values = canonical_contract("toolchain_lock").get("versions", {})
+    if not isinstance(values, dict) or not values:
+        raise RuntimeError("canonical toolchain lock must declare versions")
+    return {str(key): str(value) for key, value in values.items()}
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
     """Read the canonical Ansible collection lock without duplicating its pins."""
@@ -264,10 +933,14 @@ def canonical_services() -> list[str]:
     return [str(x) for x in ruby_yaml("architecture.lock.yaml").get("business", {}).get("services", [])]
 
 
-def run_ruby_tests(paths: list[str]) -> None:
+def run_ruby_tests(
+    paths: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
     require("ruby")
     for path in paths:
-        run(["ruby", "-Itest", path])
+        run(["ruby", "-Itest", path], env=env)
 
 
 def runtime_efficiency_check() -> int:
@@ -279,6 +952,8 @@ def runtime_efficiency_check() -> int:
 
 
 def governance() -> int:
+    if canonical_contract_audit():
+        return 1
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
@@ -507,6 +1182,11 @@ def api_compat(base: str, head: str) -> int:
 
 def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) -> int:
     require("ruby")
+    if base:
+        try:
+            base, _base_sha = resolve_base_ref(base, head=head)
+        except RuntimeError as exc:
+            return fail(str(exc), 1)
     run(["ruby", "scripts/validate-openapi.rb"])
     run(["ruby", "scripts/validate-contract-consistency.rb"])
     run_ruby_tests(["tests/openapi_validator_test.rb", "tests/contract_consistency_test.rb"])
@@ -571,18 +1251,16 @@ def automation_policy() -> int:
 
 
 def documentation_policy() -> int:
-    """Reject active documentation that contradicts the canonical automation model."""
-    rules = {
-        "AGENTS.md": [r"portable POSIX `sh`", r"repository shell helpers"],
-        "README.md": [r"scripts/ci-\*\.sh"],
-        "docs/project/CODEX_HANDOFFS.md": [r"shared POSIX `sh` helpers", r"shared repository scripts factored"],
-        "docs/api/README.md": [r"bootstrap CI Woodpecker"],
-    }
+    """Reject active documentation that contradicts canonical contracts."""
+    policy = canonical_contract("documentation_drift_policy")
     failures: list[str] = []
-    for relative, patterns in rules.items():
-        text = (ROOT / relative).read_text(encoding="utf-8")
+    for relative, patterns in policy.get("forbidden_patterns", {}).items():
+        path = ROOT / relative
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
         for pattern in patterns:
-            if re.search(pattern, text, flags=re.IGNORECASE):
+            if re.search(str(pattern), text, flags=re.IGNORECASE):
                 failures.append(f"{relative}: {pattern}")
     if failures:
         print("FAIL documentation policy: active legacy automation references found", file=sys.stderr)
@@ -590,7 +1268,6 @@ def documentation_policy() -> int:
         return 1
     print("PASS documentation policy: active automation references are canonical")
     return 0
-
 
 def frontend(action: str, scope: str = "") -> int:
     # Accept both `repoctl frontend storefront` and the compatibility form
@@ -614,12 +1291,11 @@ def frontend(action: str, scope: str = "") -> int:
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
-        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+        raise RuntimeError("TEMPL_VERSION is missing from the canonical toolchain lock")
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
-        if formatted.stdout.strip():
-            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        advisory_output_check("frontend gofmt", formatted.stdout or "")
         forbidden_frontend_artifacts()
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
@@ -812,47 +1488,104 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     require("gitleaks")
-    if os.environ.get("HEAD", "").strip() == "WORKTREE":
-        tree_sha = worktree_tree_sha()
-        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
-            temp_root = Path(temp_dir)
-            archive = temp_root / "tree.tar"
-            scan_root = temp_root / "tree"
-            scan_root.mkdir()
-            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
-            shutil.unpack_archive(str(archive), str(scan_root), "tar")
-            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
-    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-        run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    else:
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    print("PASS secret scan completed")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
+        config = Path(policy_dir) / "gitleaks.toml"
+        write_gitleaks_policy_config(config)
+        if os.environ.get("HEAD", "").strip() == "WORKTREE":
+            tree_sha = worktree_tree_sha()
+            with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+                temp_root = Path(temp_dir)
+                archive = temp_root / "tree.tar"
+                scan_root = temp_root / "tree"
+                scan_root.mkdir()
+                run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+                shutil.unpack_archive(str(archive), str(scan_root), "tar")
+                run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", str(scan_root)])
+        elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+            run(["gitleaks", "git", "--config", str(config), "--redact", "--no-banner", "."])
+        else:
+            run(["gitleaks", "dir", "--config", str(config), "--redact", "--no-banner", "."])
+    print("PASS secret scan completed from canonical security policy")
     return 0
 
-
 def terraform_check() -> int:
-    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    terraform_root = ROOT / "platform" / "terraform"
+    tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-    tool = shutil.which("tofu") or shutil.which("terraform")
+
+    policy = source_quality_adapter("terraform")
+    formatter = policy["formatter"]
+    provider_lock = terraform_provider_lock_contract()
+    qualification = provider_lock["qualification"]
+
+    tool = next(
+        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
+        None,
+    )
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
-    run([tool, "fmt", "-check", "-recursive", "-diff"])
-    for directory in sorted({p.parent for p in tf_files}):
-        print(f"CHECK terraform: {directory.relative_to(ROOT)}")
-        if "modules" in directory.parts and "platform" in directory.parts:
-            with tempfile.TemporaryDirectory(prefix="tf-module-") as temp:
-                shutil.copytree(directory, temp, dirs_exist_ok=True)
-                run([tool, "init", "-backend=false", "-input=false"], cwd=Path(temp))
-                run([tool, "validate"], cwd=Path(temp))
-        else:
-            run([tool, "init", "-backend=false", "-input=false"], cwd=directory)
-            run([tool, "validate"], cwd=directory)
+        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+
+    advisory_exit_check(
+        "terraform fmt",
+        [tool, *formatter["args"]],
+        drift_exit_codes=formatter["drift_exit_codes"],
+    )
+
+    provider_cache = terraform_provider_plugin_cache_dir(provider_lock)
+    env = qualification_environment()
+    if provider_cache is not None:
+        env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
+
+    projection = qualification.get("source_projection")
+    if not isinstance(projection, dict):
+        raise RuntimeError(
+            "Terraform qualification must declare a canonical source_projection"
+        )
+
+    if projection.get("preserve_repository_relative_paths") is not True:
+        raise RuntimeError(
+            "Terraform source projection must preserve repository-relative paths"
+        )
+
+    roots = projection.get("roots")
+    if not isinstance(roots, list) or "platform/terraform" not in roots:
+        raise RuntimeError(
+            "Terraform source projection must include platform/terraform"
+        )
+
+    ignored_names = tuple(
+        str(name) for name in projection.get("ignored_names", [])
+    )
+
+    directories = sorted({p.parent for p in tf_files})
+    with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
+        temp_repo = Path(temp_dir) / "repo"
+
+        materialize_repository_projection(
+            temp_repo,
+            [str(root) for root in roots],
+            ignored_names=ignored_names,
+        )
+
+        temp_root = temp_repo / "platform" / "terraform"
+
+        for directory in directories:
+            relative = directory.relative_to(terraform_root)
+            validation_dir = temp_root / relative
+            write_terraform_provider_lock(validation_dir / ".terraform.lock.hcl", provider_lock)
+            print(f"CHECK terraform: {relative}")
+            run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
+            run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
+
+    providers = ", ".join(
+        f"{name}={provider['version']}"
+        for name, provider in sorted(provider_lock["providers"].items())
+    )
+    print(f"PASS terraform provider lock {providers}")
     print("PASS terraform checks completed")
     return 0
-
-
 def ansible_check() -> int:
     reconcile_ansible_collections()
     require("ansible-lint")
@@ -861,7 +1594,18 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+
+    lint_policy = source_quality_adapter("ansible")["lint"]
+    advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
+    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+        config = Path(temp_dir) / "ansible-lint.yml"
+        config.write_text(
+            "---\nwarn_list:\n"
+            + "".join(f"  - {rule}\n" for rule in advisory_rules),
+            encoding="utf-8",
+        )
+        run(["ansible-lint", "--config-file", str(config), *files])
+
     run(
         [
             "ansible-playbook",
@@ -882,12 +1626,91 @@ def ansible_check() -> int:
 
 
 def system_check() -> int:
+    env = qualification_environment()
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
-    run_ruby_tests(tests)
+    run_ruby_tests(tests, env=env)
     for suite in [ROOT / "tests", ROOT / "tests" / "delivery", ROOT / "tests" / "context"]:
         if suite.is_dir() and any(suite.glob("test_*.py")):
-            run([sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"])
+            run(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    str(suite.relative_to(ROOT)),
+                    "-p",
+                    "test_*.py",
+                ],
+                env=env,
+            )
     print("PASS cross-system repository checks completed")
+    return 0
+
+
+def write_ruff_policy_config(path: Path) -> None:
+    """Materialize Ruff's adapter config from the central source-quality contract."""
+    config = source_quality_adapter("python")["configuration"]
+    target_version = str(config["target_version"])
+    line_length = int(config["line_length"])
+    extend_exclude = [str(item) for item in config["extend_exclude"]]
+    lint_select = [str(item) for item in config["lint_select"]]
+    path.write_text(
+        f'target-version = "{target_version}"\n'
+        f"line-length = {line_length}\n"
+        + "extend-exclude = "
+        + json.dumps(extend_exclude)
+        + "\n\n[lint]\nselect = "
+        + json.dumps(lint_select)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def format_check() -> int:
+    """Run repository-wide non-mutating formatter diagnostics from the central policy."""
+    python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
+    if python_files:
+        require("ruff")
+        formatter = source_quality_adapter("python")["formatter"]
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+
+    go_files = sorted(
+        str(path)
+        for tree in (ROOT / "services", ROOT / "frontend")
+        if tree.is_dir()
+        for path in tree.rglob("*.go")
+        if "vendor" not in path.parts
+    )
+    if go_files:
+        require("gofmt")
+        go_policy = source_quality_adapter("go")["formatter"]
+        result = run([go_policy["command"], *go_policy["args"], *go_files], capture=True)
+        advisory_output_check("gofmt", result.stdout or "")
+
+    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    if tf_files:
+        terraform_policy = source_quality_adapter("terraform")["formatter"]
+        tool = next(
+            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
+            None,
+        )
+        if not tool:
+            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        advisory_exit_check(
+            "terraform fmt",
+            [tool, *terraform_policy["args"]],
+            drift_exit_codes=terraform_policy["drift_exit_codes"],
+        )
+
+    print("PASS source format diagnostics completed")
     return 0
 
 
@@ -898,13 +1721,22 @@ def lint_all() -> int:
     if go_files:
         require("gofmt")
         p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip():
-            print(p.stdout, file=sys.stderr)
-            return 1
+        advisory_output_check("service gofmt", p.stdout or "")
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        python_policy = source_quality_adapter("python")
+        formatter = python_policy["formatter"]
+        lint_policy = python_policy["lint"]
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+            run([lint_policy["command"], *lint_policy["args"], "--config", str(config), *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -942,8 +1774,9 @@ def worktree_tree_sha() -> str:
     index_path = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
     with tempfile.TemporaryDirectory(prefix="ecommerce-worktree-index-") as temp_dir:
         temporary_index = Path(temp_dir) / "index"
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = str(temporary_index)
+        env = qualification_environment(
+            {"GIT_INDEX_FILE": str(temporary_index)}
+        )
         if index_path.is_file():
             shutil.copy2(index_path, temporary_index)
         else:
@@ -1046,30 +1879,30 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
 
 
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
-    requested = git("rev-parse", head).strip()
-    if requested != git("rev-parse", "HEAD").strip():
+    exact = reusable_exact_evidence(head, expected_base=base_ref)
+    if exact is None:
         return None
-    if git("status", "--porcelain", "--untracked-files=all").strip():
-        return None
-    path = CONTEXT / "evidence" / f"{requested}.json"
-    if not path.is_file():
-        return None
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if (
-        evidence.get("status") != "PASS"
-        or evidence.get("exact_commit_evidence") is not True
-        or evidence.get("head_sha") != requested
-        or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
-    ):
-        return None
+
+    path, evidence = exact
+
+    if base_ref.strip():
+        try:
+            _resolved_ref, requested_base_sha = resolve_base_ref(
+                base_ref,
+                head=head,
+            )
+        except RuntimeError:
+            return None
+
+        if evidence.get("base_sha") != requested_base_sha:
+            return None
+
     return path
 
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
     require("ruby")
+    base, _base_sha = resolve_base_ref(base, head=head)
     command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
@@ -1240,7 +2073,10 @@ def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
     if exact is None:
         return 2
     requested, current = exact
-    base_sha = git("rev-parse", base).strip()
+    try:
+        base, base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     components = affected(base, head)
     gates = _normalized_component_gates(components)
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
@@ -1296,9 +2132,12 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
+    try:
+        base, _base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     records: list[dict] = []
-    env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
+    env = qualification_environment({"BASE": base, "HEAD": head})
     rc = 0
     for name, command in _global_gate_commands(base, head):
         if not _run_gate(name, command, records, env):
@@ -1313,14 +2152,17 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
+    try:
+        base, _base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     command, reason = _component_command(component)
     records: list[dict] = []
     if command is None:
         records.append({"gate": component, "status": "SKIP", "reason": reason, "duration_seconds": 0.0})
         rc = 0
     else:
-        env = os.environ.copy()
-        env.update({"BASE": base, "HEAD": head})
+        env = qualification_environment({"BASE": base, "HEAD": head})
         rc = 0 if _run_gate(component, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"component-{component}"), {"head_sha": requested, "records": records})
     return rc
@@ -1333,7 +2175,10 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
-    base_sha = git("rev-parse", base).strip()
+    try:
+        base, base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     target = os.environ.get("CI_STATUS_TARGET_URL", "").strip()
     if not plan_path.is_file():
         publish_remote_status(requested, "failure", "Tekton plan evidence is missing", target)
@@ -1474,6 +2319,32 @@ def write_evidence(
 
 
 def verify_change(base: str, head: str) -> int:
+    if head != "WORKTREE" and not str(base).strip():
+        exact = reusable_exact_evidence(head)
+        if exact is not None:
+            path, data = exact
+            print(
+                f"PASS verify-change: reusing exact evidence "
+                f"{path.relative_to(ROOT)} for recorded base {data['base_sha']}"
+            )
+            return 0
+        return fail(
+            "verify-change requires explicit BASE=<ref> when no reusable "
+            "exact evidence exists",
+            1,
+        )
+
+    if head == "WORKTREE" and not str(base).strip():
+        return fail("verify-change WORKTREE requires explicit BASE=<ref>", 1)
+
+    try:
+        base, _base_sha = resolve_base_ref(
+            base,
+            head="HEAD" if head == "WORKTREE" else head,
+        )
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
+
     source_head_sha: str | None = None
     source_tree_sha: str | None = None
     if head != "WORKTREE":
@@ -1490,8 +2361,7 @@ def verify_change(base: str, head: str) -> int:
     paths = changed_paths(base, head)
     components = affected(base, head)
     records: list[dict] = []
-    env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
+    env = qualification_environment({"BASE": base, "HEAD": head})
 
     def run_stable_gate(name: str, command: list[str]) -> bool:
         before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
@@ -1588,6 +2458,10 @@ def verify_change(base: str, head: str) -> int:
 
 def diff_context(base: str) -> int:
     CONTEXT.mkdir(exist_ok=True)
+    try:
+        base, _base_sha = resolve_base_ref(base, head="WORKTREE")
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     paths = changed_paths(base, "WORKTREE")
     stat = git("diff", "--stat", base)
     diff = git("diff", "--unified=2", base, "--")
@@ -1730,11 +2604,33 @@ def publish(base: str, message: str) -> int:
     if not branch or branch in {"main", "master"}:
         return fail("publish refuses detached/default branch")
     run(["git", "fetch", "origin", "--prune"])
-    base_ref = base if base.startswith("origin/") else f"origin/{base}"
-    if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
-        return fail(f"branch is not based on current {base_ref}")
 
     dirty = bool(git("status", "--porcelain", "--untracked-files=all").strip())
+
+    if str(base).strip():
+        try:
+            base_ref, _base_sha = resolve_base_ref(base, head="HEAD")
+        except RuntimeError as exc:
+            return fail(str(exc), 1)
+    elif dirty:
+        return fail(
+            "publish with a dirty worktree requires explicit BASE=<ref>; "
+            "refusing to assume main/origin-main",
+            1,
+        )
+    else:
+        exact = reusable_exact_evidence("HEAD")
+        if exact is None:
+            return fail(
+                "publish requires reusable exact PASS evidence or explicit BASE=<ref>",
+                1,
+            )
+        _path, data = exact
+        base_ref = str(data["base_sha"])
+        print(
+            f"PASS publish: using recorded exact-evidence base "
+            f"{base_ref}"
+        )
     promotable = _load_promotable_worktree_evidence(base_ref) if dirty else None
     if dirty:
         if not message:
@@ -1768,6 +2664,11 @@ def publish(base: str, message: str) -> int:
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
+
+    try:
+        base_name = pull_request_base_name(base)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     review_policy = ruby_yaml("config/contracts/review-policy.yaml")
     review_forge = (review_policy.get("pull_request_review") or {}).get("forge")
     if review_forge != "github":
@@ -1784,16 +2685,13 @@ def deliver(base: str, title: str, message: str) -> int:
         return fail(f"exact evidence missing for {head}")
     if not title:
         title = git("log", "-1", "--pretty=%s").strip()
-    changed = (
-        git("diff", "--name-only", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--name-only", f"{base}...HEAD")
-    )
-    stat = (
-        git("diff", "--stat", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--stat", f"{base}...HEAD")
-    )
+    try:
+        base_ref, _base_sha = resolve_base_ref(base, head="HEAD")
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
+
+    changed = git("diff", "--name-only", f"{base_ref}...HEAD")
+    stat = git("diff", "--stat", f"{base_ref}...HEAD")
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
@@ -1824,7 +2722,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "--head",
             branch,
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--state",
             "open",
             "--json",
@@ -1860,7 +2758,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "pr",
             "create",
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--head",
             branch,
             "--title",
@@ -1881,19 +2779,25 @@ def precommit() -> int:
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
-    return verify_change("origin/main", head)
+    explicit_base = os.environ.get("BASE", "").strip()
+
+    if not explicit_base:
+        return fail(
+            "prepush requires explicit BASE=<ref>; refusing to infer the PR target "
+            "from ancestry or stale local branch state",
+            1,
+        )
+
+    exact = reusable_exact_evidence(head, expected_base=explicit_base)
+    if exact is not None:
+        path, data = exact
+        print(
+            f"PASS prepush: reusing exact evidence "
+            f"{path.relative_to(ROOT)} for exact base {data['base_sha']}"
+        )
+        return 0
+
+    return verify_change(explicit_base, head)
 
 
 def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
@@ -1912,6 +2816,7 @@ def main() -> int:
         "governance",
         "runtime-efficiency",
         "automation-policy",
+        "format-check",
         "lint",
         "test",
         "security",
@@ -1926,6 +2831,7 @@ def main() -> int:
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
+    c.add_argument("action", nargs="?", default="validate", choices=("validate", "audit-authority"))
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     c.add_argument("--generate", action="store_true")
@@ -1935,14 +2841,14 @@ def main() -> int:
     s = sub.add_parser("service")
     s.add_argument("service")
     a = sub.add_parser("affected")
-    a.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    a.add_argument("--base", default=os.environ.get("BASE", ""))
     a.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     a.add_argument("--json", action="store_true")
     v = sub.add_parser("verify-change")
-    v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    v.add_argument("--base", default=os.environ.get("BASE", ""))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     d = sub.add_parser("diff-context")
-    d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    d.add_argument("--base", default=os.environ.get("BASE", ""))
     fc = sub.add_parser("failure-context")
     fc.add_argument("--gate", default=os.environ.get("GATE", ""))
     fc.add_argument("--component", default=os.environ.get("COMPONENT", ""))
@@ -1957,17 +2863,17 @@ def main() -> int:
     sg.add_argument("--service", required=True)
     sg.add_argument("--dry-run", action="store_true")
     pub = sub.add_parser("publish")
-    pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pub.add_argument("--base", default=os.environ.get("BASE", ""))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
     dlv = sub.add_parser("deliver")
-    dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    dlv.add_argument("--base", default=os.environ.get("BASE", ""))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
     bdlv = sub.add_parser("bundle-deliver")
     bdlv.add_argument("--bundle", required=True)
     bdlv.add_argument("--expected-head", required=True)
     bdlv.add_argument("--title", required=True)
-    bdlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    bdlv.add_argument("--base", default=os.environ.get("BASE", ""))
     trr = sub.add_parser("tekton-trigger-readiness")
     trr.add_argument("--runtime-config", required=True)
     trr.add_argument(
@@ -2006,9 +2912,13 @@ def main() -> int:
         if args.cmd == "runtime-efficiency":
             return runtime_efficiency_check()
         if args.cmd == "contracts":
+            if args.action == "audit-authority":
+                return canonical_contract_audit()
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()
+        if args.cmd == "format-check":
+            return format_check()
         if args.cmd == "lint":
             return lint_all()
         if args.cmd == "test":
@@ -2063,8 +2973,19 @@ def main() -> int:
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
         if args.cmd == "bundle-deliver":
+            try:
+                bundle_base = pull_request_base_name(args.base)
+            except RuntimeError as exc:
+                return fail(str(exc), 1)
             return isolated_bundle_deliver(
-                ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable
+                ROOT,
+                Path(__file__).resolve(),
+                args.bundle,
+                args.expected_head,
+                args.title,
+                bundle_base,
+                sys.executable,
+                qualification_environment(),
             )
         if args.cmd == "tekton-trigger-readiness":
             return tekton_trigger_readiness_command(args.runtime_config, args.evidence)

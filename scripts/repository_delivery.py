@@ -280,14 +280,23 @@ def _worktree_snapshot(root: Path) -> tuple[str, str, str]:
 
 
 def bundle_deliver(
-    root: Path, trusted_controller: Path, bundle: str, expected_head: str, title: str, base: str, python_executable: str
+    root: Path,
+    trusted_controller: Path,
+    bundle: str,
+    expected_head: str,
+    title: str,
+    base: str,
+    python_executable: str,
+    process_env: dict[str, str],
 ) -> int:
     """Deliver from an isolated clone without mutating refs/files in the caller worktree."""
     bundle_path = Path(bundle).expanduser().resolve()
     if not title.strip():
         raise RuntimeError("TITLE is required")
     if not base.strip():
-        base = "main"
+        raise RuntimeError("bundle-deliver requires explicit BASE")
+    if not isinstance(process_env, dict):
+        raise RuntimeError("bundle-deliver requires canonical process environment")
     before = _worktree_snapshot(root)
     branch = _bundle_branch(root, bundle_path, expected_head)
     origin = _git(root, "remote", "get-url", "origin").strip()
@@ -314,7 +323,7 @@ def bundle_deliver(
         # Execute the trusted controller from the caller checkout while cwd points at
         # the isolated clone. A bundle that modifies repoctl.py cannot weaken the
         # delivery controller used to validate and publish itself.
-        trusted_env = os.environ.copy()
+        trusted_env = dict(process_env)
         trusted_env["REPOCTL_TRUSTED_CONTROLLER"] = str(trusted_controller)
         proc = _run(
             [

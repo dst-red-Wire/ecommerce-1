@@ -1,0 +1,123 @@
+version: 1
+kind: SourceQualityPolicy
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+authority_claims:
+  - repository.quality.source
+
+principles:
+  source_mutation_during_qualification: forbidden
+  formatter_drift: advisory
+  lint_policy_source: central-contract-only
+  syntax_validation: blocking
+  semantic_validation: blocking
+  security_validation: blocking
+  generated_artifact_drift: blocking
+  file_specific_quality_exceptions: forbidden
+  parallel_local_quality_policy: forbidden
+
+parallel_policy_files:
+  forbidden:
+    - .ansible-lint
+    - ruff.toml
+    - .ruff.toml
+    - .golangci.yml
+    - .golangci.yaml
+    - .yamllint
+
+orchestration_adapters:
+  pre_commit:
+    path: .pre-commit-config.yaml
+    required_delegate: scripts/repoctl.py
+
+adapters:
+  terraform:
+    formatter:
+      executable_preference:
+        - tofu
+        - terraform
+      args:
+        - fmt
+        - -check
+        - -recursive
+        - -diff
+      drift_exit_codes:
+        - 3
+      drift_severity: advisory
+      execution_error_severity: blocking
+    validation:
+      provider_lock_authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
+      severity: blocking
+
+  ansible:
+    lint:
+      local_config: forbidden
+      blocking_default: true
+      advisory_rules:
+        - partial-become
+        - latest[git]
+        - no-handler
+        - yaml[empty-lines]
+        - run-once[play]
+        - var-naming[no-role-prefix]
+        - yaml[line-length]
+    syntax_check:
+      severity: blocking
+    collection_versions:
+      severity: blocking
+
+  go:
+    formatter:
+      command: gofmt
+      args:
+        - -l
+      drift_output: advisory
+    vet:
+      severity: blocking
+    tests:
+      severity: blocking
+    build:
+      severity: blocking
+
+  python:
+    local_config: forbidden
+    configuration:
+      target_version: py312
+      line_length: 120
+      extend_exclude:
+        - .context
+        - frontend/node_modules
+      lint_select:
+        - E9
+        - F63
+        - F7
+        - F82
+    formatter:
+      command: ruff
+      args:
+        - format
+        - --check
+      drift_exit_codes:
+        - 1
+      drift_severity: advisory
+      execution_error_severity: blocking
+    lint:
+      command: ruff
+      args:
+        - check
+      severity: blocking
+
+  generated_artifacts:
+    templ:
+      severity: blocking
+    sqlc:
+      severity: blocking
+    openapi:
+      severity: blocking
+
+evidence:
+  advisory_prefix: ADVISORY
+  pass_prefix: PASS
+  fail_prefix: FAIL
+  qualification_may_pass_with_advisories: true

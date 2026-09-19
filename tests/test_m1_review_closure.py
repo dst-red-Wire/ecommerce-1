@@ -136,7 +136,25 @@ class M1ReviewClosureTests(unittest.TestCase):
         self.assertIn("env=dict(env, HTTP_ADDR=address)", site)
 
     def test_frontend_lint_failure_is_propagated(self):
+        python_policy = {
+            "formatter": {
+                "command": "ruff",
+                "args": ["format", "--check"],
+                "drift_exit_codes": [1],
+            },
+            "lint": {
+                "command": "ruff",
+                "args": ["check"],
+            },
+            "configuration": {
+                "target_version": "py312",
+                "line_length": 120,
+                "extend_exclude": [],
+                "lint_select": ["E9", "F82"],
+            },
+        }
         with (
+            mock.patch.object(REPOCTL, "source_quality_adapter", return_value=python_policy),
             mock.patch.object(REPOCTL, "require"),
             mock.patch.object(
                 REPOCTL,
