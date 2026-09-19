@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,29 +10,33 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR = ROOT / "scripts" / "validate-service-policy-chain.rb"
-FILES = [
-    "architecture.lock.yaml",
-    "config/contracts/dependency-map.yaml",
-    "config/contracts/service-mesh-policy.yaml",
-    "config/contracts/mesh-policy-authority.yaml",
-    "config/contracts/waypoint-scope.yaml",
-    "config/contracts/service-resilience-policy.yaml",
-    "config/contracts/service-authz-policy.yaml",
-    "config/contracts/service-exposure-policy.yaml",
-    "config/contracts/egress-policy.yaml",
-    "config/contracts/service-slo.yaml",
-    "config/contracts/traffic-class-policy.yaml",
-    "config/contracts/mesh-observability-policy.yaml",
-    "config/contracts/public-api-contracts.yaml",
-    "contracts/payment-security.yaml",
-    "contracts/payment-runtime.yaml",
-]
-
-
 class ServicePolicyChainTest(unittest.TestCase):
+    def registered_machine_contracts(self) -> list[str]:
+        script = (
+            "require 'yaml'; require 'json'; "
+            "lock=YAML.safe_load(File.read(ARGV[0]), aliases: false); "
+            "registry=lock.fetch('machine_contracts'); "
+            "raise 'machine_contracts must be a mapping' unless registry.is_a?(Hash); "
+            "print JSON.generate(registry.values)"
+        )
+        result = subprocess.run(
+            ["ruby", "-e", script, str(ROOT / "architecture.lock.yaml")],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        paths = json.loads(result.stdout)
+        self.assertTrue(all(isinstance(path, str) and path for path in paths))
+        return sorted(set(paths))
+
     def copy_contracts(self, temp_root: Path) -> None:
-        for relative in FILES:
+        relatives = ["architecture.lock.yaml", *self.registered_machine_contracts()]
+        for relative in relatives:
             source = ROOT / relative
+            self.assertTrue(source.is_file(), relative)
             destination = temp_root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)

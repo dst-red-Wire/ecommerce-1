@@ -5,20 +5,20 @@ require "pathname"
 require "yaml"
 
 module ServicePolicyChainValidator
-  CONTRACTS = {
-    dependency: "config/contracts/dependency-map.yaml",
-    mesh: "config/contracts/service-mesh-policy.yaml",
-    authority: "config/contracts/mesh-policy-authority.yaml",
-    waypoint: "config/contracts/waypoint-scope.yaml",
-    resilience: "config/contracts/service-resilience-policy.yaml",
-    authz: "config/contracts/service-authz-policy.yaml",
-    exposure: "config/contracts/service-exposure-policy.yaml",
-    egress: "config/contracts/egress-policy.yaml",
-    slo: "config/contracts/service-slo.yaml",
-    traffic: "config/contracts/traffic-class-policy.yaml",
-    observability: "config/contracts/mesh-observability-policy.yaml",
-    public_api: "config/contracts/public-api-contracts.yaml",
-    edge_protocol: "config/contracts/edge-protocol-policy.yaml"
+  CONTRACT_ROLES = {
+    dependency: "dependency_map",
+    mesh: "service_mesh_policy",
+    authority: "mesh_policy_authority",
+    waypoint: "waypoint_scope",
+    resilience: "service_resilience_policy",
+    authz: "service_authz_policy",
+    exposure: "service_exposure_policy",
+    egress: "egress_policy",
+    slo: "service_slo",
+    traffic: "traffic_class_policy",
+    observability: "mesh_observability_policy",
+    public_api: "public_api_contracts",
+    edge_protocol: "edge_protocol_policy"
   }.freeze
 
   module_function
@@ -63,17 +63,25 @@ module ServicePolicyChainValidator
     canonical = Array(lock.dig("business", "services")).map(&:to_s)
     errors << "architecture.lock.yaml must declare exactly 19 canonical services" unless canonical.size == 19 && canonical.uniq.size == 19
 
-    c = CONTRACTS.transform_values { |path| load_yaml(root, path) }
+    registry = mapping(lock["machine_contracts"], "architecture.lock.yaml machine_contracts", errors)
+    paths = CONTRACT_ROLES.transform_values do |role|
+      path = registry[role]
+      errors << "architecture.lock.yaml machine_contracts.#{role} must be declared" unless path.is_a?(String) && !path.strip.empty?
+      path
+    end
+    return errors unless errors.empty?
 
-    dependency_services = service_set(c[:dependency], "services", CONTRACTS[:dependency], canonical, errors)
-    mesh_services = service_set(c[:mesh], "services", CONTRACTS[:mesh], canonical, errors)
-    resilience_services = service_set(c[:resilience], "services", CONTRACTS[:resilience], canonical, errors)
-    authz_services = service_set(c[:authz], "service_rules", CONTRACTS[:authz], canonical, errors)
-    exposure_services = service_set(c[:exposure], "services", CONTRACTS[:exposure], canonical, errors)
-    egress_services = service_set(c[:egress], "services", CONTRACTS[:egress], canonical, errors)
-    slo_services = service_set(c[:slo], "services", CONTRACTS[:slo], canonical, errors)
-    traffic_services = service_set(c[:traffic], "services", CONTRACTS[:traffic], canonical, errors)
-    observability_services = service_set(c[:observability], "services", CONTRACTS[:observability], canonical, errors)
+    c = paths.transform_values { |contract_path| load_yaml(root, contract_path) }
+
+    dependency_services = service_set(c[:dependency], "services", paths[:dependency], canonical, errors)
+    mesh_services = service_set(c[:mesh], "services", paths[:mesh], canonical, errors)
+    resilience_services = service_set(c[:resilience], "services", paths[:resilience], canonical, errors)
+    authz_services = service_set(c[:authz], "service_rules", paths[:authz], canonical, errors)
+    exposure_services = service_set(c[:exposure], "services", paths[:exposure], canonical, errors)
+    egress_services = service_set(c[:egress], "services", paths[:egress], canonical, errors)
+    slo_services = service_set(c[:slo], "services", paths[:slo], canonical, errors)
+    traffic_services = service_set(c[:traffic], "services", paths[:traffic], canonical, errors)
+    observability_services = service_set(c[:observability], "services", paths[:observability], canonical, errors)
 
     # Layer ownership must remain single-authority for Ambient-managed traffic.
     errors << "mesh authority l3_l4 must be cilium" unless c[:authority].dig("layers", "l3_l4", "authority") == "cilium"

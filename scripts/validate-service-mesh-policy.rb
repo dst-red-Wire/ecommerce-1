@@ -15,7 +15,10 @@ module ServiceMeshPolicyValidator
 
   def validate(root)
     lock = load_yaml(File.join(root, "architecture.lock.yaml"))
-    policy = load_yaml(File.join(root, "config/contracts/service-mesh-policy.yaml"))
+    registry = lock.fetch("machine_contracts", {})
+    policy_path = registry["service_mesh_policy"]
+    raise "architecture.lock.yaml machine_contracts.service_mesh_policy must be declared" unless policy_path.is_a?(String) && !policy_path.strip.empty?
+    policy = load_yaml(File.join(root, policy_path))
     errors = []
 
     platform = lock.fetch("platform", {})

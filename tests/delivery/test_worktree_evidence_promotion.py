@@ -93,18 +93,22 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             ["git", "archive", "--format=tar", "--output", "$str:archive", "$tree_sha"],
             command_vectors,
         )
-        self.assertIn(
-            [
-                "gitleaks",
-                "dir",
-                "--config",
-                ".gitleaks.toml",
-                "--redact",
-                "--no-banner",
-                "$str:scan_root",
-            ],
+        self.assertTrue(
+            any(
+                vector[:2] == ["$command", "dir"] and vector[-1] == "$str:scan_root"
+                for vector in command_vectors
+            ),
             command_vectors,
         )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "write_gitleaks_policy_config"
+                for node in ast.walk(security)
+            )
+        )
+        self.assertNotIn(".gitleaks.toml", source)
 
     def test_worktree_tree_sha_does_not_mutate_the_real_index(self):
         with tempfile.TemporaryDirectory() as tmp:

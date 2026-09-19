@@ -1,23 +1,40 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+import copy
+import hashlib
 import json
 import re
 import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
-INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
-V5_FRONTENDS = ["storefront", "admin"]
-EXPECTED_V5_FRONTEND_RUNTIME = {
-    "language": "go",
-    "module": "frontend",
-    "module_file": "frontend/go.mod",
-    "rendering": "templ",
-    "interactions": "htmx",
-    "runtime_nodejs": False,
-    "migration_source": "nextjs-react-node",
-}
+CANONICAL_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_canonical_yaml(relative):
+    """Load canonical YAML/JSON without creating a second in-code contract snapshot."""
+    path = CANONICAL_ROOT / relative
+    ruby = (
+        "require 'yaml'; require 'json'; "
+        "data=YAML.safe_load(File.read(ARGV[0]), aliases: false); "
+        "print JSON.generate(data)"
+    )
+    completed = subprocess.run(
+        ["ruby", "-e", ruby, str(path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise RuntimeError(completed.stderr.strip() or f"cannot load canonical contract {relative}")
+    return json.loads(completed.stdout)
+
+
+_CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
+INDEX = _CANONICAL_LOCK["topology_contracts"]["exact_index"]
+V5_FRONTENDS = list(_CANONICAL_LOCK["business"]["frontends"])
+EXPECTED_V5_FRONTEND_RUNTIME = dict(_CANONICAL_LOCK["business"]["frontend_runtime"])
 V5_PROD_TOPOLOGY_KEYS = frozenset(
     {
         "physical_hosts_total",
@@ -315,493 +332,73 @@ V5_SECTION_KEYS = {
     "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
     "prod_certified_topology.sites.prod-b": V5_PROD_SITE_KEYS,
 }
-DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
-V5_MLOPS = {
-    "dataset_versioner": "lakefs",
-    "object_storage": "seaweedfs-s3",
-    "metadata_database": "cloudnativepg-postgresql",
-    "experiments_lineage": "mlflow",
-    "artifact_registry": "harbor",
-    "promotion_authority": "gitea-gitops",
-    "orchestration": "tekton",
-    "desired_state": "rancher-fleet",
-    "progressive_delivery": "argo-rollouts",
-    "runtime": "kserve-vllm",
-    "drift": "evidently-tekton-batch",
-}
-V5_OBSERVABILITY = {
-    "telemetry": "opentelemetry",
-    "application_gateway": "rotel",
-    "infrastructure_collector": "opentelemetry-collector",
-    "metrics_protocol": "prometheus",
-    "metrics_scraper": "vmagent",
-    "metrics": "victoriametrics",
-    "infrastructure_logs": "victorialogs",
-    "application_observability_storage": "clickhouse",
-    "application_observability_ui": "hyperdx",
-    "hyperdx_metadata_store": "mongodb-oss-self-hosted",
-    "alerts": "vmalert",
-    "notifications": "alertmanager",
-    "dashboards": "grafana",
-    "security_pipeline": "data-prepper",
-    "security_logs": "opensearch",
-    "security": "wazuh",
-}
-V5_SUPERSEDED = {
-    "dvc-dataset-versioner": "lakefs",
-    "nextjs-frontend-runtime": "go-templ-htmx",
-    "fluxcd": "rancher-fleet",
-    "flagger": "argo-rollouts",
-    "minio-community": "seaweedfs-s3",
-    "loki": "victorialogs",
-    "prometheus-server-tsdb": "victoriametrics",
-    "fluent-bit-general-log-shipper": "opentelemetry-collector",
-    "opensearch-general-logs": "victorialogs",
-    "data-prepper-general-logs": "security-only-data-prepper",
-    "splunk": "wazuh-opensearch",
-    "prod-physical-hosts-per-site-5": "prod-physical-hosts-per-site-3",
-    "rook-ceph-launch-baseline": "no-default-ceph",
-    "woodpecker-ci": "tekton",
-}
+V5_MLOPS = dict(_CANONICAL_LOCK["mlops"])
+DEPLOYABLE_MLOPS = [
+    V5_MLOPS["dataset_versioner"],
+    V5_MLOPS["experiments_lineage"],
+    V5_MLOPS["runtime"],
+    V5_MLOPS["drift"],
+]
+V5_OBSERVABILITY = dict(_CANONICAL_LOCK["observability"])
+V5_SUPERSEDED = dict(_CANONICAL_LOCK["superseded"])
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
-V5_TOPOLOGY_CONTRACTS = {
-    "exact_index": "docs/architecture/EXACT_TOPOLOGY_V5.md",
-    "preprod": "docs/architecture/PREPROD_TOPOLOGY_V2.md",
-    "prod": "docs/architecture/PROD_TOPOLOGY_V2.md",
-    "network_ipam": "docs/architecture/NETWORK_IPAM_CONTRACT.md",
-    "mgmt_wireguard_access": "docs/architecture/MGMT_WIREGUARD_ACCESS.md",
-    "storage": "docs/architecture/STORAGE_TOPOLOGY_V2.md",
-    "service_ownership": "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md",
-    "data_ownership": "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
-    "events": "docs/architecture/EVENT_CONTRACT_MATRIX.md",
-    "security_zones": "docs/architecture/SECURITY_TRUST_ZONES.md",
-    "deployment_dag": "docs/architecture/DEPLOYMENT_DAG.md",
-    "aiops": "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-    "mlops": "docs/architecture/MLOPS_TOPOLOGY_V1.md",
-    "observability": "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md",
-}
-V5_MACHINE_CONTRACTS = {
-    "resilience_governance": "config/contracts/resilience-governance.yaml",
-    "security_trust_zones": "config/contracts/security-trust-zones.yaml",
-    "review_policy": "config/contracts/review-policy.yaml",
-    "mgmt_inventory": "config/infrastructure/mgmt-inventory.yaml",
-    "preprod_inventory": "config/infrastructure/preprod-inventory.yaml",
-    "prod_inventory": "config/infrastructure/prod-inventory.yaml",
-    "network_plan": "config/infrastructure/network-plan.yaml",
-    "mgmt_wireguard_access": "config/contracts/mgmt-wireguard-access.yaml",
-    "mgmt_access_gateways": "config/infrastructure/mgmt-access-gateways.yaml",
-    "storage_plan": "config/infrastructure/storage-plan.yaml",
-    "deployment_waves": "config/infrastructure/deployment-waves.yaml",
-    "service_ownership": "config/contracts/service-ownership.yaml",
-    "event_contracts": "config/contracts/event-contracts.yaml",
-    "dependency_map": "config/contracts/dependency-map.yaml",
-    "public_api_contracts": "config/contracts/public-api-contracts.yaml",
-    "ci_topology": "config/contracts/ci-topology.yaml",
-    "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
-    "observability_topology": "config/contracts/observability-topology.yaml",
+DERIVED_TOPOLOGY_ROLES = frozenset(
+    {
+        "architecture_boundaries",
+        "service_mesh_topology",
+        "service_policy_chain",
+    }
+)
+REGISTRY_GLOBS = {
+    "topology_contracts": (
+        "docs/architecture/*.md",
+    ),
+    "machine_contracts": (
+        "config/contracts/*.yaml",
+        "config/contracts/*.yml",
+        "config/contracts/*.json",
+        "config/context/*.yaml",
+        "config/context/*.yml",
+        "config/context/*.json",
+        "config/infrastructure/*.yaml",
+        "config/infrastructure/*.yml",
+        "config/infrastructure/*.json",
+        "contracts/*.yaml",
+        "contracts/*.yml",
+        "contracts/*.json",
+        "contracts/**/*.yaml",
+        "contracts/**/*.yml",
+        "contracts/**/*.json",
+    ),
 }
 V5_SECTION_KEYS.update(
     {
         "superseded": frozenset(V5_SUPERSEDED),
-        "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
-        "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
     }
 )
-V5_MILESTONES = [
-    "M0-architecture-sync",
-    "M1-monorepo-bootstrap",
-    "M2-golden-service-product",
-    "M2-5-persistent-mgmt-bootstrap",
-    "M3-preprod-infrastructure",
-    "M4-platform-baseline",
-    "M5-commerce-vertical-slice",
-    "M6-full-application",
-    "M7-qualification",
-    "M8-preprod-certification",
-    "M9-prod-ab",
-]
-V5_MILESTONE_PREREQUISITES = [[], [0], [1], [1], [3], [4], [2, 5], [6], [7], [8], [9]]
+V5_MILESTONES = list(_CANONICAL_LOCK["build_milestones"])
 V5_MILESTONE_DEPENDENCIES = {
-    name: [V5_MILESTONES[index] for index in parents]
-    for name, parents in zip(V5_MILESTONES, V5_MILESTONE_PREREQUISITES)
+    name: list(parents)
+    for name, parents in _CANONICAL_LOCK["milestone_dependencies"].items()
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
-V5_REPOSITORY_GOVERNANCE = {
-    "scope": "entire-repository",
-    "transverse_rule_contract": {
-        "source_of_truth": "architecture.lock.yaml",
-        "rule_definition": "central-contract-only",
-        "enforcement": "generic-validator",
-        "per_file_rule_propagation": "forbidden",
-        "consumer_changes": "only-if-required-to-consume-contract",
-    },
-    "owner_authorization": {
-        "syntax": "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
-        "decision_authority": "repository-owner",
-        "recording_agent": "ChatGPT",
-        "recording_requires_explicit_owner_instruction": True,
-        "sha_binding": "exact",
-        "scope_binding": "exact",
-        "head_change": "authorization-expired",
-        "absence_or_mismatch": "block",
-    },
-}
+V5_REPOSITORY_GOVERNANCE = dict(_CANONICAL_LOCK["repository_governance"])
 OWNER_AUTHORIZATION_PATTERN = re.compile(
     r"^/owner-authorization approve scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
     r"sha=(?P<sha>[0-9a-f]{40})$"
 )
 
-V5_DEVELOPER_PLATFORM = {
-    "status": "contract-locked-in-m1-implemented-from-m4",
-    "scope": "management-plane",
-    "principles": {
-        "portal": "backstage",
-        "catalog": "backstage-software-catalog",
-        "source_of_truth": "git",
-        "change_unit": "pull-request",
-        "forge": "gitea",
-        "ci": "tekton",
-        "registry": "harbor",
-        "gitops": "rancher-fleet",
-        "infrastructure_api": "crossplane",
-        "progressive_delivery": "argo-rollouts",
-        "foundation_iac": "terraform-opentofu",
-    },
-    "runtime_boundary": {
-        "commerce_runtime_nodejs": "forbidden",
-        "backstage_management_plane_nodejs": "allowed-required",
-        "backstage_only_exception": True,
-    },
-    "backstage_pr_contract": {
-        "role": "request-interface",
-        "allowed_operations": [
-            "read-catalog",
-            "create-branch",
-            "create-commit",
-            "create-pull-request",
-            "read-pull-request",
-        ],
-        "forbidden_operations": [
-            "direct-main-write",
-            "force-push",
-            "approve-pull-request",
-            "merge-pull-request",
-            "terraform-apply",
-            "kubectl-apply",
-            "crossplane-apply",
-            "direct-workload-deploy",
-            "direct-environment-promotion",
-        ],
-        "gitea_pull_request_action": "ecommerce:gitea:pull-request",
-    },
-    "git_contract": {
-        "default_branch": "main",
-        "request_branch_pattern": "platform/<request-kind>/<component>/<request-id>",
-        "request_path_pattern": "platform/requests/<request-id>.yaml",
-        "force_push": "forbidden",
-        "direct_default_branch_write": "forbidden",
-    },
-    "pull_request_contract": {
-        "required": True,
-        "exact_head_sha_required": True,
-        "human_review_required": True,
-        "required_context": [
-            "request-id",
-            "component",
-            "request-kind",
-            "exact-head-sha",
-            "expected-infrastructure-impact",
-            "immutable-image-digest",
-            "preview-state",
-            "preview-url-when-ready",
-            "cleanup-policy",
-        ],
-    },
-    "platform_request_api": {
-        "api_version": "platform.ecommerce.io/v1alpha1",
-        "kind": "PlatformRequest",
-        "authoritative_representation": "git-file",
-        "path_pattern": "platform/requests/<request-id>.yaml",
-        "required_fields": [
-            "metadata.name",
-            "spec.requester.entityRef",
-            "spec.component.entityRef",
-            "spec.request.kind",
-            "spec.request.operation",
-            "spec.lifecycle.owner",
-        ],
-    },
-    "preview_environment_api": {
-        "api_version": "platform.ecommerce.io/v1alpha1",
-        "kind": "PreviewEnvironment",
-        "lifecycle_owner": "pull-request",
-        "create_on": ["pull-request-opened", "pull-request-updated"],
-        "delete_on": ["pull-request-closed", "pull-request-merged"],
-        "unique_url_required": True,
-    },
-    "execution_contract": {
-        "plan_before_apply": "required",
-        "mutating_platform_action_requires_git_change": True,
-        "tekton_direct_workload_deploy": "forbidden",
-        "tekton_outputs": [
-            "qualification-evidence",
-            "immutable-oci-artifact",
-            "infrastructure-impact-plan",
-            "gitops-desired-state-change",
-        ],
-        "harbor_reference": "immutable-digest",
-        "gitops_desired_state_required": True,
-        "fleet_reconciles_git": True,
-        "crossplane_materializes_platform_api": True,
-    },
-    "infrastructure_ownership": {
-        "terraform_opentofu": "foundation",
-        "crossplane": "self-service-platform-resources",
-    },
-    "preview_lifecycle": {
-        "creation": "gitops-reconciliation",
-        "cleanup": "gitops-reconciliation",
-        "cleanup_trigger": ["pull-request-closed", "pull-request-merged"],
-        "direct_runtime_delete": "forbidden",
-    },
-    "promotion": {
-        "strategy": "build-once-promote-many",
-        "rebuild_between_preview_preprod_prod": "forbidden",
-        "same_digest_required": True,
-        "environment_change": "gitops-only",
-    },
-    "milestone_contract": {
-        "M1-monorepo-bootstrap": {
-            "outcome": "stable-pr-driven-contract-locked",
-            "implementation_required": False,
-            "requires": [
-                "pr-governance",
-                "exact-sha-review-and-evidence",
-                "reproducible-bootstrap",
-                "affected-routing",
-                "application-qualification",
-                "frontend-go-templ-qualification",
-                "developer-platform-contract-locked",
-            ],
-            "does_not_require": [
-                "backstage-deployed",
-                "crossplane-deployed",
-                "harbor-operational",
-                "fleet-previews-operational",
-                "argo-rollouts-operational",
-                "m4-tekton-runner-operational",
-            ],
-        },
-        "M4-platform-baseline": {
-            "outcome": "implement-pr-driven-platform-contract",
-            "components": [
-                "backstage",
-                "tekton",
-                "harbor",
-                "rancher-fleet",
-                "crossplane",
-                "argo-rollouts",
-            ],
-        },
-        "M5-commerce-vertical-slice": {
-            "outcome": "prove-first-pr-driven-preview-and-promotion",
-        },
-    },
-}
+V5_DEVELOPER_PLATFORM = dict(_CANONICAL_LOCK["developer_platform"])
 
-V5_DEPLOYMENT_WAVES = {
-    "version": 2,
-    "status": "exact",
-    "waves": [
-        {
-            "id": "00-underlay",
-            "requires": [],
-            "components": ["network", "dns-prerequisites", "time-sync", "image-mirrors"],
-        },
-        {"id": "10-rke2", "requires": ["00-underlay"], "components": ["rke2-control-plane", "rke2-workers"]},
-        {
-            "id": "20-network-security",
-            "requires": ["10-rke2"],
-            "components": ["cilium", "hubble", "pod-security", "kyverno", "tetragon", "spire"],
-        },
-        {
-            "id": "30-gitops-identity",
-            "requires": ["20-network-security"],
-            "components": ["rancher-fleet", "argo-rollouts", "istio"],
-        },
-        {
-            "id": "40-secrets-registry-ci",
-            "requires": ["30-gitops-identity"],
-            "components": ["openbao", "external-secrets", "harbor", "tekton"],
-        },
-        {
-            "id": "50-observability",
-            "requires": ["40-secrets-registry-ci"],
-            "components": [
-                "opentelemetry-collector",
-                "rotel",
-                "vmagent",
-                "victoriametrics",
-                "victorialogs",
-                "clickhouse",
-                "hyperdx",
-                "mongodb-oss-self-hosted",
-                "vmalert",
-                "alertmanager",
-                "grafana",
-                "data-prepper",
-                "opensearch-security",
-                "wazuh",
-            ],
-        },
-        {
-            "id": "60-stateful",
-            "requires": ["40-secrets-registry-ci", "20-network-security"],
-            "parallel_groups": [
-                ["cloudnativepg", "strimzi-kafka", "rabbitmq", "redis", "seaweedfs"],
-                ["opensearch-business", "apicurio"],
-            ],
-        },
-        {
-            "id": "70-iam-edge",
-            "requires": ["60-stateful", "30-gitops-identity"],
-            "components": ["keycloak", "haproxy", "caddy", "coraza", "kong", "ats", "istio-gateway", "squid-egress"],
-        },
-        {
-            "id": "80-golden-service",
-            "requires": ["50-observability", "60-stateful", "70-iam-edge"],
-            "components": ["product"],
-        },
-        {
-            "id": "90-commerce",
-            "requires": ["80-golden-service"],
-            "parallel_groups": [
-                [
-                    "inventory",
-                    "tax",
-                    "shipping",
-                    "fraud-risk",
-                    "user-profile",
-                    "search",
-                    "notification",
-                    "order",
-                    "payment",
-                ],
-                ["pricing", "tracking", "fulfillment", "review", "returns", "billing"],
-                ["catalog", "cart"],
-            ],
-            "serial_after_parallel": ["checkout"],
-        },
-        {
-            "id": "95-mlops",
-            "requires": ["40-secrets-registry-ci", "60-stateful"],
-            "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"],
-        },
-        {"id": "100-frontends", "requires": ["90-commerce"], "components": ["storefront", "admin"]},
-        {
-            "id": "110-qualification",
-            "requires": ["100-frontends", "95-mlops"],
-            "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"],
-        },
-    ],
-    "rules": {
-        "wait_only_on_declared_dependencies": True,
-        "fail_fast_on_blocking_gate": True,
-        "no_perf_before_prior_gates": True,
-        "no_chaos_dr_before_prior_gates": True,
-        "no_prod_promotion_from_test_state": True,
-    },
-}
+V5_DEPLOYMENT_WAVES = _load_canonical_yaml(
+    _CANONICAL_LOCK["machine_contracts"]["deployment_waves"]
+)
 MIRRORED_WAVES = ("20-network-security", "30-gitops-identity", "50-observability")
 
 EXACT_CONTRACTS = {
-    "resilience_governance": {
-        "version": 1,
-        "status": "exact",
-        "architecture_authority": AUTHORITY,
-        "sources": [
-            "docs/architecture/SECURITY_TRUST_ZONES.md",
-            "docs/architecture/DEPLOYMENT_DAG.md",
-            "docs/architecture/PROD_TOPOLOGY_V2.md",
-            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
-        ],
-        "compromise": {
-            "scope": "reproducible-compromised-nodes-and-workloads",
-            "sequence": ["isolate", "acquire-evidence", "destroy", "rebuild-via-gitops-iac"],
-            "manual_cleaning_restores_trust": False,
-            "exception": "specialized-forensic-requirement",
-        },
-        "evidence": {
-            "destroy_required_forensic_evidence": "forbidden",
-            "acquisition_may_delay_jit_teardown": True,
-            "write_identity_separate_from_delete_admin": True,
-            "immutability": "where-policy-requires",
-        },
-        "site_recovery": {
-            "sequence": [
-                "health-evidence",
-                "quorum-fencing",
-                "write-authority-decision",
-                "stateful-promotion-recovery",
-                "application-routing",
-                "dns-gslb-change",
-            ]
-        },
-        "mlops_recovery": {
-            "promotion": "frozen-during-recovery",
-            "required_assets": [
-                "postgresql-metadata-backup",
-                "independent-object-backup",
-                "harbor-recovery",
-                "tested-restore-procedures",
-            ],
-        },
-    },
-    "security_trust_zones": {
-        "version": 1,
-        "status": "exact",
-        "architecture_authority": AUTHORITY,
-        "source": "docs/architecture/SECURITY_TRUST_ZONES.md",
-        "zones": {
-            "Z0": "internet-untrusted",
-            "Z1": "public-edge-dmz",
-            "Z2": "kubernetes-ingress-service-mesh",
-            "Z3": "application-workloads",
-            "Z4": "stateful-data",
-            "Z5": "permanent-mgmt",
-            "Z6": "backup-evidence-dfir",
-        },
-        "application_services_source": "architecture.lock.yaml#business.services",
-        "human_iam": {
-            "customers_realm": "customers",
-            "workforce_realm": "workforce",
-            "privileged_authentication": "hardware-backed-webauthn-passkeys",
-            "customer_tokens_for_mgmt": "forbidden",
-        },
-        "workload_identity": {
-            "trust_domains": ["PREPROD", "PROD-A", "PROD-B"],
-            "cross_environment": "deny-by-default",
-            "federation_requires": "architecture-security-review",
-        },
-        "secrets": {
-            "flow": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
-            "forbidden": [
-                "git",
-                "image-layers",
-                "ci-logs",
-                "bootstrap-credentials-after-preprod-destroy",
-                "application-access-to-openbao-admin-credentials",
-            ],
-        },
-        "egress": {
-            "default": "deny",
-            "application_path": "approved-istio-egress-squid",
-            "logging": "required",
-            "exceptions": "documented",
-        },
-        "mgmt_access_source": "config/contracts/mgmt-wireguard-access.yaml",
-    },
+    key: _load_canonical_yaml(_CANONICAL_LOCK["machine_contracts"][key])
+    for key in ("resilience_governance", "security_trust_zones")
 }
 
 
@@ -845,8 +442,23 @@ def owner_authorization_errors(
     return errors
 
 
+_YAML_PARSE_CACHE = {}
+
+
+def clear_yaml_parse_cache():
+    """Clear the process-local content-addressed Psych parse cache."""
+    _YAML_PARSE_CACHE.clear()
+
+
 def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
+    """Parse YAML with Ruby/Psych, caching successful results by exact file content."""
+    path = Path(path)
+    contents = path.read_bytes()
+    digest = hashlib.sha256(contents).digest()
+    cached = _YAML_PARSE_CACHE.get(digest)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
     ruby = """
 document = Psych.parse_file(ARGV[0])
 walk = lambda do |node|
@@ -865,18 +477,17 @@ puts JSON.generate(data)
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
-    return json.loads(completed.stdout)
+
+    parsed = json.loads(completed.stdout)
+
+    # Do not cache a parse if the file changed between the initial read and Psych.
+    if path.read_bytes() == contents:
+        _YAML_PARSE_CACHE[digest] = parsed
+    return copy.deepcopy(parsed)
 
 
 def validate_exact_keys(name, actual, expected_keys):
     """Validate an exact mapping schema without allowing unknown or missing fields."""
-    if name in ("topology_contracts", "machine_contracts"):
-        label = name
-        return (
-            []
-            if isinstance(actual, dict) and set(actual) == set(expected_keys)
-            else [f"{label} must match the complete approved V5 role/path registry"]
-        )
     contract_name = "complete approved V5 registry" if name == "superseded" else "complete approved V5 schema"
     if not isinstance(actual, dict):
         return [f"{name} must be a mapping with the {contract_name}"]
@@ -906,6 +517,18 @@ def lock_schema_errors(lock):
                 break
             current = current[part]
         errors.extend(validate_exact_keys(name, current, expected_keys))
+    if errors:
+        return errors
+    for registry_name in ("topology_contracts", "machine_contracts"):
+        registry = lock.get(registry_name)
+        if not isinstance(registry, dict):
+            errors.append(f"{registry_name} must be a mapping")
+            continue
+        for role, relative in registry.items():
+            if not isinstance(role, str) or not role.strip():
+                errors.append(f"{registry_name} keys must be non-empty strings")
+            if not isinstance(relative, str) or not relative.strip():
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
     if errors:
         return errors
     if not isinstance(lock.get("build_milestones"), list):
@@ -1410,6 +1033,49 @@ def documentation_errors(text):
     return errors
 
 
+def registry_coverage_errors(root, lock):
+    """Ensure every governed contract file is registered exactly once in the root authority."""
+    errors = []
+    root = Path(root)
+    for registry_name, patterns in REGISTRY_GLOBS.items():
+        declared = lock.get(registry_name, {})
+        if not isinstance(declared, dict):
+            continue
+        values = list(declared.values())
+        if len(values) != len(set(values)):
+            errors.append(f"{registry_name} must not register the same path more than once")
+        for role, relative in declared.items():
+            if (
+                not isinstance(relative, str)
+                or not relative.strip()
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
+                continue
+            if not (root / relative).is_file():
+                errors.append(f"{registry_name}.{role} declared file does not exist: {relative}")
+        discovered = set()
+        for pattern in patterns:
+            discovered.update(
+                str(path.relative_to(root))
+                for path in root.glob(pattern)
+                if path.is_file()
+            )
+        registered = {
+            relative
+            for relative in values
+            if isinstance(relative, str) and relative.strip()
+        }
+        missing = sorted(discovered - registered)
+        extra = sorted(registered - discovered)
+        if missing:
+            errors.append(f"{registry_name} has unregistered governed files: {', '.join(missing)}")
+        if extra:
+            errors.append(f"{registry_name} registers files outside its governed set: {', '.join(extra)}")
+    return errors
+
+
 def validate(root):
     root = Path(root)
     errors = []
@@ -1425,8 +1091,9 @@ def validate(root):
         if lock["version"] != 5:
             errors.append("architecture.lock.yaml must be version 5")
         topology_contracts = lock.get("topology_contracts")
-        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
-            return [*errors, "topology_contracts must match the complete approved V5 role/path registry"]
+        errors.extend(registry_coverage_errors(root, lock))
+        if errors:
+            return errors
         if topology_contracts["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
         if lock.get("observability") != V5_OBSERVABILITY:
@@ -1469,22 +1136,34 @@ def validate(root):
         ):
             errors.append("milestone dependencies must match the approved V5 DAG")
         for key in ("resilience_governance", "security_trust_zones"):
-            relative = "config/contracts/" + key.replace("_", "-") + ".yaml"
-            if lock["machine_contracts"].get(key) != relative:
-                errors.append(f"missing canonical machine contract: {key}")
+            relative = lock["machine_contracts"].get(key)
+            if not relative:
+                errors.append(f"missing canonical machine contract role: {key}")
+                continue
             contract = load_yaml(root / relative)
             if contract != EXACT_CONTRACTS[key]:
                 errors.append(f"{relative} must match its exact V5 invariants")
             if key == "security_trust_zones" and contract == EXACT_CONTRACTS[key]:
                 source = (root / contract["source"]).read_text()
                 errors.extend(security_source_errors(source, contract))
-        if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
-            errors.append("machine_contracts must match the complete approved V5 role/path registry")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
+
+        review_policy = load_yaml(root / lock["machine_contracts"]["review_policy"])
+        inherited_owner_authorization = (
+            review_policy.get("pull_request_review", {}).get("owner_authorization", {})
+        )
+        if inherited_owner_authorization != {
+            "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
+            "local_override": "forbidden",
+        }:
+            errors.append(
+                "review policy must inherit repository_governance.owner_authorization without local override"
+            )
+
         management = lock["management_plane"]
         inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
@@ -1534,23 +1213,19 @@ def validate(root):
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
         for role, relative in topology_contracts.items():
-            if (
-                not isinstance(relative, str)
-                or not relative.strip()
-                or Path(relative).is_absolute()
-                or ".." in Path(relative).parts
-            ):
-                errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
-                continue
             path = root / relative
-            if not path.is_file():
-                errors.append(f"missing topology contract: {relative}")
-                continue
             contents = path.read_text()
-            status = re.search(r"^Status:\s*`([^`]*)`\s*$", contents, re.M | re.I)
+            status = re.search(r"^Status:\s*\`([^\`]*)\`\s*$", contents, re.M | re.I)
             status_value = status.group(1).strip().upper() if status else None
-            if not contents.strip() or status_value != "EXACT":
-                errors.append(f"topology contract must be readable and EXACT: {relative}")
+            expected_status = "ACTIVE" if role in DERIVED_TOPOLOGY_ROLES else "EXACT"
+            if not contents.strip() or status_value != expected_status:
+                errors.append(
+                    f"topology contract {role} must be readable and {expected_status}: {relative}"
+                )
+            if role in DERIVED_TOPOLOGY_ROLES and "Architecture authority: `architecture.lock.yaml`" not in contents:
+                errors.append(
+                    f"derived architecture document must name architecture.lock.yaml as authority: {relative}"
+                )
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
@@ -1574,7 +1249,8 @@ def validate(root):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
         mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if f"`{relative}`" not in mandatory_handoffs:
                 errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
@@ -1728,14 +1404,15 @@ def validate(root):
         l2_canonical = router["canonical"]["L2"]
         canonical_l2_contracts = (
             INDEX,
-            "config/infrastructure/deployment-waves.yaml",
-            "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+            lock["machine_contracts"]["deployment_waves"],
+            topology_contracts["aiops"],
+            topology_contracts["mlops"],
         )
         for relative in canonical_l2_contracts:
             if relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
         for keyword in ("resilience", "recovery", "mlops", "aiops"):

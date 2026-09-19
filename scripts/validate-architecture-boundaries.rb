@@ -6,22 +6,23 @@ require "yaml"
 ROOT_DEFAULT = File.expand_path("..", __dir__)
 
 module ArchitectureBoundariesValidator
-  CONTRACTS = %w[
-    config/contracts/identity-boundary-policy.yaml
-    config/contracts/edge-policy-authority.yaml
-    config/contracts/certificate-authority-policy.yaml
-    config/contracts/secret-delivery-policy.yaml
-    config/contracts/dns-authority-policy.yaml
-    config/contracts/time-authority-policy.yaml
-    config/contracts/progressive-delivery-policy.yaml
-    config/contracts/telemetry-data-policy.yaml
-    config/contracts/rate-limit-policy.yaml
-    config/contracts/commerce-transaction-policy.yaml
-    config/contracts/egress-policy.yaml
-    config/contracts/egress-runtime-policy.yaml
-    config/contracts/service-resilience-policy.yaml
-    config/contracts/service-mesh-policy.yaml
-  ].freeze
+  CONTRACT_ROLES = {
+    identity: "identity_boundary_policy",
+    edge: "edge_policy_authority",
+    cert: "certificate_authority_policy",
+    secret: "secret_delivery_policy",
+    dns: "dns_authority_policy",
+    time: "time_authority_policy",
+    rollout: "progressive_delivery_policy",
+    telemetry: "telemetry_data_policy",
+    rate: "rate_limit_policy",
+    commerce: "commerce_transaction_policy",
+    egress: "egress_policy",
+    egress_runtime: "egress_runtime_policy",
+    resilience: "service_resilience_policy",
+    mesh: "service_mesh_policy",
+    payment_runtime: "payment_runtime"
+  }.freeze
 
   module_function
 
@@ -35,21 +36,28 @@ module ArchitectureBoundariesValidator
 
   def validate(root)
     errors = []
-    data = CONTRACTS.to_h { |path| [path, load_yaml(root, path)] }
-    identity = data["config/contracts/identity-boundary-policy.yaml"]
-    edge = data["config/contracts/edge-policy-authority.yaml"]
-    cert = data["config/contracts/certificate-authority-policy.yaml"]
-    secret = data["config/contracts/secret-delivery-policy.yaml"]
-    dns = data["config/contracts/dns-authority-policy.yaml"]
-    time = data["config/contracts/time-authority-policy.yaml"]
-    rollout = data["config/contracts/progressive-delivery-policy.yaml"]
-    telemetry = data["config/contracts/telemetry-data-policy.yaml"]
-    rate = data["config/contracts/rate-limit-policy.yaml"]
-    commerce = data["config/contracts/commerce-transaction-policy.yaml"]
-    egress = data["config/contracts/egress-policy.yaml"]
-    egress_runtime = data["config/contracts/egress-runtime-policy.yaml"]
-    resilience = data["config/contracts/service-resilience-policy.yaml"]
-    mesh = data["config/contracts/service-mesh-policy.yaml"]
+    lock = load_yaml(root, "architecture.lock.yaml")
+    registry = lock.fetch("machine_contracts", {})
+    paths = CONTRACT_ROLES.transform_values do |role|
+      path = registry[role]
+      raise "architecture.lock.yaml machine_contracts.#{role} must be declared" unless path.is_a?(String) && !path.strip.empty?
+      path
+    end
+    data = paths.transform_values { |contract_path| load_yaml(root, contract_path) }
+    identity = data[:identity]
+    edge = data[:edge]
+    cert = data[:cert]
+    secret = data[:secret]
+    dns = data[:dns]
+    time = data[:time]
+    rollout = data[:rollout]
+    telemetry = data[:telemetry]
+    rate = data[:rate]
+    commerce = data[:commerce]
+    egress = data[:egress]
+    egress_runtime = data[:egress_runtime]
+    resilience = data[:resilience]
+    mesh = data[:mesh]
 
     errors << "human identity authority must be keycloak" unless identity.dig("authorities", "human_identity", "authority") == "keycloak"
     errors << "workload identity authority must be spire" unless identity.dig("authorities", "workload_identity", "authority") == "spire"
@@ -122,7 +130,7 @@ module ArchitectureBoundariesValidator
     end
 
     if mesh.dig("services", "payment", "l7", "traffic_policy") == true
-      errors << "payment resilience source contract must exist" unless resilience.dig("services", "payment", "source_contract") == "contracts/payment-runtime.yaml"
+      errors << "payment resilience source contract must exist" unless resilience.dig("services", "payment", "source_contract") == paths[:payment_runtime]
       errors << "payment retry must require idempotency" unless resilience.dig("services", "payment", "retry_requires_idempotency") == true
     end
 

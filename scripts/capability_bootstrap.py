@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import ast
 import json
 import os
@@ -18,13 +19,23 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/toolchain/capabilities.json"
-VERSIONS = ROOT / "config/toolchain/versions.env"
-STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
-CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
-REQUIREMENTS = {"required-static", "optional-runtime"}
+TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
+VERSIONS = ROOT / "config/toolchain/versions.env"  # native projection only
+ANSIBLE_COLLECTIONS = ROOT / "platform/ansible/requirements.yml"
 SEED_LOCK = ROOT / "config/python/requirements.lock"
 SEED_VENV = ROOT / ".venv/qualification"
-MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
+
+_RAW_TOOLCHAIN_LOCK = json.loads(TOOLCHAIN_LOCK.read_text(encoding="utf-8"))
+_BOOTSTRAP_TOOLCHAIN_POLICY = _RAW_TOOLCHAIN_LOCK.get("capability_policy", {})
+
+STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
+CLASSIFICATIONS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("classifications", []))
+REQUIREMENTS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("requirements", []))
+MANAGED_PROVISION_TYPES = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_provision_types", []))
+MANAGED_BIN_DIRS = tuple(
+    Path.home() / relative
+    for relative in _BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_bin_subdirectories", [".local/bin"])
+)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
@@ -35,16 +46,129 @@ class Result:
     detail: str = ""
 
 
-def load_versions(path: Path = VERSIONS) -> dict[str, str]:
-    values = {}
+def _parse_versions_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
+            key = key.strip()
             if key in values:
-                raise ValueError(f"duplicate version authority: {key}")
-            values[key] = value
+                raise ValueError(f"duplicate version projection: {key}")
+            values[key] = value.strip()
     return values
+
+
+def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        contract.get("architecture_authority") != "architecture.lock.yaml"
+        or contract.get("scope") != "entire-repository"
+        or contract.get("status") != "exact"
+    ):
+        raise ValueError("toolchain lock must inherit architecture.lock.yaml for the entire repository")
+
+    versions = contract.get("versions")
+    if not isinstance(versions, dict) or not versions:
+        raise ValueError("toolchain lock versions must be a non-empty mapping")
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or not key
+        or not value
+        for key, value in versions.items()
+    ):
+        raise ValueError("toolchain lock versions must use non-empty string keys and values")
+
+    policy = contract.get("capability_policy")
+    if not isinstance(policy, dict):
+        raise ValueError("toolchain lock must declare capability_policy")
+    if not policy.get("classifications") or not policy.get("requirements"):
+        raise ValueError("toolchain lock capability policy must declare classifications and requirements")
+    return contract
+
+
+def _parse_ansible_collection_projection(path: Path = ANSIBLE_COLLECTIONS) -> dict[str, str]:
+    result: dict[str, str] = {}
+    name: str | None = None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if match := re.match(r"\s*-\s+name:\s*([\w.]+)\s*$", raw):
+            if name is not None:
+                raise ValueError(f"missing version for Ansible collection projection {name}")
+            name = match.group(1)
+        elif match := re.match(r"\s+version:\s*[\"']?([\w.-]+)[\"']?\s*$", raw):
+            if name is None or name in result:
+                raise ValueError("invalid Ansible collection projection")
+            result[name] = match.group(1)
+            name = None
+    if name is not None or not result:
+        raise ValueError("invalid or empty Ansible collection projection")
+    return result
+
+
+def validate_toolchain_projections(contract: dict | None = None) -> None:
+    lock = contract or load_toolchain_lock()
+
+    projected_versions = _parse_versions_env(VERSIONS)
+    if projected_versions != lock["versions"]:
+        raise ValueError("config/toolchain/versions.env drifted from central toolchain lock")
+
+    projected_collections = _parse_ansible_collection_projection()
+    expected_collections = lock.get("ansible_collections", {})
+    if projected_collections != expected_collections:
+        raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
+
+    ansible_config = lock.get("native_tool_configs", {}).get("ansible", {})
+    ansible_projection = ROOT / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
+    parser = configparser.ConfigParser()
+    parser.read(ansible_projection, encoding="utf-8")
+    expected_sections = ansible_config.get("sections", {})
+    actual_sections = {
+        section: {key: value for key, value in parser.items(section)}
+        for section in parser.sections()
+    }
+    normalized_expected_sections = {
+        str(section): {str(key): str(value) for key, value in values.items()}
+        for section, values in expected_sections.items()
+    }
+    if actual_sections != normalized_expected_sections:
+        raise ValueError("platform/ansible/ansible.cfg drifted from central toolchain lock")
+
+    bazel = lock.get("native_tool_configs", {}).get("bazel", {})
+    version_ref = bazel.get("version_ref")
+    expected_bazel = lock["versions"].get(version_ref) if isinstance(version_ref, str) else None
+    if not expected_bazel or (ROOT / ".bazelversion").read_text(encoding="utf-8").strip() != expected_bazel:
+        raise ValueError(".bazelversion drifted from central toolchain lock")
+
+    expected_bazelrc = [str(line) for line in bazel.get("bazelrc_lines", [])]
+    actual_bazelrc = [
+        line.rstrip()
+        for line in (ROOT / ".bazelrc").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if actual_bazelrc != expected_bazelrc:
+        raise ValueError(".bazelrc drifted from central toolchain lock")
+
+    seed = SEED_LOCK.read_text(encoding="utf-8").lower()
+    roots = lock.get("language_contracts", {}).get("python", {}).get("seed_roots", {})
+    for package, version_key in roots.items():
+        expected = lock["versions"].get(version_key)
+        if not expected:
+            raise ValueError(f"seed root {package}: missing version key {version_key}")
+        if not re.search(
+            rf"^{re.escape(package.lower())}=={re.escape(expected.lower())}(?:\s|\\)",
+            seed,
+            re.MULTILINE,
+        ):
+            raise ValueError(f"{package}: seed lock drifted from central {version_key}={expected}")
+
+
+def load_versions(path: Path | None = None) -> dict[str, str]:
+    if path is not None:
+        return _parse_versions_env(path)
+    contract = load_toolchain_lock()
+    validate_toolchain_projections(contract)
+    return dict(contract["versions"])
 
 
 def load_contract(path: Path = CONTRACT) -> dict:

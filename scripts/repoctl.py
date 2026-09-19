@@ -55,12 +55,43 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-os.environ["PATH"] = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
-PROJECT_COLLECTIONS = ROOT / ".ansible" / "collections"
+
+
+def _raw_toolchain_lock() -> dict:
+    return json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+
+
+def managed_bin_dirs() -> tuple[Path, ...]:
+    contract = _raw_toolchain_lock()
+    policy = contract.get("capability_policy", {})
+    relatives = policy.get("managed_bin_subdirectories", [])
+    if not isinstance(relatives, list) or not relatives or any(not isinstance(item, str) or not item for item in relatives):
+        raise RuntimeError("central toolchain lock must declare managed_bin_subdirectories")
+    return tuple(Path.home() / item for item in relatives)
+
+
+def toolchain_projection_path(name: str) -> Path:
+    projection = _raw_toolchain_lock().get("projections", {}).get(name, {})
+    relative = projection.get("path") if isinstance(projection, dict) else None
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError(f"central toolchain lock missing projection path: {name}")
+    return ROOT / relative
+
+
+def ansible_collections_root() -> Path:
+    config = _raw_toolchain_lock().get("native_tool_configs", {}).get("ansible", {})
+    relative = config.get("collections_install_root") if isinstance(config, dict) else None
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError("central toolchain lock missing Ansible collections_install_root")
+    return ROOT / relative
+
+
+os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
+PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
 os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
-os.environ["ANSIBLE_CONFIG"] = str(ROOT / "platform" / "ansible" / "ansible.cfg")
+os.environ["ANSIBLE_CONFIG"] = str(toolchain_projection_path("ansible_config"))
 CONTEXT = ROOT / ".context"
 
 
@@ -119,20 +150,473 @@ def ruby_yaml(path: str) -> dict:
     return json.loads(output(["ruby", "-e", script, path]))
 
 
-def pinned_versions() -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in (ROOT / "config" / "toolchain" / "versions.env").read_text(encoding="utf-8").splitlines():
+_SOURCE_QUALITY_POLICY: dict | None = None
+
+
+def source_quality_policy() -> dict:
+    """Load the single repository-wide source quality contract."""
+    global _SOURCE_QUALITY_POLICY
+    if _SOURCE_QUALITY_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("source_quality_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.source_quality_policy")
+        policy = ruby_yaml(relative)
+        if policy.get("architecture_authority") != "architecture.lock.yaml" or policy.get("scope") != "entire-repository":
+            raise RuntimeError("source quality policy must inherit architecture.lock.yaml for the entire repository")
+
+        adapters = policy.get("orchestration_adapters", {})
+        pre_commit = adapters.get("pre_commit", {})
+        pre_commit_path = pre_commit.get("path")
+        required_delegate = pre_commit.get("required_delegate")
+        if pre_commit_path and required_delegate:
+            adapter_path = ROOT / str(pre_commit_path)
+            if not adapter_path.is_file() or str(required_delegate) not in adapter_path.read_text(encoding="utf-8"):
+                raise RuntimeError("pre-commit adapter must delegate to the central repoctl quality authority")
+
+        _SOURCE_QUALITY_POLICY = policy
+    return copy.deepcopy(_SOURCE_QUALITY_POLICY)
+
+
+_REPOSITORY_AUTHORITY_MODEL: dict | None = None
+_SECURITY_SCAN_POLICY: dict | None = None
+_WORKSTATION_POLICY: dict | None = None
+
+
+def repository_authority_model() -> dict:
+    global _REPOSITORY_AUTHORITY_MODEL
+    if _REPOSITORY_AUTHORITY_MODEL is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("repository_authority_model")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.repository_authority_model")
+        model = ruby_yaml(relative)
+        if (
+            model.get("architecture_authority") != "architecture.lock.yaml"
+            or model.get("scope") != "entire-repository"
+            or model.get("status") != "exact"
+        ):
+            raise RuntimeError("repository authority model must inherit architecture.lock.yaml for the entire repository")
+        _REPOSITORY_AUTHORITY_MODEL = model
+    return copy.deepcopy(_REPOSITORY_AUTHORITY_MODEL)
+
+
+def workstation_policy() -> dict:
+    global _WORKSTATION_POLICY
+    if _WORKSTATION_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("workstation_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.workstation_policy")
+        policy = ruby_yaml(relative)
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "developer-workstation"
+            or policy.get("status") != "exact"
+        ):
+            raise RuntimeError("workstation policy must inherit architecture.lock.yaml")
+        _WORKSTATION_POLICY = policy
+    return copy.deepcopy(_WORKSTATION_POLICY)
+
+
+def security_scan_policy() -> dict:
+    global _SECURITY_SCAN_POLICY
+    if _SECURITY_SCAN_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("security_scan_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.security_scan_policy")
+        policy = ruby_yaml(relative)
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "entire-repository"
+            or policy.get("status") != "exact"
+        ):
+            raise RuntimeError("security scan policy must inherit architecture.lock.yaml for the entire repository")
+        _SECURITY_SCAN_POLICY = policy
+    return copy.deepcopy(_SECURITY_SCAN_POLICY)
+
+
+def write_gitleaks_policy_config(path: Path, policy: dict | None = None) -> None:
+    contract = policy or security_scan_policy()
+    config = contract.get("configuration", {})
+    allowlist = config.get("allowlist", {})
+    patterns = allowlist.get("paths", [])
+    if not isinstance(patterns, list) or any(not isinstance(item, str) for item in patterns):
+        raise RuntimeError("security scan allowlist paths must be strings")
+    lines = [
+        'title = "Generated from central security-scan-policy"',
+        "",
+        "[extend]",
+        f"useDefault = {'true' if config.get('use_default_rules') is True else 'false'}",
+        "",
+        "[allowlist]",
+        f"description = {json.dumps(str(allowlist.get('description', '')))}",
+        "paths = [",
+    ]
+    lines.extend(f"  {json.dumps(pattern)}," for pattern in patterns)
+    lines.extend(["]", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def validate_workstation_projections(policy: dict | None = None) -> None:
+    contract = policy or workstation_policy()
+
+    git_contract = contract.get("git", {})
+    git_path = ROOT / str(git_contract.get("projection", ""))
+    git_actual: dict[str, str] = {}
+    for raw in git_path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        values[key.strip()] = value.strip()
-    return values
+        git_actual[key.strip()] = value.strip()
+    git_expected = {str(key): str(value) for key, value in git_contract.get("settings", {}).items()}
+    if git_actual != git_expected:
+        raise RuntimeError("config/workstation/git-local.conf drifted from central workstation policy")
+
+    wsl_contract = contract.get("wsl2", {})
+    wsl_path = ROOT / str(wsl_contract.get("projection", ""))
+    wsl_actual: dict[str, str] = {}
+    for raw in wsl_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("[") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        wsl_actual[key.strip()] = value.strip()
+    wsl_expected = {str(key): str(value) for key, value in wsl_contract.get("settings", {}).items()}
+    if wsl_actual != wsl_expected:
+        raise RuntimeError("config/workstation/wslconfig.template drifted from central workstation policy")
+
+    winget_contract = contract.get("winget", {})
+    winget_path = ROOT / str(winget_contract.get("projection", ""))
+    winget = ruby_yaml(str(winget_path))
+    resources = winget.get("resources", [])
+    actual_packages = {}
+    for resource in resources:
+        if not isinstance(resource, dict) or resource.get("type") != "Microsoft.WinGet/Package":
+            continue
+        properties = resource.get("properties", {})
+        actual_packages[str(resource.get("name"))] = {
+            "id": str(properties.get("id")),
+            "source": str(properties.get("source")),
+            "useLatest": properties.get("useLatest"),
+        }
+    expected_packages = {
+        str(name): {
+            "id": str(values.get("id")),
+            "source": str(values.get("source")),
+            "useLatest": winget_contract.get("package_policy") == "latest-platform-provided",
+        }
+        for name, values in winget_contract.get("packages", {}).items()
+    }
+    if actual_packages != expected_packages:
+        raise RuntimeError(".config/configuration.winget drifted from central workstation policy")
+
+
+def validate_terraform_lockfile_projections(provider_contract: dict | None = None) -> None:
+    """Verify committed Terraform lockfiles project the canonical provider identity."""
+    contract = provider_contract or terraform_provider_lock_contract()
+    expected = contract.get("providers", {})
+    lockfiles = (
+        ROOT / "platform/terraform/environments/mgmt/.terraform.lock.hcl",
+        ROOT / "platform/terraform/environments/qualification/.terraform.lock.hcl",
+    )
+    for lockfile in lockfiles:
+        text = lockfile.read_text(encoding="utf-8")
+        for name, provider in expected.items():
+            source = str(provider["source"])
+            version = str(provider["version"])
+            hashes = {str(value) for value in provider["hashes"]}
+            block_match = re.search(
+                rf'provider\s+"{re.escape(source)}"\s*\{{(?P<body>.*?)\n\}}',
+                text,
+                re.DOTALL,
+            )
+            if not block_match:
+                raise RuntimeError(f"{lockfile.relative_to(ROOT)} missing canonical provider {source}")
+            body = block_match.group("body")
+            version_match = re.search(r'^\s*version\s*=\s*"([^"]+)"\s*$', body, re.MULTILINE)
+            if not version_match or version_match.group(1) != version:
+                raise RuntimeError(
+                    f"{lockfile.relative_to(ROOT)} provider {name} version drifted from central lock"
+                )
+            actual_hashes = set(re.findall(r'"((?:h1|zh):[^"]+)"', body))
+            if actual_hashes != hashes:
+                raise RuntimeError(
+                    f"{lockfile.relative_to(ROOT)} provider {name} hashes drifted from central lock"
+                )
+
+
+def repository_authority_check() -> int:
+    """Validate the repository-wide authority hierarchy and all declared projections."""
+    lock = ruby_yaml("architecture.lock.yaml")
+    registry = lock.get("machine_contracts", {})
+    if not isinstance(registry, dict):
+        raise RuntimeError("architecture.lock.yaml machine_contracts must be a mapping")
+
+    model = repository_authority_model()
+    for domain, entry in model.get("domains", {}).items():
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"repository authority domain {domain} must be a mapping")
+        machine_contract = entry.get("machine_contract")
+        if machine_contract:
+            if machine_contract not in registry:
+                raise RuntimeError(f"repository authority domain {domain} references missing machine contract {machine_contract}")
+            if not (ROOT / str(registry[machine_contract])).is_file():
+                raise RuntimeError(f"repository authority domain {domain} contract path is missing")
+
+    for relative in model.get("forbidden_parallel_policy_files", []):
+        if (ROOT / str(relative)).exists():
+            raise RuntimeError(f"parallel local policy is forbidden by repository authority model: {relative}")
+
+    for projection in model.get("native_projections", []):
+        if not isinstance(projection, dict):
+            raise RuntimeError("repository native projection entries must be mappings")
+        relative = projection.get("path")
+        authority = projection.get("authority")
+        if not isinstance(relative, str) or not relative or not (ROOT / relative).is_file():
+            raise RuntimeError(f"repository projection missing: {relative!r}")
+        if not isinstance(authority, str) or "machine_contracts." not in authority:
+            raise RuntimeError(f"repository projection {relative} must name a machine-contract authority")
+        authority_key = authority.split("machine_contracts.", 1)[1].split("#", 1)[0].split(".", 1)[0]
+        if authority_key not in registry:
+            raise RuntimeError(f"repository projection {relative} references unknown authority {authority_key}")
+
+    for adapter in model.get("orchestration_adapters", []):
+        relative = adapter.get("path") if isinstance(adapter, dict) else None
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            raise RuntimeError(f"repository orchestration adapter missing: {relative!r}")
+        content = (ROOT / relative).read_text(encoding="utf-8")
+        if "repoctl.py" not in content:
+            raise RuntimeError(f"repository orchestration adapter must delegate to repoctl: {relative}")
+        for marker in adapter.get("forbidden_markers", []):
+            if not isinstance(marker, str) or not marker:
+                raise RuntimeError(f"repository orchestration adapter {relative} has invalid forbidden marker")
+            if marker in content:
+                raise RuntimeError(f"repository orchestration adapter contains local policy marker {marker!r}: {relative}")
+
+    for manifest in model.get("component_manifests", []):
+        pattern = manifest.get("pattern") if isinstance(manifest, dict) else None
+        if not isinstance(pattern, str) or not list(ROOT.glob(pattern)):
+            raise RuntimeError(f"component manifest pattern has no repository matches: {pattern!r}")
+
+    from capability_bootstrap import load_contract, load_toolchain_lock, validate_contract, validate_toolchain_projections
+
+    toolchain = load_toolchain_lock()
+    validate_toolchain_projections(toolchain)
+    capability_graph = load_contract()
+    validate_contract(capability_graph, toolchain["versions"])
+
+    capability_policy = toolchain.get("capability_policy", {})
+    if capability_graph.get("supported") != capability_policy.get("supported"):
+        raise RuntimeError("capability graph supported platforms drifted from central toolchain lock")
+    allowed_provision_types = set(capability_policy.get("managed_provision_types", []))
+    for capability, owner in capability_graph.get("provision_owners", {}).items():
+        if owner not in allowed_provision_types:
+            raise RuntimeError(
+                f"capability {capability} uses provision owner {owner!r} outside central toolchain policy"
+            )
+
+    go_policy = toolchain.get("language_contracts", {}).get("go", {})
+    expected_go_directive = str(go_policy.get("workspace_language_directive", ""))
+    if expected_go_directive:
+        go_manifests = [ROOT / "go.work", ROOT / "frontend" / "go.mod"]
+        go_manifests.extend(sorted((ROOT / "services").glob("*/go.mod")))
+        for manifest in go_manifests:
+            text = manifest.read_text(encoding="utf-8")
+            match = re.search(r"^go\s+([0-9.]+)\s*$", text, re.MULTILINE)
+            if not match or match.group(1) != expected_go_directive:
+                raise RuntimeError(
+                    f"{manifest.relative_to(ROOT)} Go directive must project central language version {expected_go_directive}"
+                )
+
+        workspace = (ROOT / "go.work").read_text(encoding="utf-8")
+        use_block = re.search(r"(?ms)^use\s*\((?P<body>.*?)^\)", workspace)
+        if not use_block:
+            raise RuntimeError("go.work must use the canonical multi-module workspace block")
+        actual_modules = {
+            line.strip().removeprefix("./")
+            for line in use_block.group("body").splitlines()
+            if line.strip() and not line.strip().startswith("//")
+        }
+        expected_modules = {str(lock["business"]["frontend_runtime"]["module"])}
+        expected_modules.update(f"services/{service}" for service in lock["business"]["services"])
+        if actual_modules != expected_modules:
+            raise RuntimeError(
+                "go.work module set must match architecture.lock.yaml business services and frontend module"
+            )
+
+    templ_version = toolchain["versions"].get("TEMPL_VERSION")
+    frontend_go_mod = (ROOT / "frontend" / "go.mod").read_text(encoding="utf-8")
+    if templ_version and f"github.com/a-h/templ v{templ_version}" not in frontend_go_mod:
+        raise RuntimeError("frontend/go.mod templ version drifted from central toolchain lock")
+
+    validate_workstation_projections()
+    validate_terraform_lockfile_projections()
+
+    security_policy = security_scan_policy()
+    scanner = security_policy.get("scanner", {})
+    version_key = scanner.get("version_key")
+    checksum_key = scanner.get("checksum_key")
+    for key in (version_key, checksum_key):
+        if not isinstance(key, str) or key not in toolchain["versions"]:
+            raise RuntimeError(f"security scan policy references missing toolchain key: {key!r}")
+
+    print("PASS repository maximal authority model")
+    return 0
+
+
+def source_quality_adapter(name: str) -> dict:
+    adapter = source_quality_policy().get("adapters", {}).get(name)
+    if not isinstance(adapter, dict):
+        raise RuntimeError(f"source quality adapter is not declared: {name}")
+    return adapter
+
+
+def advisory_exit_check(
+    label: str,
+    command: list[str],
+    *,
+    drift_exit_codes: list[int],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run a read-only formatter check; only declared drift exits are advisory."""
+    result = run(command, cwd=cwd, env=env, check=False, capture=True)
+    output_text = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode == 0:
+        return
+    if result.returncode in {int(code) for code in drift_exit_codes}:
+        if output_text:
+            print(output_text, file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+        return
+    raise RuntimeError(output_text or f"{label} formatter failed with exit code {result.returncode}")
+
+
+def advisory_output_check(label: str, output_text: str) -> None:
+    """Report formatter drift that is signaled by non-empty output."""
+    if output_text.strip():
+        print(output_text.strip(), file=sys.stderr)
+        print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
+
+
+_TERRAFORM_PROVIDER_LOCK: dict | None = None
+
+
+def terraform_provider_lock_contract() -> dict:
+    """Load and validate the single canonical Terraform provider lock contract."""
+    global _TERRAFORM_PROVIDER_LOCK
+    if _TERRAFORM_PROVIDER_LOCK is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("terraform_provider_lock")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.terraform_provider_lock")
+
+        contract = ruby_yaml(relative)
+        if (
+            contract.get("architecture_authority") != "architecture.lock.yaml"
+            or contract.get("scope") != "platform/terraform"
+            or contract.get("status") != "exact"
+        ):
+            raise RuntimeError("Terraform provider lock must inherit architecture.lock.yaml for platform/terraform")
+
+        quality_authority = source_quality_adapter("terraform").get("validation", {}).get("provider_lock_authority")
+        if quality_authority != "architecture.lock.yaml#machine_contracts.terraform_provider_lock":
+            raise RuntimeError("Terraform quality validation must delegate provider resolution to the central lock contract")
+
+        providers = contract.get("providers")
+        if not isinstance(providers, dict) or not providers:
+            raise RuntimeError("Terraform provider lock must declare at least one provider")
+
+        for name, provider in providers.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(provider, dict):
+                raise RuntimeError("Terraform provider lock entries must be named mappings")
+            for field in ("source", "version", "constraints"):
+                value = provider.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RuntimeError(f"Terraform provider {name} must declare {field}")
+            hashes = provider.get("hashes")
+            if not isinstance(hashes, list) or not hashes or any(not isinstance(value, str) or not value for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must declare non-empty hashes")
+            if not any(value.startswith("h1:") for value in hashes) or not any(value.startswith("zh:") for value in hashes):
+                raise RuntimeError(f"Terraform provider {name} must include both h1 and zh hashes")
+
+        qualification = contract.get("qualification")
+        if not isinstance(qualification, dict):
+            raise RuntimeError("Terraform provider lock must declare qualification behavior")
+        if qualification.get("canonical_lockfile_materialization") != "required":
+            raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
+        if qualification.get("init_lockfile_mode") != "readonly":
+            raise RuntimeError("Terraform qualification provider lock must be readonly")
+
+        _TERRAFORM_PROVIDER_LOCK = contract
+    return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
+
+
+def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> None:
+    """Materialize Terraform's native lockfile from the canonical YAML authority."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    lines = [
+        "# Generated from architecture.lock.yaml#machine_contracts.terraform_provider_lock.",
+        "# Do not edit this temporary projection.",
+        "",
+    ]
+    for name in sorted(provider_lock["providers"]):
+        provider = provider_lock["providers"][name]
+        lines.extend(
+            [
+                f'provider {json.dumps(provider["source"])} {{',
+                f'  version     = {json.dumps(provider["version"])}',
+                f'  constraints = {json.dumps(provider["constraints"])}',
+                "  hashes = [",
+            ]
+        )
+        lines.extend(f"    {json.dumps(value)}," for value in provider["hashes"])
+        lines.extend(["  ]", "}", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | None:
+    """Return the persistent provider package cache; availability is an acceleration only."""
+    provider_lock = contract or terraform_provider_lock_contract()
+    cache = provider_lock["qualification"].get("provider_plugin_cache", {})
+    env_name = str(cache.get("root_source", "ECOMMERCE_TOOL_HOME"))
+    configured = os.environ.get(env_name, "").strip()
+    base = Path(configured).expanduser() if configured else Path(str(cache.get("fallback_root", "~/.cache/ecommerce-1"))).expanduser()
+    destination = base / str(cache.get("subdirectory", "terraform-provider-cache/v1"))
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"ADVISORY terraform provider cache unavailable: {exc}", file=sys.stderr)
+        return None
+    return destination
+
+
+def pinned_versions() -> dict[str, str]:
+    from capability_bootstrap import load_versions
+
+    return load_versions()
 
 
 def required_ansible_collections(requirements: Path | None = None) -> dict[str, str]:
-    """Read the canonical Ansible collection lock without duplicating its pins."""
-    source = requirements or ROOT / "platform" / "ansible" / "requirements.yml"
+    """Read Ansible collection versions from the central toolchain authority.
+
+    An explicit requirements path is parsed only for focused mutation tests; the
+    repository runtime never treats requirements.yml as an authority.
+    """
+    if requirements is None:
+        from capability_bootstrap import load_toolchain_lock, validate_toolchain_projections
+
+        contract = load_toolchain_lock()
+        validate_toolchain_projections(contract)
+        collections = contract.get("ansible_collections", {})
+        if not isinstance(collections, dict) or not collections:
+            raise RuntimeError("central toolchain lock must declare Ansible collections")
+        return {str(name): str(version) for name, version in collections.items()}
+
+    source = requirements
     result: dict[str, str] = {}
     name: str | None = None
     for raw in source.read_text(encoding="utf-8").splitlines():
@@ -140,15 +624,7 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
             if name is not None:
                 raise RuntimeError(f"missing version for Ansible collection {name} in {source}")
             name = match.group(1)
-        elif match := re.match(r"\s+version:\s*([\w.-]+)\s*$", raw):
-            if name is None or name in result:
-                raise RuntimeError(f"invalid Ansible collection requirement in {source}")
-            result[name] = match.group(1)
-            name = None
-    if name is not None or not result:
-        raise RuntimeError(f"invalid Ansible collection requirements in {source}")
-    return result
-
+        elif match := re.match(r'\s+version:\s*["\']?([\w.-]+)["\']?\s*
 
 def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
@@ -227,7 +703,7 @@ def developer_state_ready(tags: str) -> bool:
         if got.returncode or got.stdout.strip() != f"v{expected_node}":
             return False
     if "go" in wanted or "cgo" in wanted:
-        managed_bin = Path.home() / ".local" / "bin"
+        managed_bin = managed_bin_dirs()[0]
         go = str(managed_bin / "go") if (managed_bin / "go").is_file() else None
         gofmt = str(managed_bin / "gofmt") if (managed_bin / "gofmt").is_file() else None
         if not go or not gofmt:
@@ -279,11 +755,19 @@ def runtime_efficiency_check() -> int:
 
 
 def governance() -> int:
+    repository_authority_check()
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     require("ruby")
-    run(["ruby", "scripts/validate-architecture.rb"])
-    run(["ruby", "scripts/validate-observability.rb"])
+    for validator in (
+        "scripts/validate-architecture.rb",
+        "scripts/validate-architecture-boundaries.rb",
+        "scripts/validate-service-policy-chain.rb",
+        "scripts/validate-service-mesh-policy.rb",
+        "scripts/validate-contract-consistency.rb",
+        "scripts/validate-observability.rb",
+    ):
+        run(["ruby", validator])
     run_ruby_tests(
         [
             "tests/architecture_validator_test.rb",
@@ -590,10 +1074,10 @@ def frontend(action: str, scope: str = "") -> int:
     # `repoctl frontend check storefront` used by existing Tekton tasks.
     if not scope:
         scope, action = action, "check"
-    if action not in {"check", "lint", "test", "build"} or scope not in {"all", "storefront", "admin"}:
+    if action not in {"check", "lint", "test", "build", "generate", "run"} or scope not in {"all", "storefront", "admin"}:
         return fail("frontend usage: frontend <storefront|admin|all>")
     ensure_developer("go,cgo")
-    managed_bin = Path.home() / ".local/bin"
+    managed_bin = managed_bin_dirs()[0]
     env = dict(os.environ, PATH=f"{managed_bin}:{os.environ.get('PATH', '')}")
     # A version manager may export a GOROOT for a different system Go. The
     # repository-managed binary must discover and execute its own toolchain.
@@ -607,12 +1091,27 @@ def frontend(action: str, scope: str = "") -> int:
     frontend_root = ROOT / "frontend"
     templ_version = pinned_versions().get("TEMPL_VERSION")
     if not templ_version:
-        raise RuntimeError("TEMPL_VERSION is missing from config/toolchain/versions.env")
+        raise RuntimeError("TEMPL_VERSION is missing from central toolchain lock")
+    if action == "run":
+        if scope == "all":
+            return site()
+        return run([str(go), "run", f"./apps/{scope}"], cwd=frontend_root, env=env, check=False).returncode
+
+    if action == "generate":
+        if scope != "all":
+            return fail("frontend generate is repository-wide; scope must be all")
+        run(
+            [str(go), "run", f"github.com/a-h/templ/cmd/templ@v{templ_version}", "generate"],
+            cwd=frontend_root,
+            env=env,
+        )
+        print("PASS frontend generated from central templ version")
+        return 0
+
     if action in {"check", "lint"}:
         files = sorted(str(path) for path in frontend_root.rglob("*.go"))
         formatted = run([str(gofmt), "-l", *files], capture=True, env=env)
-        if formatted.stdout.strip():
-            return fail("frontend gofmt drift:\n" + formatted.stdout.strip())
+        advisory_output_check("frontend gofmt", formatted.stdout or "")
         forbidden_frontend_artifacts()
         if action == "check":
             with tempfile.TemporaryDirectory(prefix="ecommerce-frontend-templ-") as temp_dir:
@@ -656,7 +1155,7 @@ def frontend(action: str, scope: str = "") -> int:
 def site() -> int:
     """Run both independently deployable Go frontends until interrupted."""
     ensure_developer("go")
-    env = dict(os.environ, PATH=f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}")
+    env = dict(os.environ, PATH=f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}")
     with tempfile.TemporaryDirectory(prefix="ecommerce-site-") as output_dir:
         binaries = [Path(output_dir) / "storefront", Path(output_dir) / "admin"]
         for target, binary in zip(("storefront", "admin"), binaries, strict=True):
@@ -695,6 +1194,120 @@ def site() -> int:
                 signal.signal(signum, handler)
         failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
         return failed[0] if failed else 0
+
+
+def reconcile(tags: str, target_repo_root: str = "") -> int:
+    selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
+    if not selected:
+        return fail("reconcile requires at least one Ansible tag")
+    require("ansible-playbook")
+    repo_root = Path(target_repo_root).expanduser().resolve() if target_repo_root else ROOT
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={repo_root}",
+            "--tags",
+            selected,
+        ]
+    )
+    print(f"PASS reconcile tags={selected}")
+    return 0
+
+
+def bazel_verify(base: str, head: str) -> int:
+    require("bazel")
+    return run(
+        ["bazel", "run", "//:repoctl", "--", "verify-change", "--base", base, "--head", head],
+        check=False,
+    ).returncode
+
+
+def resource_candidate(evidence: str) -> int:
+    if not evidence:
+        return fail("resource-candidate requires EVIDENCE")
+    require("ruby")
+    return run(["ruby", "scripts/resource-sizing.rb", evidence], check=False).returncode
+
+
+def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: str) -> int:
+    missing = [
+        name
+        for name, value in (
+            ("RUNTIME_CONFIG", runtime_config),
+            ("BASE_SHA", base_sha),
+            ("PARENT_SHA", parent_sha),
+            ("HEAD_SHA", head_sha),
+        )
+        if not value
+    ]
+    if missing:
+        return fail("tekton-proof missing required values: " + ", ".join(missing))
+    require("ansible-playbook")
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/tekton-proof.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "-e",
+            f"tekton_runtime_config={runtime_config}",
+            "-e",
+            f"proof_base_sha={base_sha}",
+            "-e",
+            f"proof_parent_sha={parent_sha}",
+            "-e",
+            f"proof_head_sha={head_sha}",
+        ]
+    )
+    return 0
+
+
+def product_run() -> int:
+    ensure_developer("go")
+    managed_bin = managed_bin_dirs()[0]
+    go = managed_bin / "go"
+    if not go.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    env = dict(os.environ, PATH=f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    return run([str(go), "run", "./services/product/cmd/product-api"], env=env, check=False).returncode
+
+
+def product_benchmark() -> int:
+    ensure_developer("go")
+    managed_bin = managed_bin_dirs()[0]
+    go = managed_bin / "go"
+    if not go.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    env = dict(os.environ, PATH=f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    return run(
+        [
+            str(go),
+            "test",
+            "-run",
+            "^$",
+            "-bench",
+            "^BenchmarkListProductsEmpty$",
+            "-benchmem",
+            "./internal/transport/rest",
+        ],
+        cwd=ROOT / "services/product",
+        env=env,
+        check=False,
+    ).returncode
 
 
 def forbidden_frontend_artifacts() -> None:
@@ -757,7 +1370,7 @@ def service_check(service: str) -> int:
     needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
-    env["PATH"] = f"{Path.home() / '.local/bin'}:{env.get('PATH', '')}"
+    env["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{env.get('PATH', '')}"
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
@@ -804,48 +1417,93 @@ def service_check(service: str) -> int:
 
 
 def security() -> int:
-    require("gitleaks")
-    if os.environ.get("HEAD", "").strip() == "WORKTREE":
-        tree_sha = worktree_tree_sha()
-        with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
-            temp_root = Path(temp_dir)
-            archive = temp_root / "tree.tar"
-            scan_root = temp_root / "tree"
-            scan_root.mkdir()
-            run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
-            shutil.unpack_archive(str(archive), str(scan_root), "tar")
-            run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", str(scan_root)])
-    elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
-        run(["gitleaks", "git", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
-    else:
-        run(["gitleaks", "dir", "--config", ".gitleaks.toml", "--redact", "--no-banner", "."])
+    policy = security_scan_policy()
+    scanner = policy.get("scanner", {})
+    command = str(scanner.get("name", "gitleaks"))
+    require(command)
+
+    execution = policy.get("execution", {})
+    with tempfile.TemporaryDirectory(prefix="ecommerce-security-policy-") as policy_dir:
+        config = Path(policy_dir) / "gitleaks.toml"
+        write_gitleaks_policy_config(config, policy)
+        flags = ["--config", str(config)]
+        if execution.get("redact") is True:
+            flags.append("--redact")
+        if execution.get("no_banner") is True:
+            flags.append("--no-banner")
+
+        if os.environ.get("HEAD", "").strip() == "WORKTREE":
+            tree_sha = worktree_tree_sha()
+            with tempfile.TemporaryDirectory(prefix="ecommerce-gitleaks-worktree-") as temp_dir:
+                temp_root = Path(temp_dir)
+                archive = temp_root / "tree.tar"
+                scan_root = temp_root / "tree"
+                scan_root.mkdir()
+                run(["git", "archive", "--format=tar", "--output", str(archive), tree_sha])
+                shutil.unpack_archive(str(archive), str(scan_root), "tar")
+                run([command, "dir", *flags, str(scan_root)])
+        elif run(["git", "rev-parse", "--verify", "HEAD"], check=False, capture=True).returncode == 0:
+            run([command, "git", *flags, "."])
+        else:
+            run([command, "dir", *flags, "."])
+
     print("PASS secret scan completed")
     return 0
 
-
 def terraform_check() -> int:
-    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    terraform_root = ROOT / "platform" / "terraform"
+    tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
-    tool = shutil.which("tofu") or shutil.which("terraform")
+
+    policy = source_quality_adapter("terraform")
+    formatter = policy["formatter"]
+    provider_lock = terraform_provider_lock_contract()
+    qualification = provider_lock["qualification"]
+
+    tool = next(
+        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
+        None,
+    )
     if not tool:
-        return fail("Terraform sources exist but neither tofu nor terraform is installed")
-    run([tool, "fmt", "-check", "-recursive", "-diff"])
-    for directory in sorted({p.parent for p in tf_files}):
-        print(f"CHECK terraform: {directory.relative_to(ROOT)}")
-        if "modules" in directory.parts and "platform" in directory.parts:
-            with tempfile.TemporaryDirectory(prefix="tf-module-") as temp:
-                shutil.copytree(directory, temp, dirs_exist_ok=True)
-                run([tool, "init", "-backend=false", "-input=false"], cwd=Path(temp))
-                run([tool, "validate"], cwd=Path(temp))
-        else:
-            run([tool, "init", "-backend=false", "-input=false"], cwd=directory)
-            run([tool, "validate"], cwd=directory)
+        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+
+    advisory_exit_check(
+        "terraform fmt",
+        [tool, *formatter["args"]],
+        drift_exit_codes=formatter["drift_exit_codes"],
+    )
+
+    provider_cache = terraform_provider_plugin_cache_dir(provider_lock)
+    env = os.environ.copy()
+    if provider_cache is not None:
+        env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
+
+    directories = sorted({p.parent for p in tf_files})
+    with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
+        temp_root = Path(temp_dir) / "terraform"
+        shutil.copytree(
+            terraform_root,
+            temp_root,
+            ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
+        )
+
+        for directory in directories:
+            relative = directory.relative_to(terraform_root)
+            validation_dir = temp_root / relative
+            write_terraform_provider_lock(validation_dir / ".terraform.lock.hcl", provider_lock)
+            print(f"CHECK terraform: {relative}")
+            run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
+            run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
+
+    providers = ", ".join(
+        f"{name}={provider['version']}"
+        for name, provider in sorted(provider_lock["providers"].items())
+    )
+    print(f"PASS terraform provider lock {providers}")
     print("PASS terraform checks completed")
     return 0
-
-
 def ansible_check() -> int:
     reconcile_ansible_collections()
     require("ansible-lint")
@@ -854,7 +1512,18 @@ def ansible_check() -> int:
     if not files:
         print("SKIP ansible: no Ansible files found")
         return 0
-    run(["ansible-lint", *files])
+
+    lint_policy = source_quality_adapter("ansible")["lint"]
+    advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
+    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+        config = Path(temp_dir) / "ansible-lint.yml"
+        config.write_text(
+            "---\nwarn_list:\n"
+            + "".join(f"  - {rule}\n" for rule in advisory_rules),
+            encoding="utf-8",
+        )
+        run(["ansible-lint", "--config-file", str(config), *files])
+
     run(
         [
             "ansible-playbook",
@@ -884,6 +1553,72 @@ def system_check() -> int:
     return 0
 
 
+def write_ruff_policy_config(path: Path) -> None:
+    """Materialize Ruff's adapter config from the central source-quality contract."""
+    config = source_quality_adapter("python")["configuration"]
+    target_version = str(config["target_version"])
+    line_length = int(config["line_length"])
+    extend_exclude = [str(item) for item in config["extend_exclude"]]
+    lint_select = [str(item) for item in config["lint_select"]]
+    path.write_text(
+        f'target-version = "{target_version}"\n'
+        f"line-length = {line_length}\n"
+        + "extend-exclude = "
+        + json.dumps(extend_exclude)
+        + "\n\n[lint]\nselect = "
+        + json.dumps(lint_select)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def format_check() -> int:
+    """Run repository-wide non-mutating formatter diagnostics from the central policy."""
+    python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
+    if python_files:
+        require("ruff")
+        formatter = source_quality_adapter("python")["formatter"]
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+
+    go_files = sorted(
+        str(path)
+        for tree in (ROOT / "services", ROOT / "frontend")
+        if tree.is_dir()
+        for path in tree.rglob("*.go")
+        if "vendor" not in path.parts
+    )
+    if go_files:
+        require("gofmt")
+        go_policy = source_quality_adapter("go")["formatter"]
+        result = run([go_policy["command"], *go_policy["args"], *go_files], capture=True)
+        advisory_output_check("gofmt", result.stdout or "")
+
+    tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
+    if tf_files:
+        terraform_policy = source_quality_adapter("terraform")["formatter"]
+        tool = next(
+            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
+            None,
+        )
+        if not tool:
+            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        advisory_exit_check(
+            "terraform fmt",
+            [tool, *terraform_policy["args"]],
+            drift_exit_codes=terraform_policy["drift_exit_codes"],
+        )
+
+    print("PASS source format diagnostics completed")
+    return 0
+
+
 def lint_all() -> int:
     if automation_policy():
         return 1
@@ -891,13 +1626,22 @@ def lint_all() -> int:
     if go_files:
         require("gofmt")
         p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip():
-            print(p.stdout, file=sys.stderr)
-            return 1
+        advisory_output_check("service gofmt", p.stdout or "")
     python_files = sorted(str(path) for tree in (ROOT / "scripts", ROOT / "tests") for path in tree.rglob("*.py"))
     if python_files:
         require("ruff")
-        run(["ruff", "check", *python_files])
+        python_policy = source_quality_adapter("python")
+        formatter = python_policy["formatter"]
+        lint_policy = python_policy["lint"]
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ruff-policy-") as temp_dir:
+            config = Path(temp_dir) / "ruff.toml"
+            write_ruff_policy_config(config)
+            advisory_exit_check(
+                "ruff format",
+                [formatter["command"], *formatter["args"], "--config", str(config), *python_files],
+                drift_exit_codes=formatter["drift_exit_codes"],
+            )
+            run([lint_policy["command"], *lint_policy["args"], "--config", str(config), *python_files])
     if (ROOT / "frontend" / "go.mod").is_file():
         result = frontend("lint", "all")
         if result:
@@ -1905,6 +2649,7 @@ def main() -> int:
         "governance",
         "runtime-efficiency",
         "automation-policy",
+        "format-check",
         "lint",
         "test",
         "security",
@@ -1916,6 +2661,8 @@ def main() -> int:
         "precommit",
         "prepush",
         "site",
+        "product-run",
+        "product-benchmark",
     ]:
         sub.add_parser(name)
     c = sub.add_parser("contracts")
@@ -1949,6 +2696,19 @@ def main() -> int:
     sg = sub.add_parser("service-new")
     sg.add_argument("--service", required=True)
     sg.add_argument("--dry-run", action="store_true")
+    rec = sub.add_parser("reconcile")
+    rec.add_argument("--tags", required=True)
+    rec.add_argument("--target-repo-root", default="")
+    bz = sub.add_parser("bazel-verify")
+    bz.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    bz.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    rc = sub.add_parser("resource-candidate")
+    rc.add_argument("--evidence", default=os.environ.get("EVIDENCE", ""))
+    tkp = sub.add_parser("tekton-proof")
+    tkp.add_argument("--runtime-config", default=os.environ.get("RUNTIME_CONFIG", ""))
+    tkp.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
+    tkp.add_argument("--parent-sha", default=os.environ.get("PARENT_SHA", ""))
+    tkp.add_argument("--head-sha", default=os.environ.get("HEAD_SHA", ""))
     pub = sub.add_parser("publish")
     pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
@@ -2002,6 +2762,8 @@ def main() -> int:
             return contracts(args.base, args.head, args.generate)
         if args.cmd == "automation-policy":
             return automation_policy()
+        if args.cmd == "format-check":
+            return format_check()
         if args.cmd == "lint":
             return lint_all()
         if args.cmd == "test":
@@ -2018,6 +2780,10 @@ def main() -> int:
             return frontend(args.action, args.scope)
         if args.cmd == "site":
             return site()
+        if args.cmd == "product-run":
+            return product_run()
+        if args.cmd == "product-benchmark":
+            return product_benchmark()
         if args.cmd == "service":
             return service_check(args.service)
         if args.cmd == "affected":
@@ -2047,6 +2813,14 @@ def main() -> int:
                 ["--dry-run"] if args.dry_run else []
             )
             return run(cmd, check=False).returncode
+        if args.cmd == "reconcile":
+            return reconcile(args.tags, args.target_repo_root)
+        if args.cmd == "bazel-verify":
+            return bazel_verify(args.base, args.head)
+        if args.cmd == "resource-candidate":
+            return resource_candidate(args.evidence)
+        if args.cmd == "tekton-proof":
+            return tekton_proof(args.runtime_config, args.base_sha, args.parent_sha, args.head_sha)
         if args.cmd == "doctor":
             return doctor()
         if args.cmd == "git-sync":

@@ -294,26 +294,65 @@ topology_contracts:
   aiops: docs/architecture/AIOPS_TOPOLOGY_V1.md
   mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
   observability: docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md
+  architecture_boundaries: docs/architecture/ARCHITECTURE_BOUNDARIES_V1.md
+  service_mesh_topology: docs/architecture/SERVICE_MESH_TOPOLOGY_V1.md
+  service_policy_chain: docs/architecture/SERVICE_POLICY_CHAIN_V1.md
 
 machine_contracts:
+  certificate_authority_policy: config/contracts/certificate-authority-policy.yaml
+  ci_evidence: config/contracts/ci-evidence.yaml
+  ci_topology: config/contracts/ci-topology.yaml
+  commerce_transaction_policy: config/contracts/commerce-transaction-policy.yaml
+  context_router: config/context/router.yaml
+  dependency_map: config/contracts/dependency-map.yaml
+  dns_authority_policy: config/contracts/dns-authority-policy.yaml
+  edge_policy_authority: config/contracts/edge-policy-authority.yaml
+  edge_protocol_policy: config/contracts/edge-protocol-policy.yaml
+  egress_policy: config/contracts/egress-policy.yaml
+  egress_runtime_policy: config/contracts/egress-runtime-policy.yaml
+  event_contracts: config/contracts/event-contracts.yaml
+  identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
+  mesh_observability_policy: config/contracts/mesh-observability-policy.yaml
+  mesh_policy_authority: config/contracts/mesh-policy-authority.yaml
+  mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
+  observability_topology: config/contracts/observability-topology.yaml
+  progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
+  public_api_contracts: config/contracts/public-api-contracts.yaml
+  rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
-  security_trust_zones: config/contracts/security-trust-zones.yaml
+  review_budget: config/contracts/review-budget.json
   review_policy: config/contracts/review-policy.yaml
+  repository_authority_model: config/contracts/repository-authority-model.yaml
+  runtime_efficiency: config/contracts/runtime-efficiency.yaml
+  secret_delivery_policy: config/contracts/secret-delivery-policy.yaml
+  security_trust_zones: config/contracts/security-trust-zones.yaml
+  security_scan_policy: config/contracts/security-scan-policy.yaml
+  service_authz_policy: config/contracts/service-authz-policy.yaml
+  service_exposure_policy: config/contracts/service-exposure-policy.yaml
+  service_mesh_policy: config/contracts/service-mesh-policy.yaml
+  service_ownership: config/contracts/service-ownership.yaml
+  service_resilience_policy: config/contracts/service-resilience-policy.yaml
+  service_slo: config/contracts/service-slo.yaml
+  source_quality_policy: config/contracts/source-quality-policy.yaml
+  tekton_trigger_runtime: config/contracts/tekton-trigger-runtime.yaml
+  telemetry_data_policy: config/contracts/telemetry-data-policy.yaml
+  toolchain_lock: config/contracts/toolchain-lock.json
+  terraform_provider_lock: config/contracts/terraform-provider-lock.yaml
+  time_authority_policy: config/contracts/time-authority-policy.yaml
+  traffic_class_policy: config/contracts/traffic-class-policy.yaml
+  workstation_policy: config/contracts/workstation-policy.yaml
+  waypoint_scope: config/contracts/waypoint-scope.yaml
+  deployment_waves: config/infrastructure/deployment-waves.yaml
+  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   mgmt_inventory: config/infrastructure/mgmt-inventory.yaml
+  network_plan: config/infrastructure/network-plan.yaml
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
-  network_plan: config/infrastructure/network-plan.yaml
-  mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
-  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   storage_plan: config/infrastructure/storage-plan.yaml
-  deployment_waves: config/infrastructure/deployment-waves.yaml
-  service_ownership: config/contracts/service-ownership.yaml
-  event_contracts: config/contracts/event-contracts.yaml
-  dependency_map: config/contracts/dependency-map.yaml
-  public_api_contracts: config/contracts/public-api-contracts.yaml
-  ci_topology: config/contracts/ci-topology.yaml
-  runtime_efficiency: config/contracts/runtime-efficiency.yaml
-  observability_topology: config/contracts/observability-topology.yaml
+  openapi_common_v1: contracts/openapi/common.v1.yaml
+  openapi_product_v1: contracts/openapi/product.v1.yaml
+  payment_runtime: contracts/payment-runtime.yaml
+  payment_security: contracts/payment-security.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6

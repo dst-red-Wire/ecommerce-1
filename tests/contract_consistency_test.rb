@@ -15,7 +15,13 @@ class ContractConsistencyTest < Minitest::Test
 
   def fixture(root)
     write_yaml(root, "architecture.lock.yaml", {
-      "business" => {"services" => %w[product catalog], "frontends" => ["admin"]}
+      "business" => {"services" => %w[product catalog], "frontends" => ["admin"]},
+      "machine_contracts" => {
+        "service_ownership" => "config/contracts/service-ownership.yaml",
+        "dependency_map" => "config/contracts/dependency-map.yaml",
+        "event_contracts" => "config/contracts/event-contracts.yaml",
+        "public_api_contracts" => "config/contracts/public-api-contracts.yaml"
+      }
     })
     write_yaml(root, "config/contracts/service-ownership.yaml", {
       "services" => {

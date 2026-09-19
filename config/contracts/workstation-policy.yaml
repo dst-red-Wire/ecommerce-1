@@ -1,0 +1,53 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: developer-workstation
+
+git:
+  projection: config/workstation/git-local.conf
+  settings:
+    core.autocrlf: input
+    core.eol: lf
+    fetch.prune: "true"
+    fetch.pruneTags: "true"
+    pull.ff: only
+    push.default: simple
+    rerere.enabled: "true"
+    rebase.autoStash: "false"
+
+wsl2:
+  projection: config/workstation/wslconfig.template
+  settings:
+    networkingMode: nat
+    firewall: "true"
+    dnsTunneling: "true"
+    autoProxy: "true"
+
+winget:
+  projection: .config/configuration.winget
+  processor: dscv3
+  package_policy: latest-platform-provided
+  packages:
+    Git:
+      id: Git.Git
+      source: winget
+    PowerShell:
+      id: Microsoft.PowerShell
+      source: winget
+    WindowsTerminal:
+      id: Microsoft.WindowsTerminal
+      source: winget
+    VSCode:
+      id: Microsoft.VisualStudioCode
+      source: winget
+    DockerDesktop:
+      id: Docker.DockerDesktop
+      source: winget
+    GitHubCLI:
+      id: GitHub.cli
+      source: winget
+
+rules:
+  workstation_files_are_projections: true
+  workstation_packages_are_not_static_qualification_authority: true
+  local_override_of_repository_git_defaults: user-owned
