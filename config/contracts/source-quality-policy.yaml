@@ -1,7 +1,10 @@
 version: 1
+kind: SourceQualityPolicy
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
+authority_claims:
+  - repository.quality.source
 
 principles:
   source_mutation_during_qualification: forbidden
@@ -44,13 +47,7 @@ adapters:
       drift_severity: advisory
       execution_error_severity: blocking
     validation:
-      init_args:
-        - init
-        - -backend=false
-        - -input=false
-      validate_args:
-        - validate
-      module_validation_in_temporary_copy: true
+      provider_lock_authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
       severity: blocking
 
   ansible:

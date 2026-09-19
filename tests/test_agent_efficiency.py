@@ -35,10 +35,21 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Download pinned Node archive", tasks)
         self.assertIn("Link Node and Corepack commands", tasks)
 
-    def test_prepush_reuses_evidence_only_for_current_base(self):
-        text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)
-        self.assertIn('data.get("base_sha") == base_sha', text)
+    def test_prepush_requires_explicit_exact_base_and_never_assumes_main(self):
+        controller = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        policy = (ROOT / "config/contracts/ci-evidence.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("implicit_default_base: forbidden", policy)
+        self.assertIn("assume_main: forbidden", policy)
+        self.assertIn("prepush_explicit_base_required: true", policy)
+        self.assertIn("exact_evidence_recorded_base_may_authorize_reuse: symbolic-ref-only", policy)
+
+        self.assertIn("def reusable_exact_evidence(", controller)
+        self.assertIn('"merge-base", "--is-ancestor"', controller)
+        self.assertIn("prepush requires explicit BASE=<ref>", controller)
+        self.assertIn("reusable_exact_evidence(head, expected_base=explicit_base)", controller)
+        self.assertNotIn('git("rev-parse", "origin/main")', controller)
+
 
     def test_ansible_first_replaces_shell_automation(self):
         self.assertFalse(list((ROOT / "scripts").glob("*.sh")))

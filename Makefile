@@ -35,7 +35,7 @@ help: ## Show the available checks
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-}" --head WORKTREE
 
 ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks
 
@@ -84,10 +84,10 @@ mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from Ter
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 
 affected: ## Classify affected components; use BASE=<ref> [HEAD=<ref|WORKTREE>]
-	@$(PYTHON) scripts/repoctl.py affected --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+	@$(PYTHON) scripts/repoctl.py affected --base "$${BASE:-}" --head "$${HEAD:-WORKTREE}"
 
 verify-change: ## Run global + affected component gates and write evidence JSON
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-}" --head "$${HEAD:-WORKTREE}"
 
 frontend-check: ## Run complete Storefront + Admin frontend gate
 	@$(PYTHON) scripts/repoctl.py frontend check all
@@ -133,13 +133,13 @@ git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
 
 publish: ## Commit, exact-SHA verify and push current feature branch
-	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
+	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-}" --message "$(MSG)"
 
 deliver: ## Exact-SHA validate, publish and create/update GitHub PR
-	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
+	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-}" --title "$(TITLE)" --message "$(MSG)"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
-	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"
+	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-}"
 
 evidence-publish: ## Sign and publish exact PASS evidence to the configured OCI evidence repository
 	@$(PYTHON) scripts/repoctl.py evidence-publish --path "$(EVIDENCE)"
@@ -159,7 +159,7 @@ context: ## Build bounded task-aware context pack; use TASK="..."
 	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
 
 diff-context: ## Build compact diff-only context pack
-	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-origin/main}"
+	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-}"
 
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
@@ -173,7 +173,7 @@ nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph
 
 bazel-verify: ## Run affected-only verification through pinned Bazel
-	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+	@bazel run //:repoctl -- verify-change --base "$${BASE:-}" --head "$${HEAD:-WORKTREE}"
 
 .PHONY: api-generate service-new
 

@@ -1,0 +1,976 @@
+{
+  "version": 1,
+  "kind": "ToolchainLock",
+  "status": "exact",
+  "serialization": "json",
+  "architecture_authority": "architecture.lock.yaml",
+  "scope": "entire-repository",
+  "authority_claims": [
+    "repository.toolchain.versions",
+    "repository.toolchain.capabilities",
+    "repository.toolchain.provisioning-ownership",
+    "repository.toolchain.gate-requirements"
+  ],
+  "principles": {
+    "single_source_of_truth": true,
+    "unmanaged_version_authority": "forbidden",
+    "unmanaged_checksum_authority": "forbidden",
+    "consumer_embedded_tool_versions": "forbidden",
+    "projection_drift": "blocking"
+  },
+  "legacy_projections": {
+    "versions_env": {
+      "path": "config/toolchain/versions.env",
+      "authority": "derived-projection",
+      "comparison": "semantic-key-value"
+    },
+    "capabilities_json": {
+      "path": "config/toolchain/capabilities.json",
+      "authority": "derived-projection",
+      "comparison": "semantic-json",
+      "keys": [
+        "schema_version",
+        "supported",
+        "capabilities",
+        "provision_owners",
+        "seed_prerequisites",
+        "platform_primitives",
+        "gate_requirements",
+        "command_capabilities",
+        "gate_sources"
+      ]
+    }
+  },
+  "versions": {
+    "PRE_COMMIT_VERSION": "4.6.2",
+    "ANSIBLE_CORE_VERSION": "2.20.3",
+    "PYYAML_VERSION": "6.0.2",
+    "ANSIBLE_LINT_VERSION": "26.8.0",
+    "MOLECULE_VERSION": "26.8.0",
+    "MOLECULE_DOCKER_VERSION": "26.7.15",
+    "TESTINFRA_VERSION": "10.2.2",
+    "ANSIBLE_RUNNER_VERSION": "2.4.3",
+    "ANSIBLE_BUILDER_VERSION": "3.1.1",
+    "ANSIBLE_NAVIGATOR_VERSION": "26.8.0",
+    "GGSHIELD_VERSION": "1.54.0",
+    "CHECKOV_VERSION": "3.3.16",
+    "SEMGREP_VERSION": "1.176.1",
+    "CVE_BIN_TOOL_VERSION": "3.4",
+    "COSIGN_VERSION": "3.1.3",
+    "COSIGN_SHA256_LINUX_AMD64": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+    "ORAS_VERSION": "1.3.3",
+    "ORAS_SHA256_LINUX_AMD64": "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59",
+    "RIPGREP_VERSION": "15.2.0",
+    "RIPGREP_SHA256_LINUX_AMD64": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+    "FD_VERSION": "10.4.2",
+    "FD_SHA256_LINUX_AMD64": "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
+    "YQ_VERSION": "4.53.6",
+    "YQ_SHA256_LINUX_AMD64": "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385",
+    "AST_GREP_VERSION": "0.45.0",
+    "AST_GREP_SHA256_LINUX_AMD64": "78931ae35ebac33d9a72b3aecea3e3d62d6e5b0b718ac8bbedfbe69d68421e41",
+    "GO_VERSION": "1.26.6",
+    "GO_SHA256_LINUX_AMD64": "708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89",
+    "TEMPL_VERSION": "0.3.1020",
+    "SQLC_VERSION": "1.31.1",
+    "SQLC_SHA256_LINUX_AMD64": "497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354",
+    "NODE_VERSION": "24.20.0",
+    "PNPM_VERSION": "11.24.0",
+    "NODE_SHA256_LINUX_X64": "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+    "BAZEL_VERSION": "8.8.0",
+    "BAZELISK_VERSION": "1.29.0",
+    "BAZELISK_SHA256_LINUX_AMD64": "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992",
+    "NX_VERSION": "23.2.0",
+    "TURBO_VERSION": "2.10.12",
+    "PRISM_VERSION": "5.16.0",
+    "OPENAPI_TYPESCRIPT_VERSION": "7.13.0",
+    "OPENAPI_FETCH_VERSION": "0.17.0",
+    "OAPI_CODEGEN_VERSION": "2.8.0",
+    "OASDIFF_VERSION": "1.28.0",
+    "OASDIFF_SHA256_LINUX_AMD64_TARGZ": "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
+    "OAPI_CODEGEN_RUNTIME_VERSION": "1.6.0",
+    "OXC_RELEASE_TAG": "apps_v1.82.0",
+    "OXLINT_VERSION": "1.82.0",
+    "OXLINT_SHA256_LINUX_AMD64": "2284a516360c42166b9f0b1c1aa6920322d3385d93a7ff7061d2d8ed77ec1e35",
+    "OXFMT_VERSION": "0.67.0",
+    "OXFMT_SHA256_LINUX_AMD64": "7fcda58499e25a261069022f3c6b9827da4bcc729a6181214c0645b3e30d1603",
+    "RUFF_VERSION": "0.16.6",
+    "RUFF_SHA256_LINUX_AMD64": "0696335ef16615d8c7445ad438750eb0f55b3da6f153df21265a7c6d5750254f",
+    "GITLEAKS_VERSION": "8.30.1",
+    "GITLEAKS_SHA256_LINUX_AMD64": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+    "KUBECTL_VERSION": "1.37.0",
+    "KUBECTL_SHA256_LINUX_AMD64": "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f",
+    "HELM_VERSION": "4.2.4",
+    "HELM_SHA256_LINUX_AMD64": "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3",
+    "TERRAFORM_VERSION": "1.16.2",
+    "TERRAFORM_SHA256_LINUX_AMD64": "0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a",
+    "OPENTOFU_VERSION": "1.11.5",
+    "KUSTOMIZE_VERSION": "5.8.1",
+    "KUSTOMIZE_SHA256_LINUX_AMD64": "029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d",
+    "KIND_VERSION": "0.33.0",
+    "KIND_SHA256_LINUX_AMD64": "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d"
+  },
+  "schema_version": 1,
+  "supported": {
+    "os": [
+      "linux",
+      "darwin",
+      "windows"
+    ],
+    "arch": [
+      "amd64",
+      "arm64"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "python",
+      "requires": [],
+      "command": "python3",
+      "version_args": [
+        "--version"
+      ],
+      "classification": "seed-prerequisite",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ruby",
+      "requires": [],
+      "command": "ruby",
+      "version_args": [
+        "--version"
+      ],
+      "classification": "seed-prerequisite",
+      "justification": "Ruby is the contracted runtime for deterministic governance validators.",
+      "requirement": "required-static"
+    },
+    {
+      "name": "psych",
+      "requires": [
+        "ruby"
+      ],
+      "command": "ruby",
+      "version_args": [
+        "-rpsych",
+        "-e",
+        "print Psych::VERSION"
+      ],
+      "classification": "conditional",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ansible-core",
+      "requires": [],
+      "command": "ansible",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "ANSIBLE_CORE_VERSION",
+      "classification": "seed-prerequisite",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ansible-playbook",
+      "requires": [
+        "ansible-core"
+      ],
+      "provider": "ansible-core",
+      "command": "ansible-playbook",
+      "version_args": [
+        "--version"
+      ],
+      "classification": "conditional",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ansible-galaxy",
+      "requires": [
+        "ansible-core"
+      ],
+      "provider": "ansible-core",
+      "command": "ansible-galaxy",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "ANSIBLE_CORE_VERSION",
+      "classification": "conditional",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ansible-lint",
+      "requires": [
+        "ansible-playbook"
+      ],
+      "command": "ansible-lint",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "ANSIBLE_LINT_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "ansible_lint"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "node",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "node",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "NODE_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "node"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "corepack",
+      "requires": [
+        "node"
+      ],
+      "command": "corepack",
+      "version_args": [
+        "--version"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "node"
+      },
+      "classification": "conditional",
+      "requirement": "required-static"
+    },
+    {
+      "name": "pnpm",
+      "requires": [
+        "corepack"
+      ],
+      "provider": "corepack",
+      "probe": [
+        "corepack",
+        "pnpm",
+        "--version"
+      ],
+      "classification": "conditional",
+      "requirement": "required-static"
+    },
+    {
+      "name": "go",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "go",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "GO_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "go"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "sqlc",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "sqlc",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "SQLC_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "sqlc"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "yq",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "yq",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "YQ_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "context_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "oasdiff",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oasdiff",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OASDIFF_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "agent_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "rg",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "rg",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "RIPGREP_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "context_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "fd",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "fd",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "FD_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "context_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ast-grep",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "ast-grep",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "AST_GREP_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "context_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "oras",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oras",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "ORAS_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "agent_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "bazel",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "bazel",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "BAZEL_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "agent_tools"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "nx",
+      "requires": [
+        "node"
+      ],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "nx",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "NX_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "agent_tools"
+      },
+      "classification": "managed",
+      "platforms": [
+        "linux/amd64"
+      ],
+      "requirement": "required-static"
+    },
+    {
+      "name": "oapi-codegen",
+      "requires": [],
+      "provision_requires": [
+        "go",
+        "ansible-playbook"
+      ],
+      "command": "oapi-codegen",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OAPI_CODEGEN_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "oapi_codegen"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "oxlint",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oxlint",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OXLINT_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "oxlint"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "oxfmt",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "oxfmt",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "OXFMT_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "oxfmt"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "ruff",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "ruff",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "RUFF_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "ruff"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "container-network-forwarding",
+      "requires": [],
+      "probe": [
+        "sysctl",
+        "-n",
+        "net.ipv4.ip_forward"
+      ],
+      "expected_output": "1",
+      "external_failure": true,
+      "classification": "platform-provided",
+      "requirement": "optional-runtime",
+      "justification": "Host IPv4 forwarding is owned by the runner platform and is required only by networked container integration workloads."
+    },
+    {
+      "name": "docker-client-installed",
+      "requires": [],
+      "command": "docker",
+      "version_args": [
+        "--version"
+      ],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "docker_client"
+      },
+      "classification": "platform-provided",
+      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "docker-user-access",
+      "requires": [
+        "docker-client-installed"
+      ],
+      "probe": [
+        "docker",
+        "info"
+      ],
+      "external_failure": true,
+      "classification": "conditional",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "docker-daemon-ready",
+      "requires": [
+        "docker-user-access"
+      ],
+      "probe": [
+        "docker",
+        "info"
+      ],
+      "external_failure": true,
+      "classification": "conditional",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "docker",
+      "requires": [
+        "docker-daemon-ready"
+      ],
+      "probe": [
+        "docker",
+        "info"
+      ],
+      "external_failure": true,
+      "classification": "conditional",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "kubectl",
+      "requires": [],
+      "command": "kubectl",
+      "version_args": [
+        "version",
+        "--client"
+      ],
+      "version_key": "KUBECTL_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "kubectl"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "KUBECTL_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "helm",
+      "requires": [],
+      "command": "helm",
+      "version_args": [
+        "version",
+        "--short"
+      ],
+      "version_key": "HELM_VERSION",
+      "version_parser": "first_semver_release",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "helm"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "HELM_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "cosign",
+      "requires": [],
+      "command": "cosign",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "COSIGN_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "cosign"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "COSIGN_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "terraform",
+      "requires": [],
+      "version_key": "TERRAFORM_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "terraform"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
+      "selection_policy": "first_available",
+      "any_of": [
+        {
+          "command": "tofu",
+          "version_args": [
+            "version"
+          ],
+          "version_key": "OPENTOFU_VERSION"
+        },
+        {
+          "command": "terraform",
+          "version_args": [
+            "version"
+          ],
+          "version_key": "TERRAFORM_VERSION"
+        }
+      ],
+      "requirement": "required-static"
+    },
+    {
+      "name": "kustomize",
+      "requires": [],
+      "command": "kustomize",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "KUSTOMIZE_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "kustomize"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "KUSTOMIZE_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "kind",
+      "requires": [
+        "docker"
+      ],
+      "command": "kind",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "KIND_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "kind"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "KIND_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "container-tests",
+      "requires": [
+        "docker",
+        "container-network-forwarding"
+      ],
+      "virtual": true,
+      "classification": "conditional",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "gitleaks",
+      "command": "gitleaks",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "GITLEAKS_VERSION",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "gitleaks"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "requires": [],
+      "classification": "managed",
+      "checksum_key": "GITLEAKS_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    }
+  ],
+  "provision_owners": {
+    "ansible-lint": "ansible",
+    "node": "ansible",
+    "go": "ansible",
+    "sqlc": "ansible",
+    "yq": "ansible",
+    "oasdiff": "ansible",
+    "rg": "ansible",
+    "fd": "ansible",
+    "ast-grep": "ansible",
+    "oras": "ansible",
+    "bazel": "ansible",
+    "nx": "ansible",
+    "oapi-codegen": "ansible",
+    "oxlint": "ansible",
+    "oxfmt": "ansible",
+    "ruff": "ansible",
+    "kubectl": "ansible",
+    "helm": "ansible",
+    "cosign": "ansible",
+    "terraform": "ansible",
+    "kustomize": "ansible",
+    "kind": "ansible",
+    "gitleaks": "ansible"
+  },
+  "seed_prerequisites": [
+    {
+      "command": "python3",
+      "justification": "Required to start repoctl and the bootstrap controller before managed provisioning can run."
+    },
+    {
+      "command": "git",
+      "justification": "Required to locate and inspect the checkout before repository orchestration starts."
+    },
+    {
+      "command": "make",
+      "justification": "Public gate dispatcher supplied by the build environment."
+    },
+    {
+      "command": "ansible",
+      "justification": "Pinned Ansible Core is supplied by the runner and drives repository-owned tool reconciliation."
+    },
+    {
+      "command": "ansible-playbook",
+      "justification": "The runner supplies this entry point from the same pinned Ansible Core provider."
+    },
+    {
+      "command": "ansible-galaxy",
+      "justification": "The runner supplies this entry point from the same pinned Ansible Core provider."
+    },
+    {
+      "command": "ruby",
+      "justification": "The runner supplies Ruby for deterministic governance validators; repository bootstrap never installs it."
+    }
+  ],
+  "platform_primitives": [
+    {
+      "command": "tar",
+      "justification": "POSIX archive primitive used only for an in-memory Git archive compatibility snapshot."
+    },
+    {
+      "command": "diff",
+      "justification": "POSIX comparison primitive used by generated-code drift checks."
+    },
+    {
+      "command": "cc",
+      "justification": "Platform compiler primitive required conditionally by CGO service integration tests."
+    },
+    {
+      "command": "gh",
+      "justification": "Authenticated forge transport used only by explicit delivery commands."
+    },
+    {
+      "command": "curl",
+      "justification": "TLS download primitive owned by supported platform bootstrap."
+    },
+    {
+      "command": "unzip",
+      "justification": "Archive primitive owned by supported platform bootstrap."
+    }
+  ],
+  "gate_requirements": {
+    "bootstrap": [
+      "python3"
+    ],
+    "env-check": [
+      "python3",
+      "sysctl"
+    ],
+    "governance": [
+      "python3",
+      "ruby",
+      "git"
+    ],
+    "contracts": [
+      "python3",
+      "ruby",
+      "git",
+      "tar",
+      "oasdiff",
+      "oapi-codegen",
+      "go",
+      "corepack",
+      "pnpm",
+      "oxfmt"
+    ],
+    "automation": [
+      "python3",
+      "git"
+    ],
+    "lint": [
+      "python3",
+      "git",
+      "ruby",
+      "ruff",
+      "go",
+      "corepack",
+      "pnpm",
+      "node",
+      "oxlint",
+      "oxfmt"
+    ],
+    "test": [
+      "python3",
+      "ruby",
+      "git",
+      "go",
+      "corepack",
+      "pnpm",
+      "node",
+      "oxlint",
+      "oxfmt"
+    ],
+    "security": [
+      "python3",
+      "git",
+      "gitleaks"
+    ],
+    "terraform": [
+      "python3",
+      "terraform"
+    ],
+    "ansible": [
+      "python3",
+      "ansible-playbook",
+      "ansible-galaxy",
+      "ansible-lint"
+    ],
+    "service": [
+      "python3",
+      "ruby",
+      "go",
+      "gofmt",
+      "sqlc",
+      "diff",
+      "cc",
+      "docker"
+    ],
+    "tekton-trigger-readiness": [
+      "python3",
+      "kustomize",
+      "kubectl"
+    ],
+    "context": [
+      "python3",
+      "git",
+      "yq",
+      "rg",
+      "fd",
+      "nx",
+      "ast-grep"
+    ],
+    "delivery": [
+      "python3",
+      "git",
+      "gh",
+      "oras",
+      "cosign"
+    ]
+  },
+  "command_capabilities": {
+    "ansible": "ansible-core",
+    "gofmt": "go",
+    "pnpm": "pnpm",
+    "docker": "docker",
+    "terraform": "terraform",
+    "tofu": "terraform",
+    "sysctl": "container-network-forwarding"
+  },
+  "gate_sources": [
+    "scripts/repoctl.py",
+    "scripts/context-pack.py",
+    "scripts/tekton_trigger_readiness.py",
+    "scripts/mgmt_runtime_inventory.py",
+    "scripts/servicegen.py",
+    "scripts/repository_delivery.py",
+    "scripts/performance_audit.py"
+  ],
+  "architecture_refs": {
+    "node_runtime_boundary": "architecture.lock.yaml#developer_platform.runtime_boundary"
+  }
+}
