@@ -2043,6 +2043,15 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         return None
     return path
 
+def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
+    require("ruby")
+    command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
+    if strict_unknown:
+        command.append("--strict-unknown")
+    p = run(command, capture=True)
+    return json.loads(p.stdout)
+
+
 def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str, str] | None = None) -> bool:
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
