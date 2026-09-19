@@ -141,16 +141,16 @@ git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
 
 publish: ## Commit, exact-SHA verify and push current feature branch
-	@$(PYTHON) scripts/repoctl.py publish --base "${BASE:-origin/main}" --message "$(MSG)"
+	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
 
 publish-change: ## Canonical alias: qualify, commit and push the current feature branch
-	@$(PYTHON) scripts/repoctl.py publish-change --base "${BASE:-origin/main}" --message "$(MSG)"
+	@$(PYTHON) scripts/repoctl.py publish-change --base "$${BASE:-origin/main}" --message "$(MSG)"
 
 deliver: ## Exact-SHA validate, publish and create/update GitHub PR
-	@$(PYTHON) scripts/repoctl.py deliver --base "${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
+	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
 finish-pr: ## Merge the exact reviewed PR and remove its feature branches; GitHub retains the merged PR record
-	@$(PYTHON) scripts/repoctl.py finish-pr --base "${BASE:-main}"
+	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
 	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"
