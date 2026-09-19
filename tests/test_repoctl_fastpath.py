@@ -36,6 +36,48 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual(remote_sha, sha)
         self.assertEqual("origin/stacked-base^{commit}", calls[0][-1])
 
+    def test_head_base_preserves_local_git_special_ref(self):
+        head_sha = "3" * 40
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if command == ["git", "rev-parse", "--verify", "HEAD^{commit}"]:
+                return subprocess.CompletedProcess(command, 0, head_sha + "\n", "")
+            if command == ["git", "merge-base", "--is-ancestor", head_sha, "HEAD"]:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            raise AssertionError(command)
+
+        with (
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+            mock.patch.object(MOD, "git", return_value=head_sha + "\n"),
+        ):
+            ref, sha = MOD.resolve_base_ref("HEAD", head="WORKTREE")
+
+        self.assertEqual("HEAD", ref)
+        self.assertEqual(head_sha, sha)
+        self.assertNotIn(
+            ["git", "rev-parse", "--verify", "origin/HEAD^{commit}"],
+            calls,
+        )
+
+    def test_exact_base_must_be_strict_ancestor(self):
+        head_sha = "4" * 40
+
+        def fake_run(command, **_kwargs):
+            if command == ["git", "rev-parse", "--verify", f"{head_sha}^{{commit}}"]:
+                return subprocess.CompletedProcess(command, 0, head_sha + "\n", "")
+            if command == ["git", "merge-base", "--is-ancestor", head_sha, head_sha]:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            raise AssertionError(command)
+
+        with (
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+            mock.patch.object(MOD, "git", return_value=head_sha + "\n"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "strict ancestor"):
+                MOD.resolve_base_ref(head_sha, head=head_sha)
+
     def test_qualification_entrypoints_use_canonical_environment(self):
         import inspect
 

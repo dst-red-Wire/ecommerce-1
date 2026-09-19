@@ -307,6 +307,15 @@ def ci_evidence_policy() -> dict:
         if rules.get("prepush_explicit_base_required") is not True:
             raise RuntimeError("prepush must require an explicit BASE")
 
+        if rules.get("recorded_base_must_be_strict_ancestor_of_exact_head") is not True:
+            raise RuntimeError("exact evidence base must be a strict ancestor of HEAD")
+
+        if rules.get("bare_branch_remote_precedence") is not True:
+            raise RuntimeError("bare base branches must prefer origin tracking refs")
+
+        if rules.get("git_special_refs_preserved") is not True:
+            raise RuntimeError("Git special refs must preserve explicit local semantics")
+
         _CI_EVIDENCE_POLICY = policy
 
     return copy.deepcopy(_CI_EVIDENCE_POLICY)
@@ -319,7 +328,20 @@ def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
         raise RuntimeError("explicit BASE is required")
 
     is_sha = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value))
-    if is_sha or value.startswith("origin/") or value.startswith("refs/"):
+    git_special_refs = {
+        "HEAD",
+        "ORIG_HEAD",
+        "FETCH_HEAD",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+    }
+    if (
+        is_sha
+        or value in git_special_refs
+        or value.startswith("origin/")
+        or value.startswith("refs/")
+    ):
         candidates = [value]
     else:
         # Bare branch names mean the forge-tracking branch first. A stale local
@@ -344,6 +366,7 @@ def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
         raise RuntimeError(f"cannot resolve explicit BASE {value!r}")
 
     comparison_head = "HEAD" if head == "WORKTREE" else head
+    comparison_head_sha = git("rev-parse", comparison_head).strip()
 
     if run(
         ["git", "merge-base", "--is-ancestor", resolved_sha, comparison_head],
@@ -352,6 +375,11 @@ def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
     ).returncode:
         raise RuntimeError(
             f"BASE {resolved_sha} is not an ancestor of {comparison_head}"
+        )
+
+    if head != "WORKTREE" and resolved_sha == comparison_head_sha:
+        raise RuntimeError(
+            f"BASE {resolved_sha} must be a strict ancestor of exact HEAD {comparison_head_sha}"
         )
 
     return resolved_ref, resolved_sha
@@ -396,6 +424,9 @@ def reusable_exact_evidence(
         or data.get("head_sha") != requested
         or not base_sha
     ):
+        return None
+
+    if base_sha == requested:
         return None
 
     if run(
@@ -1747,6 +1778,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
     require("ruby")
+    base, _base_sha = resolve_base_ref(base, head=head)
     command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
@@ -1917,7 +1949,10 @@ def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
     if exact is None:
         return 2
     requested, current = exact
-    base_sha = git("rev-parse", base).strip()
+    try:
+        base, base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     components = affected(base, head)
     gates = _normalized_component_gates(components)
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
@@ -1973,6 +2008,10 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
+    try:
+        base, _base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     records: list[dict] = []
     env = qualification_environment({"BASE": base, "HEAD": head})
     rc = 0
@@ -1989,6 +2028,10 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
+    try:
+        base, _base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     command, reason = _component_command(component)
     records: list[dict] = []
     if command is None:
@@ -2008,7 +2051,10 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
-    base_sha = git("rev-parse", base).strip()
+    try:
+        base, base_sha = resolve_base_ref(base, head=head)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     target = os.environ.get("CI_STATUS_TARGET_URL", "").strip()
     if not plan_path.is_file():
         publish_remote_status(requested, "failure", "Tekton plan evidence is missing", target)

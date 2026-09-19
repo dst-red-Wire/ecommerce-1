@@ -13,9 +13,12 @@ base_resolution:
   stacked_pull_requests: supported
   exact_evidence_recorded_base_may_authorize_reuse: symbolic-ref-only
   recorded_base_must_be_ancestor_of_head: true
+  recorded_base_must_be_strict_ancestor_of_exact_head: true
   explicit_base_required_without_valid_exact_evidence: true
   prepush_explicit_base_required: true
   pull_request_target_requires_symbolic_base: true
+  bare_branch_remote_precedence: true
+  git_special_refs_preserved: true
 
 evidence:
   schema_version: 4
