@@ -69,7 +69,7 @@ module AffectedComponents
       when %r{\Aplatform/ansible/}
         components << "platform:ansible"
       when %r{\Acontracts/openapi/}
-        if path == common_openapi
+        if Array(common_openapi).include?(path)
           FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }
           services.each { |service| components << "service:#{service}" }
         elsif (contract = public_contracts[path])
@@ -352,7 +352,7 @@ if $PROGRAM_NAME == __FILE__
 
   root = File.expand_path("..", __dir__)
   services, public_contracts, common_openapi_values = AffectedComponents.project_for_change(root, options[:base], options[:head])
-  common_openapi = common_openapi_values.first
+  common_openapi = common_openapi_values
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
   consumers = AffectedComponents.service_consumers(root, options[:base], options[:head], services)
   contract_impact = AffectedComponents.contract_impact_map(
