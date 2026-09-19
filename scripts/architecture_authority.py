@@ -72,15 +72,56 @@ V5_ROOT_KEYS = frozenset(
     }
 )
 V5_SECTION_KEYS = {
-    "repository_governance": frozenset(_CANONICAL_LOCK["repository_governance"]),
+    # Structural schema keys must be independent from architecture.lock.yaml.
+    # Otherwise a newly introduced key could authorize itself at module startup.
+    "repository_governance": frozenset(
+        {
+            "scope",
+            "transverse_rule_contract",
+            "canonical_contract_system",
+            "owner_authorization",
+        }
+    ),
     "repository_governance.transverse_rule_contract": frozenset(
-        _CANONICAL_LOCK["repository_governance"]["transverse_rule_contract"]
+        {
+            "source_of_truth",
+            "rule_definition",
+            "enforcement",
+            "per_file_rule_propagation",
+            "consumer_changes",
+        }
     ),
     "repository_governance.canonical_contract_system": frozenset(
-        _CANONICAL_LOCK["repository_governance"]["canonical_contract_system"]
+        {
+            "version",
+            "root_authority",
+            "registry",
+            "schema",
+            "validator",
+            "controller",
+            "materializer",
+            "generic_validation",
+            "projection_root",
+            "projection_drift",
+            "duplicate_authority",
+            "unregistered_contract",
+            "implicit_policy",
+            "consumer_embedded_policy",
+            "forbidden_parallel_authority_files",
+            "required_contracts",
+        }
     ),
     "repository_governance.owner_authorization": frozenset(
-        _CANONICAL_LOCK["repository_governance"]["owner_authorization"]
+        {
+            "syntax",
+            "decision_authority",
+            "recording_agent",
+            "recording_requires_explicit_owner_instruction",
+            "sha_binding",
+            "scope_binding",
+            "head_change",
+            "absence_or_mismatch",
+        }
     ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
     "business.frontend_runtime": frozenset(

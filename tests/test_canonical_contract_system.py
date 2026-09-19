@@ -3,6 +3,10 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +67,45 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertEqual("forbidden", projection["source_mutation"])
         self.assertEqual("isolated", projection["projection_mutation"])
         self.assertEqual("forbidden", projection["symlinks"])
+
+    def test_architecture_governance_keys_are_not_self_authorizing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copy2(
+                ROOT / "scripts" / "architecture_authority.py",
+                scripts / "architecture_authority.py",
+            )
+
+            lock = (ROOT / "architecture.lock.yaml").read_text(encoding="utf-8")
+            lock = lock.replace(
+                "repository_governance:\n",
+                "repository_governance:\n  injected_self_authorized_key: true\n",
+                1,
+            )
+            (root / "architecture.lock.yaml").write_text(lock, encoding="utf-8")
+
+            probe = (
+                "import importlib.util, json, pathlib; "
+                "p=pathlib.Path(r'" + str(scripts / "architecture_authority.py") + "'); "
+                "s=importlib.util.spec_from_file_location('probe_architecture_authority', p); "
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                "errors=m.lock_schema_errors(m._CANONICAL_LOCK); "
+                "print(json.dumps(errors)); "
+                "raise SystemExit(0 if any('unknown=injected_self_authorized_key' in e for e in errors) else 1)"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=root,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+            self.assertIn("unknown=injected_self_authorized_key", result.stdout)
 
     def test_inherited_contracts_use_the_common_envelope(self):
         self.assertEqual("SourceQualityPolicy", MOD.load_yaml(
