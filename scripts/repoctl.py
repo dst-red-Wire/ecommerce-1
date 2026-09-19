@@ -1873,7 +1873,7 @@ def deliver(base: str, title: str, message: str) -> int:
         f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds', 0)} | {gate_source(g)} |" for g in ev["gates"]
     )
     body.write_text(
-        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
     existing = output(
@@ -1920,7 +1920,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "pr",
             "create",
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--head",
             branch,
             "--title",
