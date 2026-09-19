@@ -7,6 +7,7 @@ require "tmpdir"
 require_relative "../scripts/ci-affected"
 
 class CIAffectedTest < Minitest::Test
+  ROOT = File.expand_path("..", __dir__)
   SERVICES = %w[catalog product inventory cart pricing tax order payment shipping tracking returns billing fraud-risk search review user-profile notification].freeze
   PUBLIC = {
     "contracts/openapi/product.v1.yaml" => {"service" => "product", "audiences" => ["admin"]}

@@ -98,7 +98,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 "gitleaks",
                 "dir",
                 "--config",
-                ".gitleaks.toml",
+                "$str:config",
                 "--redact",
                 "--no-banner",
                 "$str:scan_root",

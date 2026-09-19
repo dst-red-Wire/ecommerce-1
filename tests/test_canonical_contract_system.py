@@ -30,6 +30,27 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertIn("config/contracts/toolchain-lock.yaml", ansible_defaults)
         self.assertNotIn("config/toolchain/versions.env", ansible_defaults)
 
+    def test_execution_environment_centralizes_qualification_isolation(self):
+        policy = MOD.load_yaml(
+            ROOT, "config/contracts/execution-environment-policy.yaml"
+        )
+        isolation = policy["qualification_isolation"]
+        git_policy = isolation["git"]
+
+        self.assertEqual("forbidden", git_policy["inherited_repository_context"])
+        self.assertIn("GIT_", git_policy["drop_inherited_prefixes"])
+        self.assertEqual("disabled", git_policy["system_config"])
+        self.assertEqual("disabled", git_policy["global_config"])
+        self.assertEqual("disabled", git_policy["nested_hooks"])
+        self.assertEqual("/dev/null", git_policy["hooks_path"])
+        self.assertEqual("forbidden", git_policy["parent_index_mutation"])
+        self.assertEqual("forbidden", git_policy["parent_worktree_mutation"])
+
+        projection = isolation["temporary_repository_projection"]
+        self.assertTrue(projection["preserve_repository_relative_paths"])
+        self.assertEqual("forbidden", projection["source_mutation"])
+        self.assertEqual("isolated", projection["projection_mutation"])
+
     def test_inherited_contracts_use_the_common_envelope(self):
         self.assertEqual("SourceQualityPolicy", MOD.load_yaml(
             ROOT, "config/contracts/source-quality-policy.yaml"

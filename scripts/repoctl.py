@@ -140,6 +140,143 @@ def canonical_contract_audit() -> int:
     return run([sys.executable, "scripts/canonical_contracts.py", "audit-authority"], check=False).returncode
 
 
+_EXECUTION_ENVIRONMENT_POLICY: dict | None = None
+
+
+def execution_environment_policy() -> dict:
+    """Load and fail closed on the canonical execution isolation contract."""
+    global _EXECUTION_ENVIRONMENT_POLICY
+
+    if _EXECUTION_ENVIRONMENT_POLICY is None:
+        policy = canonical_contract("execution_environment_policy")
+
+        if (
+            policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "repository-execution"
+            or policy.get("status") != "enforced"
+        ):
+            raise RuntimeError(
+                "execution environment policy must inherit architecture.lock.yaml"
+            )
+
+        isolation = policy.get("qualification_isolation")
+        if not isinstance(isolation, dict):
+            raise RuntimeError(
+                "execution environment policy must declare qualification_isolation"
+            )
+
+        git_policy = isolation.get("git")
+        if not isinstance(git_policy, dict):
+            raise RuntimeError(
+                "execution environment policy must declare qualification_isolation.git"
+            )
+
+        if git_policy.get("inherited_repository_context") != "forbidden":
+            raise RuntimeError("qualification must reject inherited Git repository context")
+
+        prefixes = git_policy.get("drop_inherited_prefixes")
+        if not isinstance(prefixes, list) or "GIT_" not in prefixes:
+            raise RuntimeError("qualification Git isolation must remove inherited GIT_* state")
+
+        if git_policy.get("nested_hooks") != "disabled":
+            raise RuntimeError("nested Git hooks must be disabled during qualification")
+
+        projection = isolation.get("temporary_repository_projection")
+        if (
+            not isinstance(projection, dict)
+            or projection.get("preserve_repository_relative_paths") is not True
+        ):
+            raise RuntimeError(
+                "temporary qualification projections must preserve repository-relative paths"
+            )
+
+        _EXECUTION_ENVIRONMENT_POLICY = policy
+
+    return copy.deepcopy(_EXECUTION_ENVIRONMENT_POLICY)
+
+
+def qualification_environment(
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the canonical environment inherited by every qualification gate."""
+    policy = execution_environment_policy()
+    git_policy = policy["qualification_isolation"]["git"]
+
+    env = os.environ.copy()
+
+    for prefix in git_policy["drop_inherited_prefixes"]:
+        for name in tuple(env):
+            if name.startswith(str(prefix)):
+                env.pop(name, None)
+
+    if git_policy.get("system_config") == "disabled":
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    if git_policy.get("global_config") == "disabled":
+        env["GIT_CONFIG_GLOBAL"] = os.devnull
+
+    if git_policy.get("nested_hooks") == "disabled":
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+        env["GIT_CONFIG_VALUE_0"] = str(
+            git_policy.get("hooks_path", os.devnull)
+        )
+
+    if extra:
+        env.update({str(key): str(value) for key, value in extra.items()})
+
+    return env
+
+
+def materialize_repository_projection(
+    destination: Path,
+    roots: list[str],
+    *,
+    ignored_names: tuple[str, ...] = (),
+) -> None:
+    """Copy canonical source roots while preserving their repository paths."""
+    repository_root = ROOT.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    for relative in roots:
+        relative_path = Path(str(relative))
+
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(
+                f"temporary repository projection path escapes repository: {relative}"
+            )
+
+        source = (ROOT / relative_path).resolve()
+
+        try:
+            source.relative_to(repository_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"temporary repository projection path escapes repository: {relative}"
+            ) from exc
+
+        if not source.exists():
+            raise RuntimeError(
+                f"temporary repository projection source is missing: {relative}"
+            )
+
+        target = destination / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                target,
+                ignore=shutil.ignore_patterns(*ignored_names),
+            )
+        elif source.is_file():
+            shutil.copy2(source, target)
+        else:
+            raise RuntimeError(
+                f"unsupported temporary repository projection source: {relative}"
+            )
+
+
 def security_scan_policy() -> dict:
     return canonical_contract("security_scan_policy")
 
@@ -289,11 +426,14 @@ def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> N
     ]
     for name in sorted(provider_lock["providers"]):
         provider = provider_lock["providers"][name]
+        constraints = str(provider["constraints"]).strip()
+        if constraints.startswith("="):
+            constraints = constraints[1:].strip()
         lines.extend(
             [
                 f'provider {json.dumps(provider["source"])} {{',
                 f'  version     = {json.dumps(provider["version"])}',
-                f'  constraints = {json.dumps(provider["constraints"])}',
+                f'  constraints = {json.dumps(constraints)}',
                 "  hashes = [",
             ]
         )
@@ -458,10 +598,14 @@ def canonical_services() -> list[str]:
     return [str(x) for x in ruby_yaml("architecture.lock.yaml").get("business", {}).get("services", [])]
 
 
-def run_ruby_tests(paths: list[str]) -> None:
+def run_ruby_tests(
+    paths: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
     require("ruby")
     for path in paths:
-        run(["ruby", "-Itest", path])
+        run(["ruby", "-Itest", path], env=env)
 
 
 def runtime_efficiency_check() -> int:
@@ -1050,18 +1194,42 @@ def terraform_check() -> int:
     )
 
     provider_cache = terraform_provider_plugin_cache_dir(provider_lock)
-    env = os.environ.copy()
+    env = qualification_environment()
     if provider_cache is not None:
         env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
 
+    projection = qualification.get("source_projection")
+    if not isinstance(projection, dict):
+        raise RuntimeError(
+            "Terraform qualification must declare a canonical source_projection"
+        )
+
+    if projection.get("preserve_repository_relative_paths") is not True:
+        raise RuntimeError(
+            "Terraform source projection must preserve repository-relative paths"
+        )
+
+    roots = projection.get("roots")
+    if not isinstance(roots, list) or "platform/terraform" not in roots:
+        raise RuntimeError(
+            "Terraform source projection must include platform/terraform"
+        )
+
+    ignored_names = tuple(
+        str(name) for name in projection.get("ignored_names", [])
+    )
+
     directories = sorted({p.parent for p in tf_files})
     with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
-        temp_root = Path(temp_dir) / "terraform"
-        shutil.copytree(
-            terraform_root,
-            temp_root,
-            ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
+        temp_repo = Path(temp_dir) / "repo"
+
+        materialize_repository_projection(
+            temp_repo,
+            [str(root) for root in roots],
+            ignored_names=ignored_names,
         )
+
+        temp_root = temp_repo / "platform" / "terraform"
 
         for directory in directories:
             relative = directory.relative_to(terraform_root)
@@ -1118,11 +1286,24 @@ def ansible_check() -> int:
 
 
 def system_check() -> int:
+    env = qualification_environment()
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
-    run_ruby_tests(tests)
+    run_ruby_tests(tests, env=env)
     for suite in [ROOT / "tests", ROOT / "tests" / "delivery", ROOT / "tests" / "context"]:
         if suite.is_dir() and any(suite.glob("test_*.py")):
-            run([sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"])
+            run(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    str(suite.relative_to(ROOT)),
+                    "-p",
+                    "test_*.py",
+                ],
+                env=env,
+            )
     print("PASS cross-system repository checks completed")
     return 0
 
@@ -1608,8 +1789,7 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
         return 2
     requested, _ = exact
     records: list[dict] = []
-    env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
+    env = qualification_environment({"BASE": base, "HEAD": head})
     rc = 0
     for name, command in _global_gate_commands(base, head):
         if not _run_gate(name, command, records, env):

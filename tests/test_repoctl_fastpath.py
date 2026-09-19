@@ -13,6 +13,98 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_qualification_environment_is_canonical_and_git_isolated(self):
+        inherited = {
+            "GIT_DIR": "/tmp/parent/.git",
+            "GIT_WORK_TREE": "/tmp/parent",
+            "GIT_INDEX_FILE": "/tmp/parent/.git/index",
+            "GIT_ASKPASS": "/tmp/askpass",
+            "KEEP_ME": "yes",
+        }
+
+        policy = {
+            "qualification_isolation": {
+                "git": {
+                    "drop_inherited_prefixes": ["GIT_"],
+                    "system_config": "disabled",
+                    "global_config": "disabled",
+                    "nested_hooks": "disabled",
+                    "hooks_path": "/dev/null",
+                }
+            }
+        }
+
+        with (
+            mock.patch.dict(MOD.os.environ, inherited, clear=True),
+            mock.patch.object(
+                MOD,
+                "execution_environment_policy",
+                return_value=policy,
+            ),
+        ):
+            env = MOD.qualification_environment(
+                {"BASE": "base-sha", "HEAD": "head-sha"}
+            )
+
+        self.assertFalse(any(name.startswith("GIT_") for name in inherited if name in env))
+        self.assertEqual("yes", env["KEEP_ME"])
+        self.assertEqual("1", env["GIT_CONFIG_NOSYSTEM"])
+        self.assertEqual(MOD.os.devnull, env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual("1", env["GIT_CONFIG_COUNT"])
+        self.assertEqual("core.hooksPath", env["GIT_CONFIG_KEY_0"])
+        self.assertEqual("/dev/null", env["GIT_CONFIG_VALUE_0"])
+        self.assertEqual("base-sha", env["BASE"])
+        self.assertEqual("head-sha", env["HEAD"])
+
+    def test_qualification_environment_prevents_nested_git_from_mutating_parent(self):
+        before_index = MOD.output(["git", "write-tree"]).strip()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "nested"
+            repo.mkdir()
+
+            env = MOD.qualification_environment()
+
+            subprocess.run(
+                ["git", "init", "-q"],
+                cwd=repo,
+                env=env,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=repo,
+                env=env,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Test"],
+                cwd=repo,
+                env=env,
+                check=True,
+            )
+
+            legacy = repo / "legacy.sh"
+            legacy.write_text("#!/bin/sh\n", encoding="utf-8")
+
+            subprocess.run(
+                ["git", "add", "legacy.sh"],
+                cwd=repo,
+                env=env,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "nested"],
+                cwd=repo,
+                env=env,
+                check=True,
+            )
+
+        after_index = MOD.output(["git", "write-tree"]).strip()
+
+        self.assertEqual(before_index, after_index)
+        self.assertFalse((MOD.ROOT / "legacy.sh").exists())
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
@@ -46,6 +138,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             "qualification": {
                 "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
+                "source_projection": {
+                    "preserve_repository_relative_paths": True,
+                    "roots": ["platform/terraform"],
+                    "ignored_names": [".terraform", ".terraform.lock.hcl"],
+                },
                 "provider_plugin_cache": {},
             },
         }
@@ -66,6 +163,14 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             mock.patch.object(MOD, "source_quality_adapter", return_value=policy),
             mock.patch.object(MOD, "terraform_provider_lock_contract", return_value=provider_lock),
             mock.patch.object(MOD, "terraform_provider_plugin_cache_dir", return_value=None),
+            mock.patch.object(MOD, "qualification_environment", return_value={}),
+            mock.patch.object(
+                MOD,
+                "materialize_repository_projection",
+                side_effect=lambda destination, roots, **_kwargs: (
+                    destination / "platform" / "terraform"
+                ).mkdir(parents=True, exist_ok=True),
+            ),
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
             mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
@@ -100,7 +205,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
         self.assertIn('version     = "1.68.0"', text)
-        self.assertIn('constraints = "= 1.68.0"', text)
+        self.assertIn('constraints = "1.68.0"', text)
         self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
 
 
