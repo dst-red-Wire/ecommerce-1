@@ -1218,9 +1218,11 @@ def site() -> int:
         except KeyboardInterrupt:
             pass
         finally:
+            intentionally_stopped: set[int] = set()
             for process in processes:
                 if process.poll() is not None:
                     continue
+                intentionally_stopped.add(id(process))
                 if os.name == "nt":
                     subprocess.run(
                         [str(Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32/taskkill.exe"), "/PID", str(process.pid), "/T", "/F"],
@@ -1245,7 +1247,11 @@ def site() -> int:
                     process.wait()
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
-        failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
+        failed = [
+            process.returncode
+            for process in processes
+            if id(process) not in intentionally_stopped and process.returncode not in (0, None)
+        ]
         return failed[0] if failed else 0
 
 
