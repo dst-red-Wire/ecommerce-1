@@ -18,6 +18,29 @@ class ArchitectureAuthorityTest(unittest.TestCase):
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
 
+    def test_yaml_parse_cache_is_content_addressed_and_mutation_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.yaml"
+            second_path = root / "second.yaml"
+            payload = "root:\n  value: one\n"
+            first_path.write_text(payload, encoding="utf-8")
+            second_path.write_text(payload, encoding="utf-8")
+
+            authority.clear_yaml_parse_cache()
+            first = authority.load_yaml(first_path)
+            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+
+            first["root"]["value"] = "mutated-in-caller"
+            second = authority.load_yaml(second_path)
+            self.assertEqual("one", second["root"]["value"])
+            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+
+            second_path.write_text("root:\n  value: two\n", encoding="utf-8")
+            changed = authority.load_yaml(second_path)
+            self.assertEqual("two", changed["root"]["value"])
+            self.assertEqual(2, len(authority._YAML_PARSE_CACHE))
+
     def test_active_superseded_statements(self):
         for statement in (
             "Exactly 17 services.",

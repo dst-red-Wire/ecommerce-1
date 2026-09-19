@@ -1,5 +1,10 @@
 version: 1
+kind: PullRequestReviewPolicy
 status: exact
+architecture_authority: architecture.lock.yaml
+scope: pull-request-review
+authority_claims:
+  - repository.review.merge-authorization
 
 pull_request_review:
   forge: github
@@ -17,18 +22,50 @@ pull_request_review:
 
   ai_reviewer:
     enabled: true
-    advisory_only: true
+    review_authority: advisory-only
     may_comment: true
     may_request_changes: true
     may_approve: false
-    may_merge: false
+    may_merge: conditional
     may_sign: false
     may_promote: false
     may_push: false
 
+  merge_execution:
+    actor: chatgpt-agent
+    allowed: conditional
+    failure_mode: block
+    conditions:
+      owner_authorization:
+        required: true
+        authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+        exact_head_sha_required: true
+        exact_scope_required: true
+      evidence:
+        required: true
+        status: PASS
+        evidence_kind: exact_commit
+        exact_commit_evidence: true
+        exact_head_sha_required: true
+        exact_base_sha_required: true
+        failed_gates_required: zero
+      pull_request:
+        draft: false
+        mergeable: true
+        unresolved_blocking_threads: zero
+      invalidation:
+        head_change_invalidates_authorization: true
+        head_change_invalidates_evidence: true
+
   human_gate:
     required_for:
       - architecture_changes
+      - infrastructure_apply
+      - destructive_changes
+      - state_migrations
+      - dns_network_iam_secret_changes
+    merge_execution_satisfaction: exact-owner-authorization
+    merge_execution_does_not_authorize:
       - infrastructure_apply
       - destructive_changes
       - state_migrations

@@ -19,6 +19,13 @@ class IncrementalDeliveryTests(unittest.TestCase):
     PARENT = "2" * 40
     HEAD = "3" * 40
 
+    def base_resolution(self):
+        return mock.patch.object(
+            REPOCTL,
+            "resolve_base_ref",
+            return_value=("origin/main", self.BASE),
+        )
+
     def parent_evidence(self):
         return {
             "schema_version": 2,
@@ -89,6 +96,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 return context / "evidence" / "current.json"
 
             with (
+                self.base_resolution(),
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
@@ -157,6 +165,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (
+            self.base_resolution(),
             mock.patch.object(REPOCTL, "git", side_effect=dirty_git),
             mock.patch.object(REPOCTL, "_run_gate") as run_gate,
         ):
@@ -197,6 +206,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 return context / "evidence/current.json"
 
             with (
+                self.base_resolution(),
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
@@ -222,6 +232,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
             raise AssertionError(f"unexpected git call before fail-closed mismatch: {args}")
 
         with (
+            self.base_resolution(),
             mock.patch.object(REPOCTL, "git", side_effect=mismatched_git),
             mock.patch.object(REPOCTL, "_run_gate") as run_gate,
         ):

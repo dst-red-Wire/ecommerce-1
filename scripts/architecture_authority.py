@@ -1,12 +1,13 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+import copy
+import hashlib
 import json
 import re
 import subprocess
 
 AUTHORITY = "architecture.lock.yaml"
-LOCK_STATUS = "locked-for-build"
 CANONICAL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -29,307 +30,84 @@ def _load_canonical_yaml(relative):
     return json.loads(completed.stdout)
 
 
+def _discover_canonical_contract(kind):
+    """Find exactly one canonical contract by declared kind without a path whitelist."""
+    contract_root = CANONICAL_ROOT / "config" / "contracts"
+    matches = []
+    for path in sorted(contract_root.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml", ".json"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not re.search(rf"(?m)^kind:\s*{re.escape(kind)}\s*$", text):
+            continue
+        relative = str(path.relative_to(CANONICAL_ROOT))
+        data = _load_canonical_yaml(relative)
+        if data.get("kind") == kind:
+            matches.append((relative, data))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one canonical contract kind {kind}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 _CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
 INDEX = _CANONICAL_LOCK["topology_contracts"]["exact_index"]
 V5_FRONTENDS = list(_CANONICAL_LOCK["business"]["frontends"])
 EXPECTED_V5_FRONTEND_RUNTIME = dict(_CANONICAL_LOCK["business"]["frontend_runtime"])
-V5_PROD_TOPOLOGY_KEYS = frozenset(
-    {
-        "physical_hosts_total",
-        "physical_hosts_per_site",
-        "control_planes_per_site",
-        "workers_per_site",
-        "data_workers_per_site",
-        "general_workers_per_site",
-        "sites",
-    }
+CONTRACT_SCHEMA_AUTHORITY, _CONTRACT_SCHEMA = _discover_canonical_contract(
+    "CanonicalContractSchema"
 )
-V5_PROD_SITES_KEYS = frozenset({"prod-a", "prod-b"})
-V5_PROD_SITE_KEYS = frozenset({"private_block", "physical_hosts"})
-V5_ROOT_KEYS = frozenset(
-    {
-        "version",
-        "status",
-        "project",
-        "repository_governance",
-        "business",
-        "platform",
-        "management_plane",
-        "stateful",
-        "dns",
-        "observability",
-        "mlops",
-        "supply_chain",
-        "topology_contracts",
-        "machine_contracts",
-        "developer_platform",
-        "prod_certified_topology",
-        "superseded",
-        "build_milestones",
-        "milestone_dependencies",
-    }
+if _CANONICAL_LOCK.get("machine_contracts", {}).get("contract_schema") != CONTRACT_SCHEMA_AUTHORITY:
+    raise RuntimeError("architecture.lock.yaml must register the discovered canonical contract schema")
+
+
+def _exact_schema_keys(value, label):
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(item, str) or not item.strip() for item in value)
+        or len(value) != len(set(value))
+    ):
+        raise RuntimeError(f"{label} must be a non-empty unique list of strings")
+    return frozenset(value)
+
+
+_ARCHITECTURE_LOCK_SCHEMA = _CONTRACT_SCHEMA.get("architecture_lock")
+if not isinstance(_ARCHITECTURE_LOCK_SCHEMA, dict):
+    raise RuntimeError("contract schema must declare architecture_lock")
+
+ARCHITECTURE_VERSION = _ARCHITECTURE_LOCK_SCHEMA.get("expected_version")
+LOCK_STATUS = _ARCHITECTURE_LOCK_SCHEMA.get("expected_status")
+if not isinstance(ARCHITECTURE_VERSION, int) or isinstance(ARCHITECTURE_VERSION, bool):
+    raise RuntimeError("contract schema architecture_lock.expected_version must be an integer")
+if not isinstance(LOCK_STATUS, str) or not LOCK_STATUS:
+    raise RuntimeError("contract schema architecture_lock.expected_status must be a non-empty string")
+
+V5_ROOT_KEYS = _exact_schema_keys(
+    _ARCHITECTURE_LOCK_SCHEMA.get("root_keys"),
+    "contract schema architecture_lock.root_keys",
 )
+_section_schema = _ARCHITECTURE_LOCK_SCHEMA.get("section_keys")
+if not isinstance(_section_schema, dict) or not _section_schema:
+    raise RuntimeError("contract schema architecture_lock.section_keys must be a non-empty mapping")
 V5_SECTION_KEYS = {
-    "repository_governance": frozenset(
-        {
-            "scope",
-            "transverse_rule_contract",
-            "owner_authorization",
-        }
-    ),
-    "repository_governance.transverse_rule_contract": frozenset(
-        {
-            "source_of_truth",
-            "rule_definition",
-            "enforcement",
-            "per_file_rule_propagation",
-            "consumer_changes",
-        }
-    ),
-    "repository_governance.owner_authorization": frozenset(
-        {
-            "syntax",
-            "decision_authority",
-            "recording_agent",
-            "recording_requires_explicit_owner_instruction",
-            "sha_binding",
-            "scope_binding",
-            "head_change",
-            "absence_or_mismatch",
-        }
-    ),
-    "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
-    "business.frontend_runtime": frozenset(
-        {
-            "language",
-            "module",
-            "module_file",
-            "rendering",
-            "interactions",
-            "runtime_nodejs",
-            "migration_source",
-        }
-    ),
-    "platform": frozenset(
-        {
-            "kubernetes",
-            "node_os",
-            "cni",
-            "mesh",
-            "gitops",
-            "ci",
-            "progressive_delivery",
-            "registry",
-            "secrets",
-            "external_secrets",
-            "workload_identity",
-            "iam",
-            "runtime_security",
-            "infrastructure_api",
-            "autoscaling",
-        }
-    ),
-    "platform.autoscaling": frozenset(
-        {
-            "synchronous_pods",
-            "event_driven_pods",
-            "certified_nodes",
-            "preprod_perf_burst",
-        }
-    ),
-    "management_plane": frozenset(
-        {
-            "provider",
-            "lifecycle",
-            "private_block",
-            "kubernetes",
-            "forge",
-            "ci",
-            "registry",
-            "gitops",
-            "developer_portal",
-            "bootstrap",
-        }
-    ),
-    "management_plane.bootstrap": frozenset(
-        {
-            "terraform_opentofu",
-            "ansible",
-            "requires_human_apply_gate",
-        }
-    ),
-    "developer_platform": frozenset(
-        {
-            "status",
-            "scope",
-            "principles",
-            "runtime_boundary",
-            "backstage_pr_contract",
-            "git_contract",
-            "pull_request_contract",
-            "platform_request_api",
-            "preview_environment_api",
-            "execution_contract",
-            "infrastructure_ownership",
-            "preview_lifecycle",
-            "promotion",
-            "milestone_contract",
-        }
-    ),
-    "developer_platform.principles": frozenset(
-        {
-            "portal",
-            "catalog",
-            "source_of_truth",
-            "change_unit",
-            "forge",
-            "ci",
-            "registry",
-            "gitops",
-            "infrastructure_api",
-            "progressive_delivery",
-            "foundation_iac",
-        }
-    ),
-    "developer_platform.runtime_boundary": frozenset(
-        {
-            "commerce_runtime_nodejs",
-            "backstage_management_plane_nodejs",
-            "backstage_only_exception",
-        }
-    ),
-    "developer_platform.backstage_pr_contract": frozenset(
-        {
-            "role",
-            "allowed_operations",
-            "forbidden_operations",
-            "gitea_pull_request_action",
-        }
-    ),
-    "developer_platform.git_contract": frozenset(
-        {
-            "default_branch",
-            "request_branch_pattern",
-            "request_path_pattern",
-            "force_push",
-            "direct_default_branch_write",
-        }
-    ),
-    "developer_platform.pull_request_contract": frozenset(
-        {
-            "required",
-            "exact_head_sha_required",
-            "human_review_required",
-            "required_context",
-        }
-    ),
-    "developer_platform.platform_request_api": frozenset(
-        {
-            "api_version",
-            "kind",
-            "authoritative_representation",
-            "path_pattern",
-            "required_fields",
-        }
-    ),
-    "developer_platform.preview_environment_api": frozenset(
-        {
-            "api_version",
-            "kind",
-            "lifecycle_owner",
-            "create_on",
-            "delete_on",
-            "unique_url_required",
-        }
-    ),
-    "developer_platform.execution_contract": frozenset(
-        {
-            "plan_before_apply",
-            "mutating_platform_action_requires_git_change",
-            "tekton_direct_workload_deploy",
-            "tekton_outputs",
-            "harbor_reference",
-            "gitops_desired_state_required",
-            "fleet_reconciles_git",
-            "crossplane_materializes_platform_api",
-        }
-    ),
-    "developer_platform.infrastructure_ownership": frozenset({"terraform_opentofu", "crossplane"}),
-    "developer_platform.preview_lifecycle": frozenset(
-        {
-            "creation",
-            "cleanup",
-            "cleanup_trigger",
-            "direct_runtime_delete",
-        }
-    ),
-    "developer_platform.promotion": frozenset(
-        {
-            "strategy",
-            "rebuild_between_preview_preprod_prod",
-            "same_digest_required",
-            "environment_change",
-        }
-    ),
-    "developer_platform.milestone_contract": frozenset(
-        {
-            "M1-monorepo-bootstrap",
-            "M4-platform-baseline",
-            "M5-commerce-vertical-slice",
-        }
-    ),
-    "developer_platform.milestone_contract.M1-monorepo-bootstrap": frozenset(
-        {
-            "outcome",
-            "implementation_required",
-            "requires",
-            "does_not_require",
-        }
-    ),
-    "developer_platform.milestone_contract.M4-platform-baseline": frozenset({"outcome", "components"}),
-    "developer_platform.milestone_contract.M5-commerce-vertical-slice": frozenset({"outcome"}),
-    "stateful": frozenset({"database", "events", "jobs", "cache", "search", "object_storage"}),
-    "dns": frozenset({"critical_ttl_seconds"}),
-    "observability": frozenset(
-        {
-            "telemetry",
-            "application_gateway",
-            "infrastructure_collector",
-            "metrics_protocol",
-            "metrics_scraper",
-            "metrics",
-            "infrastructure_logs",
-            "application_observability_storage",
-            "application_observability_ui",
-            "hyperdx_metadata_store",
-            "alerts",
-            "notifications",
-            "dashboards",
-            "security_pipeline",
-            "security_logs",
-            "security",
-        }
-    ),
-    "mlops": frozenset(
-        {
-            "dataset_versioner",
-            "object_storage",
-            "metadata_database",
-            "experiments_lineage",
-            "artifact_registry",
-            "promotion_authority",
-            "orchestration",
-            "desired_state",
-            "progressive_delivery",
-            "runtime",
-            "drift",
-        }
-    ),
-    "prod_certified_topology": V5_PROD_TOPOLOGY_KEYS,
-    "prod_certified_topology.sites": V5_PROD_SITES_KEYS,
-    "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
-    "prod_certified_topology.sites.prod-b": V5_PROD_SITE_KEYS,
+    name: _exact_schema_keys(
+        keys,
+        f"contract schema architecture_lock.section_keys.{name}",
+    )
+    for name, keys in _section_schema.items()
+    if isinstance(name, str) and name.strip()
 }
+if len(V5_SECTION_KEYS) != len(_section_schema):
+    raise RuntimeError("contract schema architecture_lock.section_keys names must be non-empty strings")
+
+V5_PROD_TOPOLOGY_KEYS = V5_SECTION_KEYS["prod_certified_topology"]
+V5_PROD_SITES_KEYS = V5_SECTION_KEYS["prod_certified_topology.sites"]
+V5_PROD_SITE_KEYS = V5_SECTION_KEYS["prod_certified_topology.sites.prod-a"]
+if V5_PROD_SITE_KEYS != V5_SECTION_KEYS["prod_certified_topology.sites.prod-b"]:
+    raise RuntimeError("PROD site schemas must be identical")
+
 V5_MLOPS = dict(_CANONICAL_LOCK["mlops"])
 DEPLOYABLE_MLOPS = [
     V5_MLOPS["dataset_versioner"],
@@ -366,17 +144,11 @@ REGISTRY_GLOBS = {
         "contracts/**/*.json",
     ),
 }
-V5_SECTION_KEYS.update(
-    {
-        "superseded": frozenset(V5_SUPERSEDED),
-    }
-)
 V5_MILESTONES = list(_CANONICAL_LOCK["build_milestones"])
 V5_MILESTONE_DEPENDENCIES = {
     name: list(parents)
     for name, parents in _CANONICAL_LOCK["milestone_dependencies"].items()
 }
-V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
 V5_REPOSITORY_GOVERNANCE = dict(_CANONICAL_LOCK["repository_governance"])
 OWNER_AUTHORIZATION_PATTERN = re.compile(
@@ -437,8 +209,23 @@ def owner_authorization_errors(
     return errors
 
 
+_YAML_PARSE_CACHE = {}
+
+
+def clear_yaml_parse_cache():
+    """Clear the process-local content-addressed Psych parse cache."""
+    _YAML_PARSE_CACHE.clear()
+
+
 def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
+    """Parse YAML with Ruby/Psych, caching successful results by exact file content."""
+    path = Path(path)
+    contents = path.read_bytes()
+    digest = hashlib.sha256(contents).digest()
+    cached = _YAML_PARSE_CACHE.get(digest)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
     ruby = """
 document = Psych.parse_file(ARGV[0])
 walk = lambda do |node|
@@ -457,7 +244,13 @@ puts JSON.generate(data)
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
-    return json.loads(completed.stdout)
+
+    parsed = json.loads(completed.stdout)
+
+    # Do not cache a parse if the file changed between the initial read and Psych.
+    if path.read_bytes() == contents:
+        _YAML_PARSE_CACHE[digest] = parsed
+    return copy.deepcopy(parsed)
 
 
 def validate_exact_keys(name, actual, expected_keys):
@@ -1062,8 +855,8 @@ def validate(root):
             return structural_errors
         if lock.get("status") != LOCK_STATUS:
             errors.append(f"architecture.lock.yaml status must be {LOCK_STATUS}")
-        if lock["version"] != 5:
-            errors.append("architecture.lock.yaml must be version 5")
+        if lock["version"] != ARCHITECTURE_VERSION:
+            errors.append(f"architecture.lock.yaml must be version {ARCHITECTURE_VERSION}")
         topology_contracts = lock.get("topology_contracts")
         errors.extend(registry_coverage_errors(root, lock))
         if errors:
