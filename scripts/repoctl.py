@@ -1734,6 +1734,14 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     pull_request_policy = policy["pull_request"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
+    for section_name, section in (
+        ("publish", publish_policy),
+        ("pull_request", pull_request_policy),
+        ("merge", merge_policy),
+        ("cleanup", cleanup_policy),
+    ):
+        if not isinstance(section, dict):
+            raise RuntimeError(f"review-policy repository_delivery.{section_name} must be a mapping")
     required_invariants = (
         (publish_policy.get("qualification") == "exact-sha", "publish qualification must be exact-sha"),
         (publish_policy.get("exact_evidence_required") is True, "publish exact evidence must be required"),
