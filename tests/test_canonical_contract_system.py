@@ -77,6 +77,10 @@ class CanonicalContractSystemTest(unittest.TestCase):
                 ROOT / "scripts" / "architecture_authority.py",
                 scripts / "architecture_authority.py",
             )
+            # architecture_authority.py loads canonical machine contracts at import
+            # time. Reproduce that startup environment so the regression exercises
+            # schema rejection rather than failing on missing fixture dependencies.
+            shutil.copytree(ROOT / "config", root / "config")
 
             lock = (ROOT / "architecture.lock.yaml").read_text(encoding="utf-8")
             lock = lock.replace(
