@@ -1753,7 +1753,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             pull_request_policy.get("record_after_merge") == "retained-by-forge",
             "merged PR record must be retained by the forge",
         ),
-        (merge_policy.get("method") in {"merge", "squash", "rebase"}, "unsupported merge method"),
+        (merge_policy.get("method") == "merge", "merge method must be merge"),
         (merge_policy.get("match_head_commit") == "required", "merge must match the exact head commit"),
         (merge_policy.get("branch_protection") == "required", "branch protection must be required"),
         (merge_policy.get("required_checks") == "required", "required checks must be required"),
