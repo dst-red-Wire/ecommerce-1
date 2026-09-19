@@ -199,6 +199,76 @@ developer_platform:
     rebuild_between_preview_preprod_prod: forbidden
     same_digest_required: true
     environment_change: gitops-only
+  quality_cloud_engineering:
+    status: contract-locked-in-m1
+    scope: platform-operating-model
+    implementation_milestone: M4-platform-baseline
+    proof_milestone: M5-commerce-vertical-slice
+    sector_count: 9
+    sectors:
+      continuous_testing:
+        owner: quality-engineering
+        input: exact-head-sha-and-affected-set
+        output: qualification-result
+        evidence: exact-sha-qualification-evidence
+      test_first:
+        owner: quality-engineering
+        input: behavioral-or-contract-change
+        output: regression-test-contract
+        evidence: failing-before-passing-after-or-equivalent-regression-proof
+      test_strategy:
+        owner: quality-engineering
+        input: risk-and-affected-components
+        output: selected-test-levels
+        evidence: impact-to-test-routing-record
+      automation:
+        owner: cloud-platform
+        input: approved-git-change
+        output: reproducible-automated-execution
+        evidence: tekton-run-and-gitops-state
+      monitoring_observability:
+        owner: cloud-platform
+        input: running-workload-and-platform
+        output: metrics-logs-traces-alerts
+        evidence: queryable-telemetry-and-slo-signals
+      release_governance_automation:
+        owner: cloud-platform
+        input: immutable-oci-digest-and-approved-git-state
+        output: governed-environment-promotion
+        evidence: digest-provenance-and-promotion-record
+      golden_path:
+        owner: developer-experience
+        input: platform-capability-request
+        output: standardized-pr-change
+        evidence: generated-pr-conformance
+      developer_hub:
+        owner: developer-experience
+        input: catalog-and-platform-capabilities
+        output: backstage-self-service-interface
+        evidence: catalog-template-and-action-conformance
+      measuring_engineering:
+        owner: developer-experience
+        input: pr-ci-preview-release-events
+        output: engineering-performance-metrics
+        evidence: reproducible-metric-records
+    cross_cutting:
+      security:
+        owner: security-engineering
+        applies_to_all_sectors: true
+        evidence_required: security-review-policy-and-runtime-controls
+      culture:
+        owner: platform-and-product-teams
+        applies_to_all_sectors: true
+        explicit_ownership_required: true
+        documentation_as_code_required: true
+      ai_agent:
+        owner: platform-engineering
+        applies_to_all_sectors: true
+        role: assistant
+        authoritative_gate: false
+        may_bypass_required_gates: false
+        may_merge: false
+        may_deploy_production_directly: false
   milestone_contract:
     M1-monorepo-bootstrap:
       outcome: stable-pr-driven-contract-locked
@@ -211,6 +281,7 @@ developer_platform:
         - application-qualification
         - frontend-go-templ-qualification
         - developer-platform-contract-locked
+        - quality-cloud-engineering-contract-locked
       does_not_require:
         - backstage-deployed
         - crossplane-deployed

@@ -1583,12 +1583,25 @@ def ansible_check() -> int:
     return 0
 
 
+def _git_neutral_test_env() -> dict[str, str]:
+    """Remove repository-local Git variables before tests create nested repositories."""
+    env = os.environ.copy()
+    for name in output(["git", "rev-parse", "--local-env-vars"]).splitlines():
+        if name:
+            env.pop(name, None)
+    return env
+
+
 def system_check() -> int:
+    test_env = _git_neutral_test_env()
     tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
     run_ruby_tests(tests)
     for suite in [ROOT / "tests", ROOT / "tests" / "delivery", ROOT / "tests" / "context"]:
         if suite.is_dir() and any(suite.glob("test_*.py")):
-            run([sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"])
+            run(
+                [sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"],
+                env=test_env,
+            )
     print("PASS cross-system repository checks completed")
     return 0
 
