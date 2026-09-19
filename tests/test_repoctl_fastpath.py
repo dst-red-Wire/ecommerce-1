@@ -25,6 +25,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, remote_sha + "\n", "")
             if candidate == "stacked-base^{commit}":
                 return subprocess.CompletedProcess(command, 0, local_sha + "\n", "")
+            if command == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(command, 0, "3" * 40 + "\n", "")
             if command[:3] == ["git", "merge-base", "--is-ancestor"]:
                 return subprocess.CompletedProcess(command, 0, "", "")
             raise AssertionError(command)
