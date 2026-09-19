@@ -147,7 +147,20 @@ def git(*args: str, check: bool = True) -> str:
 def ruby_yaml(path: str) -> dict:
     require("ruby")
     script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
-    return json.loads(output(["ruby", "-e", script, path]))
+    result = subprocess.run(
+        ["ruby", "-e", script, path],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "").strip() or f"Ruby YAML parse failed: {path}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Ruby YAML parser returned invalid JSON for {path}") from exc
 
 
 _SOURCE_QUALITY_POLICY: dict | None = None
@@ -550,6 +563,13 @@ def terraform_provider_lock_contract() -> dict:
             raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
             raise RuntimeError("Terraform qualification provider lock must be readonly")
+        repository_context_paths = qualification.get("repository_context_paths")
+        if (
+            not isinstance(repository_context_paths, list)
+            or not repository_context_paths
+            or any(not isinstance(value, str) or not value.strip() for value in repository_context_paths)
+        ):
+            raise RuntimeError("Terraform qualification must declare non-empty repository_context_paths")
 
         _TERRAFORM_PROVIDER_LOCK = contract
     return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
@@ -624,7 +644,15 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
             if name is not None:
                 raise RuntimeError(f"missing version for Ansible collection {name} in {source}")
             name = match.group(1)
-        elif match := re.match(r'\s+version:\s*["\']?([\w.-]+)["\']?\s*
+        elif match := re.match(r'\s+version:\s*["\']?([\w.-]+)["\']?\s*$', raw):
+            if name is None or name in result:
+                raise RuntimeError(f"invalid Ansible collection requirement in {source}")
+            result[name] = match.group(1)
+            name = None
+    if name is not None or not result:
+        raise RuntimeError(f"invalid Ansible collection requirements in {source}")
+    return result
+
 
 def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
@@ -1482,12 +1510,24 @@ def terraform_check() -> int:
 
     directories = sorted({p.parent for p in tf_files})
     with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
-        temp_root = Path(temp_dir) / "terraform"
+        temp_repo_root = Path(temp_dir) / "repository"
+        temp_root = temp_repo_root / "platform" / "terraform"
+        temp_root.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(
             terraform_root,
             temp_root,
             ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
         )
+        for relative_context in qualification.get("repository_context_paths", []):
+            source = ROOT / str(relative_context)
+            destination = temp_repo_root / str(relative_context)
+            if not source.exists():
+                raise RuntimeError(f"Terraform qualification repository context is missing: {relative_context}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
 
         for directory in directories:
             relative = directory.relative_to(terraform_root)
@@ -2462,12 +2502,88 @@ def git_sync() -> int:
     return 0
 
 
+def _validate_repository_delivery_policy(policy: dict) -> dict:
+    if not isinstance(policy, dict):
+        raise RuntimeError("review-policy repository_delivery must be a mapping")
+    required_sections = {"publish", "pull_request", "merge", "cleanup"}
+    missing = sorted(required_sections - set(policy))
+    if missing:
+        raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
+    if policy.get("forge") != "github":
+        raise RuntimeError("repository_delivery forge must be github")
+    if not str(policy.get("default_branch", "")).strip():
+        raise RuntimeError("repository_delivery default_branch is required")
+
+    publish_policy = policy["publish"]
+    pull_request_policy = policy["pull_request"]
+    merge_policy = policy["merge"]
+    cleanup_policy = policy["cleanup"]
+    for section_name, section in (
+        ("publish", publish_policy),
+        ("pull_request", pull_request_policy),
+        ("merge", merge_policy),
+        ("cleanup", cleanup_policy),
+    ):
+        if not isinstance(section, dict):
+            raise RuntimeError(f"review-policy repository_delivery.{section_name} must be a mapping")
+    required_invariants = (
+        (publish_policy.get("qualification") == "exact-sha", "publish qualification must be exact-sha"),
+        (publish_policy.get("exact_evidence_required") is True, "publish exact evidence must be required"),
+        (publish_policy.get("force_push") == "forbidden", "force-push must be forbidden"),
+        (
+            publish_policy.get("push_target") == "current-feature-branch",
+            "publish target must be the current feature branch",
+        ),
+        (
+            publish_policy.get("direct_default_branch_write") == "forbidden",
+            "direct default-branch writes must be forbidden",
+        ),
+        (pull_request_policy.get("required") is True, "pull request must be required"),
+        (pull_request_policy.get("head_sha_binding") == "exact", "pull request head binding must be exact"),
+        (pull_request_policy.get("draft_merge") == "forbidden", "draft PR merge must be forbidden"),
+        (
+            pull_request_policy.get("record_after_merge") == "retained-by-forge",
+            "merged PR record must be retained by the forge",
+        ),
+        (merge_policy.get("method") == "merge", "merge method must be merge"),
+        (merge_policy.get("match_head_commit") == "required", "merge must match the exact head commit"),
+        (merge_policy.get("branch_protection") == "required", "branch protection must be required"),
+        (merge_policy.get("required_checks") == "when-configured", "required checks must be enforced when configured"),
+        (
+            merge_policy.get("bypass_branch_protection") == "forbidden",
+            "branch-protection bypass must be forbidden",
+        ),
+        (cleanup_policy.get("merged_pr_state") == "merged-closed", "merged PR state must be merged-closed"),
+        (cleanup_policy.get("remote_branch") == "delete", "remote feature branch cleanup must be delete"),
+        (cleanup_policy.get("local_branch") == "delete", "local feature branch cleanup must be delete"),
+    )
+    for valid, message in required_invariants:
+        if not valid:
+            raise RuntimeError(f"invalid repository_delivery contract: {message}")
+    return policy
+
+
+def repository_delivery_policy() -> dict:
+    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
+
+
+def _remote_ref_sha(ref: str) -> str:
+    result = run(["git", "rev-parse", "--verify", ref], check=False, capture=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def publish(base: str, message: str) -> int:
+    policy = repository_delivery_policy()
+    default_branch = str(policy["default_branch"])
+    base_name = base.removeprefix("origin/")
+    if base_name != default_branch:
+        return fail(f"publish base must match contract default branch {default_branch!r}")
     branch = git("branch", "--show-current").strip()
-    if not branch or branch in {"main", "master"}:
+    if not branch or branch in {default_branch, "master"}:
         return fail("publish refuses detached/default branch")
     run(["git", "fetch", "origin", "--prune"])
-    base_ref = base if base.startswith("origin/") else f"origin/{base}"
+    base_ref = f"origin/{base_name}"
     if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
         return fail(f"branch is not based on current {base_ref}")
 
@@ -2505,11 +2621,14 @@ def publish(base: str, message: str) -> int:
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
-    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
-    review_forge = (review_policy.get("pull_request_review") or {}).get("forge")
+    policy = repository_delivery_policy()
+    review_forge = policy.get("forge")
     if review_forge != "github":
-        return fail(f"review-policy forge must be github for delivery; got {review_forge!r}")
-    if publish(base, message or title):
+        return fail(f"repository_delivery forge must be github; got {review_forge!r}")
+    base_name = base.removeprefix("origin/")
+    if base_name != policy["default_branch"]:
+        return fail(f"deliver base must match contract default branch {policy['default_branch']!r}")
+    if publish(base_name, message or title):
         return 1
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
@@ -2522,14 +2641,10 @@ def deliver(base: str, title: str, message: str) -> int:
     if not title:
         title = git("log", "-1", "--pretty=%s").strip()
     changed = (
-        git("diff", "--name-only", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--name-only", f"{base}...HEAD")
+        git("diff", "--name-only", f"origin/{base_name}...HEAD")
     )
     stat = (
-        git("diff", "--stat", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--stat", f"{base}...HEAD")
+        git("diff", "--stat", f"origin/{base_name}...HEAD")
     )
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
@@ -2550,7 +2665,7 @@ def deliver(base: str, title: str, message: str) -> int:
         f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds', 0)} | {gate_source(g)} |" for g in ev["gates"]
     )
     body.write_text(
-        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
     existing = output(
@@ -2561,7 +2676,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "--head",
             branch,
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--state",
             "open",
             "--json",
@@ -2597,7 +2712,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "pr",
             "create",
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--head",
             branch,
             "--title",
@@ -2609,6 +2724,164 @@ def deliver(base: str, title: str, message: str) -> int:
     )
     _record_delivery_wall(evidence, ev, deliver_started)
     print(f"PASS deliver: created PR {p.stdout.strip()} at {head}")
+    return 0
+
+
+def finish_pr(base: str) -> int:
+    policy = repository_delivery_policy()
+    base_name = base.removeprefix("origin/")
+    default_branch = str(policy["default_branch"])
+    if base_name != default_branch:
+        return fail(f"finish-pr base must match contract default branch {default_branch!r}")
+
+    branch = git("branch", "--show-current").strip()
+    if not branch or branch in {default_branch, "master"}:
+        return fail("finish-pr requires a checked-out feature branch")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("finish-pr requires a clean worktree")
+
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        return fail("GitHub CLI missing")
+
+    run(["git", "fetch", "origin", "--prune"])
+    base_ref = f"origin/{base_name}"
+    if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
+        return fail(f"finish-pr branch is not based on current {base_ref}")
+
+    head = git("rev-parse", "HEAD").strip()
+    remote_head = _remote_ref_sha(f"origin/{branch}")
+    if remote_head != head:
+        return fail(f"finish-pr remote head mismatch: local {head}, origin/{branch} {remote_head or 'missing'}")
+
+    evidence = _valid_exact_evidence(base_ref, head)
+    if evidence is None:
+        if verify_change(base_ref, head):
+            return 1
+        evidence = _valid_exact_evidence(base_ref, head)
+    if evidence is None:
+        return fail(f"finish-pr exact PASS evidence missing for {head}")
+
+    raw_prs = output(
+        [
+            gh,
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base_name,
+            "--state",
+            "open",
+            "--limit",
+            "2",
+            "--json",
+            "number,url,headRefOid,baseRefName,isDraft",
+        ]
+    )
+    prs = json.loads(raw_prs or "[]")
+    if len(prs) != 1:
+        return fail(f"finish-pr requires exactly one open PR for {branch} -> {base_name}; found {len(prs)}")
+    pr = prs[0]
+    number = int(pr["number"])
+    if pr.get("isDraft"):
+        return fail(f"finish-pr refuses draft PR #{number}")
+    if pr.get("baseRefName") != base_name:
+        return fail(f"finish-pr PR #{number} base mismatch: {pr.get('baseRefName')!r}")
+    if pr.get("headRefOid") != head:
+        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {pr.get('headRefOid')!r}")
+
+    protection = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
+        check=False,
+        capture=True,
+    )
+    if protection.returncode:
+        active_rules = run(
+            [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
+            check=False,
+            capture=True,
+        )
+        if active_rules.returncode or not (active_rules.stdout or "").strip():
+            detail = (
+                active_rules.stderr
+                or active_rules.stdout
+                or protection.stderr
+                or protection.stdout
+                or ""
+            ).strip()
+            return fail(
+                f"finish-pr cannot prove branch protection/ruleset for {base_name}: "
+                f"{detail or 'GitHub API rejected protection queries'}"
+            )
+
+    checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
+    if checks.returncode:
+        detail = "\n".join(filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()]))
+        if "no checks reported" not in detail.lower():
+            if detail:
+                print(detail, file=sys.stderr)
+            return fail(f"finish-pr required checks are not PASS for PR #{number}")
+        print(
+            f"INFO finish-pr: no required GitHub checks configured for PR #{number}; "
+            "exact PASS evidence and branch protection remain mandatory"
+        )
+
+    merge_method = str(policy["merge"]["method"])
+    merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
+    merged = run(
+        [
+            gh,
+            "pr",
+            "merge",
+            str(number),
+            merge_flag,
+            "--delete-branch",
+            "--match-head-commit",
+            head,
+        ],
+        check=False,
+        capture=True,
+    )
+    if merged.returncode:
+        detail = "\n".join(filter(None, [(merged.stdout or "").strip(), (merged.stderr or "").strip()]))
+        if detail:
+            print(detail, file=sys.stderr)
+        return fail(f"finish-pr merge refused for PR #{number}")
+
+    merged_state = json.loads(
+        output([gh, "pr", "view", str(number), "--json", "state,mergedAt,headRefOid,baseRefName"])
+    )
+    if merged_state.get("state") != "MERGED" or not merged_state.get("mergedAt"):
+        return fail(f"finish-pr PR #{number} did not reach MERGED state")
+    if merged_state.get("headRefOid") != head:
+        return fail(f"finish-pr merged PR #{number} no longer binds expected head {head}")
+
+    run(["git", "fetch", "origin", "--prune"])
+    remote_branch = run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", f"refs/heads/{branch}"],
+        check=False,
+        capture=True,
+    )
+    if remote_branch.returncode == 0:
+        deletion = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
+        if deletion.returncode:
+            detail = (deletion.stderr or deletion.stdout or "").strip()
+            return fail(f"finish-pr could not delete remote branch {branch}: {detail}")
+
+    switch = run(["git", "switch", base_name], check=False, capture=True)
+    if switch.returncode:
+        run(["git", "switch", "-c", base_name, "--track", f"origin/{base_name}"])
+    run(["git", "merge", "--ff-only", f"origin/{base_name}"])
+
+    local_branch = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
+    if local_branch.returncode == 0:
+        run(["git", "branch", "-d", branch])
+
+    print(
+        f"PASS finish-pr: PR #{number} merged at exact head {head}; "
+        f"PR record retained by GitHub; remote/local branch {branch} removed"
+    )
     return 0
 
 
@@ -2712,10 +2985,15 @@ def main() -> int:
     pub = sub.add_parser("publish")
     pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
+    pubc = sub.add_parser("publish-change")
+    pubc.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pubc.add_argument("--message", default=os.environ.get("MSG", ""))
     dlv = sub.add_parser("deliver")
     dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
+    fin = sub.add_parser("finish-pr")
+    fin.add_argument("--base", default=os.environ.get("BASE", "main"))
     bdlv = sub.add_parser("bundle-deliver")
     bdlv.add_argument("--bundle", required=True)
     bdlv.add_argument("--expected-head", required=True)
@@ -2827,8 +3105,12 @@ def main() -> int:
             return git_sync()
         if args.cmd == "publish":
             return publish(args.base, args.message)
+        if args.cmd == "publish-change":
+            return publish(args.base, args.message)
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
+        if args.cmd == "finish-pr":
+            return finish_pr(args.base)
         if args.cmd == "bundle-deliver":
             return isolated_bundle_deliver(
                 ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable

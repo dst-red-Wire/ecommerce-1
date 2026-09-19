@@ -19,8 +19,6 @@ domains:
     machine_contract: security_scan_policy
   terraform_provider:
     machine_contract: terraform_provider_lock
-  qualification_cache:
-    machine_contract: qualification_cache
   context_routing:
     machine_contract: context_router
   workstation:

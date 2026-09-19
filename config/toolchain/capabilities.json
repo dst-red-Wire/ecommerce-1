@@ -832,7 +832,8 @@
       "rg",
       "fd",
       "nx",
-      "ast-grep"
+      "ast-grep",
+      "bazel"
     ],
     "delivery": [
       "python3",
@@ -849,7 +850,8 @@
     "docker": "docker",
     "terraform": "terraform",
     "tofu": "terraform",
-    "sysctl": "container-network-forwarding"
+    "sysctl": "container-network-forwarding",
+    "bazel": "bazel"
   },
   "gate_sources": [
     "scripts/repoctl.py",

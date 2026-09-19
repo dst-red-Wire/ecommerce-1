@@ -162,6 +162,10 @@ class ApiCodegenBundleTest(unittest.TestCase):
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
             (root / "config/contracts").mkdir(parents=True)
+            shutil.copy2(
+                ROOT / "config/contracts/toolchain-lock.json",
+                root / "config/contracts/toolchain-lock.json",
+            )
             (root / "contracts/openapi").mkdir(parents=True)
             (root / "services/product").mkdir(parents=True)
             (root / "config/contracts/public-api-contracts.yaml").write_text(

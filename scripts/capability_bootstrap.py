@@ -88,7 +88,8 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
     return contract
 
 
-def _parse_ansible_collection_projection(path: Path = ANSIBLE_COLLECTIONS) -> dict[str, str]:
+def _parse_ansible_collection_projection(path: Path | None = None) -> dict[str, str]:
+    path = path or ANSIBLE_COLLECTIONS
     result: dict[str, str] = {}
     name: str | None = None
     for raw in path.read_text(encoding="utf-8").splitlines():
@@ -117,6 +118,11 @@ def validate_toolchain_projections(contract: dict | None = None) -> None:
     expected_collections = lock.get("ansible_collections", {})
     if projected_collections != expected_collections:
         raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
+
+    projected_capabilities = load_contract()
+    expected_command_capabilities = lock.get("capability_policy", {}).get("command_capabilities", {})
+    if projected_capabilities.get("command_capabilities", {}) != expected_command_capabilities:
+        raise ValueError("config/toolchain/capabilities.json command_capabilities drifted from central toolchain lock")
 
     ansible_config = lock.get("native_tool_configs", {}).get("ansible", {})
     ansible_projection = ROOT / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
@@ -182,7 +188,7 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     subprocesses or shell fragments would create a misleading, incomplete parser.
     Tests and review keep this small authority aligned with executable gate paths.
     """
-    versions = versions or load_versions()
+    versions = versions or dict(load_toolchain_lock()["versions"])
     graph = Graph(contract["capabilities"])
     for name, item in graph.items.items():
         if item.get("requirement") not in REQUIREMENTS:
