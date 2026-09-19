@@ -1063,6 +1063,11 @@ def api_compat(base: str, head: str) -> int:
 
 def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) -> int:
     require("ruby")
+    if base:
+        try:
+            base, _base_sha = resolve_base_ref(base, head=head)
+        except RuntimeError as exc:
+            return fail(str(exc), 1)
     run(["ruby", "scripts/validate-openapi.rb"])
     run(["ruby", "scripts/validate-contract-consistency.rb"])
     run_ruby_tests(["tests/openapi_validator_test.rb", "tests/contract_consistency_test.rb"])
@@ -2334,6 +2339,10 @@ def verify_change(base: str, head: str) -> int:
 
 def diff_context(base: str) -> int:
     CONTEXT.mkdir(exist_ok=True)
+    try:
+        base, _base_sha = resolve_base_ref(base, head="WORKTREE")
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     paths = changed_paths(base, "WORKTREE")
     stat = git("diff", "--stat", base)
     diff = git("diff", "--unified=2", base, "--")
@@ -2857,6 +2866,7 @@ def main() -> int:
                 args.title,
                 bundle_base,
                 sys.executable,
+                qualification_environment(),
             )
         if args.cmd == "tekton-trigger-readiness":
             return tekton_trigger_readiness_command(args.runtime_config, args.evidence)

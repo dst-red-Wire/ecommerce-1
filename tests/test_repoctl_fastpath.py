@@ -84,6 +84,14 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         import inspect
 
         self.assertIn(
+            "resolve_base_ref(base, head=head)",
+            inspect.getsource(MOD.contracts),
+        )
+        self.assertIn(
+            'resolve_base_ref(base, head="WORKTREE")',
+            inspect.getsource(MOD.diff_context),
+        )
+        self.assertIn(
             'qualification_environment({"BASE": base, "HEAD": head})',
             inspect.getsource(MOD.verify_change),
         )
