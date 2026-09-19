@@ -1,5 +1,20 @@
 version: 1
+kind: CIEvidencePolicy
 status: exact
+architecture_authority: architecture.lock.yaml
+scope: qualification-evidence
+authority_claims:
+  - repository.ci.evidence
+  - repository.ci.base-resolution
+
+base_resolution:
+  implicit_default_base: forbidden
+  assume_main: forbidden
+  stacked_pull_requests: supported
+  exact_evidence_recorded_base_may_authorize_reuse: true
+  recorded_base_must_be_ancestor_of_head: true
+  explicit_base_required_without_valid_exact_evidence: true
+  pull_request_target_requires_symbolic_base: true
 
 evidence:
   schema_version: 4

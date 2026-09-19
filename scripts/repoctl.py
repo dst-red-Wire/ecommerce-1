@@ -277,6 +277,156 @@ def materialize_repository_projection(
             )
 
 
+
+_CI_EVIDENCE_POLICY: dict | None = None
+
+
+def ci_evidence_policy() -> dict:
+    """Canonical authority for evidence reuse and base resolution."""
+    global _CI_EVIDENCE_POLICY
+
+    if _CI_EVIDENCE_POLICY is None:
+        policy = canonical_contract("ci_evidence")
+        rules = policy.get("base_resolution")
+
+        if not isinstance(rules, dict):
+            raise RuntimeError("ci evidence policy must declare base_resolution")
+
+        if rules.get("implicit_default_base") != "forbidden":
+            raise RuntimeError("implicit CI base resolution is forbidden")
+
+        if rules.get("assume_main") != "forbidden":
+            raise RuntimeError("qualification must never assume main")
+
+        if rules.get("recorded_base_must_be_ancestor_of_head") is not True:
+            raise RuntimeError("recorded evidence base must be an ancestor of HEAD")
+
+        _CI_EVIDENCE_POLICY = policy
+
+    return copy.deepcopy(_CI_EVIDENCE_POLICY)
+
+
+def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
+    """Resolve one explicit base without inventing main/origin-main."""
+    value = str(base).strip()
+    if not value:
+        raise RuntimeError("explicit BASE is required")
+
+    candidates = [value]
+
+    is_sha = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value))
+    if (
+        not is_sha
+        and not value.startswith("origin/")
+        and not value.startswith("refs/")
+    ):
+        candidates.append(f"origin/{value}")
+
+    resolved_ref = None
+    resolved_sha = None
+
+    for candidate in candidates:
+        result = run(
+            ["git", "rev-parse", "--verify", f"{candidate}^{{commit}}"],
+            check=False,
+            capture=True,
+        )
+        if result.returncode == 0:
+            resolved_ref = candidate
+            resolved_sha = result.stdout.strip()
+            break
+
+    if not resolved_ref or not resolved_sha:
+        raise RuntimeError(f"cannot resolve explicit BASE {value!r}")
+
+    comparison_head = "HEAD" if head == "WORKTREE" else head
+
+    if run(
+        ["git", "merge-base", "--is-ancestor", resolved_sha, comparison_head],
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError(
+            f"BASE {resolved_sha} is not an ancestor of {comparison_head}"
+        )
+
+    return resolved_ref, resolved_sha
+
+
+def reusable_exact_evidence(
+    head: str = "HEAD",
+) -> tuple[Path, dict] | None:
+    """Return exact PASS evidence when its recorded base still ancestors HEAD."""
+    policy = ci_evidence_policy()
+    evidence_policy = policy["evidence"]
+
+    requested = git("rev-parse", head).strip()
+    current = git("rev-parse", "HEAD").strip()
+
+    if requested != current:
+        return None
+
+    if (
+        evidence_policy.get("dirty_worktree_reuse") == "forbidden"
+        and git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        return None
+
+    path = CONTEXT / "evidence" / f"{requested}.json"
+    if not path.is_file():
+        return None
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    base_sha = str(data.get("base_sha", "")).strip()
+
+    if (
+        data.get("status") != "PASS"
+        or data.get("exact_commit_evidence") is not True
+        or data.get("head_sha") != requested
+        or not base_sha
+    ):
+        return None
+
+    if run(
+        ["git", "merge-base", "--is-ancestor", base_sha, requested],
+        check=False,
+        capture=True,
+    ).returncode:
+        return None
+
+    return path, data
+
+
+def pull_request_base_name(base: str) -> str:
+    value = str(base).strip()
+
+    if not value:
+        raise RuntimeError("pull-request delivery requires explicit BASE branch")
+
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
+        raise RuntimeError(
+            "pull-request BASE must be a symbolic branch, not a commit SHA"
+        )
+
+    if value.startswith("origin/"):
+        return value[len("origin/"):]
+
+    if value.startswith("refs/remotes/origin/"):
+        return value[len("refs/remotes/origin/"):]
+
+    if value.startswith("refs/heads/"):
+        return value[len("refs/heads/"):]
+
+    if value.startswith("refs/"):
+        raise RuntimeError(f"unsupported pull-request BASE ref: {value}")
+
+    return value
+
+
 def security_scan_policy() -> dict:
     return canonical_contract("security_scan_policy")
 
@@ -1538,25 +1688,24 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
 
 
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
-    requested = git("rev-parse", head).strip()
-    if requested != git("rev-parse", "HEAD").strip():
+    exact = reusable_exact_evidence(head)
+    if exact is None:
         return None
-    if git("status", "--porcelain", "--untracked-files=all").strip():
-        return None
-    path = CONTEXT / "evidence" / f"{requested}.json"
-    if not path.is_file():
-        return None
-    try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if (
-        evidence.get("status") != "PASS"
-        or evidence.get("exact_commit_evidence") is not True
-        or evidence.get("head_sha") != requested
-        or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
-    ):
-        return None
+
+    path, evidence = exact
+
+    if base_ref.strip():
+        try:
+            _resolved_ref, requested_base_sha = resolve_base_ref(
+                base_ref,
+                head=head,
+            )
+        except RuntimeError:
+            return None
+
+        if evidence.get("base_sha") != requested_base_sha:
+            return None
+
     return path
 
 
@@ -1965,6 +2114,32 @@ def write_evidence(
 
 
 def verify_change(base: str, head: str) -> int:
+    if head != "WORKTREE" and not str(base).strip():
+        exact = reusable_exact_evidence(head)
+        if exact is not None:
+            path, data = exact
+            print(
+                f"PASS verify-change: reusing exact evidence "
+                f"{path.relative_to(ROOT)} for recorded base {data['base_sha']}"
+            )
+            return 0
+        return fail(
+            "verify-change requires explicit BASE=<ref> when no reusable "
+            "exact evidence exists",
+            1,
+        )
+
+    if head == "WORKTREE" and not str(base).strip():
+        return fail("verify-change WORKTREE requires explicit BASE=<ref>", 1)
+
+    try:
+        base, _base_sha = resolve_base_ref(
+            base,
+            head="HEAD" if head == "WORKTREE" else head,
+        )
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
+
     source_head_sha: str | None = None
     source_tree_sha: str | None = None
     if head != "WORKTREE":
@@ -2221,11 +2396,33 @@ def publish(base: str, message: str) -> int:
     if not branch or branch in {"main", "master"}:
         return fail("publish refuses detached/default branch")
     run(["git", "fetch", "origin", "--prune"])
-    base_ref = base if base.startswith("origin/") else f"origin/{base}"
-    if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
-        return fail(f"branch is not based on current {base_ref}")
 
     dirty = bool(git("status", "--porcelain", "--untracked-files=all").strip())
+
+    if str(base).strip():
+        try:
+            base_ref, _base_sha = resolve_base_ref(base, head="HEAD")
+        except RuntimeError as exc:
+            return fail(str(exc), 1)
+    elif dirty:
+        return fail(
+            "publish with a dirty worktree requires explicit BASE=<ref>; "
+            "refusing to assume main/origin-main",
+            1,
+        )
+    else:
+        exact = reusable_exact_evidence("HEAD")
+        if exact is None:
+            return fail(
+                "publish requires reusable exact PASS evidence or explicit BASE=<ref>",
+                1,
+            )
+        _path, data = exact
+        base_ref = str(data["base_sha"])
+        print(
+            f"PASS publish: using recorded exact-evidence base "
+            f"{base_ref}"
+        )
     promotable = _load_promotable_worktree_evidence(base_ref) if dirty else None
     if dirty:
         if not message:
@@ -2259,6 +2456,11 @@ def publish(base: str, message: str) -> int:
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
+
+    try:
+        base_name = pull_request_base_name(base)
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
     review_policy = ruby_yaml("config/contracts/review-policy.yaml")
     review_forge = (review_policy.get("pull_request_review") or {}).get("forge")
     if review_forge != "github":
@@ -2275,16 +2477,13 @@ def deliver(base: str, title: str, message: str) -> int:
         return fail(f"exact evidence missing for {head}")
     if not title:
         title = git("log", "-1", "--pretty=%s").strip()
-    changed = (
-        git("diff", "--name-only", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--name-only", f"{base}...HEAD")
-    )
-    stat = (
-        git("diff", "--stat", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--stat", f"{base}...HEAD")
-    )
+    try:
+        base_ref, _base_sha = resolve_base_ref(base, head="HEAD")
+    except RuntimeError as exc:
+        return fail(str(exc), 1)
+
+    changed = git("diff", "--name-only", f"{base_ref}...HEAD")
+    stat = git("diff", "--stat", f"{base_ref}...HEAD")
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
@@ -2315,7 +2514,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "--head",
             branch,
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--state",
             "open",
             "--json",
@@ -2351,7 +2550,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "pr",
             "create",
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--head",
             branch,
             "--title",
@@ -2372,19 +2571,25 @@ def precommit() -> int:
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
-    return verify_change("origin/main", head)
+
+    exact = reusable_exact_evidence(head)
+    if exact is not None:
+        path, data = exact
+        print(
+            f"PASS prepush: reusing exact evidence "
+            f"{path.relative_to(ROOT)} for recorded base {data['base_sha']}"
+        )
+        return 0
+
+    explicit_base = os.environ.get("BASE", "").strip()
+    if not explicit_base:
+        return fail(
+            "prepush requires reusable exact PASS evidence or explicit BASE=<ref>; "
+            "refusing to assume main/origin-main",
+            1,
+        )
+
+    return verify_change(explicit_base, head)
 
 
 def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
@@ -2428,14 +2633,14 @@ def main() -> int:
     s = sub.add_parser("service")
     s.add_argument("service")
     a = sub.add_parser("affected")
-    a.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    a.add_argument("--base", default=os.environ.get("BASE", ""))
     a.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     a.add_argument("--json", action="store_true")
     v = sub.add_parser("verify-change")
-    v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    v.add_argument("--base", default=os.environ.get("BASE", ""))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     d = sub.add_parser("diff-context")
-    d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    d.add_argument("--base", default=os.environ.get("BASE", ""))
     fc = sub.add_parser("failure-context")
     fc.add_argument("--gate", default=os.environ.get("GATE", ""))
     fc.add_argument("--component", default=os.environ.get("COMPONENT", ""))
@@ -2450,17 +2655,17 @@ def main() -> int:
     sg.add_argument("--service", required=True)
     sg.add_argument("--dry-run", action="store_true")
     pub = sub.add_parser("publish")
-    pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pub.add_argument("--base", default=os.environ.get("BASE", ""))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
     dlv = sub.add_parser("deliver")
-    dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    dlv.add_argument("--base", default=os.environ.get("BASE", ""))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
     bdlv = sub.add_parser("bundle-deliver")
     bdlv.add_argument("--bundle", required=True)
     bdlv.add_argument("--expected-head", required=True)
     bdlv.add_argument("--title", required=True)
-    bdlv.add_argument("--base", default=os.environ.get("BASE", "main"))
+    bdlv.add_argument("--base", default=os.environ.get("BASE", ""))
     trr = sub.add_parser("tekton-trigger-readiness")
     trr.add_argument("--runtime-config", required=True)
     trr.add_argument(
@@ -2560,8 +2765,18 @@ def main() -> int:
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
         if args.cmd == "bundle-deliver":
+            try:
+                bundle_base = pull_request_base_name(args.base)
+            except RuntimeError as exc:
+                return fail(str(exc), 1)
             return isolated_bundle_deliver(
-                ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable
+                ROOT,
+                Path(__file__).resolve(),
+                args.bundle,
+                args.expected_head,
+                args.title,
+                bundle_base,
+                sys.executable,
             )
         if args.cmd == "tekton-trigger-readiness":
             return tekton_trigger_readiness_command(args.runtime_config, args.evidence)

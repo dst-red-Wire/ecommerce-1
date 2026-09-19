@@ -30,7 +30,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
-            'ci: ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE',
+            'ci: ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-}" --head WORKTREE',
             MAKEFILE,
         )
         self.assertIn(
