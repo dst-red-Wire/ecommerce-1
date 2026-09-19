@@ -1739,6 +1739,10 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         (publish_policy.get("exact_evidence_required") is True, "publish exact evidence must be required"),
         (publish_policy.get("force_push") == "forbidden", "force-push must be forbidden"),
         (
+            publish_policy.get("push_target") == "current-feature-branch",
+            "publish target must be the current feature branch",
+        ),
+        (
             publish_policy.get("direct_default_branch_write") == "forbidden",
             "direct default-branch writes must be forbidden",
         ),
@@ -1778,11 +1782,16 @@ def _remote_ref_sha(ref: str) -> str:
 
 
 def publish(base: str, message: str) -> int:
+    policy = repository_delivery_policy()
+    default_branch = str(policy["default_branch"])
+    base_name = base.removeprefix("origin/")
+    if base_name != default_branch:
+        return fail(f"publish base must match contract default branch {default_branch!r}")
     branch = git("branch", "--show-current").strip()
-    if not branch or branch in {"main", "master"}:
+    if not branch or branch in {default_branch, "master"}:
         return fail("publish refuses detached/default branch")
     run(["git", "fetch", "origin", "--prune"])
-    base_ref = base if base.startswith("origin/") else f"origin/{base}"
+    base_ref = f"origin/{base_name}"
     if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
         return fail(f"branch is not based on current {base_ref}")
 
@@ -1820,11 +1829,14 @@ def publish(base: str, message: str) -> int:
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
-    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
-    review_forge = (review_policy.get("pull_request_review") or {}).get("forge")
+    policy = repository_delivery_policy()
+    review_forge = policy.get("forge")
     if review_forge != "github":
-        return fail(f"review-policy forge must be github for delivery; got {review_forge!r}")
-    if publish(base, message or title):
+        return fail(f"repository_delivery forge must be github; got {review_forge!r}")
+    base_name = base.removeprefix("origin/")
+    if base_name != policy["default_branch"]:
+        return fail(f"deliver base must match contract default branch {policy['default_branch']!r}")
+    if publish(base_name, message or title):
         return 1
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
@@ -1837,14 +1849,10 @@ def deliver(base: str, title: str, message: str) -> int:
     if not title:
         title = git("log", "-1", "--pretty=%s").strip()
     changed = (
-        git("diff", "--name-only", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--name-only", f"{base}...HEAD")
+        git("diff", "--name-only", f"origin/{base_name}...HEAD")
     )
     stat = (
-        git("diff", "--stat", f"origin/{base}...HEAD")
-        if not base.startswith("origin/")
-        else git("diff", "--stat", f"{base}...HEAD")
+        git("diff", "--stat", f"origin/{base_name}...HEAD")
     )
     ev = json.loads(evidence.read_text(encoding="utf-8"))
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
@@ -1876,7 +1884,7 @@ def deliver(base: str, title: str, message: str) -> int:
             "--head",
             branch,
             "--base",
-            base.replace("origin/", ""),
+            base_name,
             "--state",
             "open",
             "--json",
