@@ -24,7 +24,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("merge", policy["merge"]["method"])
         self.assertEqual("required", policy["merge"]["match_head_commit"])
         self.assertEqual("required", policy["merge"]["branch_protection"])
-        self.assertEqual("required", policy["merge"]["required_checks"])
+        self.assertEqual("when-configured", policy["merge"]["required_checks"])
         self.assertEqual("forbidden", policy["merge"]["bypass_branch_protection"])
         self.assertEqual("delete", policy["cleanup"]["remote_branch"])
         self.assertEqual("delete", policy["cleanup"]["local_branch"])
@@ -66,6 +66,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             self.assertIn(marker, source)
         self.assertNotIn("--admin", source)
         self.assertNotIn("--force", source)
+        self.assertIn("no checks reported", source)
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
