@@ -2005,8 +2005,23 @@ def finish_pr(base: str) -> int:
         capture=True,
     )
     if protection.returncode:
-        detail = (protection.stderr or protection.stdout or "").strip()
-        return fail(f"finish-pr cannot prove branch protection for {base_name}: {detail or 'GitHub API rejected query'}")
+        active_rules = run(
+            [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
+            check=False,
+            capture=True,
+        )
+        if active_rules.returncode or not (active_rules.stdout or "").strip():
+            detail = (
+                active_rules.stderr
+                or active_rules.stdout
+                or protection.stderr
+                or protection.stdout
+                or ""
+            ).strip()
+            return fail(
+                f"finish-pr cannot prove branch protection/ruleset for {base_name}: "
+                f"{detail or 'GitHub API rejected protection queries'}"
+            )
 
     checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
     if checks.returncode:
