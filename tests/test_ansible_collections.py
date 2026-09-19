@@ -75,9 +75,16 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
                 self.assertEqual(version, MOD.resolved_ansible_collection_version(name, root))
         self.assertIn("when: developer_collection_drift | length > 0", WORKSTATION_TASKS)
 
-    def test_make_entrypoints_export_project_ansible_configuration(self):
-        self.assertIn("ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg", MAKEFILE)
-        self.assertIn("export ANSIBLE_CONFIG", MAKEFILE)
+    def test_repoctl_exports_project_ansible_configuration_from_central_toolchain(self):
+        self.assertEqual(
+            ROOT / "platform/ansible/ansible.cfg",
+            MOD.toolchain_projection_path("ansible_config"),
+        )
+        self.assertEqual(
+            str(ROOT / "platform/ansible/ansible.cfg"),
+            MOD.os.environ.get("ANSIBLE_CONFIG"),
+        )
+        self.assertNotIn("ANSIBLE_CONFIG :=", MAKEFILE)
         self.assertIn("collections_scan_sys_path = False", ANSIBLE_CFG)
 
     def test_ansible_gate_reconciles_missing_project_collections_once(self):
