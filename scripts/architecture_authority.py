@@ -175,6 +175,7 @@ V5_SECTION_KEYS = {
             "infrastructure_ownership",
             "preview_lifecycle",
             "promotion",
+            "quality_cloud_engineering",
             "milestone_contract",
         }
     ),
@@ -383,6 +384,48 @@ V5_MILESTONE_DEPENDENCIES = {
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
+V5_QCE_SECTORS = (
+    "continuous_testing",
+    "test_first",
+    "test_strategy",
+    "automation",
+    "monitoring_observability",
+    "release_governance_automation",
+    "golden_path",
+    "developer_hub",
+    "measuring_engineering",
+)
+V5_QCE_SECTOR_FIELDS = frozenset({"owner", "input", "output", "evidence"})
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering"] = frozenset(
+    {
+        "status",
+        "scope",
+        "implementation_milestone",
+        "proof_milestone",
+        "sector_count",
+        "sectors",
+        "cross_cutting",
+    }
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.sectors"] = frozenset(V5_QCE_SECTORS)
+for sector in V5_QCE_SECTORS:
+    V5_SECTION_KEYS[f"developer_platform.quality_cloud_engineering.sectors.{sector}"] = V5_QCE_SECTOR_FIELDS
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting"] = frozenset(
+    {"security", "culture", "ai_agent"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.security"] = frozenset(
+    {"owner", "applies_to_all_sectors", "evidence_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.culture"] = frozenset(
+    {"owner", "applies_to_all_sectors", "explicit_ownership_required", "documentation_as_code_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.ai_agent"] = frozenset(
+    {
+        "owner", "applies_to_all_sectors", "role", "authoritative_gate",
+        "may_bypass_required_gates", "may_merge", "may_deploy_production_directly",
+    }
+)
+
 V5_REPOSITORY_GOVERNANCE = dict(_CANONICAL_LOCK["repository_governance"])
 OWNER_AUTHORIZATION_PATTERN = re.compile(
     r"^/owner-authorization approve scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
@@ -539,6 +582,40 @@ def lock_schema_errors(lock):
         errors.append("business.forbidden_services must be a list")
     elif forbidden:
         errors.append("business.forbidden_services must be empty in the approved V5 schema")
+
+    qce = lock["developer_platform"]["quality_cloud_engineering"]
+    sectors = qce["sectors"]
+    if qce["sector_count"] != 9 or set(sectors) != set(V5_QCE_SECTORS):
+        errors.append("quality_cloud_engineering must declare exactly the nine approved QCE sectors")
+    for sector_name in V5_QCE_SECTORS:
+        sector = sectors[sector_name]
+        for field in V5_QCE_SECTOR_FIELDS:
+            value = sector[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"quality_cloud_engineering sector {sector_name} must define non-empty owner/input/output/evidence"
+                )
+                break
+    cross_cutting = qce["cross_cutting"]
+    if not cross_cutting["security"]["applies_to_all_sectors"]:
+        errors.append("quality_cloud_engineering security must apply to all sectors")
+    culture = cross_cutting["culture"]
+    if not (
+        culture["applies_to_all_sectors"]
+        and culture["explicit_ownership_required"]
+        and culture["documentation_as_code_required"]
+    ):
+        errors.append("quality_cloud_engineering culture must preserve ownership and documentation-as-code")
+    ai_agent = cross_cutting["ai_agent"]
+    if (
+        not ai_agent["applies_to_all_sectors"]
+        or ai_agent["role"] != "assistant"
+        or ai_agent["authoritative_gate"]
+        or ai_agent["may_bypass_required_gates"]
+        or ai_agent["may_merge"]
+        or ai_agent["may_deploy_production_directly"]
+    ):
+        errors.append("quality_cloud_engineering AI agent must remain non-authoritative")
 
     prod = lock["prod_certified_topology"]
     for field in V5_PROD_TOPOLOGY_KEYS - {"sites"}:
