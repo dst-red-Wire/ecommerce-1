@@ -21,6 +21,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("forbidden", policy["publish"]["force_push"])
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
+        self.assertEqual("merge", policy["merge"]["method"])
         self.assertEqual("required", policy["merge"]["match_head_commit"])
         self.assertEqual("required", policy["merge"]["branch_protection"])
         self.assertEqual("required", policy["merge"]["required_checks"])
@@ -55,6 +56,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             "--delete-branch",
             "--required",
             "/protection",
+            "/rules/branches/",
             "merge-base",
             "_valid_exact_evidence",
             "origin/{branch}",
