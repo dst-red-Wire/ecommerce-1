@@ -35,6 +35,8 @@ qualification:
     qualification_input: false
   execution_directory: temporary-copy
   canonical_lockfile_materialization: required
+  repository_context_paths:
+    - config/infrastructure
   init_lockfile_mode: readonly
   init_args:
     - init

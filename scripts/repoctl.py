@@ -550,6 +550,13 @@ def terraform_provider_lock_contract() -> dict:
             raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
             raise RuntimeError("Terraform qualification provider lock must be readonly")
+        repository_context_paths = qualification.get("repository_context_paths")
+        if (
+            not isinstance(repository_context_paths, list)
+            or not repository_context_paths
+            or any(not isinstance(value, str) or not value.strip() for value in repository_context_paths)
+        ):
+            raise RuntimeError("Terraform qualification must declare non-empty repository_context_paths")
 
         _TERRAFORM_PROVIDER_LOCK = contract
     return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
@@ -1490,12 +1497,24 @@ def terraform_check() -> int:
 
     directories = sorted({p.parent for p in tf_files})
     with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
-        temp_root = Path(temp_dir) / "terraform"
+        temp_repo_root = Path(temp_dir) / "repository"
+        temp_root = temp_repo_root / "platform" / "terraform"
+        temp_root.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(
             terraform_root,
             temp_root,
             ignore=shutil.ignore_patterns(".terraform", ".terraform.lock.hcl"),
         )
+        for relative_context in qualification.get("repository_context_paths", []):
+            source = ROOT / str(relative_context)
+            destination = temp_repo_root / str(relative_context)
+            if not source.exists():
+                raise RuntimeError(f"Terraform qualification repository context is missing: {relative_context}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
 
         for directory in directories:
             relative = directory.relative_to(terraform_root)

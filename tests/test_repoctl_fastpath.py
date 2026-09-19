@@ -47,6 +47,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
                 "provider_plugin_cache": {},
+                "repository_context_paths": ["config/infrastructure"],
             },
         }
 
@@ -91,6 +92,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("non-authoritative", qualification["repository_lockfiles"]["authority"])
         self.assertFalse(qualification["repository_lockfiles"]["qualification_input"])
         self.assertIn("-lockfile=readonly", qualification["init_args"])
+        self.assertEqual(["config/infrastructure"], qualification["repository_context_paths"])
 
     def test_terraform_native_lockfile_is_generated_from_central_contract(self):
         with tempfile.TemporaryDirectory() as directory:
