@@ -8,7 +8,7 @@ endif
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@$(PYTHON) scripts/capability_bootstrap.py seed
+	@$(PYTHON) -I -S scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static

@@ -39,10 +39,14 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Download pinned Node archive", tasks)
         self.assertIn("Link Node and Corepack commands", tasks)
 
-    def test_prepush_reuses_evidence_only_for_current_base(self):
+    def test_prepush_reuses_evidence_only_after_canonical_exact_validation(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)
-        self.assertIn('data.get("base_sha") == base_sha', text)
+        start = text.index("def prepush()")
+        end = text.index("\ndef tekton_trigger_readiness_command", start)
+        prepush = text[start:end]
+        self.assertIn('_valid_exact_evidence("origin/main", head)', prepush)
+        self.assertIn('return verify_change("origin/main", head)', prepush)
+        self.assertNotIn('data.get("base_sha")', prepush)
 
     def test_ansible_first_replaces_shell_automation(self):
         self.assertFalse(list((ROOT / "scripts").glob("*.sh")))

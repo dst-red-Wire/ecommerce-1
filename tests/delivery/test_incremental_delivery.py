@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -18,12 +19,16 @@ class IncrementalDeliveryTests(unittest.TestCase):
     BASE = "1" * 40
     PARENT = "2" * 40
     HEAD = "3" * 40
+    PARENT_TREE = "4" * 40
 
     def parent_evidence(self):
         return {
-            "schema_version": 2,
+            "schema_version": 5,
             "base_sha": self.BASE,
             "head_sha": self.PARENT,
+            "head_tree_sha": self.PARENT_TREE,
+            "qualification_identity": "test-identity",
+            "created_at_epoch": time.time(),
             "status": "PASS",
             "exact_commit_evidence": True,
             "gates": [
@@ -42,6 +47,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
             return f"{self.HEAD} {self.PARENT}\n"
         if args == ("rev-parse", "origin/main"):
             return self.BASE + "\n"
+        if args == ("rev-parse", f"{self.PARENT}^{{tree}}"):
+            return self.PARENT_TREE + "\n"
         if args == ("status", "--porcelain", "--untracked-files=all"):
             return ""
         raise AssertionError(f"unexpected git call: {args}")
@@ -95,6 +102,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
@@ -141,6 +150,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
             with (
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
             ):
                 parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
         self.assertIsNone(parent)
@@ -203,6 +214,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
                 mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 

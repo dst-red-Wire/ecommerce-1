@@ -11,6 +11,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -385,6 +386,81 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
+def templ_version_matches(stdout: str, stderr: str, expected: str) -> bool:
+    """templ must report one exact v-prefixed version and no diagnostics."""
+    return bool(expected) and stdout.strip() == f"v{expected}" and not stderr.strip()
+
+
+def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
+    """Reject replaceable seed paths before executing anything from the venv."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return False
+    if os.name == "nt":
+        return True
+    owners = {os.geteuid(), 0} if ancestor else {os.geteuid()}
+    if info.st_uid not in owners:
+        return False
+    if info.st_mode & 0o022:
+        return bool(ancestor and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX)
+    return not stat.S_ISREG(info.st_mode) or info.st_nlink == 1
+
+
+def require_private_seed_path(path: Path) -> None:
+    existing = []
+    cursor = path
+    while not cursor.exists() and cursor != cursor.parent:
+        cursor = cursor.parent
+    while True:
+        existing.append(cursor)
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    if not all(seed_path_is_private(item, ancestor=True) for item in existing):
+        raise RuntimeError(f"unsafe seed path ancestry: {path}")
+    if path.exists() and not seed_path_is_private(path):
+        raise RuntimeError(f"unsafe qualification seed directory: {path}")
+
+
+def seed_requirements_with_pip(python: Path, lock_text: str) -> dict[str, str]:
+    """Parse active PEP 508 requirements using pip's vendored packaging parser."""
+    program = r"""
+import json, sys
+from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.utils import canonicalize_name
+expected = {}
+for raw in sys.stdin.read().splitlines():
+    text = raw.strip()
+    if not text or text.startswith("#") or text.startswith("--") or text.startswith("\\"):
+        continue
+    if text.endswith("\\"):
+        text = text[:-1].strip()
+    if text.startswith("--hash="):
+        continue
+    req = Requirement(text)
+    if req.marker and not req.marker.evaluate():
+        continue
+    pins = list(req.specifier)
+    if len(pins) != 1 or pins[0].operator != "==":
+        raise SystemExit(f"non-exact seed requirement: {req.name}")
+    expected[canonicalize_name(req.name)] = pins[0].version
+print(json.dumps(expected, sort_keys=True))
+"""
+    proc = subprocess.run(
+        [str(python), "-I", "-c", program],
+        input=lock_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode:
+        raise RuntimeError(f"seed lock PEP 508 validation failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return json.loads(proc.stdout)
+
+
 class Auditor:
     def __init__(
         self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which
@@ -528,6 +604,8 @@ class Auditor:
             elif item.get("expected_output") is not None and detail != str(item["expected_output"]):
                 state = "BLOCKED" if item.get("external_failure") else "FAIL"
                 last = Result(state, f"expected output {item['expected_output']}; got {detail or 'empty'}")
+            elif command == "templ" and not templ_version_matches(proc.stdout, proc.stderr, expected or ""):
+                last = Result("FAIL", f"wrong templ version: expected exact v{expected}")
             elif expected and self.installed_version(
                 detail, item.get("version_parser", "first_semver")
             ) != expected.removeprefix("v"):
@@ -611,18 +689,33 @@ class Auditor:
 
 def seed_environment() -> int:
     versions = load_versions()
-    lock = SEED_LOCK.read_text(encoding="utf-8").lower()
-    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
-        expected = versions[key]
-        if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
-            raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
+    lock_text = SEED_LOCK.read_text(encoding="utf-8")
+    require_private_seed_path(SEED_VENV)
     python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.is_file():
+        SEED_VENV.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
+    require_private_seed_path(SEED_VENV)
+    expected = seed_requirements_with_pip(python, lock_text)
+    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+        canonical = versions[key]
+        if expected.get(package) != canonical:
+            raise ValueError(f"{package}: lock does not match canonical {key}={canonical}")
     subprocess.run(
         [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
         check=True,
     )
+    subprocess.run([str(python), "-m", "pip", "check"], check=True)
+    listed = subprocess.run(
+        [str(python), "-m", "pip", "list", "--format=json", "--disable-pip-version-check"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    installed = {item["name"].lower().replace("_", "-"): item["version"] for item in json.loads(listed.stdout)}
+    for package, version in expected.items():
+        if installed.get(package) != version:
+            raise RuntimeError(f"seed package drift: {package} expected {version}, got {installed.get(package, 'missing')}")
     ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
@@ -631,7 +724,6 @@ def seed_environment() -> int:
         f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
