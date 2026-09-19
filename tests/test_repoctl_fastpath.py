@@ -196,6 +196,22 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual(before_index, after_index)
         self.assertFalse((MOD.ROOT / "legacy.sh").exists())
 
+    def test_projection_rejects_descendant_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            source = root / "platform" / "terraform"
+            source.mkdir(parents=True)
+            outside = Path(directory) / "outside.txt"
+            outside.write_text("host-secret", encoding="utf-8")
+            escape = source / "escape.txt"
+            try:
+                escape.symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            with self.assertRaisesRegex(RuntimeError, "rejects symlink"):
+                MOD.validate_projection_source(source, root)
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
@@ -275,6 +291,38 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
         self.assertEqual("platform/terraform", contract["scope"])
         self.assertEqual("exact", contract["status"])
+
+        pins = MOD.pinned_versions()
+        terraform_cli = contract["terraform_cli"]
+        opentofu_cli = contract["opentofu_cli"]
+        self.assertEqual("TERRAFORM_VERSION", terraform_cli["toolchain_version_key"])
+        self.assertEqual("OPENTOFU_VERSION", opentofu_cli["toolchain_version_key"])
+        self.assertEqual("versions.tf", terraform_cli["compatibility_file"])
+        self.assertEqual("versions.tofu", opentofu_cli["compatibility_file"])
+        self.assertTrue(
+            MOD.version_satisfies_constraint(
+                pins["TERRAFORM_VERSION"], terraform_cli["required_version"]
+            )
+        )
+        self.assertTrue(
+            MOD.version_satisfies_constraint(
+                pins["OPENTOFU_VERSION"], opentofu_cli["required_version"]
+            )
+        )
+        for environment in ("mgmt", "qualification"):
+            tofu_versions = (
+                ROOT
+                / "platform"
+                / "terraform"
+                / "environments"
+                / environment
+                / "versions.tofu"
+            ).read_text(encoding="utf-8")
+            self.assertIn(
+                f'required_version = "{opentofu_cli["required_version"]}"',
+                tofu_versions,
+            )
+            self.assertIn('version = "= 1.68.0"', tofu_versions)
 
         provider = contract["providers"]["hcloud"]
         self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])

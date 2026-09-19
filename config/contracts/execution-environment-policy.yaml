@@ -30,6 +30,7 @@ qualification_isolation:
     preserve_repository_relative_paths: true
     source_mutation: forbidden
     projection_mutation: isolated
+    symlinks: forbidden
 
 environments:
   linux-native:

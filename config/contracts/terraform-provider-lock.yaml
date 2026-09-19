@@ -7,7 +7,14 @@ authority_claims:
   - platform.terraform.providers
 
 terraform_cli:
+  toolchain_version_key: TERRAFORM_VERSION
   required_version: ">= 1.15.0, < 2.0.0"
+  compatibility_file: versions.tf
+
+opentofu_cli:
+  toolchain_version_key: OPENTOFU_VERSION
+  required_version: ">= 1.11.5, < 2.0.0"
+  compatibility_file: versions.tofu
 
 providers:
   hcloud:

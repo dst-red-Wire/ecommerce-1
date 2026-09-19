@@ -62,6 +62,7 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertTrue(projection["preserve_repository_relative_paths"])
         self.assertEqual("forbidden", projection["source_mutation"])
         self.assertEqual("isolated", projection["projection_mutation"])
+        self.assertEqual("forbidden", projection["symlinks"])
 
     def test_inherited_contracts_use_the_common_envelope(self):
         self.assertEqual("SourceQualityPolicy", MOD.load_yaml(

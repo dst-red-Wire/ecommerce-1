@@ -189,6 +189,10 @@ def execution_environment_policy() -> dict:
             raise RuntimeError(
                 "temporary qualification projections must preserve repository-relative paths"
             )
+        if projection.get("symlinks") != "forbidden":
+            raise RuntimeError(
+                "temporary qualification projections must reject symbolic links"
+            )
 
         _EXECUTION_ENVIRONMENT_POLICY = policy
 
@@ -228,6 +232,48 @@ def qualification_environment(
     return env
 
 
+def validate_projection_source(
+    source: Path,
+    repository_root: Path,
+    *,
+    ignored_names: tuple[str, ...] = (),
+) -> None:
+    """Reject symlinks in qualification inputs before any source content is copied."""
+    ignored = set(ignored_names)
+
+    if source.is_symlink():
+        raise RuntimeError(
+            f"temporary repository projection rejects symlink: {source}"
+        )
+
+    if not source.is_dir():
+        return
+
+    for current, directories, files in os.walk(source, topdown=True, followlinks=False):
+        current_path = Path(current)
+
+        kept_directories: list[str] = []
+        for name in directories:
+            if name in ignored:
+                continue
+            candidate = current_path / name
+            if candidate.is_symlink():
+                raise RuntimeError(
+                    f"temporary repository projection rejects symlink: {candidate}"
+                )
+            kept_directories.append(name)
+        directories[:] = kept_directories
+
+        for name in files:
+            if name in ignored:
+                continue
+            candidate = current_path / name
+            if candidate.is_symlink():
+                raise RuntimeError(
+                    f"temporary repository projection rejects symlink: {candidate}"
+                )
+
+
 def materialize_repository_projection(
     destination: Path,
     roots: list[str],
@@ -246,7 +292,12 @@ def materialize_repository_projection(
                 f"temporary repository projection path escapes repository: {relative}"
             )
 
-        source = (ROOT / relative_path).resolve()
+        declared_source = ROOT / relative_path
+        if declared_source.is_symlink():
+            raise RuntimeError(
+                f"temporary repository projection rejects symlink: {relative}"
+            )
+        source = declared_source.resolve()
 
         try:
             source.relative_to(repository_root)
@@ -260,6 +311,12 @@ def materialize_repository_projection(
                 f"temporary repository projection source is missing: {relative}"
             )
 
+        validate_projection_source(
+            source,
+            repository_root,
+            ignored_names=ignored_names,
+        )
+
         target = destination / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -267,6 +324,7 @@ def materialize_repository_projection(
             shutil.copytree(
                 source,
                 target,
+                symlinks=True,
                 ignore=shutil.ignore_patterns(*ignored_names),
             )
         elif source.is_file():
@@ -275,6 +333,12 @@ def materialize_repository_projection(
             raise RuntimeError(
                 f"unsupported temporary repository projection source: {relative}"
             )
+
+        validate_projection_source(
+            target,
+            destination.resolve(),
+            ignored_names=ignored_names,
+        )
 
 
 
@@ -584,6 +648,35 @@ def advisory_output_check(label: str, output_text: str) -> None:
         print(f"ADVISORY {label}: source formatting drift detected", file=sys.stderr)
 
 
+def _semantic_version_tuple(value: str) -> tuple[int, int, int]:
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", value.strip())
+    if not match:
+        raise RuntimeError(f"unsupported semantic version: {value!r}")
+    return tuple(int(part) for part in match.groups())
+
+
+def version_satisfies_constraint(version: str, constraint: str) -> bool:
+    current = _semantic_version_tuple(version)
+    for raw in constraint.split(","):
+        token = raw.strip()
+        match = re.fullmatch(r"(>=|<=|!=|=|>|<)?\s*(\d+\.\d+\.\d+)", token)
+        if not match:
+            raise RuntimeError(f"unsupported version constraint: {token!r}")
+        operator = match.group(1) or "="
+        expected = _semantic_version_tuple(match.group(2))
+        accepted = {
+            ">=": current >= expected,
+            "<=": current <= expected,
+            "!=": current != expected,
+            "=": current == expected,
+            ">": current > expected,
+            "<": current < expected,
+        }[operator]
+        if not accepted:
+            return False
+    return True
+
+
 _TERRAFORM_PROVIDER_LOCK: dict | None = None
 
 
@@ -627,6 +720,32 @@ def terraform_provider_lock_contract() -> dict:
             raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
             raise RuntimeError("Terraform qualification provider lock must be readonly")
+
+        pins = pinned_versions()
+        cli_contracts = {
+            "terraform_cli": ("TERRAFORM_VERSION", "versions.tf"),
+            "opentofu_cli": ("OPENTOFU_VERSION", "versions.tofu"),
+        }
+        for cli_name, (version_key, compatibility_file) in cli_contracts.items():
+            cli = contract.get(cli_name)
+            if not isinstance(cli, dict):
+                raise RuntimeError(f"Terraform provider lock must declare {cli_name}")
+            if cli.get("toolchain_version_key") != version_key:
+                raise RuntimeError(
+                    f"{cli_name} must bind canonical toolchain key {version_key}"
+                )
+            if cli.get("compatibility_file") != compatibility_file:
+                raise RuntimeError(
+                    f"{cli_name} must use compatibility file {compatibility_file}"
+                )
+            required_version = cli.get("required_version")
+            pinned = pins.get(version_key)
+            if not isinstance(required_version, str) or not required_version.strip():
+                raise RuntimeError(f"{cli_name} must declare required_version")
+            if not pinned or not version_satisfies_constraint(pinned, required_version):
+                raise RuntimeError(
+                    f"{cli_name} canonical pin {pinned or 'missing'} does not satisfy {required_version}"
+                )
 
         _TERRAFORM_PROVIDER_LOCK = contract
     return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
