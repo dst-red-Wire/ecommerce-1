@@ -35,6 +35,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             ("publish", "force_push", "allowed"),
             ("publish", "direct_default_branch_write", "allowed"),
             ("pull_request", "head_sha_binding", "floating"),
+            ("merge", "method", "squash"),
             ("merge", "match_head_commit", "optional"),
             ("merge", "branch_protection", "optional"),
             ("merge", "required_checks", "optional"),
