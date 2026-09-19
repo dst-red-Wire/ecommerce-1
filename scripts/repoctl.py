@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1197,6 +1199,8 @@ def site() -> int:
                 [str(binary)],
                 cwd=ROOT / "frontend",
                 env=dict(env, HTTP_ADDR=address),
+                start_new_session=(os.name != "nt"),
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
             )
             for binary, address in zip(binaries, addresses, strict=True)
         ]
@@ -1214,10 +1218,30 @@ def site() -> int:
             pass
         finally:
             for process in processes:
-                if process.poll() is None:
-                    process.terminate()
+                if process.poll() is not None:
+                    continue
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
             for process in processes:
-                process.wait()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    if os.name != "nt":
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    process.wait()
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
         failed = [process.returncode for process in processes if process.returncode not in (0, -signal.SIGTERM)]
@@ -1757,7 +1781,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     base_sha = git("rev-parse", base_ref).strip()
     current_tree = worktree_tree_sha()
     if (
-        evidence.get("schema_version", 0) < 4
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("evidence_kind") != "worktree"
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not False
@@ -1766,6 +1790,9 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("source_head_sha") != current_head
         or evidence.get("source_tree_sha") != current_tree
         or evidence.get("base_sha") != base_sha
+        or evidence.get("head_tree_sha") != current_tree
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not isinstance(evidence.get("gates"), list)
@@ -1786,13 +1813,16 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     source_tree = str(source.get("source_tree_sha", ""))
     commit_tree = git("rev-parse", f"{requested}^{{tree}}").strip()
     if (
-        source.get("schema_version", 0) < 4
+        not _supported_evidence_schema(source, 5)
         or source.get("status") != "PASS"
         or source.get("exact_commit_evidence") is not False
         or source.get("base_sha") != base_sha
         or len(parents) != 2
         or parents[1] != source_head
         or commit_tree != source_tree
+        or source.get("head_tree_sha") != source_tree
+        or source.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(source)
     ):
         return None
 
@@ -1812,11 +1842,14 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     payload = copy.deepcopy(source)
     payload.update(
         {
-            "schema_version": 4,
+            "schema_version": 5,
             "evidence_kind": "exact_commit",
             "head_ref": requested,
             "head_sha": requested,
             "exact_commit_evidence": True,
+            "head_tree_sha": commit_tree,
+            "qualification_identity": qualification_identity(),
+            "created_at_epoch": time.time(),
             "gates": records,
             "metrics": evidence_metrics(records),
             "verification": {
@@ -1835,6 +1868,154 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     return destination
 
 
+def _complete_gate_inventory(evidence: dict, base: str, head: str) -> bool:
+    records = evidence.get("gates")
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        return False
+    global_names = {name for name, _ in _global_gate_commands(base, head)}
+    component_names = set(_normalized_component_gates(affected(base, head)))
+    names = [row.get("gate") for row in records]
+    if any(not isinstance(name, str) for name in names):
+        return False
+    if len(names) != len(set(names)) or set(names) != global_names | component_names:
+        return False
+    for row in records:
+        if row.get("status") == "PASS":
+            if row.get("exit_code", 0) != 0:
+                return False
+        elif row.get("status") == "SKIP" and row["gate"] in component_names:
+            command, _ = _component_command(row["gate"])
+            if command is not None:
+                return False
+        else:
+            return False
+    return True
+
+
+def _supported_evidence_schema(evidence: dict, minimum: int) -> bool:
+    version = evidence.get("schema_version")
+    return type(version) is int and minimum <= version <= 5
+
+
+def _fresh_evidence(evidence: dict) -> bool:
+    value = evidence.get("created_at_epoch")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        created = float(value)
+    except (ValueError, OverflowError):
+        return False
+    return math.isfinite(created) and 0 <= time.time() - created <= 86400
+
+
+def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
+    """Conservatively bind declared gates and their transitive tool providers."""
+    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+    capabilities = {item["name"]: item for item in contract["capabilities"]}
+    aliases = contract.get("command_capabilities", {})
+    required = {name for names in contract["gate_requirements"].values() for name in names}
+    required.update({"templ", "gofmt", "sysctl", "tofu"})
+    runtime = any(
+        "testcontainers" in source.read_text(encoding="utf-8")
+        for source in (ROOT / "services").rglob("*_test.go")
+    )
+    commands: dict[str, list[str] | None] = {}
+    probes: set[tuple[tuple[str, ...], bool]] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        capability = capabilities.get(aliases.get(name, name), {})
+        direct = capability.get("command")
+        if direct:
+            commands[direct] = capability.get("version_args", ["--version"])
+        if name in required:
+            commands.setdefault(name, {"gofmt": ["-h"], "tofu": ["version"]}.get(name, ["--version"]))
+        probe = capability.get("probe")
+        is_runtime = capability.get("requirement") == "optional-runtime"
+        if probe and (runtime or not is_runtime):
+            probes.add((tuple(probe), is_runtime))
+            commands.setdefault(probe[0], None)
+        for dependency in capability.get("requires", []):
+            visit(dependency)
+        if capability.get("provider"):
+            visit(capability["provider"])
+
+    for name in sorted(required):
+        visit(name)
+    return commands, probes
+
+
+def qualification_identity() -> str:
+    """Bind reusable evidence to validator/configuration and actual gate runners."""
+    digest = hashlib.sha256()
+    for relative in (
+        "scripts/repoctl.py",
+        "scripts/ci-affected.rb",
+        "config/contracts/ci-evidence.yaml",
+        "config/contracts/ci-topology.yaml",
+        "config/toolchain/versions.env",
+        "config/toolchain/capabilities.json",
+    ):
+        source = ROOT / relative
+        digest.update(relative.encode())
+        digest.update(source.read_bytes())
+    controller = Path(_controller_command()[1])
+    if not controller.is_absolute():
+        controller = ROOT / controller
+    digest.update(b"executed-controller")
+    digest.update(controller.read_bytes())
+    digest.update(sys.version.encode())
+    interpreter = Path(sys.executable).resolve()
+    digest.update(json.dumps([str(interpreter), sys.prefix, sys.base_prefix]).encode())
+    with interpreter.open("rb") as handle:
+        digest.update(hashlib.file_digest(handle, "sha256").digest())
+    commands, probes = _qualification_toolchain()
+    for command, version_args in sorted(commands.items()):
+        executable = shutil.which(command)
+        digest.update(command.encode())
+        digest.update((executable or "missing").encode())
+        if executable:
+            with Path(executable).open("rb") as handle:
+                digest.update(hashlib.file_digest(handle, "sha256").digest())
+            if version_args is not None:
+                result = run([executable, *version_args], check=False, capture=True)
+                digest.update(json.dumps([result.returncode, result.stdout, result.stderr]).encode())
+    for command, runtime in sorted(probes):
+        executable = shutil.which(command[0])
+        digest.update(json.dumps(command).encode())
+        if not executable:
+            digest.update(b"missing-probe")
+            continue
+        args = list(command)
+        if command == ("docker", "info"):
+            args += ["--format", "{{json .}}"]
+        result = run([executable, *args[1:]], check=False, capture=True)
+        if runtime and result.returncode:
+            raise RuntimeError("qualification runtime identity probe failed")
+        value = result.stdout
+        if command == ("docker", "info"):
+            info = json.loads(value)
+            value = json.dumps(
+                {
+                    key: info.get(key)
+                    for key in (
+                        "ID", "ServerVersion", "Driver", "DockerRootDir", "OSType",
+                        "Architecture", "KernelVersion", "OperatingSystem", "CgroupDriver",
+                        "CgroupVersion", "SecurityOptions", "Runtimes", "DefaultRuntime", "DriverStatus",
+                    )
+                },
+                sort_keys=True,
+            )
+        digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
+    for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
+        digest.update(name.encode())
+        digest.update(os.environ.get(name, "").encode())
+    return digest.hexdigest()
+
+
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     requested = git("rev-parse", head).strip()
     if requested != git("rev-parse", "HEAD").strip():
@@ -1849,23 +2030,19 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     if (
-        evidence.get("status") != "PASS"
+        not _supported_evidence_schema(evidence, 5)
+        or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != requested
         or evidence.get("base_sha") != git("rev-parse", base_ref).strip()
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{requested}^{{tree}}").strip()
+        or evidence.get("changed_paths") != changed_paths(base_ref, head)
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
     return path
-
-
-def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
-    require("ruby")
-    command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
-    if strict_unknown:
-        command.append("--strict-unknown")
-    p = run(command, capture=True)
-    return json.loads(p.stdout)
-
 
 def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str, str] | None = None) -> bool:
     logs = CONTEXT / "logs"
@@ -2238,13 +2415,16 @@ def write_evidence(
     exact = head != "WORKTREE" and clean and current_head_sha == head_sha
     verification_data = verification or {"mode": "full"}
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "evidence_kind": "worktree" if head == "WORKTREE" else "exact_commit",
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": head_sha,
         "exact_commit_evidence": exact,
+        "head_tree_sha": worktree_tree_sha() if head == "WORKTREE" else git("rev-parse", f"{head_sha}^{{tree}}").strip(),
+        "qualification_identity": qualification_identity(),
+        "created_at_epoch": time.time(),
         "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
         "changed_paths": paths,
         "affected_components": components,
@@ -2904,18 +3084,10 @@ def precommit() -> int:
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
-    ev = CONTEXT / "evidence" / f"{head}.json"
-    base_sha = git("rev-parse", "origin/main").strip()
-    if ev.is_file():
-        data = json.loads(ev.read_text(encoding="utf-8"))
-        if (
-            data.get("status") == "PASS"
-            and data.get("exact_commit_evidence") is True
-            and data.get("head_sha") == head
-            and data.get("base_sha") == base_sha
-        ):
-            print(f"PASS prepush: reusing exact evidence {ev.relative_to(ROOT)} for base {base_sha}")
-            return 0
+    evidence = _valid_exact_evidence("origin/main", head)
+    if evidence is not None:
+        print(f"PASS prepush: reusing validated exact evidence {evidence.relative_to(ROOT)}")
+        return 0
     return verify_change("origin/main", head)
 
 
