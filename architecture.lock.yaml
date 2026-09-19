@@ -34,6 +34,7 @@ repository_governance:
       - .golangci.yaml
     required_contracts:
       - contract_schema
+      - ci_evidence
       - source_quality_policy
       - terraform_provider_lock
       - security_scan_policy

@@ -301,6 +301,12 @@ def ci_evidence_policy() -> dict:
         if rules.get("recorded_base_must_be_ancestor_of_head") is not True:
             raise RuntimeError("recorded evidence base must be an ancestor of HEAD")
 
+        if rules.get("exact_evidence_recorded_base_may_authorize_reuse") != "symbolic-ref-only":
+            raise RuntimeError("base-less exact evidence reuse must require a symbolic recorded base")
+
+        if rules.get("prepush_explicit_base_required") is not True:
+            raise RuntimeError("prepush must require an explicit BASE")
+
         _CI_EVIDENCE_POLICY = policy
 
     return copy.deepcopy(_CI_EVIDENCE_POLICY)
@@ -312,15 +318,13 @@ def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
     if not value:
         raise RuntimeError("explicit BASE is required")
 
-    candidates = [value]
-
     is_sha = bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value))
-    if (
-        not is_sha
-        and not value.startswith("origin/")
-        and not value.startswith("refs/")
-    ):
-        candidates.append(f"origin/{value}")
+    if is_sha or value.startswith("origin/") or value.startswith("refs/"):
+        candidates = [value]
+    else:
+        # Bare branch names mean the forge-tracking branch first. A stale local
+        # branch must never outrank the fetched PR base used by publish/deliver.
+        candidates = [f"origin/{value}", value]
 
     resolved_ref = None
     resolved_sha = None
@@ -355,8 +359,10 @@ def resolve_base_ref(base: str, *, head: str = "HEAD") -> tuple[str, str]:
 
 def reusable_exact_evidence(
     head: str = "HEAD",
+    *,
+    expected_base: str = "",
 ) -> tuple[Path, dict] | None:
-    """Return exact PASS evidence when its recorded base still ancestors HEAD."""
+    """Return exact PASS evidence only when its base identity is still exact."""
     policy = ci_evidence_policy()
     evidence_policy = policy["evidence"]
 
@@ -382,6 +388,7 @@ def reusable_exact_evidence(
         return None
 
     base_sha = str(data.get("base_sha", "")).strip()
+    recorded_base_ref = str(data.get("base_ref", "")).strip()
 
     if (
         data.get("status") != "PASS"
@@ -397,6 +404,34 @@ def reusable_exact_evidence(
         capture=True,
     ).returncode:
         return None
+
+    if expected_base:
+        try:
+            _expected_ref, expected_base_sha = resolve_base_ref(
+                expected_base,
+                head=requested,
+            )
+        except RuntimeError:
+            return None
+        if expected_base_sha != base_sha:
+            return None
+    else:
+        # Without an explicit caller-supplied base, only a symbolic recorded ref
+        # may authorize reuse. A raw SHA cannot detect branch retargeting/drift.
+        if (
+            not recorded_base_ref
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", recorded_base_ref)
+        ):
+            return None
+        try:
+            _recorded_ref, recorded_base_sha = resolve_base_ref(
+                recorded_base_ref,
+                head=requested,
+            )
+        except RuntimeError:
+            return None
+        if recorded_base_sha != base_sha:
+            return None
 
     return path, data
 
@@ -1584,8 +1619,9 @@ def worktree_tree_sha() -> str:
     index_path = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index").strip())
     with tempfile.TemporaryDirectory(prefix="ecommerce-worktree-index-") as temp_dir:
         temporary_index = Path(temp_dir) / "index"
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = str(temporary_index)
+        env = qualification_environment(
+            {"GIT_INDEX_FILE": str(temporary_index)}
+        )
         if index_path.is_file():
             shutil.copy2(index_path, temporary_index)
         else:
@@ -1688,7 +1724,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
 
 
 def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
-    exact = reusable_exact_evidence(head)
+    exact = reusable_exact_evidence(head, expected_base=base_ref)
     if exact is None:
         return None
 
@@ -1959,8 +1995,7 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
         records.append({"gate": component, "status": "SKIP", "reason": reason, "duration_seconds": 0.0})
         rc = 0
     else:
-        env = os.environ.copy()
-        env.update({"BASE": base, "HEAD": head})
+        env = qualification_environment({"BASE": base, "HEAD": head})
         rc = 0 if _run_gate(component, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"component-{component}"), {"head_sha": requested, "records": records})
     return rc
@@ -2156,8 +2191,7 @@ def verify_change(base: str, head: str) -> int:
     paths = changed_paths(base, head)
     components = affected(base, head)
     records: list[dict] = []
-    env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
+    env = qualification_environment({"BASE": base, "HEAD": head})
 
     def run_stable_gate(name: str, command: list[str]) -> bool:
         before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
@@ -2571,23 +2605,23 @@ def precommit() -> int:
 
 def prepush() -> int:
     head = git("rev-parse", "HEAD").strip()
+    explicit_base = os.environ.get("BASE", "").strip()
 
-    exact = reusable_exact_evidence(head)
+    if not explicit_base:
+        return fail(
+            "prepush requires explicit BASE=<ref>; refusing to infer the PR target "
+            "from ancestry or stale local branch state",
+            1,
+        )
+
+    exact = reusable_exact_evidence(head, expected_base=explicit_base)
     if exact is not None:
         path, data = exact
         print(
             f"PASS prepush: reusing exact evidence "
-            f"{path.relative_to(ROOT)} for recorded base {data['base_sha']}"
+            f"{path.relative_to(ROOT)} for exact base {data['base_sha']}"
         )
         return 0
-
-    explicit_base = os.environ.get("BASE", "").strip()
-    if not explicit_base:
-        return fail(
-            "prepush requires reusable exact PASS evidence or explicit BASE=<ref>; "
-            "refusing to assume main/origin-main",
-            1,
-        )
 
     return verify_change(explicit_base, head)
 

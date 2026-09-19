@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -19,9 +20,20 @@ class CanonicalContractSystemTest(unittest.TestCase):
         self.assertFalse((ROOT / ".gitleaks.toml").exists())
 
     def test_toolchain_legacy_files_are_projections_only(self):
+        path = ROOT / "config/contracts/toolchain-lock.yaml"
         lock = MOD.load_yaml(ROOT, "config/contracts/toolchain-lock.yaml")
+        self.assertEqual("json", lock["serialization"])
+        self.assertIsInstance(json.loads(path.read_text(encoding="utf-8")), dict)
         self.assertEqual("derived-projection", lock["legacy_projections"]["versions_env"]["authority"])
         self.assertEqual("derived-projection", lock["legacy_projections"]["capabilities_json"]["authority"])
+
+    def test_ci_evidence_is_a_required_canonical_contract(self):
+        lock = MOD.load_yaml(ROOT, "architecture.lock.yaml")
+        required = lock["repository_governance"]["canonical_contract_system"]["required_contracts"]
+        self.assertIn("ci_evidence", required)
+        evidence = MOD.load_yaml(ROOT, lock["machine_contracts"]["ci_evidence"])
+        self.assertEqual("CIEvidencePolicy", evidence["kind"])
+        self.assertIn("repository.ci.base-resolution", evidence["authority_claims"])
 
     def test_materializers_do_not_treat_legacy_versions_as_authority(self):
         ansible_defaults = (

@@ -13,6 +13,45 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_bare_base_resolution_prefers_origin_tracking_ref(self):
+        remote_sha = "1" * 40
+        local_sha = "2" * 40
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            candidate = command[-1] if command[:3] == ["git", "rev-parse", "--verify"] else ""
+            if candidate == "origin/stacked-base^{commit}":
+                return subprocess.CompletedProcess(command, 0, remote_sha + "\n", "")
+            if candidate == "stacked-base^{commit}":
+                return subprocess.CompletedProcess(command, 0, local_sha + "\n", "")
+            if command[:3] == ["git", "merge-base", "--is-ancestor"]:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            raise AssertionError(command)
+
+        with mock.patch.object(MOD, "run", side_effect=fake_run):
+            ref, sha = MOD.resolve_base_ref("stacked-base", head="HEAD")
+
+        self.assertEqual("origin/stacked-base", ref)
+        self.assertEqual(remote_sha, sha)
+        self.assertEqual("origin/stacked-base^{commit}", calls[0][-1])
+
+    def test_qualification_entrypoints_use_canonical_environment(self):
+        import inspect
+
+        self.assertIn(
+            'qualification_environment({"BASE": base, "HEAD": head})',
+            inspect.getsource(MOD.verify_change),
+        )
+        self.assertIn(
+            'qualification_environment({"BASE": base, "HEAD": head})',
+            inspect.getsource(MOD.ci_component),
+        )
+        self.assertIn(
+            'qualification_environment(\n            {"GIT_INDEX_FILE": str(temporary_index)}\n        )',
+            inspect.getsource(MOD.worktree_tree_sha),
+        )
+
     def test_qualification_environment_is_canonical_and_git_isolated(self):
         inherited = {
             "GIT_DIR": "/tmp/parent/.git",

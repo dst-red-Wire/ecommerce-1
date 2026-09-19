@@ -144,6 +144,13 @@ def validate_repository(root: Path = ROOT) -> None:
             raise ContractError(f"parallel policy authority is forbidden: {relative}")
 
     toolchain=canonical["toolchain_lock"]
+    if toolchain.get("serialization") != "json":
+        raise ContractError("toolchain lock serialization must remain json for bootstrap/Ansible consumers")
+    try:
+        json.loads((root/registry["toolchain_lock"]).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ContractError("toolchain lock must remain valid JSON despite its .yaml compatibility path") from exc
+
     vp=toolchain.get("legacy_projections",{}).get("versions_env",{})
     projected=parse_versions_env(root/str(vp.get("path","")))
     expected={str(k):str(v) for k,v in toolchain.get("versions",{}).items()}

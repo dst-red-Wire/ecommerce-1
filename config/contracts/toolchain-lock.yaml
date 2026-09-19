@@ -2,6 +2,7 @@
   "version": 1,
   "kind": "ToolchainLock",
   "status": "exact",
+  "serialization": "json",
   "architecture_authority": "architecture.lock.yaml",
   "scope": "entire-repository",
   "authority_claims": [
