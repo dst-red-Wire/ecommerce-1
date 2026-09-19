@@ -746,7 +746,8 @@ class ArchitectureValidatorTest < Minitest::Test
       yaml_contracts = lock.fetch("machine_contracts").values.reject { |path| File.extname(path) == ".json" }
       (["architecture.lock.yaml"] + yaml_contracts).each do |path|
         original = File.read(File.join(root, path))
-        File.write(File.join(root, path), original + "\nprobe:\n  items:\n    - true: first\n      True: second\n")
+        separator = original.lstrip.start_with?("{", "[") ? "\n---\n" : "\n"
+        File.write(File.join(root, path), original + separator + "probe:\n  items:\n    - true: first\n      True: second\n")
         errors = ArchitectureValidator.validate(root)
         assert_equal 1, errors.size, path
         assert_includes errors.first, path

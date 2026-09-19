@@ -1,0 +1,12 @@
+version: 1
+kind: PolicyExceptions
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+authority_claims: [governance.policy-exceptions]
+principles:
+  implicit_exception: forbidden
+  permanent_exception: forbidden
+  local_bypass_without_registry_entry: forbidden
+required_fields: [id, contract, rule, scope, owner, justification, created, expires]
+exceptions: []

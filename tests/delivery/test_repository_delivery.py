@@ -235,13 +235,49 @@ class BundleDeliveryTests(unittest.TestCase):
                     return subprocess.CompletedProcess(cmd, 0, "", "")
                 return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
 
+            canonical_env = {
+                "PATH": "/usr/bin",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.hooksPath",
+                "GIT_CONFIG_VALUE_0": "/dev/null",
+            }
             with mock.patch.object(RD, "_run", side_effect=fake_run):
-                rc = RD.bundle_deliver(source, trusted, str(bundle), head, "Proof PR", "main", "python3")
+                rc = RD.bundle_deliver(
+                    source,
+                    trusted,
+                    str(bundle),
+                    head,
+                    "Proof PR",
+                    "main",
+                    "python3",
+                    canonical_env,
+                )
             self.assertEqual(0, rc)
             self.assertEqual(before, RD._worktree_snapshot(source))
             self.assertNotEqual(source, seen["cwd"])
             self.assertIn(str(trusted), seen["cmd"])
             self.assertEqual(str(trusted), seen["env"]["REPOCTL_TRUSTED_CONTROLLER"])
+            self.assertEqual("1", seen["env"]["GIT_CONFIG_NOSYSTEM"])
+            self.assertEqual("/dev/null", seen["env"]["GIT_CONFIG_VALUE_0"])
+
+    def test_bundle_delivery_rejects_implicit_base(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            trusted = root / "trusted.py"
+            trusted.write_text("print('trusted')\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "explicit BASE"):
+                RD.bundle_deliver(
+                    root,
+                    trusted,
+                    str(root / "missing.bundle"),
+                    "a" * 40,
+                    "Proof PR",
+                    "",
+                    "python3",
+                    {},
+                )
 
 
 class RemoteStatusTests(unittest.TestCase):

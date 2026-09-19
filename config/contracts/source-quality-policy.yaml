@@ -1,7 +1,10 @@
 version: 1
+kind: SourceQualityPolicy
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
+authority_claims:
+  - repository.quality.source
 
 principles:
   source_mutation_during_qualification: forbidden

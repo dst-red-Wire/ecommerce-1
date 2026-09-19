@@ -1,7 +1,10 @@
 version: 1
+kind: TerraformProviderLock
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: platform/terraform
+authority_claims:
+  - platform.terraform.providers
 
 terraform_cli:
   required_version: ">= 1.15.0, < 2.0.0"
@@ -43,6 +46,16 @@ qualification:
     - -lockfile=readonly
   validate_args:
     - validate
+  source_projection:
+    authority: architecture.lock.yaml#machine_contracts.execution_environment_policy
+    preserve_repository_relative_paths: true
+    roots:
+      - platform/terraform
+      - config/infrastructure
+    ignored_names:
+      - .terraform
+      - .terraform.lock.hcl
+
   provider_plugin_cache:
     root_source: ECOMMERCE_TOOL_HOME
     fallback_root: ~/.cache/ecommerce-1

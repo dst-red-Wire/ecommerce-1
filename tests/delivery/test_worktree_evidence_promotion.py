@@ -18,6 +18,13 @@ MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 
 class WorktreeEvidencePromotionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Load the repository-owned execution policy before individual tests
+        # replace REPOCTL.ROOT with intentionally minimal temporary Git repos.
+        REPOCTL.execution_environment_policy()
+
     def init_repo(self, root: Path) -> str:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
@@ -30,7 +37,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
-            'ci: ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE',
+            'ci: ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-}" --head WORKTREE',
             MAKEFILE,
         )
         self.assertIn(
@@ -98,7 +105,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 "gitleaks",
                 "dir",
                 "--config",
-                ".gitleaks.toml",
+                "$str:config",
                 "--redact",
                 "--no-banner",
                 "$str:scan_root",

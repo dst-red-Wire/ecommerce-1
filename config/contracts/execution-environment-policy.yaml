@@ -1,0 +1,54 @@
+version: 1
+kind: ExecutionEnvironmentPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: repository-execution
+authority_claims:
+  - repository.execution.environments
+  - repository.execution.qualification-isolation
+
+principles:
+  static_qualification_must_not_require_container_runtime: true
+  external_runtime_capabilities_may_block_runtime_profile_only: true
+  repository_must_not_install_docker_daemon: true
+  qualification_must_not_mutate_parent_repository: true
+  temporary_projections_preserve_repository_relative_paths: true
+
+qualification_isolation:
+  git:
+    inherited_repository_context: forbidden
+    drop_inherited_prefixes:
+      - GIT_
+    system_config: disabled
+    global_config: disabled
+    nested_hooks: disabled
+    hooks_path: /dev/null
+    parent_index_mutation: forbidden
+    parent_worktree_mutation: forbidden
+
+  temporary_repository_projection:
+    preserve_repository_relative_paths: true
+    source_mutation: forbidden
+    projection_mutation: isolated
+
+environments:
+  linux-native:
+    static: supported
+
+  wsl2:
+    static: supported
+    docker_runtime:
+      provider: docker-desktop-or-compatible
+      ownership: external
+
+  codex-cloud:
+    static: supported
+    docker_runtime:
+      requirement: optional-runtime
+      absence: platform-not-capable
+
+profiles:
+  static:
+    external_runtime_required: false
+  runtime:
+    external_runtime_required: true
