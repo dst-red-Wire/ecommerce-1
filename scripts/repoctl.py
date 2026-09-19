@@ -624,7 +624,15 @@ def required_ansible_collections(requirements: Path | None = None) -> dict[str, 
             if name is not None:
                 raise RuntimeError(f"missing version for Ansible collection {name} in {source}")
             name = match.group(1)
-        elif match := re.match(r'\s+version:\s*["\']?([\w.-]+)["\']?\s*
+        elif match := re.match(r'\s+version:\s*["\']?([\w.-]+)["\']?\s*$', raw):
+            if name is None or name in result:
+                raise RuntimeError(f"invalid Ansible collection requirement in {source}")
+            result[name] = match.group(1)
+            name = None
+    if name is not None or not result:
+        raise RuntimeError(f"invalid Ansible collection requirements in {source}")
+    return result
+
 
 def resolved_ansible_collection_version(name: str, collections_root: Path = PROJECT_COLLECTIONS) -> str | None:
     """Return the version Ansible can resolve from its isolated project path."""
