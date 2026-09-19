@@ -1223,7 +1223,7 @@ def site() -> int:
                     continue
                 if os.name == "nt":
                     subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        [str(Path(os.environ.get("SystemRoot", r"C:\\Windows")) / "System32/taskkill.exe"), "/PID", str(process.pid), "/T", "/F"],
                         check=False,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
@@ -1796,8 +1796,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or not _fresh_evidence(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
-        or not isinstance(evidence.get("gates"), list)
-        or any(record.get("status") not in {"PASS", "SKIP"} for record in evidence.get("gates", []))
+        or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
     ):
         return None
     return evidence
@@ -1824,6 +1823,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or source.get("head_tree_sha") != source_tree
         or source.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(source)
+        or not _complete_gate_inventory(source, base_ref, "WORKTREE")
     ):
         return None
 
@@ -1994,8 +1994,6 @@ def qualification_identity() -> str:
         if command == ("docker", "info"):
             args += ["--format", "{{json .}}"]
         result = run([executable, *args[1:]], check=False, capture=True)
-        if runtime and result.returncode:
-            raise RuntimeError("qualification runtime identity probe failed")
         value = result.stdout
         if command == ("docker", "info"):
             info = json.loads(value)
@@ -2093,12 +2091,15 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         return None, None
     base_sha = git("rev-parse", base).strip()
     if (
-        evidence.get("schema_version", 0) < 2
+        not _supported_evidence_schema(evidence, 5)
         or evidence.get("status") != "PASS"
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("head_sha") != parent_sha
         or evidence.get("base_sha") != base_sha
-        or not isinstance(evidence.get("gates"), list)
+        or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
+        or evidence.get("qualification_identity") != qualification_identity()
+        or not _fresh_evidence(evidence)
+        or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
     return parent_sha, evidence
