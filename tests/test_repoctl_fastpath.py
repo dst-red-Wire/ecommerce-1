@@ -39,7 +39,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
                 "hcloud": {
                     "source": "registry.terraform.io/hetznercloud/hcloud",
                     "version": "1.68.0",
-                    "constraints": "= 1.68.0",
+                    "constraints": "1.68.0",
                     "hashes": ["h1:test", "zh:test"],
                 }
             },
@@ -83,7 +83,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         provider = contract["providers"]["hcloud"]
         self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])
         self.assertEqual("1.68.0", provider["version"])
-        self.assertEqual("= 1.68.0", provider["constraints"])
+        self.assertEqual("1.68.0", provider["constraints"])
         self.assertTrue(any(value.startswith("h1:") for value in provider["hashes"]))
         self.assertTrue(any(value.startswith("zh:") for value in provider["hashes"]))
 
@@ -100,7 +100,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
         self.assertIn('version     = "1.68.0"', text)
-        self.assertIn('constraints = "= 1.68.0"', text)
+        self.assertIn('constraints = "1.68.0"', text)
         self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
 
 
