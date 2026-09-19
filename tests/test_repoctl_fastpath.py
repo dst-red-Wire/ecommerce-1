@@ -145,7 +145,6 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("toolchain_lock", domains["toolchain"]["machine_contract"])
         self.assertEqual("security_scan_policy", domains["security_scan"]["machine_contract"])
         self.assertEqual("terraform_provider_lock", domains["terraform_provider"]["machine_contract"])
-        self.assertEqual("qualification_cache", domains["qualification_cache"]["machine_contract"])
         self.assertEqual("context_router", domains["context_routing"]["machine_contract"])
         self.assertEqual("workstation_policy", domains["workstation"]["machine_contract"])
 

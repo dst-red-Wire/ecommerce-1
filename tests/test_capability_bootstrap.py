@@ -144,7 +144,7 @@ class CapabilityGraphTest(unittest.TestCase):
 
     def test_qualification_virtualenv_is_ignored(self):
         ignored = subprocess.run(
-            ["git", "check-ignore", ".venv/qualification/pyvenv.cfg"],
+            ["git", "check-ignore", ".venv/qualification"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -1396,7 +1396,7 @@ class CapabilityClosureTest(unittest.TestCase):
         )
         makefile = (ROOT / "Makefile").read_text()
         self.assertIn("quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries", makefile)
-        self.assertIn("@$(ANSIBLE_LOCAL) --tags quality_tools", makefile)
+        self.assertIn("@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools", makefile)
         self.assertIn("--tags toolchain,node,agent_tools,context_tools", makefile)
 
         # Exact regression mutation: tasks still carry `toolchain`, but the old
@@ -1409,7 +1409,7 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical = MOD.load_contract()
         MOD.validate_contract(canonical)
         names = {item["name"] for item in canonical["capabilities"]}
-        for name in ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize"):
+        for name in ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize", "bazel"):
             self.assertIn(name, names)
 
     def test_unknown_gate_command_is_rejected(self):
