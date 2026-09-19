@@ -147,7 +147,20 @@ def git(*args: str, check: bool = True) -> str:
 def ruby_yaml(path: str) -> dict:
     require("ruby")
     script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
-    return json.loads(output(["ruby", "-e", script, path]))
+    result = subprocess.run(
+        ["ruby", "-e", script, path],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError((result.stderr or result.stdout or "").strip() or f"Ruby YAML parse failed: {path}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Ruby YAML parser returned invalid JSON for {path}") from exc
 
 
 _SOURCE_QUALITY_POLICY: dict | None = None
