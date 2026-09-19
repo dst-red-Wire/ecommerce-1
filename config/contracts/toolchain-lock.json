@@ -165,7 +165,17 @@
     ],
     "managed_bin_subdirectories": [
       ".local/bin"
-    ]
+    ],
+    "command_capabilities": {
+      "ansible": "ansible-core",
+      "gofmt": "go",
+      "pnpm": "pnpm",
+      "docker": "docker",
+      "terraform": "terraform",
+      "tofu": "terraform",
+      "sysctl": "container-network-forwarding",
+      "bazel": "bazel"
+    }
   },
   "native_tool_configs": {
     "bazel": {
