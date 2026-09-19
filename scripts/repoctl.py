@@ -1718,6 +1718,65 @@ def git_sync() -> int:
     return 0
 
 
+def _validate_repository_delivery_policy(policy: dict) -> dict:
+    if not isinstance(policy, dict):
+        raise RuntimeError("review-policy repository_delivery must be a mapping")
+    required_sections = {"publish", "pull_request", "merge", "cleanup"}
+    missing = sorted(required_sections - set(policy))
+    if missing:
+        raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
+    if policy.get("forge") != "github":
+        raise RuntimeError("repository_delivery forge must be github")
+    if not str(policy.get("default_branch", "")).strip():
+        raise RuntimeError("repository_delivery default_branch is required")
+
+    publish_policy = policy["publish"]
+    pull_request_policy = policy["pull_request"]
+    merge_policy = policy["merge"]
+    cleanup_policy = policy["cleanup"]
+    required_invariants = (
+        (publish_policy.get("qualification") == "exact-sha", "publish qualification must be exact-sha"),
+        (publish_policy.get("exact_evidence_required") is True, "publish exact evidence must be required"),
+        (publish_policy.get("force_push") == "forbidden", "force-push must be forbidden"),
+        (
+            publish_policy.get("direct_default_branch_write") == "forbidden",
+            "direct default-branch writes must be forbidden",
+        ),
+        (pull_request_policy.get("required") is True, "pull request must be required"),
+        (pull_request_policy.get("head_sha_binding") == "exact", "pull request head binding must be exact"),
+        (pull_request_policy.get("draft_merge") == "forbidden", "draft PR merge must be forbidden"),
+        (
+            pull_request_policy.get("record_after_merge") == "retained-by-forge",
+            "merged PR record must be retained by the forge",
+        ),
+        (merge_policy.get("method") in {"merge", "squash", "rebase"}, "unsupported merge method"),
+        (merge_policy.get("match_head_commit") == "required", "merge must match the exact head commit"),
+        (merge_policy.get("branch_protection") == "required", "branch protection must be required"),
+        (merge_policy.get("required_checks") == "required", "required checks must be required"),
+        (
+            merge_policy.get("bypass_branch_protection") == "forbidden",
+            "branch-protection bypass must be forbidden",
+        ),
+        (cleanup_policy.get("merged_pr_state") == "merged-closed", "merged PR state must be merged-closed"),
+        (cleanup_policy.get("remote_branch") == "delete", "remote feature branch cleanup must be delete"),
+        (cleanup_policy.get("local_branch") == "delete", "local feature branch cleanup must be delete"),
+    )
+    for valid, message in required_invariants:
+        if not valid:
+            raise RuntimeError(f"invalid repository_delivery contract: {message}")
+    return policy
+
+
+def repository_delivery_policy() -> dict:
+    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
+
+
+def _remote_ref_sha(ref: str) -> str:
+    result = run(["git", "rev-parse", "--verify", ref], check=False, capture=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def publish(base: str, message: str) -> int:
     branch = git("branch", "--show-current").strip()
     if not branch or branch in {"main", "master"}:
@@ -1868,6 +1927,144 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def finish_pr(base: str) -> int:
+    policy = repository_delivery_policy()
+    base_name = base.removeprefix("origin/")
+    default_branch = str(policy["default_branch"])
+    if base_name != default_branch:
+        return fail(f"finish-pr base must match contract default branch {default_branch!r}")
+
+    branch = git("branch", "--show-current").strip()
+    if not branch or branch in {default_branch, "master"}:
+        return fail("finish-pr requires a checked-out feature branch")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("finish-pr requires a clean worktree")
+
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        return fail("GitHub CLI missing")
+
+    run(["git", "fetch", "origin", "--prune"])
+    base_ref = f"origin/{base_name}"
+    if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
+        return fail(f"finish-pr branch is not based on current {base_ref}")
+
+    head = git("rev-parse", "HEAD").strip()
+    remote_head = _remote_ref_sha(f"origin/{branch}")
+    if remote_head != head:
+        return fail(f"finish-pr remote head mismatch: local {head}, origin/{branch} {remote_head or 'missing'}")
+
+    evidence = _valid_exact_evidence(base_ref, head)
+    if evidence is None:
+        if verify_change(base_ref, head):
+            return 1
+        evidence = _valid_exact_evidence(base_ref, head)
+    if evidence is None:
+        return fail(f"finish-pr exact PASS evidence missing for {head}")
+
+    raw_prs = output(
+        [
+            gh,
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--base",
+            base_name,
+            "--state",
+            "open",
+            "--limit",
+            "2",
+            "--json",
+            "number,url,headRefOid,baseRefName,isDraft",
+        ]
+    )
+    prs = json.loads(raw_prs or "[]")
+    if len(prs) != 1:
+        return fail(f"finish-pr requires exactly one open PR for {branch} -> {base_name}; found {len(prs)}")
+    pr = prs[0]
+    number = int(pr["number"])
+    if pr.get("isDraft"):
+        return fail(f"finish-pr refuses draft PR #{number}")
+    if pr.get("baseRefName") != base_name:
+        return fail(f"finish-pr PR #{number} base mismatch: {pr.get('baseRefName')!r}")
+    if pr.get("headRefOid") != head:
+        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {pr.get('headRefOid')!r}")
+
+    protection = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
+        check=False,
+        capture=True,
+    )
+    if protection.returncode:
+        detail = (protection.stderr or protection.stdout or "").strip()
+        return fail(f"finish-pr cannot prove branch protection for {base_name}: {detail or 'GitHub API rejected query'}")
+
+    checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
+    if checks.returncode:
+        detail = "\n".join(filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()]))
+        if detail:
+            print(detail, file=sys.stderr)
+        return fail(f"finish-pr required checks are not PASS for PR #{number}")
+
+    merge_method = str(policy["merge"]["method"])
+    merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
+    merged = run(
+        [
+            gh,
+            "pr",
+            "merge",
+            str(number),
+            merge_flag,
+            "--delete-branch",
+            "--match-head-commit",
+            head,
+        ],
+        check=False,
+        capture=True,
+    )
+    if merged.returncode:
+        detail = "\n".join(filter(None, [(merged.stdout or "").strip(), (merged.stderr or "").strip()]))
+        if detail:
+            print(detail, file=sys.stderr)
+        return fail(f"finish-pr merge refused for PR #{number}")
+
+    merged_state = json.loads(
+        output([gh, "pr", "view", str(number), "--json", "state,mergedAt,headRefOid,baseRefName"])
+    )
+    if merged_state.get("state") != "MERGED" or not merged_state.get("mergedAt"):
+        return fail(f"finish-pr PR #{number} did not reach MERGED state")
+    if merged_state.get("headRefOid") != head:
+        return fail(f"finish-pr merged PR #{number} no longer binds expected head {head}")
+
+    run(["git", "fetch", "origin", "--prune"])
+    remote_branch = run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", f"refs/heads/{branch}"],
+        check=False,
+        capture=True,
+    )
+    if remote_branch.returncode == 0:
+        deletion = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
+        if deletion.returncode:
+            detail = (deletion.stderr or deletion.stdout or "").strip()
+            return fail(f"finish-pr could not delete remote branch {branch}: {detail}")
+
+    switch = run(["git", "switch", base_name], check=False, capture=True)
+    if switch.returncode:
+        run(["git", "switch", "-c", base_name, "--track", f"origin/{base_name}"])
+    run(["git", "merge", "--ff-only", f"origin/{base_name}"])
+
+    local_branch = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
+    if local_branch.returncode == 0:
+        run(["git", "branch", "-d", branch])
+
+    print(
+        f"PASS finish-pr: PR #{number} merged at exact head {head}; "
+        f"PR record retained by GitHub; remote/local branch {branch} removed"
+    )
+    return 0
+
+
 def precommit() -> int:
     return verify_change("HEAD", "WORKTREE")
 
@@ -1952,10 +2149,15 @@ def main() -> int:
     pub = sub.add_parser("publish")
     pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pub.add_argument("--message", default=os.environ.get("MSG", ""))
+    pubc = sub.add_parser("publish-change")
+    pubc.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pubc.add_argument("--message", default=os.environ.get("MSG", ""))
     dlv = sub.add_parser("deliver")
     dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
+    fin = sub.add_parser("finish-pr")
+    fin.add_argument("--base", default=os.environ.get("BASE", "main"))
     bdlv = sub.add_parser("bundle-deliver")
     bdlv.add_argument("--bundle", required=True)
     bdlv.add_argument("--expected-head", required=True)
@@ -2053,8 +2255,12 @@ def main() -> int:
             return git_sync()
         if args.cmd == "publish":
             return publish(args.base, args.message)
+        if args.cmd == "publish-change":
+            return publish(args.base, args.message)
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
+        if args.cmd == "finish-pr":
+            return finish_pr(args.base)
         if args.cmd == "bundle-deliver":
             return isolated_bundle_deliver(
                 ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable
