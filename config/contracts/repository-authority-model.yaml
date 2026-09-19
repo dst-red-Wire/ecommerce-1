@@ -1,0 +1,150 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+
+principle:
+  one_root_authority: architecture.lock.yaml
+  cross_cutting_policy: central-contract-only
+  generic_enforcement: required
+  per_file_policy_duplication: forbidden
+  consumer_local_override: forbidden
+
+domains:
+  source_quality:
+    machine_contract: source_quality_policy
+  toolchain:
+    machine_contract: toolchain_lock
+  security_scan:
+    machine_contract: security_scan_policy
+  terraform_provider:
+    machine_contract: terraform_provider_lock
+  qualification_cache:
+    machine_contract: qualification_cache
+  context_routing:
+    machine_contract: context_router
+  workstation:
+    machine_contract: workstation_policy
+  contract_registry:
+    authority: architecture.lock.yaml#machine_contracts
+
+artifact_classes:
+  central_contract:
+    may_define_cross_cutting_policy: true
+  native_projection:
+    may_define_cross_cutting_policy: false
+    drift: blocking
+    must_name_authority: true
+  orchestration_adapter:
+    may_define_cross_cutting_policy: false
+    must_delegate_to: scripts/repoctl.py
+  component_manifest:
+    may_define_cross_cutting_policy: false
+    may_define_component_dependencies: true
+    may_define_component_schema: true
+
+native_projections:
+  - path: config/toolchain/versions.env
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: platform/ansible/requirements.yml
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: platform/ansible/ansible.cfg
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: config/python/requirements.lock
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: config/toolchain/capabilities.json
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .bazelversion
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .bazelrc
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  - path: .config/configuration.winget
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
+  - path: config/workstation/git-local.conf
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
+  - path: config/workstation/wslconfig.template
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.workstation_policy
+  - path: platform/terraform/environments/mgmt/.terraform.lock.hcl
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
+  - path: platform/terraform/environments/qualification/.terraform.lock.hcl
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.terraform_provider_lock
+
+orchestration_adapters:
+  - path: Makefile
+    forbidden_markers:
+      - versions.env
+      - MANAGED_BIN
+      - $(HOME)/.local/bin
+      - ANSIBLE_LOCAL
+      - "@ansible-playbook"
+      - "@bazel "
+      - "@ruby "
+  - path: frontend/Makefile
+    forbidden_markers:
+      - versions.env
+      - TEMPL_VERSION
+      - "@go "
+  - path: .pre-commit-config.yaml
+    forbidden_markers:
+      - minimum_pre_commit_version
+      - PRE_COMMIT_VERSION
+      - ruff
+      - gitleaks
+      - ansible-lint
+      - terraform fmt
+
+component_manifests:
+  - pattern: go.work
+    kind: go-workspace
+  - pattern: frontend/go.mod
+    kind: go-module
+  - pattern: services/*/go.mod
+    kind: go-module
+  - pattern: services/*/sqlc.yaml
+    kind: sqlc-component
+  - pattern: frontend/go.sum
+    kind: go-module-lock
+  - pattern: services/*/go.sum
+    kind: go-module-lock
+  - pattern: MODULE.bazel
+    kind: bazel-module
+  - pattern: MODULE.bazel.lock
+    kind: bazel-module-lock
+  - pattern: BUILD.bazel
+    kind: bazel-build
+  - pattern: services/*/Containerfile
+    kind: container-build
+  - pattern: contracts/openapi/*.yaml
+    kind: openapi-component
+
+forbidden_parallel_policy_files:
+  - .ansible-lint
+  - ruff.toml
+  - .ruff.toml
+  - .gitleaks.toml
+  - .gitleaks.yaml
+  - .golangci.yml
+  - .golangci.yaml
+  - .yamllint
+  - .tflint.hcl
+  - .terraformrc
+  - terraform.rc
+
+validation:
+  undeclared_cross_cutting_policy: blocking
+  projection_drift: blocking
+  missing_projection: blocking
+  missing_authority: blocking
+  adapter_policy_value: blocking

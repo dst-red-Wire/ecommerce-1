@@ -18,6 +18,29 @@ class ArchitectureAuthorityTest(unittest.TestCase):
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
 
+    def test_yaml_parse_cache_is_content_addressed_and_mutation_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.yaml"
+            second_path = root / "second.yaml"
+            payload = "root:\n  value: one\n"
+            first_path.write_text(payload, encoding="utf-8")
+            second_path.write_text(payload, encoding="utf-8")
+
+            authority.clear_yaml_parse_cache()
+            first = authority.load_yaml(first_path)
+            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+
+            first["root"]["value"] = "mutated-in-caller"
+            second = authority.load_yaml(second_path)
+            self.assertEqual("one", second["root"]["value"])
+            self.assertEqual(1, len(authority._YAML_PARSE_CACHE))
+
+            second_path.write_text("root:\n  value: two\n", encoding="utf-8")
+            changed = authority.load_yaml(second_path)
+            self.assertEqual("two", changed["root"]["value"])
+            self.assertEqual(2, len(authority._YAML_PARSE_CACHE))
+
     def test_active_superseded_statements(self):
         for statement in (
             "Exactly 17 services.",
@@ -407,6 +430,25 @@ graph LR
                     lock.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+    def test_review_policy_cannot_override_root_owner_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            policy.write_text(
+                original.replace(
+                    "    authority_source: architecture.lock.yaml#repository_governance.owner_authorization",
+                    "    authority_source: config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
+                    1,
+                )
+            )
+            self.assertIn(
+                "review policy must inherit repository_governance.owner_authorization without local override",
+                authority.validate(root),
+            )
+            policy.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
@@ -465,6 +507,7 @@ graph LR
         for relative in ("architecture.lock.yaml", "AGENTS.md", "README.md"):
             shutil.copy2(ROOT / relative, root / relative)
         shutil.copytree(ROOT / "config", root / "config")
+        shutil.copytree(ROOT / "contracts", root / "contracts")
         shutil.copytree(ROOT / "docs", root / "docs")
         shutil.copytree(ROOT / "instruction", root / "instruction")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -638,7 +681,7 @@ graph LR
                 "platform keys",
             ),
             ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
-            ("  gitops: rancher-fleet\n  bootstrap:", "  bootstrap:", "management_plane keys"),
+            ("  developer_portal: backstage\n  bootstrap:", "  bootstrap:", "management_plane keys"),
             (
                 "    migration_source: nextjs-react-node",
                 "    migration_source: nextjs-react-node\n    package_manager: npm",
@@ -870,62 +913,42 @@ graph LR
                 path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_required_topology_contract_registrations_are_rejected_when_file_is_also_deleted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = self.copy_repository(directory)
-            lock_path = root / "architecture.lock.yaml"
-            original_lock = lock_path.read_text()
-            for key, relative in (
-                ("prod", "docs/architecture/PROD_TOPOLOGY_V2.md"),
-                ("mlops", "docs/architecture/MLOPS_TOPOLOGY_V1.md"),
-            ):
-                with self.subTest(key=key):
-                    mutated = re.sub(rf"^  {key}: .*\n", "", original_lock, count=1, flags=re.M)
-                    lock_path.write_text(mutated)
-                    path = root / relative
-                    contents = path.read_text()
-                    path.unlink()
-                    self.assertTrue(
-                        any("complete approved V5 role/path registry" in error for error in authority.validate(root))
-                    )
-                    path.write_text(contents)
-                    lock_path.write_text(original_lock)
-            self.assertEqual([], authority.validate(root))
-
-    def test_missing_topology_contract_registrations_return_registry_error(self):
+    def test_unregistered_topology_contract_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             lock_path = root / "architecture.lock.yaml"
             original = lock_path.read_text()
-            for key in ("mlops", "prod"):
-                with self.subTest(key=key):
-                    lock_path.write_text(re.sub(rf"^  {key}: .*\n", "", original, count=1, flags=re.M))
-                    self.assertEqual(
-                        ["topology_contracts must match the complete approved V5 role/path registry"],
-                        authority.validate(root),
-                    )
+            lock_path.write_text(re.sub(r"^  mlops: .*\n", "", original, count=1, flags=re.M))
+            errors = authority.validate(root)
+            self.assertTrue(any("topology_contracts has unregistered governed files" in error for error in errors))
             lock_path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_v5_registry_role_path_mutations_are_rejected(self):
+    def test_duplicate_topology_registration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             lock_path = root / "architecture.lock.yaml"
             original = lock_path.read_text()
-            for first, second in (("preprod", "prod"), ("mlops", "observability")):
-                mutated = re.sub(
-                    rf"(^  {first}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[second]}", original, flags=re.M
-                )
-                mutated = re.sub(
-                    rf"(^  {second}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[first]}", mutated, flags=re.M
-                )
-                lock_path.write_text(mutated)
-                self.assertTrue(any("topology_contracts must match" in error for error in authority.validate(root)))
-                lock_path.write_text(original)
-            mutated = original.replace("  preprod_inventory: config/infrastructure/preprod-inventory.yaml\n", "")
+            prod = re.search(r"^  prod: ([^\n]+)$", original, re.M).group(1)
+            mutated = re.sub(r"^  preprod: [^\n]+$", f"  preprod: {prod}", original, count=1, flags=re.M)
             lock_path.write_text(mutated)
-            (root / "config/infrastructure/preprod-inventory.yaml").unlink()
-            self.assertTrue(any("machine_contracts must match" in error for error in authority.validate(root)))
+            errors = authority.validate(root)
+            self.assertTrue(any("topology_contracts must not register the same path more than once" in error for error in errors))
+            lock_path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_unregistered_machine_contract_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original = lock_path.read_text()
+            lock_path.write_text(
+                original.replace("  preprod_inventory: config/infrastructure/preprod-inventory.yaml\n", "", 1)
+            )
+            errors = authority.validate(root)
+            self.assertTrue(any("machine_contracts has unregistered governed files" in error for error in errors))
+            lock_path.write_text(original)
+            self.assertEqual([], authority.validate(root))
 
     def test_m5_autonomous_domain_handoff_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

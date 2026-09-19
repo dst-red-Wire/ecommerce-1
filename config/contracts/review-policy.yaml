@@ -5,6 +5,10 @@ pull_request_review:
   forge: github
   ci: tekton
 
+  owner_authorization:
+    authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+    local_override: forbidden
+
   deterministic_gate:
     authority: true
     required_for_merge: true

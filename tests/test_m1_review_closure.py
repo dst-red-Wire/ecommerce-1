@@ -47,9 +47,11 @@ class M1ReviewClosureTests(unittest.TestCase):
         makefile = (ROOT / "frontend/Makefile").read_text(encoding="utf-8")
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn("TEMPL_VERSION :=", makefile)
-        self.assertIn("templ@v$(TEMPL_VERSION)", makefile)
+        self.assertIn("scripts/repoctl.py frontend generate all", makefile)
+        self.assertNotIn("TEMPL_VERSION", makefile)
+        self.assertNotIn("versions.env", makefile)
         self.assertIn('pinned_versions().get("TEMPL_VERSION")', frontend)
+        self.assertIn('f"github.com/a-h/templ/cmd/templ@v{templ_version}"', frontend)
         self.assertNotIn("templ@v0.", makefile + frontend)
 
     def test_frontend_tests_cover_shared_packages_once(self):
@@ -62,7 +64,8 @@ class M1ReviewClosureTests(unittest.TestCase):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         state = source[source.index("def developer_state_ready(") : source.index("def canonical_services(")]
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('managed_bin = Path.home() / ".local" / "bin"', state)
+        self.assertIn("managed_bin = managed_bin_dirs()[0]", state)
+        self.assertIn("def managed_bin_dirs()", source)
         self.assertIn('go = managed_bin / "go"', frontend)
         self.assertIn('env.pop("GOROOT", None)', frontend)
         self.assertIn('[str(go), "test"', frontend)

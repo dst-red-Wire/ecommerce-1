@@ -7,35 +7,33 @@ require "yaml"
 
 module ArchitectureValidator
   LOCK_STATUS = "locked-for-build"
-  V5_FRONTENDS = %w[storefront admin].freeze
-  DEPLOYABLE_MLOPS = %w[lakefs mlflow kserve-vllm evidently-tekton-batch].freeze
-  V5_MLOPS = {
-    "dataset_versioner" => "lakefs", "object_storage" => "seaweedfs-s3",
-    "metadata_database" => "cloudnativepg-postgresql", "experiments_lineage" => "mlflow",
-    "artifact_registry" => "harbor", "promotion_authority" => "gitea-gitops",
-    "orchestration" => "tekton", "desired_state" => "rancher-fleet",
-    "progressive_delivery" => "argo-rollouts", "runtime" => "kserve-vllm",
-    "drift" => "evidently-tekton-batch"
-  }.freeze
-  V5_TOPOLOGY_CONTRACTS = {
-    "exact_index" => "docs/architecture/EXACT_TOPOLOGY_V5.md", "preprod" => "docs/architecture/PREPROD_TOPOLOGY_V2.md",
-    "prod" => "docs/architecture/PROD_TOPOLOGY_V2.md", "network_ipam" => "docs/architecture/NETWORK_IPAM_CONTRACT.md",
-    "mgmt_wireguard_access" => "docs/architecture/MGMT_WIREGUARD_ACCESS.md", "storage" => "docs/architecture/STORAGE_TOPOLOGY_V2.md",
-    "service_ownership" => "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "data_ownership" => "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
-    "events" => "docs/architecture/EVENT_CONTRACT_MATRIX.md", "security_zones" => "docs/architecture/SECURITY_TRUST_ZONES.md",
-    "deployment_dag" => "docs/architecture/DEPLOYMENT_DAG.md", "aiops" => "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-    "mlops" => "docs/architecture/MLOPS_TOPOLOGY_V1.md", "observability" => "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md"
-  }.freeze
-  V5_MACHINE_CONTRACTS = {
-    "resilience_governance" => "config/contracts/resilience-governance.yaml", "security_trust_zones" => "config/contracts/security-trust-zones.yaml",
-    "review_policy" => "config/contracts/review-policy.yaml", "mgmt_inventory" => "config/infrastructure/mgmt-inventory.yaml",
-    "preprod_inventory" => "config/infrastructure/preprod-inventory.yaml", "prod_inventory" => "config/infrastructure/prod-inventory.yaml",
-    "network_plan" => "config/infrastructure/network-plan.yaml", "mgmt_wireguard_access" => "config/contracts/mgmt-wireguard-access.yaml",
-    "mgmt_access_gateways" => "config/infrastructure/mgmt-access-gateways.yaml", "storage_plan" => "config/infrastructure/storage-plan.yaml",
-    "deployment_waves" => "config/infrastructure/deployment-waves.yaml", "service_ownership" => "config/contracts/service-ownership.yaml",
-    "event_contracts" => "config/contracts/event-contracts.yaml", "dependency_map" => "config/contracts/dependency-map.yaml",
-    "public_api_contracts" => "config/contracts/public-api-contracts.yaml", "ci_topology" => "config/contracts/ci-topology.yaml",
-    "runtime_efficiency" => "config/contracts/runtime-efficiency.yaml", "observability_topology" => "config/contracts/observability-topology.yaml"
+  CANONICAL_ROOT = File.expand_path("..", __dir__)
+  CANONICAL_LOCK = YAML.safe_load(
+    File.read(File.join(CANONICAL_ROOT, "architecture.lock.yaml")),
+    aliases: false
+  ).freeze
+  V5_FRONTENDS = Array(CANONICAL_LOCK.dig("business", "frontends")).freeze
+  V5_MLOPS = CANONICAL_LOCK.fetch("mlops").freeze
+  DEPLOYABLE_MLOPS = [
+    V5_MLOPS.fetch("dataset_versioner"),
+    V5_MLOPS.fetch("experiments_lineage"),
+    V5_MLOPS.fetch("runtime"),
+    V5_MLOPS.fetch("drift")
+  ].freeze
+  DERIVED_TOPOLOGY_ROLES = %w[
+    architecture_boundaries service_mesh_topology service_policy_chain
+  ].freeze
+  REGISTRY_GLOBS = {
+    "topology_contracts" => [
+      "docs/architecture/*.md"
+    ],
+    "machine_contracts" => [
+      "config/contracts/*.yaml", "config/contracts/*.yml", "config/contracts/*.json",
+      "config/context/*.yaml", "config/context/*.yml", "config/context/*.json",
+      "config/infrastructure/*.yaml", "config/infrastructure/*.yml", "config/infrastructure/*.json",
+      "contracts/*.yaml", "contracts/*.yml", "contracts/*.json",
+      "contracts/**/*.yaml", "contracts/**/*.yml", "contracts/**/*.json"
+    ]
   }.freeze
 
   class ContractLoadError < StandardError; end
@@ -156,17 +154,11 @@ module ArchitectureValidator
       contract = load_yaml(root, validated_path)
       loaded[key] = [expect_mapping(contract, validated_path), validated_path]
     end
-    unless declared == V5_MACHINE_CONTRACTS
-      raise ContractLoadError, "architecture.lock.yaml machine_contracts must match the complete approved V5 role/path registry"
-    end
     contracts
   end
 
   def validate_topology_contracts(root, lock)
     declared = expect_mapping(lock["topology_contracts"], "architecture.lock.yaml topology_contracts")
-    unless declared == V5_TOPOLOGY_CONTRACTS
-      raise ContractLoadError, "architecture.lock.yaml topology_contracts must match the complete approved V5 role/path registry"
-    end
     declared.each do |key, path|
       label = "architecture.lock.yaml topology_contracts.#{key}"
       unless key.is_a?(String) && !key.strip.empty?
@@ -187,9 +179,37 @@ module ArchitectureValidator
       end
       contents = File.read(real_path)
       status = contents.match(/^Status:\s*`([^`]*)`\s*$/i)
-      status_value = status && status[1].strip
-      unless status_value&.casecmp?("EXACT")
-        raise ContractLoadError, "#{label} must reference a readable EXACT topology contract: #{path}"
+      status_value = status && status[1].strip.upcase
+      expected = DERIVED_TOPOLOGY_ROLES.include?(key) ? "ACTIVE" : "EXACT"
+      unless status_value == expected
+        raise ContractLoadError, "#{label} must reference a readable #{expected} architecture document: #{path}"
+      end
+      if DERIVED_TOPOLOGY_ROLES.include?(key) && !contents.include?("Architecture authority: `architecture.lock.yaml`")
+        raise ContractLoadError, "#{label} must name architecture.lock.yaml as its authority: #{path}"
+      end
+    end
+  end
+
+  def validate_registry_coverage(root, lock)
+    REGISTRY_GLOBS.each do |registry_name, patterns|
+      declared = expect_mapping(lock[registry_name], "architecture.lock.yaml #{registry_name}")
+      values = declared.values
+      if values.uniq.length != values.length
+        raise ContractLoadError, "architecture.lock.yaml #{registry_name} must not register the same path more than once"
+      end
+      discovered = patterns.flat_map do |pattern|
+        Dir.glob(File.join(root, pattern)).select { |path| File.file?(path) }.map do |path|
+          Pathname.new(path).relative_path_from(Pathname.new(root)).to_s
+        end
+      end.uniq.sort
+      registered = values.select { |path| path.is_a?(String) && !path.strip.empty? }.sort
+      missing = discovered - registered
+      extra = registered - discovered
+      unless missing.empty?
+        raise ContractLoadError, "architecture.lock.yaml #{registry_name} has unregistered governed files: #{missing.join(', ')}"
+      end
+      unless extra.empty?
+        raise ContractLoadError, "architecture.lock.yaml #{registry_name} registers files outside its governed set: #{extra.join(', ')}"
       end
     end
   end
@@ -228,6 +248,7 @@ module ArchitectureValidator
     check_equal(errors, "architecture.lock.yaml status", LOCK_STATUS, lock["status"])
     validate_topology_contracts(root, lock)
     contracts = load_machine_contracts(root, lock)
+    validate_registry_coverage(root, lock)
     ownership, ownership_path = required_machine_contract(contracts, "service_ownership")
     events, events_path = required_machine_contract(contracts, "event_contracts")
     dependencies, dependencies_path = required_machine_contract(contracts, "dependency_map")
@@ -299,7 +320,7 @@ module ArchitectureValidator
                 %w[health-evidence quorum-fencing write-authority-decision stateful-promotion-recovery application-routing dns-gslb-change],
                 resilience.dig("site_recovery", "sequence"))
 
-    service_rows = markdown_rows(root, "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md", "| Service |")
+    service_rows = markdown_rows(root, lock.fetch("topology_contracts").fetch("service_ownership"), "| Service |")
     service_sets = {
       "architecture.lock.yaml" => lock.dig("business", "services"),
       File.basename(ownership_path) => ownership.fetch("services").keys,
@@ -406,7 +427,7 @@ module ArchitectureValidator
     }.each do |field, expected|
       check_equal(errors, "#{File.basename(events_path)} semantics.#{field}", expected, semantics[field])
     end
-    event_rows = markdown_rows(root, "docs/architecture/EVENT_CONTRACT_MATRIX.md", "| Producer |")
+    event_rows = markdown_rows(root, lock.fetch("topology_contracts").fetch("events"), "| Producer |")
     markdown_events = event_rows.to_h { |row| ["#{row[0]}.#{row[1]}", list(row[2])] }
     machine_events = events.fetch("events").transform_values { |entry| entry.fetch("consumers") }
     check_equal(errors, "active event catalogue", machine_events, markdown_events)
@@ -540,36 +561,9 @@ module ArchitectureValidator
       check_equal(errors, "prod_certified_topology.#{field}", expected, topology.fetch(field))
     end
 
-    active_contracts = {
-      "platform" => {
-        "kubernetes" => "rke2", "node_os" => "rocky-linux-9", "cni" => "cilium", "mesh" => "istio",
-        "gitops" => "rancher-fleet", "ci" => "tekton", "progressive_delivery" => "argo-rollouts",
-        "registry" => "harbor", "secrets" => "openbao", "external_secrets" => "eso",
-        "workload_identity" => "spire", "iam" => "keycloak", "runtime_security" => "tetragon",
-        "autoscaling" => {
-          "synchronous_pods" => "kubernetes-hpa", "event_driven_pods" => "keda",
-          "certified_nodes" => "fixed", "preprod_perf_burst" => "gate-only"
-        }
-      },
-      "stateful" => {
-        "database" => "cloudnativepg-postgresql", "events" => "strimzi-kafka-kraft",
-        "jobs" => "rabbitmq-quorum-queues", "cache" => "redis-cluster", "search" => "opensearch",
-        "object_storage" => "seaweedfs-s3"
-      },
-      "observability" => {
-        "telemetry" => "opentelemetry", "application_gateway" => "rotel",
-        "infrastructure_collector" => "opentelemetry-collector", "metrics_protocol" => "prometheus",
-        "metrics_scraper" => "vmagent", "metrics" => "victoriametrics", "infrastructure_logs" => "victorialogs",
-        "application_observability_storage" => "clickhouse", "application_observability_ui" => "hyperdx",
-        "hyperdx_metadata_store" => "mongodb-oss-self-hosted",
-        "alerts" => "vmalert", "notifications" => "alertmanager", "dashboards" => "grafana",
-        "security_pipeline" => "data-prepper", "security_logs" => "opensearch", "security" => "wazuh"
-      },
-      "supply_chain" => {
-        "scanner" => "trivy", "sbom" => "syft", "signing" => "cosign",
-        "immutable_images" => true, "forbid_latest" => true
-      }
-    }
+    active_contracts = %w[platform stateful observability supply_chain].to_h do |section|
+      [section, CANONICAL_LOCK.fetch(section)]
+    end
     active_contracts.each do |section, expected_contract|
       actual_contract = lock.fetch(section)
       check_equal(errors, "#{section} active contract keys", expected_contract.keys.sort, actual_contract.keys.sort)

@@ -1,0 +1,40 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+
+scanner:
+  name: gitleaks
+  version_authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  version_key: GITLEAKS_VERSION
+  checksum_key: GITLEAKS_SHA256_LINUX_AMD64
+  local_config: forbidden
+  generated_config: required
+
+configuration:
+  use_default_rules: true
+  allowlist:
+    description: Ignore repository metadata, dependencies, generated test outputs and explicit fixtures
+    paths:
+      - '(^|/)\.git/'
+      - '(^|/)node_modules/'
+      - '(^|/)vendor/'
+      - '(^|/)test-results/'
+      - '(^|/)tests/fixtures/'
+
+execution:
+  worktree:
+    mode: materialized-git-tree
+    exact_tree_required: true
+  exact_commit:
+    mode: git-history
+  fallback:
+    mode: directory
+  cache: forbidden
+  redact: true
+  no_banner: true
+
+rules:
+  secret_scan_failure: blocking
+  config_generation_failure: blocking
+  local_policy_override: forbidden
