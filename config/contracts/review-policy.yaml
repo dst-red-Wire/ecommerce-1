@@ -55,7 +55,7 @@ repository_delivery:
     method: merge
     match_head_commit: required
     branch_protection: required
-    required_checks: required
+    required_checks: when-configured
     bypass_branch_protection: forbidden
 
   cleanup:
