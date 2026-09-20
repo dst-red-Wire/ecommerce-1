@@ -1011,38 +1011,33 @@ def runtime_efficiency_check() -> int:
 def _governance_authority() -> int:
     repository_authority_check()
     run([sys.executable, "scripts/architecture_authority.py"])
-    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
     return 0
 
 
-def _governance_cache_contract() -> int:
-    for pattern in ("test_qualification_cache.py", "test_qualification_execution_policy.py"):
-        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern])
-    return 0
-
-
-def _governance_ruby_validators() -> int:
+def _governance_validator(relative: str) -> int:
     require("ruby")
-    for validator in (
-        "scripts/validate-architecture.rb",
-        "scripts/validate-architecture-boundaries.rb",
-        "scripts/validate-service-policy-chain.rb",
-        "scripts/validate-service-mesh-policy.rb",
-        "scripts/validate-contract-consistency.rb",
-        "scripts/validate-observability.rb",
-    ):
-        run(["ruby", validator])
+    run(["ruby", relative])
     return 0
 
 
-def _governance_ruby_tests() -> int:
-    run_ruby_tests(
+def _governance_owned_test(relative: str) -> int:
+    path = ROOT / relative
+    if path.suffix == ".rb":
+        run_ruby_tests([relative])
+        return 0
+    suite = path.parent.relative_to(ROOT).as_posix()
+    run(
         [
-            "tests/architecture_validator_test.rb",
-            "tests/observability_topology_test.rb",
-            "tests/ci_authority_test.rb",
-            "tests/ci_affected_test.rb",
-        ]
+            sys.executable,
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            suite,
+            "-p",
+            path.name,
+        ],
+        env=_git_neutral_test_env(),
     )
     return 0
 
@@ -1052,25 +1047,52 @@ def _governance_documentation() -> int:
 
 
 def governance() -> int:
-    steps = [
+    steps: list[tuple[str, object]] = [
         ("governance:authority", lambda: _run_cached_gate("governance:authority", {}, _governance_authority)),
-        (
-            "governance:cache-contract",
-            lambda: _run_cached_gate("governance:cache-contract", {}, _governance_cache_contract),
-        ),
-        (
-            "governance:ruby-validators",
-            lambda: _run_cached_gate("governance:ruby-validators", {}, _governance_ruby_validators),
-        ),
-        ("governance:ruby-tests", lambda: _run_cached_gate("governance:ruby-tests", {}, _governance_ruby_tests)),
         (
             "governance:documentation",
             lambda: _run_cached_gate("governance:documentation", {}, _governance_documentation),
         ),
     ]
+    validators = (
+        "scripts/validate-architecture.rb",
+        "scripts/validate-architecture-boundaries.rb",
+        "scripts/validate-service-policy-chain.rb",
+        "scripts/validate-service-mesh-policy.rb",
+        "scripts/validate-contract-consistency.rb",
+        "scripts/validate-observability.rb",
+    )
+    for relative in validators:
+        gate = f"governance:validator:{relative}"
+        steps.append(
+            (
+                gate,
+                lambda gate=gate, relative=relative: _run_cached_gate(
+                    gate,
+                    {},
+                    lambda relative=relative: _governance_validator(relative),
+                ),
+            )
+        )
+
+    for relative, owner in sorted(_dedicated_test_owners().items()):
+        if owner != "governance":
+            continue
+        gate = f"governance:test:{relative}"
+        steps.append(
+            (
+                gate,
+                lambda gate=gate, relative=relative: _run_cached_gate(
+                    gate,
+                    {},
+                    lambda relative=relative: _governance_owned_test(relative),
+                ),
+            )
+        )
+
     if _run_functions_parallel(steps):
         return 1
-    print("PASS governance checks completed")
+    print(f"PASS governance checks completed shards={len(steps)}")
     return 0
 
 
