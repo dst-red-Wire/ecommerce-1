@@ -35,6 +35,57 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         )
         self.assertIs(True, policy["execution"]["ci_max_workers_required"])
 
+    def test_qualification_workflows_are_centralized(self):
+        policy = MOD.qualification_execution_policy()
+        proof = policy["workflows"]["qualification_proof"]
+        campaign = policy["workflows"]["performance_campaign"]
+
+        self.assertEqual(1, proof["verify_change_runs"])
+        self.assertEqual(1, proof["performance_audit_runs"])
+        self.assertIs(False, proof["performance_campaign_required"])
+        self.assertIs(True, proof["merge_authoritative"])
+
+        self.assertEqual(3, campaign["repetitions"])
+        self.assertIs(False, campaign["merge_authoritative"])
+        self.assertNotIn("repetitions", policy["performance"]["campaign"])
+
+    def test_qualification_proof_runs_exact_verify_once_then_audit_once(self):
+        head = "a" * 40
+        evidence = ROOT / ".context" / "evidence" / f"{head}.json"
+
+        def fake_git(*args, check=True):
+            if args == ("rev-parse", "HEAD"):
+                return head + "\n"
+            if args == ("status", "--porcelain", "--untracked-files=all"):
+                return ""
+            raise AssertionError(args)
+
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(MOD, "git", side_effect=fake_git),
+            mock.patch.object(MOD, "verify_change", return_value=0) as verify,
+            mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(0, MOD.qualification_proof("origin/main"))
+
+        verify.assert_called_once_with("origin/main", head)
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertIn("scripts/performance_audit.py", command)
+        self.assertEqual(1, command.count("--evidence"))
+
+    def test_performance_campaign_uses_central_workflow_repetition_count(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(MOD, "qualification_workflow", return_value={"repetitions": 7}),
+            mock.patch.object(MOD, "run", return_value=completed) as run,
+        ):
+            self.assertEqual(0, MOD.performance_campaign("origin/main"))
+
+        command = run.call_args.args[0]
+        self.assertEqual("7", command[command.index("--repetitions") + 1])
+
     def test_ci_worker_budget_is_required_from_runtime(self):
         execution = MOD.qualification_execution_policy()["execution"]
         env_name = execution["ci_max_workers_env"]
