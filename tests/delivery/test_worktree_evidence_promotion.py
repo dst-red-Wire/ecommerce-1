@@ -40,8 +40,8 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         )
         expected_ci_global = (
             'ci-global: ## Run canonical global gates through the central execution planner\n'
-            '\t@$(PYTHON) scripts/repoctl.py global-check --base "${BASE:-origin/main}" '
-            '--head "${HEAD:-WORKTREE}"'
+            '\t@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" '
+            '--head "$${HEAD:-WORKTREE}"'
         )
         self.assertIn(expected_ci_global, MAKEFILE)
 
