@@ -48,6 +48,15 @@
   when: wireguard_secret_mode == 'bootstrap-local'
   no_log: true
 
+- name: Validate and sanitize bootstrap peers before persistence
+  ansible.builtin.set_fact:
+    wireguard_bootstrap_validated_peers: >-
+      {{ (wireguard_bootstrap_peers_json | from_json)
+         | mgmt_wireguard_peers(wireguard_operator_pool, wireguard_break_glass_pool,
+                                wireguard_break_glass_authorized | bool) }}
+  when: wireguard_secret_mode == 'bootstrap-local'
+  no_log: true
+
 - name: Inspect temporary gateway key on wg-01
   ansible.builtin.stat:
     path: "{{ wireguard_bootstrap_key_file }}"
@@ -61,6 +70,16 @@
     fail_msg: >-
       First OpenBao authority transition requires the existing bootstrap key so
       mandatory replacement-key rotation can be proven before bootstrap cleanup.
+  when:
+    - wireguard_secret_mode == 'runtime-openbao-read'
+    - not wireguard_authority_state.stat.exists
+  no_log: true
+
+- name: Require explicit human authorization for first OpenBao authority transition
+  ansible.builtin.assert:
+    that:
+      - wireguard_openbao_transition_human_gate | bool
+    fail_msg: "First OpenBao authority transition requires explicit one-shot human authorization."
   when:
     - wireguard_secret_mode == 'runtime-openbao-read'
     - not wireguard_authority_state.stat.exists
@@ -88,7 +107,7 @@
 
 - name: Stage non-secret bootstrap peer public records locally
   ansible.builtin.copy:
-    content: "{{ wireguard_bootstrap_peers_json }}\n"
+    content: "{{ wireguard_bootstrap_validated_peers | to_json }}\n"
     dest: "{{ wireguard_bootstrap_peer_staging_file }}"
     owner: root
     group: root
@@ -157,17 +176,39 @@
     - wireguard_bootstrap_key_stat.stat.exists | default(false)
   no_log: true
 
-- name: Prove the OpenBao key replaces rather than copies the bootstrap key
-  ansible.builtin.assert:
-    that:
-      - wireguard_openbao_gateway.json.data.data.private_key != (wireguard_pre_transition_key.content | b64decode | trim)
-    fail_msg: "Authority transition requires key rotation; copying the bootstrap key into OpenBao is forbidden."
+- name: Derive the bootstrap WireGuard public key for rotation proof
+  ansible.builtin.command:
+    argv: [wg, pubkey]
+    stdin: "{{ wireguard_pre_transition_key.content | b64decode | trim }}"
+  register: wireguard_pre_transition_public_key
+  changed_when: false
   when:
     - wireguard_secret_mode == 'runtime-openbao-read'
     - wireguard_bootstrap_key_stat.stat.exists | default(false)
   no_log: true
 
-- name: Select phase-specific WireGuard material without controller secret authority
+- name: Derive the OpenBao replacement WireGuard public key for rotation proof
+  ansible.builtin.command:
+    argv: [wg, pubkey]
+    stdin: "{{ wireguard_openbao_gateway.json.data.data.private_key }}"
+  register: wireguard_openbao_replacement_public_key
+  changed_when: false
+  when:
+    - wireguard_secret_mode == 'runtime-openbao-read'
+    - wireguard_bootstrap_key_stat.stat.exists | default(false)
+  no_log: true
+
+- name: Prove the OpenBao key replaces the effective bootstrap credential
+  ansible.builtin.assert:
+    that:
+      - wireguard_openbao_replacement_public_key.stdout | trim != wireguard_pre_transition_public_key.stdout | trim
+    fail_msg: "Authority transition requires a distinct effective WireGuard public key before bootstrap cleanup."
+  when:
+    - wireguard_secret_mode == 'runtime-openbao-read'
+    - wireguard_bootstrap_key_stat.stat.exists | default(false)
+  no_log: true
+
+- name: Select phase-specific WireGuard material without controller secret authority- name: Select phase-specific WireGuard material without controller secret authority
   ansible.builtin.set_fact:
     wireguard_private_key: >-
       {{ (wireguard_bootstrap_material.results[0].content | b64decode | trim)
