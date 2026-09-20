@@ -1079,6 +1079,17 @@ def _python_method_shard_threshold() -> int:
     return value
 
 
+def _python_unittest_shards(relative: str) -> list[list[str]]:
+    identifiers = _python_unittest_ids(relative)
+    if len(identifiers) < _python_method_shard_threshold():
+        return [identifiers] if identifiers else []
+    workers = min(_execution_workers(), len(identifiers))
+    shards: list[list[str]] = [[] for _ in range(workers)]
+    for index, identifier in enumerate(identifiers):
+        shards[index % workers].append(identifier)
+    return [shard for shard in shards if shard]
+
+
 def _run_python_unittest_file(relative: str, env: dict[str, str]) -> int:
     identifiers = _python_unittest_ids(relative)
     if len(identifiers) < _python_method_shard_threshold():
@@ -1090,9 +1101,11 @@ def _run_python_unittest_file(relative: str, env: dict[str, str]) -> int:
         )
         return 0
 
-    def run_identifier(identifier: str) -> int:
+    shards = _python_unittest_shards(relative)
+
+    def run_shard(index: int, shard: list[str]) -> int:
         completed = run(
-            [sys.executable, "-m", "unittest", identifier],
+            [sys.executable, "-m", "unittest", *shard],
             env=env,
             capture=True,
             check=False,
@@ -1101,13 +1114,25 @@ def _run_python_unittest_file(relative: str, env: dict[str, str]) -> int:
             detail = "\n".join(
                 part for part in ((completed.stdout or "").strip(), (completed.stderr or "").strip()) if part
             )
-            raise RuntimeError(f"unittest shard failed: {identifier}\n{detail}")
+            raise RuntimeError(
+                f"unittest shard failed: file={relative} shard={index + 1}/{len(shards)} "
+                f"tests={len(shard)}\n{detail}"
+            )
         return 0
 
-    steps = [(identifier, lambda identifier=identifier: run_identifier(identifier)) for identifier in identifiers]
+    steps = [
+        (
+            f"{relative}#shard-{index + 1}",
+            lambda index=index, shard=shard: run_shard(index, shard),
+        )
+        for index, shard in enumerate(shards)
+    ]
     if _run_functions_parallel(steps):
         return 1
-    print(f"PASS unittest method shards file={relative} methods={len(identifiers)}")
+    print(
+        f"PASS unittest method shards file={relative} methods={len(identifiers)} "
+        f"processes={len(shards)}"
+    )
     return 0
 
 
