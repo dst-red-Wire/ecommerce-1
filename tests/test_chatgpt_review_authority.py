@@ -126,7 +126,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         owner = subprocess.CompletedProcess(
             [],
             0,
-            json.dumps({"owner": {"login": "dst-red-Wire"}}),
+            json.dumps({"owner": {"login": "dst-red-Wire"}, "nameWithOwner": "dst-red-Wire/ecommerce-1"}),
             "",
         )
         pages = subprocess.CompletedProcess(
