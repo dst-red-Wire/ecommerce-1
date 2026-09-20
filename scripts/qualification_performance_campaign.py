@@ -159,7 +159,9 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     head_tree = subprocess.check_output(["git", "rev-parse", f"{head}^{{tree}}"], cwd=ROOT, text=True).strip()
     identity = repoctl.qualification_identity()
-    full_env = os.environ.copy()
+    base_env = os.environ.copy()
+    base_env.pop("ECOMMERCE_FORCE_FULL_QUALIFICATION", None)
+    full_env = dict(base_env)
     full_env["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
 
     verify = _controller("verify-change", "--base", base, "--head", head)
@@ -190,7 +192,7 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
             f"warm-{name}",
             command,
             repetitions,
-            env=full_env,
+            env=base_env,
             warmup=True,
         )
 
@@ -216,7 +218,7 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
             warmup=True,
         )
 
-    final_product = _run_sample("final-product-exact", _controller("service", "product"), env=full_env)
+    final_product = _run_sample("final-product-exact", _controller("service", "product"), env=base_env)
     final_verify = _run_sample("final-verify-exact", verify, env=full_env)
 
     checks = {
