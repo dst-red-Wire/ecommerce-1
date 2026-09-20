@@ -40,7 +40,7 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn("qualification_cache.cache_root()", source)
         self.assertNotIn("GOMODCACHE", source)
         self.assertNotIn("go clean", source)
-        self.assertIn("git", "worktree", "add", source)
+        self.assertIn('["git", "worktree", "add"', source)
         self.assertIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", source)
 
     def test_make_exposes_complete_campaign_and_final_proof(self):
