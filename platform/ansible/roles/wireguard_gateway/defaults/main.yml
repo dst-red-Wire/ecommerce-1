@@ -1,6 +1,7 @@
 ---
 wireguard_secret_mode: ""
 wireguard_bootstrap_human_gate: false
+wireguard_openbao_transition_human_gate: false
 wireguard_bootstrap_peers_json: ""
 wireguard_openbao_addr: ""
 wireguard_openbao_token: ""
