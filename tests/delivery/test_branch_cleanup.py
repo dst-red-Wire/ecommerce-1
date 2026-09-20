@@ -137,6 +137,24 @@ class BranchCleanupTests(unittest.TestCase):
         self.assertEqual("keep", by_key[("local", "main")]["action"])
         self.assertEqual("protected-branch", by_key[("local", "main")]["reason"])
 
+    def test_planner_preserves_all_refs_when_one_side_has_unabsorbed_work(self):
+        absorbed = "b" * 40
+        unique = "c" * 40
+        plan = REPOCTL._plan_branch_cleanup(
+            {"diverged": unique},
+            {"diverged": absorbed},
+            current_branch="main",
+            default_branch="main",
+            active_worktrees={"main"},
+            ancestor_heads={absorbed: True, unique: False},
+            merged_pr_heads={},
+        )
+        by_scope = {item["scope"]: item for item in plan}
+        self.assertEqual("keep", by_scope["remote"]["action"])
+        self.assertEqual("branch-with-unabsorbed-head", by_scope["remote"]["reason"])
+        self.assertEqual("keep", by_scope["local"]["action"])
+        self.assertEqual("branch-with-unabsorbed-head", by_scope["local"]["reason"])
+
     def test_cleanup_deletes_branch_whose_head_is_already_in_main(self):
         with tempfile.TemporaryDirectory() as directory:
             root, _remote = self.init_repo(directory)
