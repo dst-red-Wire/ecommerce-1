@@ -208,6 +208,49 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertLessEqual(performance["budgets_seconds"]["service_product_warm_wall_max"], 10)
         self.assertIs(True, performance["regression"]["fail_on_budget_regression"])
 
+    def test_merge_campaign_validator_accepts_only_exact_pass_budget_proof(self):
+        import json
+        import tempfile
+        import time
+
+        head = "a" * 40
+        tree = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            proof_dir = context / "performance"
+            proof_dir.mkdir()
+            proof = proof_dir / f"campaign-{head}.json"
+            payload = {
+                "schema_version": 1,
+                "status": "PASS",
+                "head_sha": head,
+                "head_tree_sha": tree,
+                "qualification_identity": "identity",
+                "created_at_epoch": time.time(),
+                "repetitions": 3,
+                "budgets": {"warm": {"status": "PASS"}},
+                "safety": {
+                    "native_dependency_caches_preserved": True,
+                    "product_runtime_tests_remain_fresh": True,
+                },
+            }
+            proof.write_text(json.dumps(payload), encoding="utf-8")
+
+            def fake_git(*args, check=True):
+                if args == ("rev-parse", f"{head}^{{tree}}"):
+                    return tree + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "CONTEXT", context),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "qualification_identity", return_value="identity"),
+            ):
+                self.assertEqual(proof, MOD._valid_performance_campaign(head))
+                payload["budgets"]["warm"]["status"] = "FAIL"
+                proof.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertIsNone(MOD._valid_performance_campaign(head))
+
     def test_unknown_gate_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "does not declare gate"):
             MOD._resolved_gate_policy("unknown:gate")
