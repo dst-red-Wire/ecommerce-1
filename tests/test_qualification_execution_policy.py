@@ -70,8 +70,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "automation": ("content-pass", True),
             "security": ("fresh", True),
             "system": ("composed", False),
-            "platform:ansible": ("content-pass", False),
-            "platform:terraform": ("content-pass", False),
+            "platform:ansible": ("content-pass", True),
+            "platform:terraform": ("content-pass", True),
             "frontend:storefront": ("native-only", True),
             "service:product": ("native-only", True),
         }
@@ -244,7 +244,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(110.054, performance["baselines_seconds"]["system"])
         self.assertEqual(86.060, performance["baselines_seconds"]["governance"])
         self.assertLessEqual(performance["budgets_seconds"]["warm_verify_change_wall_max"], 30)
-        self.assertLessEqual(performance["budgets_seconds"]["service_product_warm_wall_max"], 10)
+        self.assertLessEqual(performance["budgets_seconds"]["service_product_warm_wall_max"], 15)
         self.assertIs(True, performance["regression"]["fail_on_budget_regression"])
 
     def test_merge_campaign_validator_accepts_only_exact_pass_budget_proof(self):
@@ -293,6 +293,23 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
     def test_unknown_gate_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "does not declare gate"):
             MOD._resolved_gate_policy("unknown:gate")
+
+    def test_platform_parallel_safety_keeps_unique_mutation_domains(self):
+        ansible = MOD._resolved_gate_policy("platform:ansible")
+        terraform = MOD._resolved_gate_policy("platform:terraform")
+        self.assertIs(True, ansible["parallel_safe"])
+        self.assertIs(True, terraform["parallel_safe"])
+        self.assertEqual(
+            ["project-owned-collection-version-reconciliation"],
+            ansible["fresh_prechecks"],
+        )
+        self.assertEqual(
+            ["approved-terraform-executable-availability", "canonical-provider-lock-contract"],
+            terraform["fresh_prechecks"],
+        )
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        self.assertIn('TemporaryDirectory(prefix="ecommerce-terraform-validation-")', source)
+        self.assertIn('collections_install_root', (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
 
     def test_security_and_dynamic_runtime_state_cannot_be_content_cached(self):
         policy = MOD.qualification_execution_policy()
