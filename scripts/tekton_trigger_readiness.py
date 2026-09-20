@@ -59,6 +59,13 @@ def _require_string(mapping: dict[str, Any], key: str, prefix: str = "") -> str:
     return value.strip()
 
 
+def _require_worker_budget(mapping: dict[str, Any]) -> int:
+    value = mapping.get("max_workers")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1 or value > 16:
+        raise ValueError("runtime config requires execution_budget.max_workers integer between 1 and 16")
+    return value
+
+
 def validate_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("runtime config must be a mapping")
@@ -96,6 +103,7 @@ def validate_runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("runtime config requires execution_budget mapping")
     normalized["execution_budget"] = {
         "resource_quota_name": _require_string(execution_budget, "resource_quota_name", "execution_budget"),
+        "max_workers": _require_worker_budget(execution_budget),
     }
 
     proofs = config.get("proofs")
@@ -478,6 +486,7 @@ def run_readiness(root: Path, config: dict[str, Any], evidence_path: Path, execu
         "kube_context": runtime["kube_context"],
         "namespace": namespace,
         "runner_image": runtime["runner_image"],
+        "max_workers": runtime["execution_budget"]["max_workers"],
         "static": {"kustomize": static},
         "proofs": proofs,
         "mutation_performed": False,
