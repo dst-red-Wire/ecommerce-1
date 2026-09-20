@@ -395,6 +395,7 @@ machine_contracts:
   qualification_execution_policy: config/contracts/qualification-execution-policy.yaml
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
+  roadmap_policy: config/contracts/roadmap-policy.yaml
   review_budget: config/contracts/review-budget.json
   review_policy: config/contracts/review-policy.yaml
   repository_authority_model: config/contracts/repository-authority-model.yaml
