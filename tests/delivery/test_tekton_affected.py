@@ -27,6 +27,13 @@ class TektonAffectedContractTests(unittest.TestCase):
             self.assertIn("scripts/repoctl.py", content, path)
             self.assertNotIn(".sh", content, path)
 
+    def test_ci_topology_delegates_execution_to_central_policy(self):
+        topology = self.read("config/contracts/ci-topology.yaml")
+        self.assertIn(
+            "execution_policy: config/contracts/qualification-execution-policy.yaml",
+            topology,
+        )
+
     def test_ci_evidence_contract_fails_closed(self):
         contract = self.read("config/contracts/ci-evidence.yaml")
         self.assertIn("signature_required: true", contract)
@@ -57,6 +64,11 @@ class TektonAffectedContractTests(unittest.TestCase):
             self.assertIn("$(workspaces.source.path)/$(params.record-dir)", content, path)
             self.assertNotIn(".sh", content, path)
         component = self.read("platform/tekton/tasks/component-gates.yaml")
+        global_task = self.read("platform/tekton/tasks/global-gates.yaml")
+        self.assertIn("name: ECOMMERCE_TOOL_HOME", global_task)
+        self.assertIn(".context/cache/tool-home", global_task)
+        self.assertIn("name: ECOMMERCE_TOOL_HOME", component)
+        self.assertIn(".context/cache/tool-home", component)
         self.assertIn("name: GOCACHE", component)
         self.assertIn(".context/cache/go-build", component)
         self.assertIn("name: GOMODCACHE", component)
