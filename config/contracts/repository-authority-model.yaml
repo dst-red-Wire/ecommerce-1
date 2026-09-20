@@ -19,6 +19,8 @@ domains:
     machine_contract: cache_policy
   qualification_execution:
     machine_contract: qualification_execution_policy
+  roadmap:
+    machine_contract: roadmap_policy
   security_scan:
     machine_contract: security_scan_policy
   terraform_provider:
