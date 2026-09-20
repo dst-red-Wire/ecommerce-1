@@ -156,6 +156,8 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
         raise RuntimeError("performance campaign requires a clean worktree")
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    head_tree = subprocess.check_output(["git", "rev-parse", f"{head}^{{tree}}"], cwd=ROOT, text=True).strip()
+    identity = repoctl.qualification_identity()
     full_env = os.environ.copy()
     full_env["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
 
@@ -247,6 +249,9 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     report = {
         "schema_version": 1,
         "head_sha": head,
+        "head_tree_sha": head_tree,
+        "qualification_identity": identity,
+        "created_at_epoch": time.time(),
         "base": base,
         "repetitions": repetitions,
         "baselines_seconds": baselines,
