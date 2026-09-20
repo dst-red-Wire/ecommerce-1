@@ -28,6 +28,12 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         )
         self.assertEqual("FAIL", CAMPAIGN._budget_result(3.001, 3.0)["status"])
 
+    def test_baseline_comparison_reports_savings_and_speedup(self):
+        comparison = CAMPAIGN._baseline_comparison(100.0, 25.0)
+        self.assertEqual(75.0, comparison["saved_seconds"])
+        self.assertEqual(75.0, comparison["savings_percent"])
+        self.assertEqual(4.0, comparison["speedup"])
+
     def test_campaign_is_python_only_and_preserves_native_dependency_caches(self):
         source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
         self.assertNotIn(".sh", source)
