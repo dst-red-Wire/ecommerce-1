@@ -147,6 +147,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             4,
             MOD.qualification_execution_policy()["execution"]["python_unittest_method_shard_min_tests"],
         )
+        shards = MOD._python_unittest_shards("tests/test_architecture_authority.py")
+        self.assertEqual(MOD._execution_workers(), len(shards))
+        flattened = [identifier for shard in shards for identifier in shard]
+        self.assertEqual(set(identifiers), set(flattened))
+        self.assertEqual(len(identifiers), len(flattened))
+        self.assertLessEqual(max(map(len, shards)) - min(map(len, shards)), 1)
 
     def test_dynamic_service_inputs_are_resolved_without_product_special_case(self):
         product = MOD._resolved_gate_policy("service:product")
