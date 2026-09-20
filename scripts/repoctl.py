@@ -3379,6 +3379,10 @@ def verify_change(base: str, head: str) -> int:
     components = affected(base, head)
     records: list[dict] = []
     env = os.environ.copy()
+    # ECOMMERCE_FORCE_FULL_QUALIFICATION is a top-level campaign/planner control.
+    # Never leak it into gates or their nested repository tests, otherwise those
+    # tests would observe incremental reuse as artificially disabled.
+    env.pop("ECOMMERCE_FORCE_FULL_QUALIFICATION", None)
     env.update(
         {
             "BASE": base,
