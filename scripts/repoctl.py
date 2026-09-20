@@ -3388,6 +3388,29 @@ def verify_change(base: str, head: str) -> int:
     return 0
 
 
+def global_check(base: str, head: str) -> int:
+    if head != "WORKTREE":
+        exact = _require_clean_exact_checkout("global-check", head)
+        if exact is None:
+            return 2
+    records: list[dict] = []
+    env = os.environ.copy()
+    env.update(
+        {
+            "BASE": base,
+            "HEAD": head,
+            "ECOMMERCE_QUALIFICATION_MONOTONIC_START": str(time.monotonic()),
+        }
+    )
+    plan = build_execution_plan(base, head, ["global"])
+    before = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _execute_plan_scope(plan, "global", records, env, None, None):
+        return 1
+    if head == "WORKTREE" and worktree_tree_sha() != before:
+        return fail("global-check mutated worktree", 1)
+    print(f"PASS global-check gates={len(records)}")
+    return 0
+
 def diff_context(base: str) -> int:
     CONTEXT.mkdir(exist_ok=True)
     paths = changed_paths(base, "WORKTREE")
@@ -3971,6 +3994,9 @@ def main() -> int:
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    gl = sub.add_parser("global-check")
+    gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     d = sub.add_parser("diff-context")
     d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     fc = sub.add_parser("failure-context")
@@ -4117,6 +4143,8 @@ def main() -> int:
             return 0
         if args.cmd == "verify-change":
             return verify_change(args.base, args.head)
+        if args.cmd == "global-check":
+            return global_check(args.base, args.head)
         if args.cmd == "diff-context":
             return diff_context(args.base)
         if args.cmd == "failure-context":
