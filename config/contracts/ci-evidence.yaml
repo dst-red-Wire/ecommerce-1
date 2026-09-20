@@ -103,5 +103,5 @@ metrics:
   report_critical_path_estimate: true
   report_parallelization_headroom: true
   report_amdahl_priorities: true
-  performance_audit_output: .context/performance/<sha>.json
+  performance_audit_output_source: workflows.qualification_proof.performance_audit_output
   performance_audit_is_authoritative_for_pass: false
