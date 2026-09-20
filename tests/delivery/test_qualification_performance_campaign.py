@@ -32,7 +32,7 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         )
         self.assertEqual("FAIL", CAMPAIGN._budget_result(3.001, 3.0)["status"])
 
-    def test_run_sample_streams_live_and_keeps_identical_log(self):
+    def test_run_sample_keeps_detailed_output_hidden_and_reports_clean_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             terminal = io.StringIO()
@@ -41,18 +41,28 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
                 redirect_stdout(terminal),
             ):
                 result = CAMPAIGN._run_sample(
-                    "live-tee",
-                    [CAMPAIGN.sys.executable, "-c", "print('VISIBLE-LINE')"],
+                    "clean-status",
+                    [CAMPAIGN.sys.executable, "-c", "print('LOG-ONLY-LINE')"],
                     cwd=root,
                     env=CAMPAIGN.os.environ.copy(),
                 )
 
             output = terminal.getvalue()
             log_path = root / result["log"]
-            self.assertIn("=== START live-tee ===", output)
-            self.assertIn("VISIBLE-LINE", output)
-            self.assertIn("=== PASS live-tee", output)
-            self.assertEqual("VISIBLE-LINE\n", log_path.read_text(encoding="utf-8"))
+            self.assertIn("RUN  clean-status", output)
+            self.assertIn("PASS clean-status", output)
+            self.assertNotIn("LOG-ONLY-LINE", output)
+            self.assertEqual("LOG-ONLY-LINE\n", log_path.read_text(encoding="utf-8"))
+
+    def test_status_color_is_tty_only_and_respects_no_color(self):
+        with (
+            mock.patch.object(CAMPAIGN.sys.stdout, "isatty", return_value=True),
+            mock.patch.dict(CAMPAIGN.os.environ, {"TERM": "xterm-256color"}, clear=False),
+        ):
+            CAMPAIGN.os.environ.pop("NO_COLOR", None)
+            self.assertEqual("\033[32mPASS\033[0m", CAMPAIGN._paint("PASS", "32"))
+            with mock.patch.dict(CAMPAIGN.os.environ, {"NO_COLOR": "1"}, clear=False):
+                self.assertEqual("PASS", CAMPAIGN._paint("PASS", "32"))
 
     def test_baseline_comparison_reports_savings_and_speedup(self):
         comparison = CAMPAIGN._baseline_comparison(100.0, 25.0)
