@@ -38,6 +38,12 @@ gate_records:
     - cache_entries
   dynamic_runtime_cache_authority: forbidden
 
+qualification_proof:
+  authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
+  required_before_merge: true
+  exact_pass_evidence_required: true
+  performance_audit_required: true
+
 performance_campaign:
   authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
   repetitions: 3
@@ -49,8 +55,8 @@ performance_campaign:
     - final_product_exact
     - final_verify_exact
   output: .context/performance/campaign-<sha>.json
-  required_before_merge: true
-  budget_failure_blocks_readiness: true
+  required_before_merge: false
+  budget_failure_blocks_readiness: false
   native_dependency_caches_must_be_preserved: true
   synthetic_impacts_must_use_isolated_worktrees: true
 
