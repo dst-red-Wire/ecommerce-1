@@ -64,6 +64,8 @@ class TektonRuntimeWiringTests(unittest.TestCase):
         self.assertIn("evidence-fetch --sha", playbook)
         self.assertIn("service:product", playbook)
         self.assertIn("reused_from_sha", playbook)
+        self.assertIn("runtime.execution_budget.max_workers", playbook)
+        self.assertIn("name: max-workers", playbook)
         self.assertIn("kustomize", playbook)
         self.assertNotIn("ansible.builtin.shell", playbook)
         self.assertNotIn("kubectl apply", playbook)
