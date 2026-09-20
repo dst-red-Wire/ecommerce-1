@@ -8,55 +8,67 @@ import re
 from ansible.errors import AnsibleFilterError
 
 
+def _key(value):
+    if not isinstance(value, str) or len(value) != 44:
+        raise ValueError()
+    decoded = base64.b64decode(value, validate=True)
+    if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError()
+
+
+def _validated_peers(peers, operator_pool, break_glass_pool, authorize_break_glass=False):
+    if not isinstance(peers, list) or not peers:
+        raise ValueError()
+    pools = {
+        "workforce": ipaddress.IPv4Network(operator_pool),
+        "break-glass": ipaddress.IPv4Network(break_glass_pool),
+    }
+    addresses, keys, identities = set(), set(), set()
+    validated_peers = []
+    allowed_peer_fields = {"public_key", "identity", "allowed_ip", "scope"}
+    for peer in peers:
+        if not isinstance(peer, dict) or set(peer) - allowed_peer_fields:
+            raise ValueError()
+        _key(peer["public_key"])
+        identity = peer["identity"]
+        if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}", identity):
+            raise ValueError()
+        scope = peer.get("scope", "workforce")
+        if scope not in pools or (scope == "break-glass" and authorize_break_glass is not True):
+            raise ValueError()
+        raw = peer["allowed_ip"]
+        if not isinstance(raw, str) or not re.fullmatch(r"[0-9.]+/32", raw):
+            raise ValueError()
+        address = ipaddress.IPv4Interface(raw).ip
+        pool = pools[scope]
+        if address not in pool or address in (pool.network_address, pool.broadcast_address):
+            raise ValueError()
+        if address in addresses or peer["public_key"] in keys or identity in identities:
+            raise ValueError()
+        addresses.add(address)
+        keys.add(peer["public_key"])
+        identities.add(identity)
+        validated_peer = {"public_key": peer["public_key"], "identity": identity, "allowed_ip": raw}
+        if "scope" in peer:
+            validated_peer["scope"] = scope
+        validated_peers.append(validated_peer)
+    return validated_peers
+
+
+def validate_peers(peers, operator_pool, break_glass_pool, authorize_break_glass=False):
+    """Return only allowlisted, validated public peer records."""
+    try:
+        return _validated_peers(peers, operator_pool, break_glass_pool, authorize_break_glass)
+    except (ValueError, TypeError, KeyError, binascii.Error):
+        raise AnsibleFilterError("Invalid WireGuard key, identity, peer assignment or scope authorization.") from None
+
+
 def validate_material(material, operator_pool, break_glass_pool, authorize_break_glass=False):
     """Return validated material; diagnostics must never contain runtime secrets."""
     try:
-
-        def key(value):
-            if not isinstance(value, str) or len(value) != 44:
-                raise ValueError()
-            decoded = base64.b64decode(value, validate=True)
-            if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
-                raise ValueError()
-
-        key(material["private_key"])
-        peers = material["peers"]
-        if not isinstance(peers, list) or not peers:
-            raise ValueError()
-        pools = {
-            "workforce": ipaddress.IPv4Network(operator_pool),
-            "break-glass": ipaddress.IPv4Network(break_glass_pool),
-        }
-        addresses, keys, identities = set(), set(), set()
-        validated_peers = []
-        allowed_peer_fields = {"public_key", "identity", "allowed_ip", "scope"}
-        for peer in peers:
-            if not isinstance(peer, dict) or set(peer) - allowed_peer_fields:
-                raise ValueError()
-            key(peer["public_key"])
-            identity = peer["identity"]
-            if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}", identity):
-                raise ValueError()
-            scope = peer.get("scope", "workforce")
-            if scope not in pools or (scope == "break-glass" and authorize_break_glass is not True):
-                raise ValueError()
-            raw = peer["allowed_ip"]
-            if not isinstance(raw, str) or not re.fullmatch(r"[0-9.]+/32", raw):
-                raise ValueError()
-            address = ipaddress.IPv4Interface(raw).ip
-            pool = pools[scope]
-            if address not in pool or address in (pool.network_address, pool.broadcast_address):
-                raise ValueError()
-            if address in addresses or peer["public_key"] in keys or identity in identities:
-                raise ValueError()
-            addresses.add(address)
-            keys.add(peer["public_key"])
-            identities.add(identity)
-            validated_peer = {"public_key": peer["public_key"], "identity": identity, "allowed_ip": raw}
-            if "scope" in peer:
-                validated_peer["scope"] = scope
-            validated_peers.append(validated_peer)
-        return {"private_key": material["private_key"], "peers": validated_peers}
+        _key(material["private_key"])
+        peers = _validated_peers(material["peers"], operator_pool, break_glass_pool, authorize_break_glass)
+        return {"private_key": material["private_key"], "peers": peers}
     except (ValueError, TypeError, KeyError, binascii.Error):
         raise AnsibleFilterError("Invalid WireGuard key, identity, peer assignment or scope authorization.") from None
 
@@ -73,4 +85,8 @@ def fresh_handshake(text, peers, earliest):
 
 class FilterModule:
     def filters(self):
-        return {"mgmt_wireguard_material": validate_material, "mgmt_wireguard_fresh_handshake": fresh_handshake}
+        return {
+            "mgmt_wireguard_material": validate_material,
+            "mgmt_wireguard_peers": validate_peers,
+            "mgmt_wireguard_fresh_handshake": fresh_handshake,
+        }
