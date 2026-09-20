@@ -31,10 +31,10 @@ help: ## Show the available checks
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks
+ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks
 
-ci-global: governance contracts automation security ## Run global gates used by Tekton
-
+ci-global: ## Run canonical global gates through the central execution planner
+	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 governance: runtime-efficiency ## Validate canonical architecture and all registered governance contracts
 	@$(PYTHON) scripts/repoctl.py governance
 
@@ -100,7 +100,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -125,6 +125,9 @@ git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target anothe
 
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
+
+branch-cleanup: ## Delete safe stale local/remote branches; DRY_RUN=1 only reports candidates
+	@$(PYTHON) scripts/repoctl.py branch-cleanup $(if $(DRY_RUN),--dry-run,)
 
 publish: ## Commit, exact-SHA verify and push current feature branch
 	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
@@ -153,6 +156,11 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
+perf-campaign: ## Run the repository-defined statistical performance campaign
+	@$(PYTHON) scripts/repoctl.py perf-campaign --base "$${BASE:-origin/main}" $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
+
+qualification-proof: ## Run one exact-SHA qualification plus its performance audit
+	@$(PYTHON) scripts/repoctl.py qualification-proof --base "$${BASE:-origin/main}"
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
 
 context: ## Build bounded task-aware context pack; use TASK="..."
@@ -167,7 +175,7 @@ failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service
 pr-monitor: ## Poll one GitHub PR cheaply; PR/OWNER/REPO required, CODEX_COMMAND optional
 	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(CODEX_COMMAND),--codex-command $(CODEX_COMMAND),)
 
-review-budget: ## Decide whether Codex/Work should run; PR and SNAPSHOT required
+review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
 	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
 	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)

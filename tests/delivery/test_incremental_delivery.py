@@ -90,6 +90,9 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 records.append({"gate": name, "status": "PASS", "exit_code": 0, "duration_seconds": 0.01})
                 return True
 
+            def fake_run_gate_batch(items, records, env=None):
+                return all(fake_run_gate(name, command, records, env) for name, command in items)
+
             def fake_write(base, head, paths, components, records, verification=None):
                 captured["records"] = list(records)
                 captured["verification"] = verification
@@ -100,7 +103,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
-                mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(REPOCTL, "_run_gate_batch", side_effect=fake_run_gate_batch),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
@@ -157,6 +160,44 @@ class IncrementalDeliveryTests(unittest.TestCase):
         self.assertIsNone(parent)
         self.assertIsNone(data)
 
+    def test_force_full_campaign_control_does_not_leak_into_gate_subprocesses(self):
+        captured_envs = []
+
+        def fake_run_gate_batch(items, records, env=None):
+            captured_envs.append(dict(env or {}))
+            for name, _command in items:
+                records.append(
+                    {
+                        "gate": name,
+                        "status": "PASS",
+                        "exit_code": 0,
+                        "duration_seconds": 0.01,
+                    }
+                )
+            return True
+
+        def fake_write(base, head, paths, components, records, verification=None):
+            return Path("/tmp/evidence.json")
+
+        with (
+            mock.patch.dict(
+                REPOCTL.os.environ,
+                {"ECOMMERCE_FORCE_FULL_QUALIFICATION": "1"},
+                clear=False,
+            ),
+            mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+            mock.patch.object(REPOCTL, "changed_paths", return_value=["scripts/resource-sizing.rb"]),
+            mock.patch.object(REPOCTL, "affected", return_value=["global"]),
+            mock.patch.object(REPOCTL, "_incremental_parent_evidence", return_value=(None, None)),
+            mock.patch.object(REPOCTL, "_run_gate_batch", side_effect=fake_run_gate_batch),
+            mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+        ):
+            self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
+
+        self.assertTrue(captured_envs)
+        for env in captured_envs:
+            self.assertNotIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", env)
+
     def test_dirty_exact_checkout_fails_before_any_gate(self):
         def dirty_git(*args, check=True):
             if args == ("rev-parse", "feature-head"):
@@ -169,10 +210,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
         with (
             mock.patch.object(REPOCTL, "git", side_effect=dirty_git),
-            mock.patch.object(REPOCTL, "_run_gate") as run_gate,
+            mock.patch.object(REPOCTL, "_run_gate_batch") as run_gate_batch,
         ):
             self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
-        run_gate.assert_not_called()
+        run_gate_batch.assert_not_called()
 
     def test_actually_changed_component_executes_while_other_component_reuses(self):
         executed = []
@@ -203,6 +244,9 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 records.append({"gate": name, "status": "PASS", "duration_seconds": 0.01})
                 return True
 
+            def fake_run_gate_batch(items, records, env=None):
+                return all(fake_run_gate(name, command, records, env) for name, command in items)
+
             def fake_write(base, head, paths, components, records, verification=None):
                 captured["records"] = list(records)
                 return context / "evidence/current.json"
@@ -212,7 +256,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
-                mock.patch.object(REPOCTL, "_run_gate", side_effect=fake_run_gate),
+                mock.patch.object(REPOCTL, "_run_gate_batch", side_effect=fake_run_gate_batch),
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
@@ -236,10 +280,10 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
         with (
             mock.patch.object(REPOCTL, "git", side_effect=mismatched_git),
-            mock.patch.object(REPOCTL, "_run_gate") as run_gate,
+            mock.patch.object(REPOCTL, "_run_gate_batch") as run_gate_batch,
         ):
             self.assertEqual(2, REPOCTL.verify_change("origin/main", "feature-head"))
-        run_gate.assert_not_called()
+        run_gate_batch.assert_not_called()
 
     def test_wrong_base_parent_evidence_is_not_reused(self):
         evidence = self.parent_evidence()

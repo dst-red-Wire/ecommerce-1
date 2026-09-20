@@ -35,6 +35,8 @@ execution_budget:
   bounded_parallelism_required: true
   enforcement: kubernetes-resourcequota-and-runner-pod-resources
   values_source: management-plane-runtime-config
+  qualification_max_workers_parameter: max-workers
+  qualification_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
   resource_quota_name_source: management-plane-runtime-config
   resource_quota_required_hard_keys:
     - requests.cpu

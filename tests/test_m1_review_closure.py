@@ -84,11 +84,15 @@ class M1ReviewClosureTests(unittest.TestCase):
             stdout = "1\n" if command[0] == "sysctl" else ""
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
+        def passthrough_cache(_name, _options, producer):
+            return producer()
+
         for service, expected in (("cart", "go,cgo"), ("product", "go,cgo,sqlc")):
             with (
                 self.subTest(service=service),
                 mock.patch.object(REPOCTL, "canonical_services", return_value=[service]),
                 mock.patch.object(REPOCTL, "ensure_developer") as ensure,
+                mock.patch.object(REPOCTL, "_run_cached_gate", side_effect=passthrough_cache),
                 mock.patch.object(REPOCTL, "require"),
                 mock.patch.object(
                     REPOCTL,

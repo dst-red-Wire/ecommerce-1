@@ -1199,6 +1199,44 @@ def validate(root):
                 "review policy must inherit repository_governance.owner_authorization without local override"
             )
 
+        ai_reviewer = review_policy.get("pull_request_review", {}).get("ai_reviewer", {})
+        if (
+            ai_reviewer.get("enabled") is not True
+            or ai_reviewer.get("provider") != "ChatGPT"
+            or ai_reviewer.get("sole_code_security_authority") is not True
+            or ai_reviewer.get("exact_sha_binding") != "required"
+            or ai_reviewer.get("prior_sha_review") != "historical-only"
+            or ai_reviewer.get("merge_readiness") != {
+                "code_review_complete": "required",
+                "security_review_complete": "required",
+                "unresolved_blocking_findings": "forbidden",
+            }
+            or ai_reviewer.get("codex") != {
+                "review_authority": "forbidden",
+                "trigger": "forbidden",
+                "polling": "forbidden",
+                "merge_readiness_dependency": "forbidden",
+            }
+            or ai_reviewer.get("evidence") != {
+                "transport": "github-pr-comment",
+                "marker": "chatgpt-exact-sha-review:v1",
+                "required_kinds": ["code", "security"],
+                "required_status": "PASS",
+                "exact_sha_required": True,
+                "comment_author": "repository-owner",
+            }
+        ):
+            errors.append(
+                "review policy must make ChatGPT the sole exact-SHA CODE/SECURITY AI authority "
+                "and forbid Codex review workflows"
+            )
+
+        review_budget = load_yaml(root / lock["machine_contracts"]["review_budget"])
+        if review_budget.get("review_authority_source") != (
+            "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"
+        ):
+            errors.append("review budget must inherit the canonical ChatGPT review authority")
+
         management = lock["management_plane"]
         inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])

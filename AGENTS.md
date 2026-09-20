@@ -107,10 +107,23 @@ ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
 - A finding may be resolved only after the correction exists on a published SHA and supporting deterministic evidence is available.
 - Merge readiness requires exact-SHA qualification plus completed ChatGPT CODE and SECURITY review for that same SHA, with no unresolved blocking finding.
 - Deterministic gates and tests are evidence for the review; they do not replace ChatGPT CODE or SECURITY review.
+- Final ChatGPT review results are recorded on the PR with `chatgpt-exact-sha-review:v1` machine markers for `code` and `security`; both must bind the current full head SHA and be PASS with zero blocking findings.
+- `finish-pr` consumes only those ChatGPT markers. Codex comments, reactions, summaries, statuses, and completed reviews are ignored for merge readiness.
 
 ## Automated delivery
 
 Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
+
+## Automatic stale-branch cleanup
+
+Use `make branch-cleanup` for repository branch hygiene. `make git-sync` invokes the same cleanup automatically after fetch/prune and fast-forward, and `finish-pr` performs a final sweep after a successful merge.
+
+A local or `origin` branch may be deleted only when the central `repository_delivery.cleanup` policy proves one of these conditions:
+
+- the branch HEAD is already an ancestor of `origin/main`; or
+- a GitHub PR into `main` is merged and its recorded head SHA exactly equals the branch's current HEAD.
+
+Never delete the default branch, `master`, the current branch, or any branch checked out by an active worktree. If a branch has advanced after its merged PR, preserve it. Missing GitHub CLI/API evidence disables only the merged-PR criterion; ancestry-based cleanup may still proceed. Use `make branch-cleanup DRY_RUN=1` to inspect the exact deletion plan without mutating refs.
 <!-- BEGIN ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->
 ## Ansible-first developer automation
 

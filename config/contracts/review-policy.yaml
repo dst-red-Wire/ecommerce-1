@@ -17,6 +17,26 @@ pull_request_review:
 
   ai_reviewer:
     enabled: true
+    provider: ChatGPT
+    sole_code_security_authority: true
+    exact_sha_binding: required
+    prior_sha_review: historical-only
+    merge_readiness:
+      code_review_complete: required
+      security_review_complete: required
+      unresolved_blocking_findings: forbidden
+    codex:
+      review_authority: forbidden
+      trigger: forbidden
+      polling: forbidden
+      merge_readiness_dependency: forbidden
+    evidence:
+      transport: github-pr-comment
+      marker: chatgpt-exact-sha-review:v1
+      required_kinds: [code, security]
+      required_status: PASS
+      exact_sha_required: true
+      comment_author: repository-owner
     advisory_only: true
     may_comment: true
     may_request_changes: true
@@ -62,3 +82,22 @@ repository_delivery:
     merged_pr_state: merged-closed
     remote_branch: delete
     local_branch: delete
+    automatic_branch_cleanup:
+      enabled: true
+      triggers: [git-sync, finish-pr]
+      default_branch_ref: origin/<default-branch>
+      delete_when:
+        - head-is-ancestor-of-default-branch
+        - merged-pr-head-matches-current-branch-head
+      merged_pr_base_must_match_default: true
+      github_merge_proof: exact-head-sha
+      preserve:
+        - default-branch
+        - master
+        - current-branch
+        - active-worktree
+        - branch-with-unabsorbed-head
+        - branch-advanced-after-merged-pr
+      github_cli_optional_for_ancestor_cleanup: true
+      remote_delete_requires_exact_lease: true
+      local_delete_requires_compare_and_delete: true

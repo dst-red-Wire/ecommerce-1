@@ -22,18 +22,19 @@ class PerformanceAuditTests(unittest.TestCase):
             "status": "PASS",
             "verification": {"mode": "incremental"},
             "gates": [
-                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
-                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0},
-                {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 4.0},
-                {"gate": "service:product", "status": "PASS", "duration_seconds": 1.0},
+                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0, "parallel_safe": False, "scope": "global"},
+                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0, "parallel_safe": True, "scope": "global"},
+                {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 4.0, "scope": "component"},
+                {"gate": "service:product", "status": "PASS", "duration_seconds": 1.0, "scope": "component"},
                 {
                     "gate": "platform:terraform",
                     "status": "PASS",
                     "duration_seconds": 0.0,
                     "source_duration_seconds": 6.0,
                     "reused_from_sha": "9" * 40,
+                    "scope": "component",
                 },
-                {"gate": "system", "status": "SKIP", "duration_seconds": 0.0},
+                {"gate": "system", "status": "SKIP", "duration_seconds": 0.0, "scope": "component"},
             ],
         }
 
@@ -69,25 +70,122 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(16.0, inventory["equivalent_full_seconds"])
         self.assertEqual(20.0, inventory["evidence_reuse_hit_percent"])
 
-    def test_tekton_critical_path_models_global_serial_vs_component_matrix(self):
-        critical = AUDIT.tekton_critical_path(self.evidence()["gates"])
+    def test_local_critical_path_models_bounded_parallelism_and_serial_barriers(self):
+        critical = AUDIT.tekton_critical_path(self.evidence()["gates"], max_workers=4)
+        self.assertEqual("tekton-affected-v3", critical["model"])
+        self.assertEqual("ordered-bounded-local", critical["global_execution_model"])
+        self.assertEqual("ordered-bounded-local", critical["component_execution_model"])
         self.assertEqual(5.0, critical["global_branch_seconds"])
-        self.assertEqual(4.0, critical["component_matrix_branch_seconds"])
-        self.assertEqual(5.0, critical["critical_path_estimate_seconds"])
-        self.assertEqual("global-gates", critical["critical_branch"])
-        self.assertEqual(["governance", "contracts"], critical["critical_gates"])
-        self.assertEqual(5.0, critical["parallelization_headroom_seconds"])
-        self.assertEqual(2.0, critical["theoretical_gate_only_parallel_speedup"])
+        self.assertEqual(5.0, critical["component_matrix_branch_seconds"])
+        self.assertEqual("sequential-local-scopes", critical["scope_execution_model"])
+        self.assertEqual(10.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("local-sequential-scopes", critical["critical_branch"])
+        self.assertEqual(
+            ["governance", "contracts", "frontend:storefront", "service:product"],
+            critical["critical_gates"],
+        )
+        self.assertEqual(0.0, critical["parallelization_headroom_seconds"])
+        self.assertEqual(1.0, critical["theoretical_gate_only_parallel_speedup"])
+
+    def test_true_tekton_global_fanout_uses_longest_global_taskrun(self):
+        evidence = self.evidence()
+        for record in evidence["gates"]:
+            if record["gate"] in {"governance", "contracts"}:
+                record["scope"] = "global"
+                record["ci_fanout"] = True
+                record["parallel_group"] = "tekton-global-matrix"
+            elif record.get("scope") == "component" and record["status"] != "SKIP" and not record.get("reused_from_sha"):
+                record["parallel_group"] = "tekton-component-matrix"
+        critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
+        self.assertEqual("tekton-matrix", critical["global_execution_model"])
+        self.assertEqual("tekton-matrix", critical["component_execution_model"])
+        self.assertEqual("parallel-tekton-branches", critical["scope_execution_model"])
+        self.assertEqual(3.0, critical["global_branch_seconds"])
+        self.assertEqual(4.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("component-matrix", critical["critical_branch"])
+
+    def test_ordered_schedule_respects_serial_barriers(self):
+        seconds, path = AUDIT._ordered_parallel_schedule(
+            [
+                ("governance", 2.0, False),
+                ("contracts", 3.0, True),
+                ("automation", 1.0, True),
+            ],
+            4,
+        )
+        self.assertEqual(5.0, seconds)
+        self.assertEqual(["governance", "contracts"], path)
+
+    def test_recorded_ci_worker_budget_overrides_local_default(self):
+        evidence = self.evidence()
+        for record in evidence["gates"]:
+            if record["status"] != "SKIP" and not record.get("reused_from_sha"):
+                record["worker_budget"] = 1
+        critical = AUDIT.tekton_critical_path(evidence["gates"])
+        self.assertEqual(1, critical["max_workers"])
+        self.assertEqual(5.0, critical["global_branch_seconds"])
+        self.assertEqual(10.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("local-sequential-scopes", critical["critical_branch"])
+
+    def test_bounded_parallel_schedule_respects_worker_limit(self):
+        seconds, path = AUDIT._bounded_parallel_schedule(
+            [("a", 4.0), ("b", 3.0), ("c", 2.0), ("d", 1.0), ("e", 5.0)],
+            2,
+        )
+        self.assertEqual(10.0, seconds)
+        self.assertEqual(["a", "d", "e"], path)
 
     def test_component_becomes_critical_when_it_is_longer_than_global_branch(self):
         evidence = self.evidence()
         next(record for record in evidence["gates"] if record["gate"] == "frontend:storefront")["duration_seconds"] = (
             12.0
         )
-        critical = AUDIT.tekton_critical_path(evidence["gates"])
+        critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
+        self.assertEqual(18.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("local-sequential-scopes", critical["critical_branch"])
+        self.assertEqual(
+            ["governance", "contracts", "frontend:storefront", "service:product"],
+            critical["critical_gates"],
+        )
+
+    def test_local_component_serial_system_barrier_extends_critical_path(self):
+        records = [
+            {
+                "gate": "governance",
+                "status": "PASS",
+                "duration_seconds": 2.0,
+                "scope": "global",
+                "parallel_safe": False,
+            },
+            {
+                "gate": "service:cart",
+                "status": "PASS",
+                "duration_seconds": 4.0,
+                "scope": "component",
+                "parallel_safe": True,
+            },
+            {
+                "gate": "service:product",
+                "status": "PASS",
+                "duration_seconds": 3.0,
+                "scope": "component",
+                "parallel_safe": True,
+            },
+            {
+                "gate": "system",
+                "status": "PASS",
+                "duration_seconds": 6.0,
+                "scope": "component",
+                "parallel_safe": False,
+            },
+        ]
+        critical = AUDIT.tekton_critical_path(records, max_workers=4)
+        self.assertEqual("ordered-bounded-local", critical["component_execution_model"])
+        self.assertEqual("sequential-local-scopes", critical["scope_execution_model"])
+        self.assertEqual(10.0, critical["component_matrix_branch_seconds"])
         self.assertEqual(12.0, critical["critical_path_estimate_seconds"])
-        self.assertEqual("component-matrix", critical["critical_branch"])
-        self.assertEqual(["frontend:storefront"], critical["critical_gates"])
+        self.assertEqual("local-sequential-scopes", critical["critical_branch"])
+        self.assertEqual(["governance", "service:cart", "system"], critical["critical_gates"])
 
     def test_amdahl_priorities_use_full_equivalent_cost_and_identify_largest_share(self):
         priorities = AUDIT.amdahl_priorities(self.evidence()["gates"])
@@ -113,7 +211,7 @@ class PerformanceAuditTests(unittest.TestCase):
             report = AUDIT.audit(self.evidence(), root=self.make_root(temp))
         self.assertFalse(report["safety"]["content_cache_authorizes_pass_reuse"])
         self.assertEqual("exact-direct-parent-only", report["safety"]["verdict_reuse_policy"])
-        self.assertEqual("global-gates", report["critical_path"]["critical_branch"])
+        self.assertEqual("local-sequential-scopes", report["critical_path"]["critical_branch"])
         self.assertTrue(report["recommendations"])
 
     def test_baseline_comparison_reports_measured_gate_savings(self):
@@ -128,6 +226,12 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(10.0, comparison["current_executed_seconds"])
         self.assertEqual(6.0, comparison["measured_gate_time_saved_seconds"])
         self.assertEqual(37.5, comparison["measured_gate_savings_percent"])
+
+    def test_missing_canonical_scope_fails_closed(self):
+        evidence = self.evidence()
+        evidence["gates"][0].pop("scope")
+        with self.assertRaisesRegex(ValueError, "lacks canonical"):
+            AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
 
     def test_invalid_gate_status_fails_closed(self):
         evidence = self.evidence()

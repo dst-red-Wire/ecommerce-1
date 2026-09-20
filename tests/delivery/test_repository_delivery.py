@@ -19,7 +19,7 @@ SPEC.loader.exec_module(RD)
 class EvidenceMetricsTests(unittest.TestCase):
     def test_metrics_count_execution_reuse_and_saved_time(self):
         records = [
-            {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
+            {"gate": "governance", "status": "PASS", "duration_seconds": 2.0, "content_cache_hits": 2},
             {
                 "gate": "frontend:storefront",
                 "status": "PASS",
@@ -34,6 +34,11 @@ class EvidenceMetricsTests(unittest.TestCase):
                 "executed_gates": 1,
                 "reused_gates": 1,
                 "skipped_gates": 1,
+                "execution_counts": {"fresh": 1, "parent-evidence": 1, "skipped": 1},
+                "content_cache_gates": 1,
+                "content_cache_direct_gates": 0,
+                "content_cache_hits": 2,
+                "content_cache_misses": 0,
                 "executed_seconds": 2.0,
                 "estimated_saved_seconds": 20.0,
                 "equivalent_full_seconds": 22.0,

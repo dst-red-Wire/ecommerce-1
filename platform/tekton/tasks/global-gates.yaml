@@ -6,6 +6,8 @@ spec:
   params:
     - name: runner-image
       type: string
+    - name: gate
+      type: string
     - name: base
       type: string
       default: origin/main
@@ -15,6 +17,8 @@ spec:
     - name: record-dir
       type: string
       default: .context/tekton/manual
+    - name: max-workers
+      type: string
   workspaces:
     - name: source
   volumes:
@@ -46,9 +50,18 @@ spec:
     - name: global-gates
       image: $(params.runner-image)
       workingDir: /var/ecommerce-run/repository
+      env:
+        - name: ECOMMERCE_TOOL_HOME
+          value: $(workspaces.source.path)/.context/cache/tool-home
+        - name: ECOMMERCE_EXECUTION_SCOPE
+          value: ci
+        - name: ECOMMERCE_QUALIFICATION_MAX_WORKERS
+          value: $(params.max-workers)
       command: [python3, scripts/repoctl.py]
       args:
         - ci-global
+        - --gate
+        - $(params.gate)
         - --base
         - $(params.base)
         - --head

@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,8 @@ _SCHEMA_VERSION = 1
 _MEMORY: dict[tuple[str, str], Any] = {}
 _TOOL_VERSIONS: dict[tuple[str, tuple[str, ...]], str] = {}
 _EXECUTABLE_IDENTITIES: dict[str, dict[str, str]] = {}
+_FILE_BYTES: dict[str, tuple[tuple[int, int, int, int, int], bytes]] = {}
+_FILE_BYTES_LOCK = threading.Lock()
 
 _PSYCH_SCRIPT = r"""
 document = Psych.parse_file(ARGV[0])
@@ -81,6 +84,47 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _stable_file_bytes(path: Path) -> bytes:
+    resolved = path.resolve()
+    before = resolved.stat()
+    identity = (
+        int(before.st_dev),
+        int(before.st_ino),
+        int(before.st_size),
+        int(before.st_mtime_ns),
+        int(before.st_ctime_ns),
+    )
+    key = str(resolved)
+    with _FILE_BYTES_LOCK:
+        cached = _FILE_BYTES.get(key)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+    contents = resolved.read_bytes()
+    after = resolved.stat()
+    after_identity = (
+        int(after.st_dev),
+        int(after.st_ino),
+        int(after.st_size),
+        int(after.st_mtime_ns),
+        int(after.st_ctime_ns),
+    )
+    if after_identity != identity:
+        return resolved.read_bytes()
+    with _FILE_BYTES_LOCK:
+        _FILE_BYTES[key] = (identity, contents)
+    return contents
+
+
+def clear_file_bytes_cache() -> None:
+    with _FILE_BYTES_LOCK:
+        _FILE_BYTES.clear()
+
+
+def file_bytes_cache_entry_count() -> int:
+    with _FILE_BYTES_LOCK:
+        return len(_FILE_BYTES)
+
+
 def digest_paths(paths: list[Path] | tuple[Path, ...], *, root: Path = ROOT) -> str:
     digest = hashlib.sha256()
     normalized: list[tuple[str, Path]] = []
@@ -96,7 +140,7 @@ def digest_paths(paths: list[Path] | tuple[Path, ...], *, root: Path = ROOT) -> 
     for label, path in sorted(normalized):
         digest.update(label.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(_stable_file_bytes(path))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -120,7 +164,7 @@ def digest_globs(patterns: list[str] | tuple[str, ...], *, root: Path = ROOT) ->
     for relative, path in sorted(selected.items()):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(_stable_file_bytes(path))
         digest.update(b"\0")
     return digest.hexdigest()
 

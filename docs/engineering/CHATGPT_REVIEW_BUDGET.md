@@ -1,10 +1,10 @@
-# Codex / Work review budget
+# ChatGPT exact-SHA review budget
 
-This repository applies the reusable skill in `.agents/skills/codex-review-budget/SKILL.md` through the deterministic controller `scripts/review_budget.py`.
+This repository applies `.agents/skills/chatgpt-exact-sha-review/SKILL.md` through the deterministic controller `scripts/review_budget.py`.
 
 ## Goal
 
-Reduce repeated Codex/Work analysis without weakening exact-SHA review or qualification. The controller itself never invokes a model. It decides whether an AI review is justified and keeps ephemeral state under `.context/review-budget/`.
+Reduce repeated ChatGPT CODE/SECURITY analysis without weakening exact-SHA review or qualification. The controller itself never invokes a model. It decides whether an AI review is justified and keeps ephemeral state under `.context/review-budget/`.
 
 ## The 10 enforced rules
 
@@ -34,7 +34,7 @@ Create a JSON snapshot outside Git-tracked source, for example `.context/review-
 }
 ```
 
-## Decide whether Codex/Work should run
+## Decide whether ChatGPT review should run
 
 ```text
 python3 scripts/review_budget.py decide --pr 123 --snapshot .context/review-budget/current.json --review-kind combined

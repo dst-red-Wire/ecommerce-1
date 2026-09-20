@@ -22,6 +22,8 @@ spec:
       type: string
     - name: status-secret
       type: string
+    - name: max-workers
+      type: string
   workspaces:
     - name: source
   tasks:
@@ -68,6 +70,10 @@ spec:
       runAfter: [classify]
       taskRef:
         name: ecommerce-global-gates
+      matrix:
+        params:
+          - name: gate
+            value: $(tasks.classify.results.global-gates[*])
       params:
         - name: runner-image
           value: $(params.runner-image)
@@ -77,6 +83,8 @@ spec:
           value: $(params.head)
         - name: record-dir
           value: .context/tekton/$(context.pipelineRun.uid)
+        - name: max-workers
+          value: $(params.max-workers)
       workspaces:
         - name: source
           workspace: source
@@ -98,6 +106,8 @@ spec:
           value: $(params.head)
         - name: record-dir
           value: .context/tekton/$(context.pipelineRun.uid)
+        - name: max-workers
+          value: $(params.max-workers)
       workspaces:
         - name: source
           workspace: source

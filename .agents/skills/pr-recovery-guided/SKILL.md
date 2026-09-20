@@ -151,6 +151,8 @@ For a final candidate SHA:
 6. if the head SHA changes, treat the prior final review as historical and review the new exact SHA;
 7. resolve findings only after the fix exists on a published SHA and its evidence is verified;
 8. require no unresolved blocking finding before merge.
+9. record final CODE and SECURITY results with the `chatgpt-exact-sha-review:v1` markers required by `review-policy.yaml`;
+10. treat Codex comments, reactions, summaries, and review completion as non-authoritative historical input only.
 
 Use `chatgpt-exact-sha-review` as the review authority and duplication-control contract.
 
@@ -162,9 +164,11 @@ After merge:
 
 1. update local `main` by fast-forward;
 2. verify the work has landed;
-3. delete obsolete remote/local branches when safe;
-4. remove temporary worktrees only after checking they are clean;
+3. run the canonical `make branch-cleanup` sweep instead of hand-deleting branches; it deletes only exact merged-PR heads or heads already absorbed by `origin/main`;
+4. remove temporary worktrees only after checking they are clean; active worktree branches are automatically preserved by branch cleanup;
 5. preserve verified rescue archives until the user explicitly decides they are no longer needed.
+
+For audit-only cleanup, use `make branch-cleanup DRY_RUN=1`.
 
 ## Response style
 

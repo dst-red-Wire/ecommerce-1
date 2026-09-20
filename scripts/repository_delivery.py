@@ -47,11 +47,12 @@ def require_command(name: str) -> str:
 
 
 def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize actual work and conservative time saved by exact evidence reuse/promotion."""
+    """Summarize execution, exact evidence reuse, and content-cache acceleration separately."""
 
     def reused(record: dict[str, Any]) -> bool:
         return bool(
-            record.get("reused_from_sha")
+            record.get("execution") == "parent-evidence"
+            or record.get("reused_from_sha")
             or record.get("promoted_from_worktree")
             or record.get("reused_from_worktree_tree_sha")
         )
@@ -63,10 +64,29 @@ def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     saved_seconds = round(sum(float(r.get("source_duration_seconds", 0.0) or 0.0) for r in reused_records), 3)
     equivalent_full = round(executed_seconds + saved_seconds, 3)
     savings_percent = round((saved_seconds / equivalent_full) * 100.0, 1) if equivalent_full else 0.0
+
+    nested_cache_gates = [r for r in executed if int(r.get("content_cache_hits", 0) or 0) > 0]
+    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in executed)
+    content_cache_misses = sum(int(r.get("content_cache_misses", 0) or 0) for r in executed)
+    execution_counts: dict[str, int] = {}
+    for record in records:
+        if record.get("status") == "SKIP":
+            mode = "skipped"
+        elif reused(record):
+            mode = str(record.get("execution") or "parent-evidence")
+        else:
+            mode = str(record.get("execution") or "fresh")
+        execution_counts[mode] = execution_counts.get(mode, 0) + 1
+
     return {
         "executed_gates": len(executed),
         "reused_gates": len(reused_records),
         "skipped_gates": len(skipped),
+        "execution_counts": dict(sorted(execution_counts.items())),
+        "content_cache_gates": len(nested_cache_gates),
+        "content_cache_direct_gates": sum(1 for r in executed if r.get("execution") == "content-cache"),
+        "content_cache_hits": content_cache_hits,
+        "content_cache_misses": content_cache_misses,
         "executed_seconds": executed_seconds,
         "estimated_saved_seconds": saved_seconds,
         "equivalent_full_seconds": equivalent_full,

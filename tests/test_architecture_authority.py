@@ -449,6 +449,57 @@ graph LR
             policy.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_review_policy_locks_chatgpt_exact_sha_authority_and_forbids_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            mutations = (
+                ("    provider: ChatGPT", "    provider: Codex"),
+                ("    sole_code_security_authority: true", "    sole_code_security_authority: false"),
+                ("    exact_sha_binding: required", "    exact_sha_binding: optional"),
+                ("      trigger: forbidden", "      trigger: allowed"),
+                (
+                    "      marker: chatgpt-exact-sha-review:v1",
+                    "      marker: external-ai-review:v1",
+                ),
+                ("      comment_author: repository-owner", "      comment_author: any-commenter"),
+            )
+            for before, after in mutations:
+                with self.subTest(mutation=f"{before} -> {after}"):
+                    self.assertIn(before, original)
+                    policy.write_text(original.replace(before, after, 1))
+                    self.assertIn(
+                        "review policy must make ChatGPT the sole exact-SHA CODE/SECURITY AI authority "
+                        "and forbid Codex review workflows",
+                        authority.validate(root),
+                    )
+                    policy.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_review_budget_inherits_chatgpt_review_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            budget = root / "config/contracts/review-budget.json"
+            original = budget.read_text()
+            self.assertIn(
+                '"review_authority_source": "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"',
+                original,
+            )
+            budget.write_text(
+                original.replace(
+                    "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer",
+                    "external/codex-review-authority",
+                    1,
+                )
+            )
+            self.assertIn(
+                "review budget must inherit the canonical ChatGPT review authority",
+                authority.validate(root),
+            )
+            budget.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",

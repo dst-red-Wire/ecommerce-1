@@ -1,0 +1,433 @@
+version: 1
+kind: QualificationExecutionPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+
+principles:
+  single_execution_authority: true
+  fail_closed_on_unknown_gate: true
+  affected_only_by_default: true
+  cache_is_acceleration_not_authority: true
+  exact_sha_evidence_remains_authoritative: true
+  dynamic_state_must_be_fresh: true
+
+execution:
+  global_gate_order:
+    - governance
+    - runtime-efficiency
+    - contracts
+    - automation
+    - security
+  local_max_workers: 4
+  python_unittest_method_shard_min_tests: 4
+  ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
+  ci_max_workers_required: true
+  global_parallelism: bounded
+  component_parallelism: bounded
+  stable_output_order: true
+
+cache_modes:
+  content-pass: deterministic PASS may be reused from the content-addressed qualification cache
+  native-only: only tool-native caches may accelerate execution
+  fresh: always execute
+  forbidden: no cache of any kind may authorize skipping execution
+  composed: aggregate gate whose child gates own cache decisions
+
+gates:
+  governance:
+    scope: global
+    parallel_safe: false
+    cache_mode: composed
+    dependencies: []
+    command:
+      action: governance
+    ci_fanout: true
+    owned_tests:
+      - tests/test_architecture_authority.py
+      - tests/test_qualification_cache.py
+      - tests/test_qualification_execution_policy.py
+      - tests/architecture_validator_test.rb
+      - tests/observability_topology_test.rb
+      - tests/ci_authority_test.rb
+      - tests/ci_affected_test.rb
+    tools: [python3, ruby, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/architecture_authority.py
+      - scripts/validate-architecture.rb
+      - scripts/validate-architecture-boundaries.rb
+      - scripts/validate-service-policy-chain.rb
+      - scripts/validate-service-mesh-policy.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-observability.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - config/toolchain/**/*
+      - contracts/**/*
+      - docs/architecture/**/*
+      - scripts/architecture_authority.py
+      - scripts/validate-architecture.rb
+      - scripts/validate-architecture-boundaries.rb
+      - scripts/validate-service-policy-chain.rb
+      - scripts/validate-service-mesh-policy.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-observability.rb
+      - tests/test_architecture_authority.py
+      - tests/test_qualification_cache.py
+      - tests/architecture_validator_test.rb
+      - tests/observability_topology_test.rb
+      - tests/ci_authority_test.rb
+      - tests/ci_affected_test.rb
+      - AGENTS.md
+      - README.md
+      - docs/api/README.md
+      - docs/project/CODEX_HANDOFFS.md
+  governance:authority:
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, git, ruby]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/architecture_authority.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - scripts/architecture_authority.py
+  "governance:validator:*":
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [ruby]
+    validators:
+      - <target>
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - <target>
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - contracts/**/*
+  "governance:test:*":
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby, git]
+    validators:
+      - <target>
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - <target>
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - contracts/**/*
+      - scripts/**/*.py
+      - scripts/**/*.rb
+  governance:documentation:
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - AGENTS.md
+      - README.md
+      - docs/api/README.md
+      - docs/project/CODEX_HANDOFFS.md
+      - scripts/repoctl.py
+  runtime-efficiency:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: runtime-efficiency
+    ci_fanout: true
+    owned_tests:
+      - tests/runtime_efficiency_test.rb
+      - tests/resource_sizing_test.rb
+    tools: [python3, ruby]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/validate-runtime-efficiency.rb
+      - scripts/resource-sizing.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/runtime-efficiency.yaml
+      - frontend/go.mod
+      - frontend/apps/storefront/main.go
+      - frontend/apps/admin/main.go
+      - frontend/internal/web/layout.templ
+      - services/*/Containerfile
+      - scripts/validate-runtime-efficiency.rb
+      - scripts/resource-sizing.rb
+      - tests/runtime_efficiency_test.rb
+      - tests/resource_sizing_test.rb
+  contracts:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: contracts
+      context_args: base-head
+    ci_fanout: true
+    owned_tests:
+      - tests/openapi_validator_test.rb
+      - tests/contract_consistency_test.rb
+    tools: [python3, ruby, git, go, oasdiff, oapi-codegen]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/validate-openapi.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-architecture.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/public-api-contracts.yaml
+      - config/contracts/service-ownership.yaml
+      - config/contracts/dependency-map.yaml
+      - config/contracts/event-contracts.yaml
+      - contracts/openapi/**/*
+      - scripts/validate-openapi.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-architecture.rb
+      - tests/openapi_validator_test.rb
+      - tests/contract_consistency_test.rb
+  automation:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: automation-policy
+    ci_fanout: true
+    tools: [python3, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - .gitignore
+      - BUILD.bazel
+      - "**/*.sh"
+      - platform/tekton/**/*
+      - scripts/repoctl.py
+  security:
+    scope: global
+    parallel_safe: true
+    cache_mode: fresh
+    dependencies: []
+    command:
+      action: security
+    ci_fanout: true
+    tools: [gitleaks, git]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/security-scan-policy.yaml
+    fresh_prechecks:
+      - exact-git-history-and-worktree-scan
+  system:
+    scope: component
+    parallel_safe: false
+    cache_mode: composed
+    dependencies: []
+    command:
+      action: system
+    tools: [python3, ruby, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - tests/**/*
+      - scripts/**/*
+  "system:test:*":
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby, git]
+    validators:
+      - <target>
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - <target>
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - contracts/**/*
+      - frontend/**/*
+      - platform/**/*
+      - scripts/**/*
+      - services/**/*
+      - Makefile
+      - BUILD.bazel
+      - go.work
+  platform:ansible:
+    scope: component
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: ansible
+    tools: [ansible-lint, ansible-playbook, ansible-galaxy]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/source-quality-policy.yaml
+      - config/contracts/toolchain-lock.json
+      - platform/ansible/**/*
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    fresh_prechecks:
+      - project-owned-collection-version-reconciliation
+  platform:terraform:
+    scope: component
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: terraform
+    tools: [tofu, terraform]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/source-quality-policy.yaml
+      - config/contracts/terraform-provider-lock.yaml
+      - config/contracts/toolchain-lock.json
+      - platform/terraform/**/*.tf
+      - platform/terraform/**/*.tftpl
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    fresh_prechecks:
+      - approved-terraform-executable-availability
+      - canonical-provider-lock-contract
+  "frontend:*":
+    scope: component
+    parallel_safe: true
+    cache_mode: native-only
+    dependencies: []
+    command:
+      action: frontend
+      static_args: [check]
+      suffix_arg: true
+    tools: [go, gofmt, templ]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - frontend/**/*
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+  "service-static:*":
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [go, gofmt, sqlc]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - services/<target>/**/*
+      - go.work
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+      - config/contracts/source-quality-policy.yaml
+  "service:*":
+    scope: component
+    parallel_safe: true
+    cache_mode: native-only
+    dependencies: []
+    command:
+      action: service
+      suffix_arg: true
+    requires_path: services/<target>/go.mod
+    tools: [go, gofmt]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - services/<service>/**/*
+      - go.work
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+    fresh_prechecks:
+      - docker-runtime-when-testcontainers-are-used
+
+
+workflows:
+  qualification_proof:
+    exact_sha_required: true
+    clean_worktree_required: true
+    verify_change_runs: 1
+    performance_audit_runs: 1
+    performance_audit_output: .context/performance/<sha>.json
+    performance_campaign_required: false
+    merge_authoritative: true
+  performance_campaign:
+    exact_sha_required: true
+    clean_worktree_required: true
+    repetitions: 3
+    merge_authoritative: false
+    blocking_for_campaign_result: true
+
+performance:
+  baselines_seconds:
+    system: 110.054
+    governance: 86.060
+    platform:ansible: 28.639
+    service:product: 14.821
+  campaign:
+    cold_clears_qualification_content_cache_only: true
+    preserve_dependency_and_native_tool_caches: true
+    scenarios:
+      - cold-verify-change
+      - warm-verify-change
+      - affected-product
+      - affected-governance
+  budgets_seconds:
+    cold_verify_change_wall_max: 90
+    warm_verify_change_wall_max: 30
+    affected_product_wall_max: 30
+    affected_governance_wall_max: 30
+    service_product_warm_wall_max: 15
+    system_warm_wall_max: 2
+    governance_warm_wall_max: 2
+    ansible_warm_wall_max: 5
+  regression:
+    compare_median: true
+    evidence_required: true
+    fail_on_budget_regression: true
+
+dynamic_state:
+  always_fresh:
+    - git-status
+    - current-head-sha
+    - remote-ci-state
+    - review-state
+    - docker-runtime-state
+    - kubernetes-runtime-state
+    - network-state
+    - secrets-and-authentication
+    - provisioning-state

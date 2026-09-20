@@ -14,6 +14,8 @@ spec:
       type: string
     - name: record-dir
       type: string
+    - name: max-workers
+      type: string
   workspaces:
     - name: source
   volumes:
@@ -46,6 +48,12 @@ spec:
       image: $(params.runner-image)
       workingDir: /var/ecommerce-run/repository
       env:
+        - name: ECOMMERCE_TOOL_HOME
+          value: $(workspaces.source.path)/.context/cache/tool-home
+        - name: ECOMMERCE_EXECUTION_SCOPE
+          value: ci
+        - name: ECOMMERCE_QUALIFICATION_MAX_WORKERS
+          value: $(params.max-workers)
         - name: GOCACHE
           value: $(workspaces.source.path)/.context/cache/go-build
         - name: GOMODCACHE

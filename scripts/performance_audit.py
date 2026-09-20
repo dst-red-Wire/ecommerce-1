@@ -15,18 +15,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any
 
-GLOBAL_GATES = (
-    "governance",
-    "runtime-efficiency",
-    "contracts",
-    "automation",
-    "security",
-)
 REUSE_FIELDS = (
     "reused_from_sha",
     "promoted_from_worktree",
@@ -92,6 +86,18 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
     equivalent_full_seconds = executed_seconds + reused_seconds
     denominator = len(executed) + len(reused)
     cache_hit_ratio = (len(reused) / denominator) if denominator else 0.0
+    content_cache_records = [r for r in executed if int(r.get("content_cache_hits", 0) or 0) > 0]
+    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in executed)
+    content_cache_misses = sum(int(r.get("content_cache_misses", 0) or 0) for r in executed)
+    execution_counts: dict[str, int] = {}
+    for record in records:
+        if record.get("status") == "SKIP":
+            mode = "skipped"
+        elif _is_reused(record):
+            mode = str(record.get("execution") or "parent-evidence")
+        else:
+            mode = str(record.get("execution") or "fresh")
+        execution_counts[mode] = execution_counts.get(mode, 0) + 1
 
     return {
         "executed_records": executed,
@@ -102,6 +108,11 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
         "reused_gates": len(reused),
         "skipped_gates": len(skipped),
         "failed_gates": len(failed),
+        "execution_counts": dict(sorted(execution_counts.items())),
+        "content_cache_gates": len(content_cache_records),
+        "content_cache_direct_gates": sum(1 for r in executed if r.get("execution") == "content-cache"),
+        "content_cache_hits": content_cache_hits,
+        "content_cache_misses": content_cache_misses,
         "executed_seconds": _round(executed_seconds),
         "estimated_saved_seconds": _round(reused_seconds),
         "equivalent_full_seconds": _round(equivalent_full_seconds),
@@ -110,42 +121,164 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Model the canonical affected Pipeline after classification.
+def execution_max_workers(root: Path | None = None) -> int:
+    policy = (root or Path(__file__).resolve().parents[1]) / "config/contracts/qualification-execution-policy.yaml"
+    try:
+        text = policy.read_text(encoding="utf-8")
+    except OSError:
+        return 1
+    match = re.search(r"(?m)^\s*local_max_workers:\s*(\d+)\s*$", text)
+    if not match:
+        return 1
+    return max(1, min(16, int(match.group(1))))
 
-    The current Pipeline runs one sequential global-gates Task in parallel with a
-    matrix of independent component TaskRuns, then joins in the finalizer. Classify,
-    pod scheduling and finalizer overhead are not represented in per-gate evidence,
-    so this is an execution-gate estimate rather than observed wall clock.
-    """
+
+def _bounded_parallel_schedule(rows: list[tuple[str, float]], workers: int) -> tuple[float, list[str]]:
+    if not rows:
+        return 0.0, []
+    worker_count = max(1, min(int(workers), len(rows)))
+    slots: list[tuple[float, list[str]]] = [(0.0, []) for _ in range(worker_count)]
+    for name, seconds in rows:
+        index = min(range(worker_count), key=lambda item: (slots[item][0], item))
+        elapsed, names = slots[index]
+        slots[index] = (elapsed + seconds, [*names, name])
+    critical_seconds, critical_names = max(slots, key=lambda item: (item[0], item[1]))
+    return critical_seconds, critical_names
+
+
+def _ordered_parallel_schedule(
+    rows: list[tuple[str, float, bool]], workers: int
+) -> tuple[float, list[str]]:
+    total = 0.0
+    critical: list[str] = []
+    pending: list[tuple[str, float]] = []
+
+    def flush() -> None:
+        nonlocal total, pending
+        if not pending:
+            return
+        seconds, names = _bounded_parallel_schedule(pending, workers)
+        total += seconds
+        critical.extend(names)
+        pending = []
+
+    for name, seconds, parallel_safe in rows:
+        if parallel_safe:
+            pending.append((name, seconds))
+            continue
+        flush()
+        total += seconds
+        critical.append(name)
+    flush()
+    return total, critical
+
+
+def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None = None) -> dict[str, Any]:
+    """Model either local bounded execution or true Tekton matrix fan-out from evidence."""
     active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
-    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
-    components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
-    global_seconds = sum(_seconds(record.get("duration_seconds")) for record in globals_)
-    component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
-    longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
-    component_parallel_seconds = longest_component[1]
-    serial_seconds = global_seconds + sum(seconds for _, seconds in component_durations)
-    critical_seconds = max(global_seconds, component_parallel_seconds)
+    def is_global(record: dict[str, Any]) -> bool:
+        scope = record.get("scope")
+        if scope not in {"global", "component"}:
+            raise ValueError(f"gate {record.get('gate')} lacks canonical global/component scope")
+        return scope == "global"
 
-    if global_seconds >= component_parallel_seconds and globals_:
-        branch = "global-gates"
-        gates = [str(record.get("gate")) for record in globals_]
-    elif longest_component[0]:
-        branch = "component-matrix"
-        gates = [longest_component[0]]
+    globals_ = [record for record in active if is_global(record)]
+    components = [record for record in active if not is_global(record)]
+
+    recorded_budgets = {
+        int(record.get("worker_budget"))
+        for record in active
+        if record.get("worker_budget") is not None
+    }
+    if len(recorded_budgets) > 1:
+        raise ValueError("evidence contains inconsistent worker budgets")
+    recorded_workers = next(iter(recorded_budgets), None)
+    workers = int(max_workers or recorded_workers or execution_max_workers())
+
+    tekton_global_fanout = bool(globals_) and all(
+        record.get("parallel_group") == "tekton-global-matrix" and record.get("ci_fanout") is True
+        for record in globals_
+    )
+    if tekton_global_fanout:
+        global_durations = [
+            (str(record.get("gate")), _seconds(record.get("duration_seconds")))
+            for record in globals_
+        ]
+        longest_global = max(global_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
+        global_seconds = longest_global[1]
+        global_path = [longest_global[0]] if longest_global[0] else []
+        global_model = "tekton-matrix"
     else:
-        branch = "none"
-        gates = []
+        global_rows = [
+            (
+                str(record.get("gate")),
+                _seconds(record.get("duration_seconds")),
+                bool(record.get("parallel_safe", False)),
+            )
+            for record in globals_
+        ]
+        global_seconds, global_path = _ordered_parallel_schedule(global_rows, workers)
+        global_model = "ordered-bounded-local"
+
+    component_durations = [
+        (str(record.get("gate")), _seconds(record.get("duration_seconds")))
+        for record in components
+    ]
+    tekton_component_fanout = bool(components) and all(
+        record.get("parallel_group") == "tekton-component-matrix"
+        for record in components
+    )
+    if tekton_component_fanout:
+        longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
+        component_parallel_seconds = longest_component[1]
+        component_path = [longest_component[0]] if longest_component[0] else []
+        component_model = "tekton-matrix"
+    else:
+        component_rows = [
+            (
+                str(record.get("gate")),
+                _seconds(record.get("duration_seconds")),
+                bool(record.get("parallel_safe", False)),
+            )
+            for record in components
+        ]
+        component_parallel_seconds, component_path = _ordered_parallel_schedule(component_rows, workers)
+        component_model = "ordered-bounded-local"
+
+    serial_seconds = sum(_seconds(record.get("duration_seconds")) for record in active)
+    true_tekton_fanout = tekton_global_fanout and (not components or tekton_component_fanout)
+    if true_tekton_fanout:
+        critical_seconds = max(global_seconds, component_parallel_seconds)
+        if global_seconds >= component_parallel_seconds and globals_:
+            branch = "global-gates"
+            gates = global_path
+        elif component_path:
+            branch = "component-matrix"
+            gates = component_path
+        else:
+            branch = "none"
+            gates = []
+        scope_model = "parallel-tekton-branches"
+    else:
+        # Local verify-change executes the global scope first, then the component
+        # scope. Parallelism is bounded within each scope, never across them.
+        critical_seconds = global_seconds + component_parallel_seconds
+        gates = [*global_path, *component_path]
+        branch = "local-sequential-scopes" if gates else "none"
+        scope_model = "sequential-local-scopes"
 
     parallel_headroom = max(0.0, serial_seconds - critical_seconds)
     speedup = (serial_seconds / critical_seconds) if critical_seconds else 1.0
     utilization = (critical_seconds / serial_seconds) if serial_seconds else 0.0
 
     return {
-        "model": "tekton-affected-v1",
-        "assumption": "global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
+        "model": "tekton-affected-v3",
+        "global_execution_model": global_model,
+        "component_execution_model": component_model,
+        "scope_execution_model": scope_model,
+        "assumption": "Tekton global/component matrices run in parallel; local verify-change runs global then component scopes sequentially",
+        "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
         "global_branch_seconds": _round(global_seconds),
         "component_matrix_branch_seconds": _round(component_parallel_seconds),
@@ -445,6 +578,9 @@ def _print_summary(report: dict[str, Any], destination: Path) -> None:
     print(f"executed gate time   {inventory['executed_seconds']:.3f}s")
     print(f"reused time saved    {inventory['estimated_saved_seconds']:.3f}s")
     print(f"evidence hit ratio   {inventory['evidence_reuse_hit_percent']:.1f}%")
+    print(f"content cache hits   {inventory.get('content_cache_hits', 0)} across {inventory.get('content_cache_gates', 0)} gates")
+    print(f"content cache misses {inventory.get('content_cache_misses', 0)}")
+    print(f"execution modes      {json.dumps(inventory.get('execution_counts', {}), sort_keys=True)}")
     print(f"critical path est.   {critical['critical_path_estimate_seconds']:.3f}s ({critical['critical_branch']})")
     print(f"parallel headroom    {critical['parallelization_headroom_seconds']:.3f}s")
     priorities = report.get("amdahl_priorities", [])

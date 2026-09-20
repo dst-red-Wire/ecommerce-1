@@ -15,6 +15,51 @@ evidence:
   qualification_identity_required: true
   commit_tree_required: true
 
+gate_records:
+  required:
+    - gate
+    - status
+    - duration_seconds
+    - execution
+    - cache_mode
+    - scope
+    - parallel_safe
+    - parallel_group
+    - started_at_monotonic_offset
+  execution_values:
+    - fresh
+    - content-cache
+    - parent-evidence
+    - skipped
+  conditional_content_cache_fields:
+    - cache_key
+    - input_digest
+    - source_duration_seconds
+    - cache_entries
+  dynamic_runtime_cache_authority: forbidden
+
+qualification_proof:
+  authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
+  required_before_merge: true
+  exact_pass_evidence_required: true
+  performance_audit_required: true
+
+performance_campaign:
+  authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
+  repetitions_source: workflows.performance_campaign.repetitions
+  bind_fields:
+    - head_sha
+    - head_tree_sha
+    - qualification_identity
+    - budgets
+    - final_product_exact
+    - final_verify_exact
+  output: .context/performance/campaign-<sha>.json
+  required_before_merge: false
+  budget_failure_blocks_readiness: false
+  native_dependency_caches_must_be_preserved: true
+  synthetic_impacts_must_use_isolated_worktrees: true
+
 remote_store:
   authority: harbor
   transport: oci-distribution
@@ -53,8 +98,10 @@ metrics:
   report_executed_reused_skipped_counts: true
   compare_full_and_incremental_runs: true
   report_evidence_reuse_hit_ratio: true
+  report_content_cache_hits: true
+  distinguish_content_cache_from_evidence_reuse: true
   report_critical_path_estimate: true
   report_parallelization_headroom: true
   report_amdahl_priorities: true
-  performance_audit_output: .context/performance/<sha>.json
+  performance_audit_output_source: workflows.qualification_proof.performance_audit_output
   performance_audit_is_authoritative_for_pass: false
