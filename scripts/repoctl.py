@@ -3852,27 +3852,33 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
         return False, "repository owner login is missing"
 
     response = run(
-        [gh, "pr", "view", str(pr_number), "--json", "comments"],
+        [
+            gh,
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner_login}/{ROOT.name}/issues/{pr_number}/comments?per_page=100",
+        ],
         check=False,
         capture=True,
     )
     if response.returncode:
         detail = (response.stderr or response.stdout or "").strip()
-        return False, detail or "unable to read PR comments"
+        return False, detail or "unable to read complete PR comment history"
 
     try:
-        payload = json.loads(response.stdout or "{}")
+        pages = json.loads(response.stdout or "[]")
     except json.JSONDecodeError:
         return False, "invalid GitHub PR comments JSON"
 
-    comments = payload.get("comments", [])
-    if not isinstance(comments, list):
-        return False, "GitHub PR comments payload is not a list"
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        return False, "GitHub PR paginated comments payload is invalid"
+    comments = [comment for page in pages for comment in page]
 
     for comment in comments:
         if not isinstance(comment, dict):
             continue
-        author = comment.get("author") or {}
+        author = comment.get("user") or comment.get("author") or {}
         if not isinstance(author, dict) or str(author.get("login") or "") != owner_login:
             continue
         for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
