@@ -108,7 +108,7 @@
   ansible.builtin.assert:
     that:
       - wireguard_openbao_addr | length > 0
-      - wireguard_openbao_addr is match('^https://[^\\s]+$')
+      - wireguard_openbao_addr is match('^https://[^\s]+$')
       - wireguard_openbao_token | length > 0
       - wireguard_openbao_gateway_path == 'mgmt/wireguard/wg-01'
       - wireguard_openbao_peers_path == 'mgmt/wireguard/peers'
