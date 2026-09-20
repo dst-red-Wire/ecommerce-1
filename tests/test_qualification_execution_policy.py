@@ -306,15 +306,18 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             MOD._execute_plan_scope(unknown, "global", [], {}, None, None)
 
     def test_performance_campaign_and_budgets_are_central_contract(self):
-        performance = MOD.qualification_execution_policy()["performance"]
-        self.assertEqual(3, performance["campaign"]["repetitions"])
+        policy = MOD.qualification_execution_policy()
+        performance = policy["performance"]
+        campaign = policy["workflows"]["performance_campaign"]
+        self.assertEqual(3, campaign["repetitions"])
+        self.assertNotIn("repetitions", performance["campaign"])
         self.assertEqual(110.054, performance["baselines_seconds"]["system"])
         self.assertEqual(86.060, performance["baselines_seconds"]["governance"])
         self.assertLessEqual(performance["budgets_seconds"]["warm_verify_change_wall_max"], 30)
         self.assertLessEqual(performance["budgets_seconds"]["service_product_warm_wall_max"], 15)
         self.assertIs(True, performance["regression"]["fail_on_budget_regression"])
 
-    def test_merge_campaign_validator_accepts_only_exact_pass_budget_proof(self):
+    def test_performance_campaign_validator_accepts_only_exact_pass_budget_proof(self):
         import json
         import tempfile
         import time
@@ -326,6 +329,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             proof_dir = context / "performance"
             proof_dir.mkdir()
             proof = proof_dir / f"campaign-{head}.json"
+            repetitions = MOD.qualification_workflow("performance_campaign")["repetitions"]
             payload = {
                 "schema_version": 1,
                 "status": "PASS",
@@ -333,7 +337,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 "head_tree_sha": tree,
                 "qualification_identity": "identity",
                 "created_at_epoch": time.time(),
-                "repetitions": 3,
+                "repetitions": repetitions,
                 "budgets": {"warm": {"status": "PASS"}},
                 "safety": {
                     "native_dependency_caches_preserved": True,
