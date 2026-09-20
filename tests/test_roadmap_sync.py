@@ -106,5 +106,18 @@ class RoadmapSyncTests(unittest.TestCase):
                 ROADMAP.tracker_states("gh", policy)
 
 
+    def test_finish_pr_source_runs_post_merge_roadmap_reconciliation(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
+        self.assertIn("_roadmap_followup_after_merge()", finish)
+        self.assertIn("automatic roadmap synchronization failed", finish)
+
+        followup = source[source.index("def _roadmap_followup_after_merge(") : source.index("def git_sync(")]
+        self.assertIn("roadmap_check(quiet=True)", followup)
+        self.assertIn("roadmap_sync()", followup)
+        self.assertIn("deliver(default_branch, title, title)", followup)
+        self.assertNotIn("git push origin main", followup)
+
+
 if __name__ == "__main__":
     unittest.main()
