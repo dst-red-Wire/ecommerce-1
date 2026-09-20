@@ -90,6 +90,10 @@
           - runtime.evidence_signing_secret | default('') | length > 0
           - runtime.registry_auth_secret | default('') | length > 0
           - runtime.status_secret | default('') | length > 0
+          - runtime.execution_budget is defined
+          - runtime.execution_budget.max_workers is defined
+          - runtime.execution_budget.max_workers | int >= 1
+          - runtime.execution_budget.max_workers | int <= 16
         fail_msg: >-
           Runtime config must provide kube_context, namespace, immutable runner_image,
           pipeline_service_account, repo_url, evidence_repository and the three
@@ -293,6 +297,10 @@
             (existing_parent_run.resources[0].spec.params
             | selectattr('name', 'equalto', 'status-secret')
             | map(attribute='value') | list) == [runtime.status_secret]
+          - >-
+            (existing_parent_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'max-workers')
+            | map(attribute='value') | list) == [runtime.execution_budget.max_workers | string]
         fail_msg: >-
           Existing parent PipelineRun name collides with non-owned or non-exact state.
           Refuse deletion or reuse; inspect the management plane manually.
@@ -358,6 +366,8 @@
                 value: "{{ runtime.registry_auth_secret }}"
               - name: status-secret
                 value: "{{ runtime.status_secret }}"
+              - name: max-workers
+                value: "{{ runtime.execution_budget.max_workers }}"
             workspaces:
               - name: source
                 emptyDir: {}
@@ -430,6 +440,10 @@
             (existing_child_run.resources[0].spec.params
             | selectattr('name', 'equalto', 'status-secret')
             | map(attribute='value') | list) == [runtime.status_secret]
+          - >-
+            (existing_child_run.resources[0].spec.params
+            | selectattr('name', 'equalto', 'max-workers')
+            | map(attribute='value') | list) == [runtime.execution_budget.max_workers | string]
         fail_msg: >-
           Existing child PipelineRun name collides with non-owned or non-exact state.
           Refuse deletion or reuse; inspect the management plane manually.
@@ -495,6 +509,8 @@
                 value: "{{ runtime.registry_auth_secret }}"
               - name: status-secret
                 value: "{{ runtime.status_secret }}"
+              - name: max-workers
+                value: "{{ runtime.execution_budget.max_workers }}"
             workspaces:
               - name: source
                 emptyDir: {}
