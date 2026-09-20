@@ -111,8 +111,10 @@ the already-imported tar archives so kubelet does not enter `DiskPressure`. The
 installed RPMs, RKE2 binary and containerd content remain. To reconstruct transfer
 bytes after cleanup, run `vm_action=restage`; it stops the local server, executes the
 same complete offline validation and staging role, and leaves restart to the next
-`server` action. A normal `test` action refuses an active server so a cold trial cannot
-be confused with recovery.
+`server` action. To remain inside the official box's 10 GiB disk, it removes only the
+stopped fixture's reconstructible containerd store and image-import directory before
+rebuilding them; RKE2 server state and etcd remain. A normal `test` action refuses an
+active server so a cold trial cannot be confused with recovery.
 
 The fail-closed mutation proof is a separate recovery sequence. Run `restage`, then
 `tamper`, then `restage` again before `server`. The `tamper` action flips one byte in

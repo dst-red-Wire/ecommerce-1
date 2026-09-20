@@ -45,6 +45,13 @@
   when: vm_action == 'restage' and vm_test_server_active.stdout | trim == 'active'
   changed_when: true
   failed_when: false
+- name: Release only reconstructible containerd and image-import state before restaging
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n, python3, '-']
+    stdin: "{{ lookup('file', playbook_dir ~ '/restage_cleanup.py') }}"
+  when: vm_action == 'restage'
+  register: vm_restage_cleanup
+  changed_when: (vm_restage_cleanup.stdout | from_json).removed | length > 0
 - name: Create controller harness matching role helper layout
   ansible.builtin.file:
     path: "{{ vm_state }}/controller/{{ item }}"

@@ -21,6 +21,7 @@ def load(name: str):
 RKE2 = load("rke2_probe")
 VIRTUALBOX = load("virtualbox_probe")
 TAMPER = load("tamper_artifact")
+RESTAGE = load("restage_cleanup")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
@@ -91,6 +92,22 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             self.assertNotEqual(TAMPER.sha256(artifact), before)
             self.assertEqual(result["before_sha256"], before)
             self.assertEqual(result["after_sha256"], TAMPER.sha256(artifact))
+
+    def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            containerd = root / "containerd"
+            images = root / "images"
+            unrelated = root / "server"
+            for path in (containerd, images, unrelated):
+                path.mkdir()
+            self.assertEqual(
+                RESTAGE.clean((containerd, images), allowed=(containerd, images)),
+                [str(containerd), str(images)],
+            )
+            self.assertTrue(unrelated.is_dir())
+            with self.assertRaisesRegex(ValueError, "non-reconstructible"):
+                RESTAGE.clean((unrelated,), allowed=(containerd, images))
 
 
 if __name__ == "__main__":
