@@ -164,9 +164,11 @@ After merge:
 
 1. update local `main` by fast-forward;
 2. verify the work has landed;
-3. delete obsolete remote/local branches when safe;
-4. remove temporary worktrees only after checking they are clean;
+3. run the canonical `make branch-cleanup` sweep instead of hand-deleting branches; it deletes only exact merged-PR heads or heads already absorbed by `origin/main`;
+4. remove temporary worktrees only after checking they are clean; active worktree branches are automatically preserved by branch cleanup;
 5. preserve verified rescue archives until the user explicitly decides they are no longer needed.
+
+For audit-only cleanup, use `make branch-cleanup DRY_RUN=1`.
 
 ## Response style
 
