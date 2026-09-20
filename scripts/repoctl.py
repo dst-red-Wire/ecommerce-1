@@ -4085,7 +4085,7 @@ def git_sync() -> int:
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
-    required_sections = {"publish", "pull_request", "merge", "cleanup"}
+    required_sections = {"publish", "pull_request", "merge", "cleanup", "post_merge"}
     missing = sorted(required_sections - set(policy))
     if missing:
         raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
@@ -4098,6 +4098,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     pull_request_policy = policy["pull_request"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
+    post_merge_policy = policy["post_merge"]
     automatic_cleanup = cleanup_policy.get("automatic_branch_cleanup")
     expected_automatic_cleanup = {
         "enabled": True,
@@ -4128,6 +4129,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         ("pull_request", pull_request_policy),
         ("merge", merge_policy),
         ("cleanup", cleanup_policy),
+        ("post_merge", post_merge_policy),
     ):
         if not isinstance(section, dict):
             raise RuntimeError(f"review-policy repository_delivery.{section_name} must be a mapping")
@@ -4161,6 +4163,16 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         (cleanup_policy.get("merged_pr_state") == "merged-closed", "merged PR state must be merged-closed"),
         (cleanup_policy.get("remote_branch") == "delete", "remote feature branch cleanup must be delete"),
         (cleanup_policy.get("local_branch") == "delete", "local feature branch cleanup must be delete"),
+        (
+            post_merge_policy.get("roadmap") == {
+                "authority": "architecture.lock.yaml#machine_contracts.roadmap_policy",
+                "check": "required",
+                "sync_on_drift": "required",
+                "delivery": "qualified-pull-request",
+                "direct_default_branch_write": "forbidden",
+            },
+            "post-merge roadmap reconciliation contract must remain exact",
+        ),
     )
     for valid, message in required_invariants:
         if not valid:
@@ -4770,7 +4782,7 @@ def finish_pr(base: str) -> int:
 
     print(
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
-        f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciled"
+        f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
     )
     return 0
 
