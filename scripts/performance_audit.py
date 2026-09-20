@@ -140,6 +140,33 @@ def _bounded_parallel_schedule(rows: list[tuple[str, float]], workers: int) -> t
     return critical_seconds, critical_names
 
 
+def _ordered_parallel_schedule(
+    rows: list[tuple[str, float, bool]], workers: int
+) -> tuple[float, list[str]]:
+    total = 0.0
+    critical: list[str] = []
+    pending: list[tuple[str, float]] = []
+
+    def flush() -> None:
+        nonlocal total, pending
+        if not pending:
+            return
+        seconds, names = _bounded_parallel_schedule(pending, workers)
+        total += seconds
+        critical.extend(names)
+        pending = []
+
+    for name, seconds, parallel_safe in rows:
+        if parallel_safe:
+            pending.append((name, seconds))
+            continue
+        flush()
+        total += seconds
+        critical.append(name)
+    flush()
+    return total, critical
+
+
 def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None = None) -> dict[str, Any]:
     """Model the canonical affected Pipeline with centrally bounded parallel global gates.
 
@@ -160,12 +187,19 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
         raise ValueError("evidence contains inconsistent worker budgets")
     recorded_workers = next(iter(recorded_budgets), None)
     workers = int(max_workers or recorded_workers or execution_max_workers())
-    global_rows = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in globals_]
-    global_seconds, global_path = _bounded_parallel_schedule(global_rows, workers)
+    global_rows = [
+        (
+            str(record.get("gate")),
+            _seconds(record.get("duration_seconds")),
+            bool(record.get("parallel_safe", False)),
+        )
+        for record in globals_
+    ]
+    global_seconds, global_path = _ordered_parallel_schedule(global_rows, workers)
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
-    serial_seconds = sum(seconds for _, seconds in global_rows) + sum(seconds for _, seconds in component_durations)
+    serial_seconds = sum(seconds for _, seconds, _ in global_rows) + sum(seconds for _, seconds in component_durations)
     critical_seconds = max(global_seconds, component_parallel_seconds)
 
     if global_seconds >= component_parallel_seconds and globals_:
@@ -184,7 +218,7 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
 
     return {
         "model": "tekton-affected-v2",
-        "assumption": "global gates use central bounded parallelism; component gates fan out as a Matrix; both branches start after classify",
+        "assumption": "global gates use ordered bounded parallelism with serial barriers; component gates fan out as a Matrix; both branches start after classify",
         "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
         "global_branch_seconds": _round(global_seconds),
