@@ -120,7 +120,7 @@
   ansible.builtin.set_fact:
     mgmt_private_configured_alias_cidrs: >-
       {{ mgmt_private_alias_config.stdout
-         | regex_findall('(?:[0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}') }}
+         | regex_findall('(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}') }}
 
 - name: Report complete alias-set drift in Ansible check mode
   ansible.builtin.debug:
