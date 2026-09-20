@@ -70,7 +70,12 @@ def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     content_cache_misses = sum(int(r.get("content_cache_misses", 0) or 0) for r in executed)
     execution_counts: dict[str, int] = {}
     for record in records:
-        mode = str(record.get("execution") or ("skipped" if record.get("status") == "SKIP" else "fresh"))
+        if record.get("status") == "SKIP":
+            mode = "skipped"
+        elif reused(record):
+            mode = str(record.get("execution") or "parent-evidence")
+        else:
+            mode = str(record.get("execution") or "fresh")
         execution_counts[mode] = execution_counts.get(mode, 0) + 1
 
     return {
