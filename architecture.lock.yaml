@@ -370,6 +370,7 @@ topology_contracts:
   service_policy_chain: docs/architecture/SERVICE_POLICY_CHAIN_V1.md
 
 machine_contracts:
+  cache_policy: config/contracts/cache-policy.yaml
   certificate_authority_policy: config/contracts/certificate-authority-policy.yaml
   ci_evidence: config/contracts/ci-evidence.yaml
   ci_topology: config/contracts/ci-topology.yaml

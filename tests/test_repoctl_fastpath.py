@@ -145,6 +145,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         domains = model["domains"]
         self.assertEqual("source_quality_policy", domains["source_quality"]["machine_contract"])
         self.assertEqual("toolchain_lock", domains["toolchain"]["machine_contract"])
+        self.assertEqual("cache_policy", domains["qualification_cache"]["machine_contract"])
         self.assertEqual("security_scan_policy", domains["security_scan"]["machine_contract"])
         self.assertEqual("terraform_provider_lock", domains["terraform_provider"]["machine_contract"])
         self.assertEqual("context_router", domains["context_routing"]["machine_contract"])
@@ -170,6 +171,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("generated-projection", contract["projections"]["versions_env"]["mode"])
         self.assertEqual("generated-projection", contract["projections"]["ansible_collections"]["mode"])
         self.assertEqual("operational-projection", contract["projections"]["capability_graph"]["mode"])
+        self.assertEqual("forbidden", contract["rules"]["floating_versions"])
+        self.assertEqual("required", contract["rules"]["executable_sha256_cache_identity"])
 
     def test_workstation_native_files_are_central_projections(self):
         policy = MOD.workstation_policy()

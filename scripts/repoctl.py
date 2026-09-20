@@ -27,6 +27,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import qualification_cache
+
 
 def _missing_repository_delivery(*_args, **_kwargs):
     raise RuntimeError(
@@ -148,21 +150,62 @@ def git(*args: str, check: bool = True) -> str:
 
 def ruby_yaml(path: str) -> dict:
     require("ruby")
-    script = "require 'yaml'; require 'json'; d=YAML.safe_load(File.read(ARGV[0]), aliases: false) || {}; print JSON.generate(d)"
-    result = subprocess.run(
-        ["ruby", "-e", script, path],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
+    source = Path(path)
+    if not source.is_absolute():
+        source = ROOT / source
+    return qualification_cache.psych_load(source)
+
+
+_STATIC_GATE_TOOLS = {
+    "governance": (sys.executable, "ruby", "git"),
+    "runtime-efficiency": (sys.executable, "ruby"),
+    "contracts": (sys.executable, "ruby", "git", "go", "oasdiff", "oapi-codegen"),
+    "automation": (sys.executable, "git"),
+}
+
+
+def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
+    consumers = qualification_cache.contract().get("consumers", {})
+    global_contracts = consumers.get("repoctl_global_static_gates", {}).get("gates", {})
+    gate_contract = global_contracts.get(name) if isinstance(global_contracts, dict) else None
+    tool_names = list(_STATIC_GATE_TOOLS.get(name, ()))
+    patterns = gate_contract.get("inputs", []) if isinstance(gate_contract, dict) else []
+    if not patterns or not tool_names:
+        raise RuntimeError(f"static qualification cache is not approved for gate {name}")
+    input_digest = qualification_cache.digest_globs(patterns, root=ROOT)
+    validator_digest = qualification_cache.digest_paths(
+        [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
+        root=ROOT,
     )
-    if result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or "").strip() or f"Ruby YAML parse failed: {path}")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Ruby YAML parser returned invalid JSON for {path}") from exc
+    tool_identity = {tool: qualification_cache.executable_identity(tool) for tool in tool_names}
+    key = qualification_cache.build_key(
+        f"static-gate:{name}",
+        input_content_digest=input_digest,
+        validator_content_digest=validator_digest,
+        tool_identity=tool_identity,
+        options={"gate_inputs": list(patterns), "gate_options": options},
+    )
+    return key, input_digest
+
+
+def _run_cached_static_gate(name: str, options: dict, producer) -> int:
+    key, input_digest = _static_gate_cache_key(name, options)
+    namespace = f"static-gate:{name}"
+    cached = qualification_cache.load_success(namespace, key)
+    if cached is not None:
+        saved = float(cached.get("duration_seconds", 0.0) or 0.0)
+        print(f"PASS {name} qualification cache hit inputs={input_digest[:12]} saved~{saved:.3f}s")
+        return 0
+    started = time.monotonic()
+    result = producer()
+    duration = round(time.monotonic() - started, 3)
+    if result == 0:
+        qualification_cache.store_success(
+            namespace,
+            key,
+            {"input_digest": input_digest, "duration_seconds": duration, "options": options},
+        )
+    return result
 
 
 _SOURCE_QUALITY_POLICY: dict | None = None
@@ -420,6 +463,32 @@ def repository_authority_check() -> int:
 
     toolchain = load_toolchain_lock()
     validate_toolchain_projections(toolchain)
+
+    rules = toolchain.get("rules", {})
+    expected_rules = {
+        "floating_versions": "forbidden",
+        "managed_download_sha256": "required-when-downloaded-as-release-asset",
+        "mutable_oci_tags": "forbidden",
+        "immutable_oci_digest": "required",
+        "executable_sha256_cache_identity": "required",
+    }
+    for rule, expected in expected_rules.items():
+        if rules.get(rule) != expected:
+            raise RuntimeError(f"central toolchain rule {rule} must be {expected!r}")
+    floating_tokens = {"latest", "stable", "main", "master", "head", "edge", "nightly", "*"}
+    for key, raw_value in toolchain.get("versions", {}).items():
+        value = str(raw_value).strip()
+        if "SHA256" in key.upper():
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                raise RuntimeError(f"{key}: SHA-256 pin must be exactly 64 hexadecimal characters")
+            continue
+        if (
+            value.lower() in floating_tokens
+            or value.endswith(".x")
+            or any(marker in value for marker in ("<", ">", "^", "~", "*"))
+        ):
+            raise RuntimeError(f"{key}: floating tool version is forbidden: {value}")
+
     capability_graph = load_contract()
     validate_contract(capability_graph, toolchain["versions"])
 
@@ -796,6 +865,7 @@ def governance() -> int:
     repository_authority_check()
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
+    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
     require("ruby")
     for validator in (
         "scripts/validate-architecture.rb",
@@ -3235,13 +3305,22 @@ def main() -> int:
     args = p.parse_args()
     try:
         if args.cmd == "governance":
-            return governance()
+            return _run_cached_static_gate("governance", {}, governance)
         if args.cmd == "runtime-efficiency":
-            return runtime_efficiency_check()
+            return _run_cached_static_gate("runtime-efficiency", {}, runtime_efficiency_check)
         if args.cmd == "contracts":
-            return contracts(args.base, args.head, args.generate)
+            contract_options = {
+                "base_tree": git("rev-parse", f"{args.base}^{{tree}}").strip() if args.base else "",
+                "head_tree": worktree_tree_sha() if args.head == "WORKTREE" else git("rev-parse", f"{args.head}^{{tree}}").strip(),
+                "generate": bool(args.generate),
+            }
+            return _run_cached_static_gate(
+                "contracts",
+                contract_options,
+                lambda: contracts(args.base, args.head, args.generate),
+            )
         if args.cmd == "automation-policy":
-            return automation_policy()
+            return _run_cached_static_gate("automation", {}, automation_policy)
         if args.cmd == "format-check":
             return format_check()
         if args.cmd == "lint":

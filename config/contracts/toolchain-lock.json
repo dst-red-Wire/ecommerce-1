@@ -136,7 +136,12 @@
   "rules": {
     "native_projection_drift": "block",
     "duplicate_version_authority": "forbidden",
-    "unmanaged_cross_cutting_version": "forbidden"
+    "unmanaged_cross_cutting_version": "forbidden",
+    "floating_versions": "forbidden",
+    "managed_download_sha256": "required-when-downloaded-as-release-asset",
+    "mutable_oci_tags": "forbidden",
+    "immutable_oci_digest": "required",
+    "executable_sha256_cache_identity": "required"
   },
   "capability_policy": {
     "supported": {
