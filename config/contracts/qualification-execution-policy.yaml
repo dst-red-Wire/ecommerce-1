@@ -382,6 +382,7 @@ workflows:
     clean_worktree_required: true
     verify_change_runs: 1
     performance_audit_runs: 1
+    performance_audit_output: .context/performance/<sha>.json
     performance_campaign_required: false
     merge_authoritative: true
   performance_campaign:
