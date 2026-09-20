@@ -289,7 +289,28 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     return report, report["status"] == "PASS"
 
 
-def _markdown_report(report: dict, audit_report: dict, files_changed: list[str], branch: str) -> str:
+def _resolve_pr_url() -> str:
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        return "unresolved-offline"
+    completed = subprocess.run(
+        [gh, "pr", "view", "--json", "url", "--jq", ".url"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    value = (completed.stdout or "").strip()
+    return value if completed.returncode == 0 and value else "unresolved-offline"
+
+
+def _markdown_report(
+    report: dict,
+    audit_report: dict,
+    files_changed: list[str],
+    branch: str,
+    pr_url: str,
+) -> str:
     before = report["baselines_seconds"]
     cold = report["cold_verify_change"]["median_wall_seconds"]
     warm = report["warm_verify_change"]["median_wall_seconds"]
@@ -365,7 +386,7 @@ def _markdown_report(report: dict, audit_report: dict, files_changed: list[str],
         f".context/evidence/{report['head_sha']}.json",
         "",
         "PR",
-        "resolved by the delivery/PR workflow for this branch",
+        pr_url,
         "",
         "VERDICT",
         "READY FOR REVIEW" if report["status"] == "PASS" else "BLOCKED: performance/qualification budget failure",
@@ -404,7 +425,13 @@ def main(argv: list[str] | None = None) -> int:
         ).splitlines()
         markdown = destination.with_suffix(".md")
         markdown.write_text(
-            _markdown_report(report, audit_report, sorted(set(files_changed)), branch),
+            _markdown_report(
+                report,
+                audit_report,
+                sorted(set(files_changed)),
+                branch,
+                _resolve_pr_url(),
+            ),
             encoding="utf-8",
         )
         print(
