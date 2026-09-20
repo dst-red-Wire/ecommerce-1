@@ -29,21 +29,40 @@ def _run_sample(label: str, command: list[str], *, cwd: Path = ROOT, env: dict[s
     logs.mkdir(parents=True, exist_ok=True)
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in label)
     log_path = logs / f"{safe}.log"
+    process_env = dict(env or os.environ)
+    process_env["PYTHONUNBUFFERED"] = "1"
+    process_env["ECOMMERCE_LIVE_OUTPUT"] = "1"
+
+    print(f"\n=== START {label} ===", flush=True)
+    print(f"LOG {log_path.relative_to(ROOT)}", flush=True)
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=env,
+            env=process_env,
             text=True,
-            stdout=log,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            check=False,
+            bufsize=1,
         )
+        if process.stdout is None:
+            process.kill()
+            raise RuntimeError(f"{label} could not capture subprocess output")
+        for line in process.stdout:
+            log.write(line)
+            log.flush()
+            print(line, end="", flush=True)
+        returncode = process.wait()
+
     wall = round(time.monotonic() - started, 3)
-    if completed.returncode:
-        tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
-        raise RuntimeError(f"{label} failed ({completed.returncode}) after {wall:.3f}s\n{tail}")
+    if returncode:
+        print(f"=== FAIL {label} ({wall:.3f}s) ===", flush=True)
+        raise RuntimeError(
+            f"{label} failed ({returncode}) after {wall:.3f}s; "
+            f"log={log_path.relative_to(ROOT)}"
+        )
+    print(f"=== PASS {label} ({wall:.3f}s) ===", flush=True)
     return {"label": label, "wall_seconds": wall, "log": str(log_path.relative_to(ROOT))}
 
 
