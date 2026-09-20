@@ -213,6 +213,36 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
+
+  def test_service_change_routes_transitive_consumers
+    affected = AffectedComponents.classify(
+      ["services/product/internal/domain/product.go"],
+      services: SERVICES,
+      public_contracts: PUBLIC,
+      common_openapi: "contracts/openapi/common.v1.yaml",
+      contract_impact: {},
+      service_consumers: {"product" => %w[cart search]}
+    )
+    assert_equal %w[global service:cart service:product service:search], affected
+  end
+
+  def test_changed_paths_includes_deletions
+    Dir.mktmpdir("ci-affected-delete") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "gone.txt"), "one\n")
+        isolated_git("add", "gone.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.delete(File.join(dir, "gone.txt"))
+        isolated_git("add", "-A", chdir: dir)
+        isolated_git("commit", "-qm", "delete", chdir: dir)
+        head = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        assert_equal ["gone.txt"], AffectedComponents.changed_paths(dir, base, head)
+      end
+    end
+  end
+
   def test_unknown_service_path_fails_closed
     assert_raises(ArgumentError) { classify("services/warehouse/main.go") }
   end

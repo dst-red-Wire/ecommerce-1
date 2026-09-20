@@ -18,6 +18,29 @@ class ArchitectureAuthorityTest(unittest.TestCase):
     def test_repository(self):
         self.assertEqual([], authority.validate(ROOT))
 
+    def test_yaml_parse_cache_is_content_addressed_and_mutation_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.yaml"
+            second_path = root / "second.yaml"
+            payload = "root:\n  value: one\n"
+            first_path.write_text(payload, encoding="utf-8")
+            second_path.write_text(payload, encoding="utf-8")
+
+            authority.clear_yaml_parse_cache()
+            first = authority.load_yaml(first_path)
+            self.assertEqual(1, authority.qualification_cache.memory_entry_count("psych-yaml"))
+
+            first["root"]["value"] = "mutated-in-caller"
+            second = authority.load_yaml(second_path)
+            self.assertEqual("one", second["root"]["value"])
+            self.assertEqual(1, authority.qualification_cache.memory_entry_count("psych-yaml"))
+
+            second_path.write_text("root:\n  value: two\n", encoding="utf-8")
+            changed = authority.load_yaml(second_path)
+            self.assertEqual("two", changed["root"]["value"])
+            self.assertEqual(2, authority.qualification_cache.memory_entry_count("psych-yaml"))
+
     def test_active_superseded_statements(self):
         for statement in (
             "Exactly 17 services.",
@@ -233,6 +256,199 @@ graph LR
             [], authority.documentation_errors("Next.js is only the migration source; target runtime is Go.")
         )
 
+    def test_backstage_nodejs_exception_is_management_plane_only(self):
+        self.assertFalse(authority.EXPECTED_V5_FRONTEND_RUNTIME["runtime_nodejs"])
+        contract = authority.V5_DEVELOPER_PLATFORM
+        self.assertEqual("forbidden", contract["runtime_boundary"]["commerce_runtime_nodejs"])
+        self.assertEqual(
+            "allowed-required",
+            contract["runtime_boundary"]["backstage_management_plane_nodejs"],
+        )
+        self.assertTrue(contract["runtime_boundary"]["backstage_only_exception"])
+        self.assertEqual("backstage", contract["principles"]["portal"])
+
+    def test_pr_driven_platform_contract_is_locked_and_m4_implemented(self):
+        contract = authority.V5_DEVELOPER_PLATFORM
+        self.assertEqual("git", contract["principles"]["source_of_truth"])
+        self.assertEqual("pull-request", contract["principles"]["change_unit"])
+        self.assertEqual("tekton", contract["principles"]["ci"])
+        self.assertEqual("rancher-fleet", contract["principles"]["gitops"])
+        self.assertEqual("crossplane", contract["principles"]["infrastructure_api"])
+        self.assertEqual("forbidden", contract["execution_contract"]["tekton_direct_workload_deploy"])
+        self.assertTrue(contract["execution_contract"]["mutating_platform_action_requires_git_change"])
+        self.assertEqual(
+            "stable-pr-driven-contract-locked",
+            contract["milestone_contract"]["M1-monorepo-bootstrap"]["outcome"],
+        )
+        self.assertFalse(
+            contract["milestone_contract"]["M1-monorepo-bootstrap"]["implementation_required"]
+        )
+        self.assertEqual(
+            "implement-pr-driven-platform-contract",
+            contract["milestone_contract"]["M4-platform-baseline"]["outcome"],
+        )
+
+    def test_pr_driven_platform_contract_mutation_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            mutations = (
+                ("    backstage_management_plane_nodejs: allowed-required", "    backstage_management_plane_nodejs: forbidden"),
+                ("    source_of_truth: git", "    source_of_truth: backstage"),
+                ("    tekton_direct_workload_deploy: forbidden", "    tekton_direct_workload_deploy: allowed"),
+                ("      implementation_required: false", "      implementation_required: true"),
+                ("      outcome: implement-pr-driven-platform-contract", "      outcome: redesign-pr-driven-platform-contract"),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    lock.write_text(original.replace(before, after, 1))
+                    self.assertTrue(
+                        any(
+                            "developer_platform must match the approved V5 PR-driven platform contract" in error
+                            for error in authority.validate(root)
+                        )
+                    )
+                    lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_repository_governance_contract_is_repository_wide(self):
+        contract = authority.V5_REPOSITORY_GOVERNANCE
+        self.assertEqual("entire-repository", contract["scope"])
+        self.assertEqual(
+            "architecture.lock.yaml",
+            contract["transverse_rule_contract"]["source_of_truth"],
+        )
+        self.assertEqual(
+            "central-contract-only",
+            contract["transverse_rule_contract"]["rule_definition"],
+        )
+        self.assertEqual(
+            "generic-validator",
+            contract["transverse_rule_contract"]["enforcement"],
+        )
+        self.assertEqual(
+            "forbidden",
+            contract["transverse_rule_contract"]["per_file_rule_propagation"],
+        )
+        self.assertEqual(
+            "only-if-required-to-consume-contract",
+            contract["transverse_rule_contract"]["consumer_changes"],
+        )
+        authorization = contract["owner_authorization"]
+        self.assertEqual(
+            "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
+            authorization["syntax"],
+        )
+        self.assertEqual("repository-owner", authorization["decision_authority"])
+        self.assertEqual("ChatGPT", authorization["recording_agent"])
+        self.assertTrue(authorization["recording_requires_explicit_owner_instruction"])
+        self.assertEqual("exact", authorization["sha_binding"])
+        self.assertEqual("exact", authorization["scope_binding"])
+        self.assertEqual("authorization-expired", authorization["head_change"])
+        self.assertEqual("block", authorization["absence_or_mismatch"])
+
+    def test_owner_authorization_is_exact_and_fail_closed(self):
+        head = "a" * 40
+        command = f"/owner-authorization approve scope=repository sha={head}"
+        valid = dict(
+            expected_scope="repository",
+            head_sha=head,
+            decision_authority="repository-owner",
+            recording_agent="ChatGPT",
+            explicit_owner_instruction=True,
+        )
+        self.assertEqual([], authority.owner_authorization_errors(command, **valid))
+
+        cases = (
+            (
+                None,
+                valid,
+                "BLOCK owner authorization missing",
+            ),
+            (
+                command,
+                {**valid, "expected_scope": "architecture"},
+                "BLOCK owner authorization scope mismatch",
+            ),
+            (
+                command,
+                {**valid, "head_sha": "b" * 40},
+                "BLOCK owner authorization SHA mismatch or authorization expired after HEAD change",
+            ),
+            (
+                "/owner-authorization approve scope=repository sha=abc123",
+                valid,
+                "BLOCK owner authorization syntax mismatch",
+            ),
+            (
+                command,
+                {**valid, "decision_authority": "recording-agent"},
+                "BLOCK owner authorization decision authority mismatch",
+            ),
+            (
+                command,
+                {**valid, "recording_agent": "other-agent"},
+                "BLOCK owner authorization recording agent mismatch",
+            ),
+            (
+                command,
+                {**valid, "explicit_owner_instruction": False},
+                "BLOCK owner authorization requires explicit repository-owner instruction",
+            ),
+        )
+        for candidate, kwargs, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, authority.owner_authorization_errors(candidate, **kwargs))
+
+    def test_repository_governance_mutations_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock = root / "architecture.lock.yaml"
+            original = lock.read_text()
+            mutations = (
+                ("  scope: entire-repository", "  scope: developer-platform"),
+                (
+                    "    per_file_rule_propagation: forbidden",
+                    "    per_file_rule_propagation: allowed",
+                ),
+                ("    recording_agent: ChatGPT", "    recording_agent: autonomous-agent"),
+                (
+                    "    head_change: authorization-expired",
+                    "    head_change: authorization-valid",
+                ),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, original)
+                    lock.write_text(original.replace(before, after, 1))
+                    self.assertIn(
+                        "repository_governance must match the approved repository-wide contract",
+                        authority.validate(root),
+                    )
+                    lock.write_text(original)
+                    self.assertEqual([], authority.validate(root))
+
+    def test_review_policy_cannot_override_root_owner_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            policy.write_text(
+                original.replace(
+                    "    authority_source: architecture.lock.yaml#repository_governance.owner_authorization",
+                    "    authority_source: config/contracts/review-policy.yaml#pull_request_review.owner_authorization",
+                    1,
+                )
+            )
+            self.assertIn(
+                "review policy must inherit repository_governance.owner_authorization without local override",
+                authority.validate(root),
+            )
+            policy.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
@@ -291,6 +507,7 @@ graph LR
         for relative in ("architecture.lock.yaml", "AGENTS.md", "README.md"):
             shutil.copy2(ROOT / relative, root / relative)
         shutil.copytree(ROOT / "config", root / "config")
+        shutil.copytree(ROOT / "contracts", root / "contracts")
         shutil.copytree(ROOT / "docs", root / "docs")
         shutil.copytree(ROOT / "instruction", root / "instruction")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -464,7 +681,7 @@ graph LR
                 "platform keys",
             ),
             ("  object_storage: seaweedfs-s3", "  object_storage: seaweedfs-s3\n  archive: minio", "stateful keys"),
-            ("  gitops: rancher-fleet\n  bootstrap:", "  bootstrap:", "management_plane keys"),
+            ("  developer_portal: backstage\n  bootstrap:", "  bootstrap:", "management_plane keys"),
             (
                 "    migration_source: nextjs-react-node",
                 "    migration_source: nextjs-react-node\n    package_manager: npm",
@@ -696,62 +913,42 @@ graph LR
                 path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_required_topology_contract_registrations_are_rejected_when_file_is_also_deleted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = self.copy_repository(directory)
-            lock_path = root / "architecture.lock.yaml"
-            original_lock = lock_path.read_text()
-            for key, relative in (
-                ("prod", "docs/architecture/PROD_TOPOLOGY_V2.md"),
-                ("mlops", "docs/architecture/MLOPS_TOPOLOGY_V1.md"),
-            ):
-                with self.subTest(key=key):
-                    mutated = re.sub(rf"^  {key}: .*\n", "", original_lock, count=1, flags=re.M)
-                    lock_path.write_text(mutated)
-                    path = root / relative
-                    contents = path.read_text()
-                    path.unlink()
-                    self.assertTrue(
-                        any("complete approved V5 role/path registry" in error for error in authority.validate(root))
-                    )
-                    path.write_text(contents)
-                    lock_path.write_text(original_lock)
-            self.assertEqual([], authority.validate(root))
-
-    def test_missing_topology_contract_registrations_return_registry_error(self):
+    def test_unregistered_topology_contract_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             lock_path = root / "architecture.lock.yaml"
             original = lock_path.read_text()
-            for key in ("mlops", "prod"):
-                with self.subTest(key=key):
-                    lock_path.write_text(re.sub(rf"^  {key}: .*\n", "", original, count=1, flags=re.M))
-                    self.assertEqual(
-                        ["topology_contracts must match the complete approved V5 role/path registry"],
-                        authority.validate(root),
-                    )
+            lock_path.write_text(re.sub(r"^  mlops: .*\n", "", original, count=1, flags=re.M))
+            errors = authority.validate(root)
+            self.assertTrue(any("topology_contracts has unregistered governed files" in error for error in errors))
             lock_path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_v5_registry_role_path_mutations_are_rejected(self):
+    def test_duplicate_topology_registration_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             lock_path = root / "architecture.lock.yaml"
             original = lock_path.read_text()
-            for first, second in (("preprod", "prod"), ("mlops", "observability")):
-                mutated = re.sub(
-                    rf"(^  {first}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[second]}", original, flags=re.M
-                )
-                mutated = re.sub(
-                    rf"(^  {second}: )([^\n]+)", rf"\g<1>{authority.V5_TOPOLOGY_CONTRACTS[first]}", mutated, flags=re.M
-                )
-                lock_path.write_text(mutated)
-                self.assertTrue(any("topology_contracts must match" in error for error in authority.validate(root)))
-                lock_path.write_text(original)
-            mutated = original.replace("  preprod_inventory: config/infrastructure/preprod-inventory.yaml\n", "")
+            prod = re.search(r"^  prod: ([^\n]+)$", original, re.M).group(1)
+            mutated = re.sub(r"^  preprod: [^\n]+$", f"  preprod: {prod}", original, count=1, flags=re.M)
             lock_path.write_text(mutated)
-            (root / "config/infrastructure/preprod-inventory.yaml").unlink()
-            self.assertTrue(any("machine_contracts must match" in error for error in authority.validate(root)))
+            errors = authority.validate(root)
+            self.assertTrue(any("topology_contracts must not register the same path more than once" in error for error in errors))
+            lock_path.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
+    def test_unregistered_machine_contract_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            lock_path = root / "architecture.lock.yaml"
+            original = lock_path.read_text()
+            lock_path.write_text(
+                original.replace("  preprod_inventory: config/infrastructure/preprod-inventory.yaml\n", "", 1)
+            )
+            errors = authority.validate(root)
+            self.assertTrue(any("machine_contracts has unregistered governed files" in error for error in errors))
+            lock_path.write_text(original)
+            self.assertEqual([], authority.validate(root))
 
     def test_m5_autonomous_domain_handoff_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

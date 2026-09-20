@@ -12,6 +12,27 @@ utilise Ansible pour réconcilier uniquement les outils du projet. Les états no
 que ses vrais dépendants, tels Kind et les tests conteneurisés. Voir
 [ADR-0002](docs/adr/ADR-0002-capability-aware-bootstrap.md).
 
+## Réduction de consommation Codex / Work
+
+Le dépôt applique une politique reproductible de revue différentielle et de réutilisation des preuves exact-SHA pour éviter les relances Codex/Work inutiles sans réduire la qualité des revues.
+
+Commande courte :
+
+```sh
+make review-budget PR=<numero> SNAPSHOT=.context/review-budget/current.json
+```
+
+Options utiles :
+
+```sh
+make review-budget PR=<numero> SNAPSHOT=.context/review-budget/current.json REVIEW_KIND=security
+make review-budget PR=<numero> SNAPSHOT=.context/review-budget/current.json REVIEW_KIND=combined FINAL_CANDIDATE=1
+```
+
+Si la décision retournée contient `"should_invoke_ai": false`, aucune nouvelle revue équivalente Codex/Work ne doit être lancée. Le cache et l'état local restent sous `.context/review-budget/` et ne sont pas versionnés.
+
+Documentation complète : [`docs/engineering/CODEX_REVIEW_BUDGET.md`](docs/engineering/CODEX_REVIEW_BUDGET.md). Le skill réutilisable est sous [`.agents/skills/codex-review-budget/SKILL.md`](.agents/skills/codex-review-budget/SKILL.md).
+
 ## Statut
 
 Le dépôt est en phase `BUILD`, avec `M2-golden-service-product` comme jalon applicatif courant. Le monorepo applicatif existe déjà (`frontend/`, `services/product/`) et l'IaC MGMT est amorcée sous `platform/terraform` et `platform/ansible`; les autres services et couches de plateforme sont ajoutés progressivement selon `architecture.lock.yaml`.

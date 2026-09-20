@@ -37,7 +37,8 @@ class M1ReviewClosureTests(unittest.TestCase):
     def test_frontend_gate_reconciles_go_and_checks_templ_drift_in_temporary_tree(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('ensure_developer("go,cgo")', frontend)
+        self.assertIn('ensure_developer("go,cgo,templ")', frontend)
+        self.assertIn('templ = managed_bin / "templ"', frontend)
         self.assertIn("TemporaryDirectory", frontend)
         self.assertIn("frontend templ generated code is stale", frontend)
 
@@ -47,10 +48,17 @@ class M1ReviewClosureTests(unittest.TestCase):
         makefile = (ROOT / "frontend/Makefile").read_text(encoding="utf-8")
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn("TEMPL_VERSION :=", makefile)
-        self.assertIn("templ@v$(TEMPL_VERSION)", makefile)
+        self.assertIn("scripts/repoctl.py frontend generate all", makefile)
+        self.assertNotIn("TEMPL_VERSION", makefile)
+        self.assertNotIn("versions.env", makefile)
         self.assertIn('pinned_versions().get("TEMPL_VERSION")', frontend)
-        self.assertNotIn("templ@v0.", makefile + frontend)
+        self.assertIn('[str(templ), "generate"]', frontend)
+        self.assertNotIn("github.com/a-h/templ/cmd/templ@", frontend)
+        capabilities = (ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8")
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn('"name": "templ"', capabilities)
+        self.assertIn('"version_key": "TEMPL_VERSION"', capabilities)
+        self.assertIn("github.com/a-h/templ/cmd/templ@v{{ templ_version }}", tasks)
 
     def test_frontend_tests_cover_shared_packages_once(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
@@ -62,7 +70,8 @@ class M1ReviewClosureTests(unittest.TestCase):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         state = source[source.index("def developer_state_ready(") : source.index("def canonical_services(")]
         frontend = source[source.index("def frontend(") : source.index("def site(")]
-        self.assertIn('managed_bin = Path.home() / ".local" / "bin"', state)
+        self.assertIn("managed_bin = managed_bin_dirs()[0]", state)
+        self.assertIn("def managed_bin_dirs()", source)
         self.assertIn('go = managed_bin / "go"', frontend)
         self.assertIn('env.pop("GOROOT", None)', frontend)
         self.assertIn('[str(go), "test"', frontend)
@@ -97,36 +106,42 @@ class M1ReviewClosureTests(unittest.TestCase):
         site = source[source.index("def site(") : source.index("def forbidden_frontend_artifacts(")]
         self.assertIn('["go", "build", "-o"', site)
         self.assertNotIn('"go", "run"', site)
-        self.assertIn("process.terminate()", site)
-        self.assertIn("signal.SIGTERM", site)
+        self.assertIn('start_new_session=(os.name != "nt")', site)
+        self.assertIn("CREATE_NEW_PROCESS_GROUP", site)
+        self.assertIn("os.killpg(process.pid, signal.SIGTERM)", site)
+        self.assertIn("taskkill.exe", site)
+        self.assertIn("intentionally_stopped", site)
 
     def test_site_terminates_survivor_when_peer_fails(self):
         class Process:
-            def __init__(self, returncode):
+            def __init__(self, pid, returncode):
+                self.pid = pid
                 self.returncode = returncode
-                self.terminated = False
 
             def poll(self):
                 return self.returncode
 
-            def terminate(self):
-                self.terminated = True
-                self.returncode = -REPOCTL.signal.SIGTERM
-
-            def wait(self):
+            def wait(self, timeout=None):
                 return self.returncode
 
-        storefront = Process(None)
-        admin = Process(17)
+        storefront = Process(101, None)
+        admin = Process(202, 17)
+
+        def killpg(pid, signum):
+            self.assertEqual(101, pid)
+            self.assertEqual(REPOCTL.signal.SIGTERM, signum)
+            storefront.returncode = -REPOCTL.signal.SIGTERM
+
         with (
             mock.patch.object(REPOCTL, "ensure_developer"),
             mock.patch.object(REPOCTL, "run"),
             mock.patch.object(REPOCTL.subprocess, "Popen", side_effect=[storefront, admin]),
             mock.patch.object(REPOCTL.signal, "signal", return_value=REPOCTL.signal.SIG_DFL),
+            mock.patch.object(REPOCTL.os, "name", "posix"),
+            mock.patch.object(REPOCTL.os, "killpg", side_effect=killpg) as terminate_tree,
         ):
             self.assertEqual(17, REPOCTL.site())
-        self.assertTrue(storefront.terminated)
-        self.assertFalse(admin.terminated)
+        terminate_tree.assert_called_once_with(101, REPOCTL.signal.SIGTERM)
 
     def test_site_assigns_distinct_addresses(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")

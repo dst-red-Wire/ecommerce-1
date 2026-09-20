@@ -1,4 +1,5 @@
 import ast
+import json
 from pathlib import Path
 import unittest
 
@@ -7,10 +8,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class GoToolchainDeliveryTests(unittest.TestCase):
     def test_go_toolchain_is_pinned(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
-        self.assertIn("GO_VERSION=1.26.6", versions)
-        self.assertIn(
-            "GO_SHA256_LINUX_AMD64=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89", versions
+        versions = json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        )["versions"]
+        self.assertEqual("1.26.6", versions["GO_VERSION"])
+        self.assertEqual(
+            "708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89",
+            versions["GO_SHA256_LINUX_AMD64"],
         )
 
     def test_go_toolchain_is_reconciled_by_ansible(self):

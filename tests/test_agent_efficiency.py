@@ -1,3 +1,4 @@
+import json
 import pathlib
 import unittest
 
@@ -27,18 +28,25 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("role: frontend-task-scheduling-and-local-cache", topology)
 
     def test_node_and_corepack_are_reconciled_by_ansible(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
-        self.assertIn(
-            "NODE_SHA256_LINUX_X64=2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2", versions
+        versions = json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        )["versions"]
+        self.assertEqual(
+            "2f2c0da162318f0de47665410c7c8c2ed3d36c8f3105de4bbc61176c70a7cbf2",
+            versions["NODE_SHA256_LINUX_X64"],
         )
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         self.assertIn("Download pinned Node archive", tasks)
         self.assertIn("Link Node and Corepack commands", tasks)
 
-    def test_prepush_reuses_evidence_only_for_current_base(self):
+    def test_prepush_reuses_evidence_only_after_canonical_exact_validation(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('base_sha = git("rev-parse", "origin/main").strip()', text)
-        self.assertIn('data.get("base_sha") == base_sha', text)
+        start = text.index("def prepush()")
+        end = text.index("\ndef tekton_trigger_readiness_command", start)
+        prepush = text[start:end]
+        self.assertIn('_valid_exact_evidence("origin/main", head)', prepush)
+        self.assertIn('return verify_change("origin/main", head)', prepush)
+        self.assertNotIn('data.get("base_sha")', prepush)
 
     def test_ansible_first_replaces_shell_automation(self):
         self.assertFalse(list((ROOT / "scripts").glob("*.sh")))
@@ -47,12 +55,14 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Stateful workstation and", controller)
 
     def test_oasdiff_checksum_matches_downloaded_tarball_asset(self):
-        versions = (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8")
+        versions = json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        )["versions"]
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn("OASDIFF_VERSION=1.28.0", versions)
-        self.assertIn(
-            "OASDIFF_SHA256_LINUX_AMD64_TARGZ=e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
-            versions,
+        self.assertEqual("1.28.0", versions["OASDIFF_VERSION"])
+        self.assertEqual(
+            "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5",
+            versions["OASDIFF_SHA256_LINUX_AMD64_TARGZ"],
         )
         self.assertIn("oasdiff_{{ oasdiff_version }}_linux_amd64.tar.gz", tasks)
         self.assertIn('checksum: "sha256:{{ oasdiff_sha256 }}"', tasks)

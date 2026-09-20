@@ -5,17 +5,10 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-MANAGED_BIN := $(HOME)/.local/bin
-ANSIBLE_CONFIG := $(CURDIR)/platform/ansible/ansible.cfg
-ANSIBLE_COLLECTIONS_PATH := $(CURDIR)/.ansible/collections
-export ANSIBLE_CONFIG
-export ANSIBLE_COLLECTIONS_PATH
-ANSIBLE_LOCAL := ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root=$(CURDIR)
-
 .PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
 seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
-	@$(PYTHON) scripts/capability_bootstrap.py seed
+	@$(PYTHON) -I -S scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile static
@@ -33,6 +26,7 @@ env-check-runtime: ## Audit and require optional external runtime capabilities
 
 help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
+	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
@@ -41,7 +35,7 @@ ci-full: governance contracts automation lint test security terraform ansible ##
 
 ci-global: governance contracts automation security ## Run global gates used by Tekton
 
-governance: runtime-efficiency ## Validate canonical architecture and CI authority contracts
+governance: runtime-efficiency ## Validate canonical architecture and all registered governance contracts
 	@$(PYTHON) scripts/repoctl.py governance
 
 runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
@@ -56,15 +50,10 @@ automation: ## Enforce Ansible-first and zero repository Shell scripts
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
 
-format format-check: export PATH := $(MANAGED_BIN):$(PATH)
+format: format-check ## Non-mutating alias; repository quality automation never rewrites source files
 
-format: ## Format Python and Go frontend sources
-	@ruff format scripts tests
-	@gofmt -w frontend
-
-format-check: ## Check Ruff and Go formatting without mutation
-	@ruff format --check scripts tests
-	@output="$$(gofmt -l frontend)" || exit $$?; test -z "$$output" || { printf '%s\n' "$$output"; exit 1; }
+format-check: ## Run repository-wide non-mutating format diagnostics from the central quality policy
+	@$(PYTHON) scripts/repoctl.py format-check
 
 test: ## Run repository, Go and frontend test suites
 	@$(PYTHON) scripts/repoctl.py test
@@ -100,7 +89,7 @@ frontend-check: ## Run complete Storefront + Admin frontend gate
 frontend-storefront: ## Run complete Storefront gate
 	@$(PYTHON) scripts/repoctl.py frontend check storefront
 
-frontend-admin: ## Run complete Admin gate
+frontend-admin: ## Run complete Admin frontend gate
 	@$(PYTHON) scripts/repoctl.py frontend check admin
 
 service-check: ## Run generic Go service gate; use SERVICE=product
@@ -111,28 +100,28 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish deliver bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(ANSIBLE_LOCAL) --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
 
 quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
-	@$(ANSIBLE_LOCAL) --tags quality_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools
 
 agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
-	@$(ANSIBLE_LOCAL) --tags toolchain,node,agent_tools,context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags toolchain,node,agent_tools,context_tools
 
 context-tools: ## Reconcile token-efficient context tooling with Ansible
-	@$(ANSIBLE_LOCAL) --tags context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags context_tools
 
 product-bootstrap-persistence: ## Reconcile Product persistence generation/dependencies with Ansible
-	@$(ANSIBLE_LOCAL) --tags go,cgo,sqlc,docker,product_persistence
+	@$(PYTHON) scripts/repoctl.py reconcile --tags go,cgo,sqlc,docker,product_persistence
 
 git-local-reconcile: ## Reconcile Git config; TARGET_REPO_ROOT may target another checkout
-	@ansible-playbook -i localhost, -c local platform/ansible/developer.yml -e repo_root="$${TARGET_REPO_ROOT:-$(CURDIR)}" --tags git
+	@$(PYTHON) scripts/repoctl.py reconcile --tags git --target-repo-root "${TARGET_REPO_ROOT:-$(CURDIR)}"
 
 git-sync: ## Fetch/prune and fast-forward current branch
 	@$(PYTHON) scripts/repoctl.py git-sync
@@ -140,8 +129,14 @@ git-sync: ## Fetch/prune and fast-forward current branch
 publish: ## Commit, exact-SHA verify and push current feature branch
 	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
 
+publish-change: ## Canonical alias: qualify, commit and push the current feature branch
+	@$(PYTHON) scripts/repoctl.py publish-change --base "$${BASE:-origin/main}" --message "$(MSG)"
+
 deliver: ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
+
+finish-pr: ## Merge the exact reviewed PR and remove its feature branches; GitHub retains the merged PR record
+	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
 	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"
@@ -158,7 +153,7 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
-.PHONY: context diff-context failure-context nx-graph bazel-verify pr-monitor
+.PHONY: context diff-context failure-context review-budget nx-graph bazel-verify
 
 context: ## Build bounded task-aware context pack; use TASK="..."
 	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
@@ -169,14 +164,16 @@ diff-context: ## Build compact diff-only context pack
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
 
-pr-monitor: ## Poll one GitHub PR cheaply; PR/OWNER/REPO required, CODEX_COMMAND optional
-	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(CODEX_COMMAND),--codex-command $(CODEX_COMMAND),)
+review-budget: ## Decide whether Codex/Work should run; PR and SNAPSHOT required
+	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
+	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
+	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph
 
 bazel-verify: ## Run affected-only verification through pinned Bazel
-	@bazel run //:repoctl -- verify-change --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
+	@$(PYTHON) scripts/repoctl.py bazel-verify --base "${BASE:-origin/main}" --head "${HEAD:-WORKTREE}"
 
 .PHONY: api-generate service-new
 
@@ -194,18 +191,16 @@ site: ## Run Storefront and Admin Go frontends locally
 product-check: ## Validate Product through generic Go service gate
 	@$(PYTHON) scripts/repoctl.py service product
 
-product-run: ## Run local Product REST runtime on PRODUCT_HTTP_ADDR (default :8080)
-	@$(ANSIBLE_LOCAL) --tags go
-	@$(HOME)/.local/bin/go run ./services/product/cmd/product-api
+product-run: ## Run local Product REST runtime through the central tool resolver
+	@$(PYTHON) scripts/repoctl.py product-run
 
-product-benchmark: ## Benchmark the Product HTTP hot path with allocations; not production sizing evidence
-	@$(ANSIBLE_LOCAL) --tags go
-	@cd services/product && $(HOME)/.local/bin/go test -run '^$$' -bench '^BenchmarkListProductsEmpty$$' -benchmem ./internal/transport/rest
+product-benchmark: ## Benchmark Product through the central tool resolver
+	@$(PYTHON) scripts/repoctl.py product-benchmark
 
 resource-candidate: ## Derive a deterministic candidate from representative preprod evidence; use EVIDENCE=path.json
-	@ruby scripts/resource-sizing.rb "$(EVIDENCE)"
+	@$(PYTHON) scripts/repoctl.py resource-candidate --evidence "$(EVIDENCE)"
 
 .PHONY: tekton-proof
 
 tekton-proof: ## Reconcile Tekton and run one exact remote proof; RUNTIME_CONFIG/BASE_SHA/PARENT_SHA/HEAD_SHA required
-	@ansible-playbook -i localhost, -c local platform/ansible/tekton-proof.yml -e repo_root=$(CURDIR) -e tekton_runtime_config="$(RUNTIME_CONFIG)" -e proof_base_sha="$(BASE_SHA)" -e proof_parent_sha="$(PARENT_SHA)" -e proof_head_sha="$(HEAD_SHA)"
+	@$(PYTHON) scripts/repoctl.py tekton-proof --runtime-config "$(RUNTIME_CONFIG)" --base-sha "$(BASE_SHA)" --parent-sha "$(PARENT_SHA)" --head-sha "$(HEAD_SHA)"

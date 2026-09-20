@@ -1,0 +1,85 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+dependency_map: config/contracts/dependency-map.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+
+defaults:
+  decision: deny
+  identity_source: spire
+  transport: istio-ambient-mtls
+  l3_l4_authority: cilium
+  l7_authority: istio-waypoint
+  unlisted_callers: deny
+  cross_namespace: deny-unless-declared
+
+service_rules:
+  catalog:
+    allowed_callers: []
+    l7_required: false
+  product:
+    allowed_callers: [catalog, cart, pricing, review]
+    l7_required: false
+  inventory:
+    allowed_callers: [catalog, cart, checkout, fulfillment]
+    l7_required: false
+  cart:
+    allowed_callers: [checkout]
+    l7_required: false
+  checkout:
+    allowed_callers: []
+    l7_required: false
+  pricing:
+    allowed_callers: [catalog, cart, checkout]
+    l7_required: false
+  tax:
+    allowed_callers: [checkout]
+    l7_required: false
+  order:
+    allowed_callers: [checkout, returns, billing]
+    l7_required: false
+  payment:
+    allowed_callers: [billing]
+    l7_required: true
+    source_contract: contracts/payment-security.yaml
+    method_policy:
+      authority: source-contract
+      requirement: method-aware-authorization
+      default: deny
+  fulfillment:
+    allowed_callers: []
+    l7_required: false
+  shipping:
+    allowed_callers: [checkout, fulfillment, tracking, returns]
+    l7_required: false
+  tracking:
+    allowed_callers: []
+    l7_required: false
+  returns:
+    allowed_callers: []
+    l7_required: false
+  billing:
+    allowed_callers: []
+    l7_required: false
+  fraud-risk:
+    allowed_callers: [checkout]
+    l7_required: false
+  search:
+    allowed_callers: []
+    l7_required: false
+  review:
+    allowed_callers: []
+    l7_required: false
+  user-profile:
+    allowed_callers: [review]
+    l7_required: false
+  notification:
+    allowed_callers: []
+    l7_required: false
+
+rules:
+  caller_matrix_must_match_declared_sync_dependencies: true
+  asynchronous-event-delivery-does-not-create-sync-caller-authorization: true
+  l7_required_must_have-versioned-source-contract: true
+  deny_unlisted_callers: true
+  workload_identity_required: true

@@ -2,6 +2,24 @@ version: 5
 status: locked-for-build
 project: ecommerce
 
+repository_governance:
+  scope: entire-repository
+  transverse_rule_contract:
+    source_of_truth: architecture.lock.yaml
+    rule_definition: central-contract-only
+    enforcement: generic-validator
+    per_file_rule_propagation: forbidden
+    consumer_changes: only-if-required-to-consume-contract
+  owner_authorization:
+    syntax: "/owner-authorization approve scope=<scope> sha=<exact-head-sha>"
+    decision_authority: repository-owner
+    recording_agent: ChatGPT
+    recording_requires_explicit_owner_instruction: true
+    sha_binding: exact
+    scope_binding: exact
+    head_change: authorization-expired
+    absence_or_mismatch: block
+
 business:
   services:
     - catalog
@@ -50,6 +68,7 @@ platform:
   workload_identity: spire
   iam: keycloak
   runtime_security: tetragon
+  infrastructure_api: crossplane
   autoscaling:
     synchronous_pods: kubernetes-hpa
     event_driven_pods: keda
@@ -65,10 +84,222 @@ management_plane:
   ci: tekton
   registry: harbor
   gitops: rancher-fleet
+  developer_portal: backstage
   bootstrap:
     terraform_opentofu: true
     ansible: true
     requires_human_apply_gate: true
+
+developer_platform:
+  status: contract-locked-in-m1-implemented-from-m4
+  scope: management-plane
+  principles:
+    portal: backstage
+    catalog: backstage-software-catalog
+    source_of_truth: git
+    change_unit: pull-request
+    forge: gitea
+    ci: tekton
+    registry: harbor
+    gitops: rancher-fleet
+    infrastructure_api: crossplane
+    progressive_delivery: argo-rollouts
+    foundation_iac: terraform-opentofu
+  runtime_boundary:
+    commerce_runtime_nodejs: forbidden
+    backstage_management_plane_nodejs: allowed-required
+    backstage_only_exception: true
+  backstage_pr_contract:
+    role: request-interface
+    allowed_operations:
+      - read-catalog
+      - create-branch
+      - create-commit
+      - create-pull-request
+      - read-pull-request
+    forbidden_operations:
+      - direct-main-write
+      - force-push
+      - approve-pull-request
+      - merge-pull-request
+      - terraform-apply
+      - kubectl-apply
+      - crossplane-apply
+      - direct-workload-deploy
+      - direct-environment-promotion
+    gitea_pull_request_action: ecommerce:gitea:pull-request
+  git_contract:
+    default_branch: main
+    request_branch_pattern: platform/<request-kind>/<component>/<request-id>
+    request_path_pattern: platform/requests/<request-id>.yaml
+    force_push: forbidden
+    direct_default_branch_write: forbidden
+  pull_request_contract:
+    required: true
+    exact_head_sha_required: true
+    human_review_required: true
+    required_context:
+      - request-id
+      - component
+      - request-kind
+      - exact-head-sha
+      - expected-infrastructure-impact
+      - immutable-image-digest
+      - preview-state
+      - preview-url-when-ready
+      - cleanup-policy
+  platform_request_api:
+    api_version: platform.ecommerce.io/v1alpha1
+    kind: PlatformRequest
+    authoritative_representation: git-file
+    path_pattern: platform/requests/<request-id>.yaml
+    required_fields:
+      - metadata.name
+      - spec.requester.entityRef
+      - spec.component.entityRef
+      - spec.request.kind
+      - spec.request.operation
+      - spec.lifecycle.owner
+  preview_environment_api:
+    api_version: platform.ecommerce.io/v1alpha1
+    kind: PreviewEnvironment
+    lifecycle_owner: pull-request
+    create_on:
+      - pull-request-opened
+      - pull-request-updated
+    delete_on:
+      - pull-request-closed
+      - pull-request-merged
+    unique_url_required: true
+  execution_contract:
+    plan_before_apply: required
+    mutating_platform_action_requires_git_change: true
+    tekton_direct_workload_deploy: forbidden
+    tekton_outputs:
+      - qualification-evidence
+      - immutable-oci-artifact
+      - infrastructure-impact-plan
+      - gitops-desired-state-change
+    harbor_reference: immutable-digest
+    gitops_desired_state_required: true
+    fleet_reconciles_git: true
+    crossplane_materializes_platform_api: true
+  infrastructure_ownership:
+    terraform_opentofu: foundation
+    crossplane: self-service-platform-resources
+  preview_lifecycle:
+    creation: gitops-reconciliation
+    cleanup: gitops-reconciliation
+    cleanup_trigger:
+      - pull-request-closed
+      - pull-request-merged
+    direct_runtime_delete: forbidden
+  promotion:
+    strategy: build-once-promote-many
+    rebuild_between_preview_preprod_prod: forbidden
+    same_digest_required: true
+    environment_change: gitops-only
+  quality_cloud_engineering:
+    status: contract-locked-in-m1
+    scope: platform-operating-model
+    implementation_milestone: M4-platform-baseline
+    proof_milestone: M5-commerce-vertical-slice
+    sector_count: 9
+    sectors:
+      continuous_testing:
+        owner: quality-engineering
+        input: exact-head-sha-and-affected-set
+        output: qualification-result
+        evidence: exact-sha-qualification-evidence
+      test_first:
+        owner: quality-engineering
+        input: behavioral-or-contract-change
+        output: regression-test-contract
+        evidence: failing-before-passing-after-or-equivalent-regression-proof
+      test_strategy:
+        owner: quality-engineering
+        input: risk-and-affected-components
+        output: selected-test-levels
+        evidence: impact-to-test-routing-record
+      automation:
+        owner: cloud-platform
+        input: approved-git-change
+        output: reproducible-automated-execution
+        evidence: tekton-run-and-gitops-state
+      monitoring_observability:
+        owner: cloud-platform
+        input: running-workload-and-platform
+        output: metrics-logs-traces-alerts
+        evidence: queryable-telemetry-and-slo-signals
+      release_governance_automation:
+        owner: cloud-platform
+        input: immutable-oci-digest-and-approved-git-state
+        output: governed-environment-promotion
+        evidence: digest-provenance-and-promotion-record
+      golden_path:
+        owner: developer-experience
+        input: platform-capability-request
+        output: standardized-pr-change
+        evidence: generated-pr-conformance
+      developer_hub:
+        owner: developer-experience
+        input: catalog-and-platform-capabilities
+        output: backstage-self-service-interface
+        evidence: catalog-template-and-action-conformance
+      measuring_engineering:
+        owner: developer-experience
+        input: pr-ci-preview-release-events
+        output: engineering-performance-metrics
+        evidence: reproducible-metric-records
+    cross_cutting:
+      security:
+        owner: security-engineering
+        applies_to_all_sectors: true
+        evidence_required: security-review-policy-and-runtime-controls
+      culture:
+        owner: platform-and-product-teams
+        applies_to_all_sectors: true
+        explicit_ownership_required: true
+        documentation_as_code_required: true
+      ai_agent:
+        owner: platform-engineering
+        applies_to_all_sectors: true
+        role: assistant
+        authoritative_gate: false
+        may_bypass_required_gates: false
+        may_merge: false
+        may_deploy_production_directly: false
+  milestone_contract:
+    M1-monorepo-bootstrap:
+      outcome: stable-pr-driven-contract-locked
+      implementation_required: false
+      requires:
+        - pr-governance
+        - exact-sha-review-and-evidence
+        - reproducible-bootstrap
+        - affected-routing
+        - application-qualification
+        - frontend-go-templ-qualification
+        - developer-platform-contract-locked
+        - quality-cloud-engineering-contract-locked
+      does_not_require:
+        - backstage-deployed
+        - crossplane-deployed
+        - harbor-operational
+        - fleet-previews-operational
+        - argo-rollouts-operational
+        - m4-tekton-runner-operational
+    M4-platform-baseline:
+      outcome: implement-pr-driven-platform-contract
+      components:
+        - backstage
+        - tekton
+        - harbor
+        - rancher-fleet
+        - crossplane
+        - argo-rollouts
+    M5-commerce-vertical-slice:
+      outcome: prove-first-pr-driven-preview-and-promotion
 
 stateful:
   database: cloudnativepg-postgresql
@@ -134,26 +365,66 @@ topology_contracts:
   aiops: docs/architecture/AIOPS_TOPOLOGY_V1.md
   mlops: docs/architecture/MLOPS_TOPOLOGY_V1.md
   observability: docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md
+  architecture_boundaries: docs/architecture/ARCHITECTURE_BOUNDARIES_V1.md
+  service_mesh_topology: docs/architecture/SERVICE_MESH_TOPOLOGY_V1.md
+  service_policy_chain: docs/architecture/SERVICE_POLICY_CHAIN_V1.md
 
 machine_contracts:
+  cache_policy: config/contracts/cache-policy.yaml
+  certificate_authority_policy: config/contracts/certificate-authority-policy.yaml
+  ci_evidence: config/contracts/ci-evidence.yaml
+  ci_topology: config/contracts/ci-topology.yaml
+  commerce_transaction_policy: config/contracts/commerce-transaction-policy.yaml
+  context_router: config/context/router.yaml
+  dependency_map: config/contracts/dependency-map.yaml
+  dns_authority_policy: config/contracts/dns-authority-policy.yaml
+  edge_policy_authority: config/contracts/edge-policy-authority.yaml
+  edge_protocol_policy: config/contracts/edge-protocol-policy.yaml
+  egress_policy: config/contracts/egress-policy.yaml
+  egress_runtime_policy: config/contracts/egress-runtime-policy.yaml
+  event_contracts: config/contracts/event-contracts.yaml
+  identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
+  mesh_observability_policy: config/contracts/mesh-observability-policy.yaml
+  mesh_policy_authority: config/contracts/mesh-policy-authority.yaml
+  mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
+  observability_topology: config/contracts/observability-topology.yaml
+  progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
+  public_api_contracts: config/contracts/public-api-contracts.yaml
+  rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
-  security_trust_zones: config/contracts/security-trust-zones.yaml
+  review_budget: config/contracts/review-budget.json
   review_policy: config/contracts/review-policy.yaml
+  repository_authority_model: config/contracts/repository-authority-model.yaml
+  runtime_efficiency: config/contracts/runtime-efficiency.yaml
+  secret_delivery_policy: config/contracts/secret-delivery-policy.yaml
+  security_trust_zones: config/contracts/security-trust-zones.yaml
+  security_scan_policy: config/contracts/security-scan-policy.yaml
+  service_authz_policy: config/contracts/service-authz-policy.yaml
+  service_exposure_policy: config/contracts/service-exposure-policy.yaml
+  service_mesh_policy: config/contracts/service-mesh-policy.yaml
+  service_ownership: config/contracts/service-ownership.yaml
+  service_resilience_policy: config/contracts/service-resilience-policy.yaml
+  service_slo: config/contracts/service-slo.yaml
+  source_quality_policy: config/contracts/source-quality-policy.yaml
+  tekton_trigger_runtime: config/contracts/tekton-trigger-runtime.yaml
+  telemetry_data_policy: config/contracts/telemetry-data-policy.yaml
+  toolchain_lock: config/contracts/toolchain-lock.json
+  terraform_provider_lock: config/contracts/terraform-provider-lock.yaml
+  time_authority_policy: config/contracts/time-authority-policy.yaml
+  traffic_class_policy: config/contracts/traffic-class-policy.yaml
+  workstation_policy: config/contracts/workstation-policy.yaml
+  waypoint_scope: config/contracts/waypoint-scope.yaml
+  deployment_waves: config/infrastructure/deployment-waves.yaml
+  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   mgmt_inventory: config/infrastructure/mgmt-inventory.yaml
+  network_plan: config/infrastructure/network-plan.yaml
   preprod_inventory: config/infrastructure/preprod-inventory.yaml
   prod_inventory: config/infrastructure/prod-inventory.yaml
-  network_plan: config/infrastructure/network-plan.yaml
-  mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
-  mgmt_access_gateways: config/infrastructure/mgmt-access-gateways.yaml
   storage_plan: config/infrastructure/storage-plan.yaml
-  deployment_waves: config/infrastructure/deployment-waves.yaml
-  service_ownership: config/contracts/service-ownership.yaml
-  event_contracts: config/contracts/event-contracts.yaml
-  dependency_map: config/contracts/dependency-map.yaml
-  public_api_contracts: config/contracts/public-api-contracts.yaml
-  ci_topology: config/contracts/ci-topology.yaml
-  runtime_efficiency: config/contracts/runtime-efficiency.yaml
-  observability_topology: config/contracts/observability-topology.yaml
+  openapi_common_v1: contracts/openapi/common.v1.yaml
+  openapi_product_v1: contracts/openapi/product.v1.yaml
+  payment_runtime: contracts/payment-runtime.yaml
+  payment_security: contracts/payment-security.yaml
 
 prod_certified_topology:
   physical_hosts_total: 6

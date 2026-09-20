@@ -1,0 +1,62 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+dependency_map: config/contracts/dependency-map.yaml
+
+classes:
+  interactive:
+    description: User-facing synchronous traffic where latency directly affects UX.
+    priority: high
+  transactional-critical:
+    description: Synchronous commerce state transitions where correctness dominates throughput.
+    priority: critical
+  internal-read:
+    description: Internal synchronous reads and reference lookups.
+    priority: normal
+  async:
+    description: Event-driven or queued work not on the synchronous request path.
+    priority: normal
+  bulk:
+    description: Batch, indexing, rebuild, import, export, or background bulk processing.
+    priority: low
+  observability:
+    description: Telemetry transport and diagnostics; never authoritative business traffic.
+    priority: low
+  external-critical:
+    description: Synchronous dependency on an external provider on a critical business path.
+    priority: critical
+
+services:
+  catalog: {primary_class: internal-read}
+  product: {primary_class: internal-read}
+  inventory: {primary_class: transactional-critical}
+  cart: {primary_class: interactive}
+  checkout: {primary_class: transactional-critical}
+  pricing: {primary_class: internal-read}
+  tax: {primary_class: internal-read}
+  order: {primary_class: transactional-critical}
+  payment: {primary_class: external-critical}
+  fulfillment: {primary_class: transactional-critical}
+  shipping: {primary_class: external-critical}
+  tracking: {primary_class: internal-read}
+  returns: {primary_class: transactional-critical}
+  billing: {primary_class: transactional-critical}
+  fraud-risk: {primary_class: transactional-critical}
+  search: {primary_class: interactive}
+  review: {primary_class: internal-read}
+  user-profile: {primary_class: internal-read}
+  notification: {primary_class: async}
+
+flow_overrides:
+  search-index-rebuild: {class: bulk}
+  telemetry-export: {class: observability}
+  notification-delivery: {class: async}
+  payment-to-stripe: {class: external-critical}
+  shipping-to-carrier-adapters: {class: external-critical}
+  billing-to-qonto-pa: {class: external-critical}
+
+rules:
+  traffic_class_must-not-change-business-ownership: true
+  bulk_must-not-starve-transactional-critical: true
+  observability_must-not-become-business-critical-dependency: true
+  class_specific_resilience-policy-required: true

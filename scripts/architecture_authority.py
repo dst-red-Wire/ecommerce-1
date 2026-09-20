@@ -1,23 +1,33 @@
 """Deterministic V5 authority checks. Read-only; no runtime/deployment claims."""
 
 from pathlib import Path
+import copy
+import hashlib
 import json
 import re
 import subprocess
+import sys
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import qualification_cache
 
 AUTHORITY = "architecture.lock.yaml"
-INDEX = "docs/architecture/EXACT_TOPOLOGY_V5.md"
 LOCK_STATUS = "locked-for-build"
-V5_FRONTENDS = ["storefront", "admin"]
-EXPECTED_V5_FRONTEND_RUNTIME = {
-    "language": "go",
-    "module": "frontend",
-    "module_file": "frontend/go.mod",
-    "rendering": "templ",
-    "interactions": "htmx",
-    "runtime_nodejs": False,
-    "migration_source": "nextjs-react-node",
-}
+CANONICAL_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_canonical_yaml(relative):
+    """Load canonical YAML/JSON through the content-addressed qualification cache."""
+    return qualification_cache.psych_load(CANONICAL_ROOT / relative)
+
+
+_CANONICAL_LOCK = _load_canonical_yaml(AUTHORITY)
+INDEX = _CANONICAL_LOCK["topology_contracts"]["exact_index"]
+V5_FRONTENDS = list(_CANONICAL_LOCK["business"]["frontends"])
+EXPECTED_V5_FRONTEND_RUNTIME = dict(_CANONICAL_LOCK["business"]["frontend_runtime"])
 V5_PROD_TOPOLOGY_KEYS = frozenset(
     {
         "physical_hosts_total",
@@ -36,6 +46,7 @@ V5_ROOT_KEYS = frozenset(
         "version",
         "status",
         "project",
+        "repository_governance",
         "business",
         "platform",
         "management_plane",
@@ -46,6 +57,7 @@ V5_ROOT_KEYS = frozenset(
         "supply_chain",
         "topology_contracts",
         "machine_contracts",
+        "developer_platform",
         "prod_certified_topology",
         "superseded",
         "build_milestones",
@@ -53,6 +65,34 @@ V5_ROOT_KEYS = frozenset(
     }
 )
 V5_SECTION_KEYS = {
+    "repository_governance": frozenset(
+        {
+            "scope",
+            "transverse_rule_contract",
+            "owner_authorization",
+        }
+    ),
+    "repository_governance.transverse_rule_contract": frozenset(
+        {
+            "source_of_truth",
+            "rule_definition",
+            "enforcement",
+            "per_file_rule_propagation",
+            "consumer_changes",
+        }
+    ),
+    "repository_governance.owner_authorization": frozenset(
+        {
+            "syntax",
+            "decision_authority",
+            "recording_agent",
+            "recording_requires_explicit_owner_instruction",
+            "sha_binding",
+            "scope_binding",
+            "head_change",
+            "absence_or_mismatch",
+        }
+    ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
     "business.frontend_runtime": frozenset(
         {
@@ -80,6 +120,7 @@ V5_SECTION_KEYS = {
             "workload_identity",
             "iam",
             "runtime_security",
+            "infrastructure_api",
             "autoscaling",
         }
     ),
@@ -101,6 +142,7 @@ V5_SECTION_KEYS = {
             "ci",
             "registry",
             "gitops",
+            "developer_portal",
             "bootstrap",
         }
     ),
@@ -111,6 +153,137 @@ V5_SECTION_KEYS = {
             "requires_human_apply_gate",
         }
     ),
+    "developer_platform": frozenset(
+        {
+            "status",
+            "scope",
+            "principles",
+            "runtime_boundary",
+            "backstage_pr_contract",
+            "git_contract",
+            "pull_request_contract",
+            "platform_request_api",
+            "preview_environment_api",
+            "execution_contract",
+            "infrastructure_ownership",
+            "preview_lifecycle",
+            "promotion",
+            "quality_cloud_engineering",
+            "milestone_contract",
+        }
+    ),
+    "developer_platform.principles": frozenset(
+        {
+            "portal",
+            "catalog",
+            "source_of_truth",
+            "change_unit",
+            "forge",
+            "ci",
+            "registry",
+            "gitops",
+            "infrastructure_api",
+            "progressive_delivery",
+            "foundation_iac",
+        }
+    ),
+    "developer_platform.runtime_boundary": frozenset(
+        {
+            "commerce_runtime_nodejs",
+            "backstage_management_plane_nodejs",
+            "backstage_only_exception",
+        }
+    ),
+    "developer_platform.backstage_pr_contract": frozenset(
+        {
+            "role",
+            "allowed_operations",
+            "forbidden_operations",
+            "gitea_pull_request_action",
+        }
+    ),
+    "developer_platform.git_contract": frozenset(
+        {
+            "default_branch",
+            "request_branch_pattern",
+            "request_path_pattern",
+            "force_push",
+            "direct_default_branch_write",
+        }
+    ),
+    "developer_platform.pull_request_contract": frozenset(
+        {
+            "required",
+            "exact_head_sha_required",
+            "human_review_required",
+            "required_context",
+        }
+    ),
+    "developer_platform.platform_request_api": frozenset(
+        {
+            "api_version",
+            "kind",
+            "authoritative_representation",
+            "path_pattern",
+            "required_fields",
+        }
+    ),
+    "developer_platform.preview_environment_api": frozenset(
+        {
+            "api_version",
+            "kind",
+            "lifecycle_owner",
+            "create_on",
+            "delete_on",
+            "unique_url_required",
+        }
+    ),
+    "developer_platform.execution_contract": frozenset(
+        {
+            "plan_before_apply",
+            "mutating_platform_action_requires_git_change",
+            "tekton_direct_workload_deploy",
+            "tekton_outputs",
+            "harbor_reference",
+            "gitops_desired_state_required",
+            "fleet_reconciles_git",
+            "crossplane_materializes_platform_api",
+        }
+    ),
+    "developer_platform.infrastructure_ownership": frozenset({"terraform_opentofu", "crossplane"}),
+    "developer_platform.preview_lifecycle": frozenset(
+        {
+            "creation",
+            "cleanup",
+            "cleanup_trigger",
+            "direct_runtime_delete",
+        }
+    ),
+    "developer_platform.promotion": frozenset(
+        {
+            "strategy",
+            "rebuild_between_preview_preprod_prod",
+            "same_digest_required",
+            "environment_change",
+        }
+    ),
+    "developer_platform.milestone_contract": frozenset(
+        {
+            "M1-monorepo-bootstrap",
+            "M4-platform-baseline",
+            "M5-commerce-vertical-slice",
+        }
+    ),
+    "developer_platform.milestone_contract.M1-monorepo-bootstrap": frozenset(
+        {
+            "outcome",
+            "implementation_required",
+            "requires",
+            "does_not_require",
+        }
+    ),
+    "developer_platform.milestone_contract.M4-platform-baseline": frozenset({"outcome", "components"}),
+    "developer_platform.milestone_contract.M5-commerce-vertical-slice": frozenset({"outcome"}),
     "stateful": frozenset({"database", "events", "jobs", "cache", "search", "object_storage"}),
     "dns": frozenset({"critical_ttl_seconds"}),
     "observability": frozenset(
@@ -153,345 +326,169 @@ V5_SECTION_KEYS = {
     "prod_certified_topology.sites.prod-a": V5_PROD_SITE_KEYS,
     "prod_certified_topology.sites.prod-b": V5_PROD_SITE_KEYS,
 }
-DEPLOYABLE_MLOPS = ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"]
-V5_MLOPS = {
-    "dataset_versioner": "lakefs",
-    "object_storage": "seaweedfs-s3",
-    "metadata_database": "cloudnativepg-postgresql",
-    "experiments_lineage": "mlflow",
-    "artifact_registry": "harbor",
-    "promotion_authority": "gitea-gitops",
-    "orchestration": "tekton",
-    "desired_state": "rancher-fleet",
-    "progressive_delivery": "argo-rollouts",
-    "runtime": "kserve-vllm",
-    "drift": "evidently-tekton-batch",
-}
-V5_OBSERVABILITY = {
-    "telemetry": "opentelemetry",
-    "application_gateway": "rotel",
-    "infrastructure_collector": "opentelemetry-collector",
-    "metrics_protocol": "prometheus",
-    "metrics_scraper": "vmagent",
-    "metrics": "victoriametrics",
-    "infrastructure_logs": "victorialogs",
-    "application_observability_storage": "clickhouse",
-    "application_observability_ui": "hyperdx",
-    "hyperdx_metadata_store": "mongodb-oss-self-hosted",
-    "alerts": "vmalert",
-    "notifications": "alertmanager",
-    "dashboards": "grafana",
-    "security_pipeline": "data-prepper",
-    "security_logs": "opensearch",
-    "security": "wazuh",
-}
-V5_SUPERSEDED = {
-    "dvc-dataset-versioner": "lakefs",
-    "nextjs-frontend-runtime": "go-templ-htmx",
-    "fluxcd": "rancher-fleet",
-    "flagger": "argo-rollouts",
-    "minio-community": "seaweedfs-s3",
-    "loki": "victorialogs",
-    "prometheus-server-tsdb": "victoriametrics",
-    "fluent-bit-general-log-shipper": "opentelemetry-collector",
-    "opensearch-general-logs": "victorialogs",
-    "data-prepper-general-logs": "security-only-data-prepper",
-    "splunk": "wazuh-opensearch",
-    "prod-physical-hosts-per-site-5": "prod-physical-hosts-per-site-3",
-    "rook-ceph-launch-baseline": "no-default-ceph",
-    "woodpecker-ci": "tekton",
-}
+V5_MLOPS = dict(_CANONICAL_LOCK["mlops"])
+DEPLOYABLE_MLOPS = [
+    V5_MLOPS["dataset_versioner"],
+    V5_MLOPS["experiments_lineage"],
+    V5_MLOPS["runtime"],
+    V5_MLOPS["drift"],
+]
+V5_OBSERVABILITY = dict(_CANONICAL_LOCK["observability"])
+V5_SUPERSEDED = dict(_CANONICAL_LOCK["superseded"])
 SUPERSEDED_COMPONENT = r"FluxCD|Flagger|MinIO(?: Community Edition| Operator| CE)?|Loki|Splunk"
-V5_TOPOLOGY_CONTRACTS = {
-    "exact_index": "docs/architecture/EXACT_TOPOLOGY_V5.md",
-    "preprod": "docs/architecture/PREPROD_TOPOLOGY_V2.md",
-    "prod": "docs/architecture/PROD_TOPOLOGY_V2.md",
-    "network_ipam": "docs/architecture/NETWORK_IPAM_CONTRACT.md",
-    "mgmt_wireguard_access": "docs/architecture/MGMT_WIREGUARD_ACCESS.md",
-    "storage": "docs/architecture/STORAGE_TOPOLOGY_V2.md",
-    "service_ownership": "docs/architecture/SERVICE_OWNERSHIP_MATRIX.md",
-    "data_ownership": "docs/architecture/DATA_OWNERSHIP_MATRIX.md",
-    "events": "docs/architecture/EVENT_CONTRACT_MATRIX.md",
-    "security_zones": "docs/architecture/SECURITY_TRUST_ZONES.md",
-    "deployment_dag": "docs/architecture/DEPLOYMENT_DAG.md",
-    "aiops": "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-    "mlops": "docs/architecture/MLOPS_TOPOLOGY_V1.md",
-    "observability": "docs/architecture/OBSERVABILITY_TOPOLOGY_V1.md",
-}
-V5_MACHINE_CONTRACTS = {
-    "resilience_governance": "config/contracts/resilience-governance.yaml",
-    "security_trust_zones": "config/contracts/security-trust-zones.yaml",
-    "review_policy": "config/contracts/review-policy.yaml",
-    "mgmt_inventory": "config/infrastructure/mgmt-inventory.yaml",
-    "preprod_inventory": "config/infrastructure/preprod-inventory.yaml",
-    "prod_inventory": "config/infrastructure/prod-inventory.yaml",
-    "network_plan": "config/infrastructure/network-plan.yaml",
-    "mgmt_wireguard_access": "config/contracts/mgmt-wireguard-access.yaml",
-    "mgmt_access_gateways": "config/infrastructure/mgmt-access-gateways.yaml",
-    "storage_plan": "config/infrastructure/storage-plan.yaml",
-    "deployment_waves": "config/infrastructure/deployment-waves.yaml",
-    "service_ownership": "config/contracts/service-ownership.yaml",
-    "event_contracts": "config/contracts/event-contracts.yaml",
-    "dependency_map": "config/contracts/dependency-map.yaml",
-    "public_api_contracts": "config/contracts/public-api-contracts.yaml",
-    "ci_topology": "config/contracts/ci-topology.yaml",
-    "runtime_efficiency": "config/contracts/runtime-efficiency.yaml",
-    "observability_topology": "config/contracts/observability-topology.yaml",
+DERIVED_TOPOLOGY_ROLES = frozenset(
+    {
+        "architecture_boundaries",
+        "service_mesh_topology",
+        "service_policy_chain",
+    }
+)
+REGISTRY_GLOBS = {
+    "topology_contracts": (
+        "docs/architecture/*.md",
+    ),
+    "machine_contracts": (
+        "config/contracts/*.yaml",
+        "config/contracts/*.yml",
+        "config/contracts/*.json",
+        "config/context/*.yaml",
+        "config/context/*.yml",
+        "config/context/*.json",
+        "config/infrastructure/*.yaml",
+        "config/infrastructure/*.yml",
+        "config/infrastructure/*.json",
+        "contracts/*.yaml",
+        "contracts/*.yml",
+        "contracts/*.json",
+        "contracts/**/*.yaml",
+        "contracts/**/*.yml",
+        "contracts/**/*.json",
+    ),
 }
 V5_SECTION_KEYS.update(
     {
         "superseded": frozenset(V5_SUPERSEDED),
-        "topology_contracts": frozenset(V5_TOPOLOGY_CONTRACTS),
-        "machine_contracts": frozenset(V5_MACHINE_CONTRACTS),
     }
 )
-V5_MILESTONES = [
-    "M0-architecture-sync",
-    "M1-monorepo-bootstrap",
-    "M2-golden-service-product",
-    "M2-5-persistent-mgmt-bootstrap",
-    "M3-preprod-infrastructure",
-    "M4-platform-baseline",
-    "M5-commerce-vertical-slice",
-    "M6-full-application",
-    "M7-qualification",
-    "M8-preprod-certification",
-    "M9-prod-ab",
-]
-V5_MILESTONE_PREREQUISITES = [[], [0], [1], [1], [3], [4], [2, 5], [6], [7], [8], [9]]
+V5_MILESTONES = list(_CANONICAL_LOCK["build_milestones"])
 V5_MILESTONE_DEPENDENCIES = {
-    name: [V5_MILESTONES[index] for index in parents]
-    for name, parents in zip(V5_MILESTONES, V5_MILESTONE_PREREQUISITES)
+    name: list(parents)
+    for name, parents in _CANONICAL_LOCK["milestone_dependencies"].items()
 }
 V5_SECTION_KEYS["milestone_dependencies"] = frozenset(V5_MILESTONE_DEPENDENCIES)
 
-V5_DEPLOYMENT_WAVES = {
-    "version": 2,
-    "status": "exact",
-    "waves": [
-        {
-            "id": "00-underlay",
-            "requires": [],
-            "components": ["network", "dns-prerequisites", "time-sync", "image-mirrors"],
-        },
-        {"id": "10-rke2", "requires": ["00-underlay"], "components": ["rke2-control-plane", "rke2-workers"]},
-        {
-            "id": "20-network-security",
-            "requires": ["10-rke2"],
-            "components": ["cilium", "hubble", "pod-security", "kyverno", "tetragon", "spire"],
-        },
-        {
-            "id": "30-gitops-identity",
-            "requires": ["20-network-security"],
-            "components": ["rancher-fleet", "argo-rollouts", "istio"],
-        },
-        {
-            "id": "40-secrets-registry-ci",
-            "requires": ["30-gitops-identity"],
-            "components": ["openbao", "external-secrets", "harbor", "tekton"],
-        },
-        {
-            "id": "50-observability",
-            "requires": ["40-secrets-registry-ci"],
-            "components": [
-                "opentelemetry-collector",
-                "rotel",
-                "vmagent",
-                "victoriametrics",
-                "victorialogs",
-                "clickhouse",
-                "hyperdx",
-                "mongodb-oss-self-hosted",
-                "vmalert",
-                "alertmanager",
-                "grafana",
-                "data-prepper",
-                "opensearch-security",
-                "wazuh",
-            ],
-        },
-        {
-            "id": "60-stateful",
-            "requires": ["40-secrets-registry-ci", "20-network-security"],
-            "parallel_groups": [
-                ["cloudnativepg", "strimzi-kafka", "rabbitmq", "redis", "seaweedfs"],
-                ["opensearch-business", "apicurio"],
-            ],
-        },
-        {
-            "id": "70-iam-edge",
-            "requires": ["60-stateful", "30-gitops-identity"],
-            "components": ["keycloak", "haproxy", "caddy", "coraza", "kong", "ats", "istio-gateway", "squid-egress"],
-        },
-        {
-            "id": "80-golden-service",
-            "requires": ["50-observability", "60-stateful", "70-iam-edge"],
-            "components": ["product"],
-        },
-        {
-            "id": "90-commerce",
-            "requires": ["80-golden-service"],
-            "parallel_groups": [
-                [
-                    "inventory",
-                    "tax",
-                    "shipping",
-                    "fraud-risk",
-                    "user-profile",
-                    "search",
-                    "notification",
-                    "order",
-                    "payment",
-                ],
-                ["pricing", "tracking", "fulfillment", "review", "returns", "billing"],
-                ["catalog", "cart"],
-            ],
-            "serial_after_parallel": ["checkout"],
-        },
-        {
-            "id": "95-mlops",
-            "requires": ["40-secrets-registry-ci", "60-stateful"],
-            "serial_after_parallel": ["lakefs", "mlflow", "kserve-vllm", "evidently-tekton-batch"],
-        },
-        {"id": "100-frontends", "requires": ["90-commerce"], "components": ["storefront", "admin"]},
-        {
-            "id": "110-qualification",
-            "requires": ["100-frontends", "95-mlops"],
-            "components": ["smoke", "security", "contracts", "integration", "bdd", "e2e", "performance", "chaos-dr"],
-        },
-    ],
-    "rules": {
-        "wait_only_on_declared_dependencies": True,
-        "fail_fast_on_blocking_gate": True,
-        "no_perf_before_prior_gates": True,
-        "no_chaos_dr_before_prior_gates": True,
-        "no_prod_promotion_from_test_state": True,
-    },
-}
+V5_QCE_SECTORS = (
+    "continuous_testing",
+    "test_first",
+    "test_strategy",
+    "automation",
+    "monitoring_observability",
+    "release_governance_automation",
+    "golden_path",
+    "developer_hub",
+    "measuring_engineering",
+)
+V5_QCE_SECTOR_FIELDS = frozenset({"owner", "input", "output", "evidence"})
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering"] = frozenset(
+    {
+        "status",
+        "scope",
+        "implementation_milestone",
+        "proof_milestone",
+        "sector_count",
+        "sectors",
+        "cross_cutting",
+    }
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.sectors"] = frozenset(V5_QCE_SECTORS)
+for sector in V5_QCE_SECTORS:
+    V5_SECTION_KEYS[f"developer_platform.quality_cloud_engineering.sectors.{sector}"] = V5_QCE_SECTOR_FIELDS
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting"] = frozenset(
+    {"security", "culture", "ai_agent"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.security"] = frozenset(
+    {"owner", "applies_to_all_sectors", "evidence_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.culture"] = frozenset(
+    {"owner", "applies_to_all_sectors", "explicit_ownership_required", "documentation_as_code_required"}
+)
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.ai_agent"] = frozenset(
+    {
+        "owner", "applies_to_all_sectors", "role", "authoritative_gate",
+        "may_bypass_required_gates", "may_merge", "may_deploy_production_directly",
+    }
+)
+
+V5_REPOSITORY_GOVERNANCE = dict(_CANONICAL_LOCK["repository_governance"])
+OWNER_AUTHORIZATION_PATTERN = re.compile(
+    r"^/owner-authorization approve scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
+    r"sha=(?P<sha>[0-9a-f]{40})$"
+)
+
+V5_DEVELOPER_PLATFORM = dict(_CANONICAL_LOCK["developer_platform"])
+
+V5_DEPLOYMENT_WAVES = _load_canonical_yaml(
+    _CANONICAL_LOCK["machine_contracts"]["deployment_waves"]
+)
 MIRRORED_WAVES = ("20-network-security", "30-gitops-identity", "50-observability")
 
 EXACT_CONTRACTS = {
-    "resilience_governance": {
-        "version": 1,
-        "status": "exact",
-        "architecture_authority": AUTHORITY,
-        "sources": [
-            "docs/architecture/SECURITY_TRUST_ZONES.md",
-            "docs/architecture/DEPLOYMENT_DAG.md",
-            "docs/architecture/PROD_TOPOLOGY_V2.md",
-            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
-        ],
-        "compromise": {
-            "scope": "reproducible-compromised-nodes-and-workloads",
-            "sequence": ["isolate", "acquire-evidence", "destroy", "rebuild-via-gitops-iac"],
-            "manual_cleaning_restores_trust": False,
-            "exception": "specialized-forensic-requirement",
-        },
-        "evidence": {
-            "destroy_required_forensic_evidence": "forbidden",
-            "acquisition_may_delay_jit_teardown": True,
-            "write_identity_separate_from_delete_admin": True,
-            "immutability": "where-policy-requires",
-        },
-        "site_recovery": {
-            "sequence": [
-                "health-evidence",
-                "quorum-fencing",
-                "write-authority-decision",
-                "stateful-promotion-recovery",
-                "application-routing",
-                "dns-gslb-change",
-            ]
-        },
-        "mlops_recovery": {
-            "promotion": "frozen-during-recovery",
-            "required_assets": [
-                "postgresql-metadata-backup",
-                "independent-object-backup",
-                "harbor-recovery",
-                "tested-restore-procedures",
-            ],
-        },
-    },
-    "security_trust_zones": {
-        "version": 1,
-        "status": "exact",
-        "architecture_authority": AUTHORITY,
-        "source": "docs/architecture/SECURITY_TRUST_ZONES.md",
-        "zones": {
-            "Z0": "internet-untrusted",
-            "Z1": "public-edge-dmz",
-            "Z2": "kubernetes-ingress-service-mesh",
-            "Z3": "application-workloads",
-            "Z4": "stateful-data",
-            "Z5": "permanent-mgmt",
-            "Z6": "backup-evidence-dfir",
-        },
-        "application_services_source": "architecture.lock.yaml#business.services",
-        "human_iam": {
-            "customers_realm": "customers",
-            "workforce_realm": "workforce",
-            "privileged_authentication": "hardware-backed-webauthn-passkeys",
-            "customer_tokens_for_mgmt": "forbidden",
-        },
-        "workload_identity": {
-            "trust_domains": ["PREPROD", "PROD-A", "PROD-B"],
-            "cross_environment": "deny-by-default",
-            "federation_requires": "architecture-security-review",
-        },
-        "secrets": {
-            "flow": "openbao-eso-kubernetes-secret-runtime-mount-where-applicable",
-            "forbidden": [
-                "git",
-                "image-layers",
-                "ci-logs",
-                "bootstrap-credentials-after-preprod-destroy",
-                "application-access-to-openbao-admin-credentials",
-            ],
-        },
-        "egress": {
-            "default": "deny",
-            "application_path": "approved-istio-egress-squid",
-            "logging": "required",
-            "exceptions": "documented",
-        },
-        "mgmt_access_source": "config/contracts/mgmt-wireguard-access.yaml",
-    },
+    key: _load_canonical_yaml(_CANONICAL_LOCK["machine_contracts"][key])
+    for key in ("resilience_governance", "security_trust_zones")
 }
 
 
-def load_yaml(path):
-    """Use the repository-contracted Ruby/Psych runtime; Python has no PyYAML contract."""
-    ruby = """
-document = Psych.parse_file(ARGV[0])
-walk = lambda do |node|
-  if node.is_a?(Psych::Nodes::Mapping)
-    keys = node.children.each_slice(2).map { |key, _| key.value }
-    duplicate = keys.group_by(&:itself).find { |_, values| values.length > 1 }
-    raise "duplicate YAML mapping key: #{duplicate[0]}" if duplicate
-  end
-  Array(node.children).each { |child| walk.call(child) } if node.respond_to?(:children)
-end
-walk.call(document)
-data = Psych.safe_load(File.read(ARGV[0]), aliases: false)
-puts JSON.generate(data)
-"""
-    command = ["ruby", "-rpsych", "-rjson", "-e", ruby, str(path)]
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
-    if completed.returncode:
-        raise ValueError(completed.stderr.strip() or f"cannot parse {path}")
-    return json.loads(completed.stdout)
+def owner_authorization_errors(
+    command,
+    *,
+    expected_scope,
+    head_sha,
+    decision_authority,
+    recording_agent,
+    explicit_owner_instruction,
+):
+    """Fail-closed evaluation for repository-owner authorization records."""
+    policy = V5_REPOSITORY_GOVERNANCE["owner_authorization"]
+    errors = []
 
+    if decision_authority != policy["decision_authority"]:
+        errors.append("BLOCK owner authorization decision authority mismatch")
+    if recording_agent != policy["recording_agent"]:
+        errors.append("BLOCK owner authorization recording agent mismatch")
+    if policy["recording_requires_explicit_owner_instruction"] and not explicit_owner_instruction:
+        errors.append("BLOCK owner authorization requires explicit repository-owner instruction")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", expected_scope or ""):
+        errors.append("BLOCK owner authorization expected scope is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha or ""):
+        errors.append("BLOCK owner authorization current HEAD SHA is not exact")
+
+    if not command:
+        errors.append("BLOCK owner authorization missing")
+        return errors
+
+    match = OWNER_AUTHORIZATION_PATTERN.fullmatch(command)
+    if not match:
+        errors.append("BLOCK owner authorization syntax mismatch")
+        return errors
+
+    if match.group("scope") != expected_scope:
+        errors.append("BLOCK owner authorization scope mismatch")
+    if match.group("sha") != head_sha:
+        errors.append("BLOCK owner authorization SHA mismatch or authorization expired after HEAD change")
+    return errors
+
+
+def clear_yaml_parse_cache():
+    """Clear the process-local Psych cache compatibility surface."""
+    qualification_cache.clear_memory_cache("psych-yaml")
+
+
+def load_yaml(path):
+    """Parse YAML with Ruby/Psych through the canonical content-addressed cache."""
+    return qualification_cache.psych_load(path)
 
 def validate_exact_keys(name, actual, expected_keys):
     """Validate an exact mapping schema without allowing unknown or missing fields."""
-    if name in ("topology_contracts", "machine_contracts"):
-        label = name
-        return (
-            []
-            if isinstance(actual, dict) and set(actual) == set(expected_keys)
-            else [f"{label} must match the complete approved V5 role/path registry"]
-        )
     contract_name = "complete approved V5 registry" if name == "superseded" else "complete approved V5 schema"
     if not isinstance(actual, dict):
         return [f"{name} must be a mapping with the {contract_name}"]
@@ -523,6 +520,18 @@ def lock_schema_errors(lock):
         errors.extend(validate_exact_keys(name, current, expected_keys))
     if errors:
         return errors
+    for registry_name in ("topology_contracts", "machine_contracts"):
+        registry = lock.get(registry_name)
+        if not isinstance(registry, dict):
+            errors.append(f"{registry_name} must be a mapping")
+            continue
+        for role, relative in registry.items():
+            if not isinstance(role, str) or not role.strip():
+                errors.append(f"{registry_name} keys must be non-empty strings")
+            if not isinstance(relative, str) or not relative.strip():
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
+    if errors:
+        return errors
     if not isinstance(lock.get("build_milestones"), list):
         errors.append("build_milestones must be a list")
     business = lock["business"]
@@ -531,6 +540,40 @@ def lock_schema_errors(lock):
         errors.append("business.forbidden_services must be a list")
     elif forbidden:
         errors.append("business.forbidden_services must be empty in the approved V5 schema")
+
+    qce = lock["developer_platform"]["quality_cloud_engineering"]
+    sectors = qce["sectors"]
+    if qce["sector_count"] != 9 or set(sectors) != set(V5_QCE_SECTORS):
+        errors.append("quality_cloud_engineering must declare exactly the nine approved QCE sectors")
+    for sector_name in V5_QCE_SECTORS:
+        sector = sectors[sector_name]
+        for field in V5_QCE_SECTOR_FIELDS:
+            value = sector[field]
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"quality_cloud_engineering sector {sector_name} must define non-empty owner/input/output/evidence"
+                )
+                break
+    cross_cutting = qce["cross_cutting"]
+    if not cross_cutting["security"]["applies_to_all_sectors"]:
+        errors.append("quality_cloud_engineering security must apply to all sectors")
+    culture = cross_cutting["culture"]
+    if not (
+        culture["applies_to_all_sectors"]
+        and culture["explicit_ownership_required"]
+        and culture["documentation_as_code_required"]
+    ):
+        errors.append("quality_cloud_engineering culture must preserve ownership and documentation-as-code")
+    ai_agent = cross_cutting["ai_agent"]
+    if (
+        not ai_agent["applies_to_all_sectors"]
+        or ai_agent["role"] != "assistant"
+        or ai_agent["authoritative_gate"]
+        or ai_agent["may_bypass_required_gates"]
+        or ai_agent["may_merge"]
+        or ai_agent["may_deploy_production_directly"]
+    ):
+        errors.append("quality_cloud_engineering AI agent must remain non-authoritative")
 
     prod = lock["prod_certified_topology"]
     for field in V5_PROD_TOPOLOGY_KEYS - {"sites"}:
@@ -1025,6 +1068,49 @@ def documentation_errors(text):
     return errors
 
 
+def registry_coverage_errors(root, lock):
+    """Ensure every governed contract file is registered exactly once in the root authority."""
+    errors = []
+    root = Path(root)
+    for registry_name, patterns in REGISTRY_GLOBS.items():
+        declared = lock.get(registry_name, {})
+        if not isinstance(declared, dict):
+            continue
+        values = list(declared.values())
+        if len(values) != len(set(values)):
+            errors.append(f"{registry_name} must not register the same path more than once")
+        for role, relative in declared.items():
+            if (
+                not isinstance(relative, str)
+                or not relative.strip()
+                or Path(relative).is_absolute()
+                or ".." in Path(relative).parts
+            ):
+                errors.append(f"{registry_name}.{role} must declare a non-empty repository-relative path")
+                continue
+            if not (root / relative).is_file():
+                errors.append(f"{registry_name}.{role} declared file does not exist: {relative}")
+        discovered = set()
+        for pattern in patterns:
+            discovered.update(
+                str(path.relative_to(root))
+                for path in root.glob(pattern)
+                if path.is_file()
+            )
+        registered = {
+            relative
+            for relative in values
+            if isinstance(relative, str) and relative.strip()
+        }
+        missing = sorted(discovered - registered)
+        extra = sorted(registered - discovered)
+        if missing:
+            errors.append(f"{registry_name} has unregistered governed files: {', '.join(missing)}")
+        if extra:
+            errors.append(f"{registry_name} registers files outside its governed set: {', '.join(extra)}")
+    return errors
+
+
 def validate(root):
     root = Path(root)
     errors = []
@@ -1040,14 +1126,23 @@ def validate(root):
         if lock["version"] != 5:
             errors.append("architecture.lock.yaml must be version 5")
         topology_contracts = lock.get("topology_contracts")
-        if topology_contracts != V5_TOPOLOGY_CONTRACTS:
-            return [*errors, "topology_contracts must match the complete approved V5 role/path registry"]
+        errors.extend(registry_coverage_errors(root, lock))
+        if errors:
+            return errors
         if topology_contracts["exact_index"] != INDEX:
             errors.append("exact index must be the derived V5 index")
         if lock.get("observability") != V5_OBSERVABILITY:
             errors.append("observability must match the complete approved V5 mapping")
         if lock["business"].get("frontend_runtime") != EXPECTED_V5_FRONTEND_RUNTIME:
             errors.append("business.frontend_runtime must match the approved V5 mapping")
+        if lock.get("repository_governance") != V5_REPOSITORY_GOVERNANCE:
+            errors.append("repository_governance must match the approved repository-wide contract")
+        if lock.get("developer_platform") != V5_DEVELOPER_PLATFORM:
+            errors.append("developer_platform must match the approved V5 PR-driven platform contract")
+        if lock.get("platform", {}).get("infrastructure_api") != "crossplane":
+            errors.append("platform.infrastructure_api must remain crossplane")
+        if lock.get("management_plane", {}).get("developer_portal") != "backstage":
+            errors.append("management_plane.developer_portal must remain backstage")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
             errors.append("critical DNS TTL must remain 60 seconds")
         if lock.get("superseded") != V5_SUPERSEDED:
@@ -1076,22 +1171,34 @@ def validate(root):
         ):
             errors.append("milestone dependencies must match the approved V5 DAG")
         for key in ("resilience_governance", "security_trust_zones"):
-            relative = "config/contracts/" + key.replace("_", "-") + ".yaml"
-            if lock["machine_contracts"].get(key) != relative:
-                errors.append(f"missing canonical machine contract: {key}")
+            relative = lock["machine_contracts"].get(key)
+            if not relative:
+                errors.append(f"missing canonical machine contract role: {key}")
+                continue
             contract = load_yaml(root / relative)
             if contract != EXACT_CONTRACTS[key]:
                 errors.append(f"{relative} must match its exact V5 invariants")
             if key == "security_trust_zones" and contract == EXACT_CONTRACTS[key]:
                 source = (root / contract["source"]).read_text()
                 errors.extend(security_source_errors(source, contract))
-        if lock["machine_contracts"] != V5_MACHINE_CONTRACTS:
-            errors.append("machine_contracts must match the complete approved V5 role/path registry")
         # The Ruby architecture validator also checks all declared contract paths
         # and their cross-contract invariants. Never bypass its missing-file checks.
         for relative in lock["machine_contracts"].values():
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
+
+        review_policy = load_yaml(root / lock["machine_contracts"]["review_policy"])
+        inherited_owner_authorization = (
+            review_policy.get("pull_request_review", {}).get("owner_authorization", {})
+        )
+        if inherited_owner_authorization != {
+            "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
+            "local_override": "forbidden",
+        }:
+            errors.append(
+                "review policy must inherit repository_governance.owner_authorization without local override"
+            )
+
         management = lock["management_plane"]
         inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
@@ -1141,23 +1248,19 @@ def validate(root):
         if any(gate is not True for gate in human_gates):
             errors.append("management_plane.bootstrap requires the locked human apply gate")
         for role, relative in topology_contracts.items():
-            if (
-                not isinstance(relative, str)
-                or not relative.strip()
-                or Path(relative).is_absolute()
-                or ".." in Path(relative).parts
-            ):
-                errors.append(f"topology_contracts.{role} must declare a non-empty repository-relative path")
-                continue
             path = root / relative
-            if not path.is_file():
-                errors.append(f"missing topology contract: {relative}")
-                continue
             contents = path.read_text()
-            status = re.search(r"^Status:\s*`([^`]*)`\s*$", contents, re.M | re.I)
+            status = re.search(r"^Status:\s*\`([^\`]*)\`\s*$", contents, re.M | re.I)
             status_value = status.group(1).strip().upper() if status else None
-            if not contents.strip() or status_value != "EXACT":
-                errors.append(f"topology contract must be readable and EXACT: {relative}")
+            expected_status = "ACTIVE" if role in DERIVED_TOPOLOGY_ROLES else "EXACT"
+            if not contents.strip() or status_value != expected_status:
+                errors.append(
+                    f"topology contract {role} must be readable and {expected_status}: {relative}"
+                )
+            if role in DERIVED_TOPOLOGY_ROLES and "Architecture authority: `architecture.lock.yaml`" not in contents:
+                errors.append(
+                    f"derived architecture document must name architecture.lock.yaml as authority: {relative}"
+                )
         index = (root / INDEX).read_text()
         if "`architecture.lock.yaml` is the single canonical architecture authority" not in index:
             errors.append("derived index must establish the lock as root authority")
@@ -1181,7 +1284,8 @@ def validate(root):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
         handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
         mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if f"`{relative}`" not in mandatory_handoffs:
                 errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
         m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
@@ -1335,14 +1439,15 @@ def validate(root):
         l2_canonical = router["canonical"]["L2"]
         canonical_l2_contracts = (
             INDEX,
-            "config/infrastructure/deployment-waves.yaml",
-            "docs/architecture/AIOPS_TOPOLOGY_V1.md",
-            "docs/architecture/MLOPS_TOPOLOGY_V1.md",
+            lock["machine_contracts"]["deployment_waves"],
+            topology_contracts["aiops"],
+            topology_contracts["mlops"],
         )
         for relative in canonical_l2_contracts:
             if relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
-        for relative in ("config/contracts/resilience-governance.yaml", "config/contracts/security-trust-zones.yaml"):
+        for key in ("resilience_governance", "security_trust_zones"):
+            relative = lock["machine_contracts"][key]
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
         for keyword in ("resilience", "recovery", "mlops", "aiops"):

@@ -1,0 +1,18 @@
+version: 1
+status: active
+service: payment
+owner: payment
+architecture_authority: architecture.lock.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+requirements:
+  method_aware_authorization:
+    required: true
+    scope: internal-service-to-payment
+    layer: l7
+    capability: l7.authorization
+    rationale: Payment operations require authorization decisions that can distinguish application methods rather than relying only on workload identity or L3/L4 policy.
+    enforcement_authority: istio-waypoint
+    cilium_l7_authority: false
+    transport_security:
+      mtls: strict
+      transport: ztunnel

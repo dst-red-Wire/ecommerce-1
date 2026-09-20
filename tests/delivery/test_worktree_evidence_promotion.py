@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -93,18 +94,22 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             ["git", "archive", "--format=tar", "--output", "$str:archive", "$tree_sha"],
             command_vectors,
         )
-        self.assertIn(
-            [
-                "gitleaks",
-                "dir",
-                "--config",
-                ".gitleaks.toml",
-                "--redact",
-                "--no-banner",
-                "$str:scan_root",
-            ],
+        self.assertTrue(
+            any(
+                vector[:2] == ["$command", "dir"] and vector[-1] == "$str:scan_root"
+                for vector in command_vectors
+            ),
             command_vectors,
         )
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "write_gitleaks_policy_config"
+                for node in ast.walk(security)
+            )
+        )
+        self.assertNotIn(".gitleaks.toml", source)
 
     def test_worktree_tree_sha_does_not_mutate_the_real_index(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,10 +140,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -146,6 +156,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": "test-identity",
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
@@ -171,10 +184,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             evidence_dir = context / "evidence"
             evidence_dir.mkdir(parents=True)
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_ref": base,
                     "base_sha": base,
@@ -182,6 +200,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "head_sha": base,
                     "source_head_sha": base,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": "test-identity",
+                    "created_at_epoch": time.time(),
                     "exact_commit_evidence": False,
                     "status": "PASS",
                     "changed_paths": ["README.md"],
@@ -231,15 +252,23 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             base = self.init_repo(root)
             context = root / ".context"
             (root / "README.md").write_text("validated\n", encoding="utf-8")
-            with mock.patch.object(REPOCTL, "ROOT", root), mock.patch.object(REPOCTL, "CONTEXT", context):
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+            ):
                 tree = REPOCTL.worktree_tree_sha()
                 source = {
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "evidence_kind": "worktree",
                     "base_sha": base,
                     "head_sha": "f" * 40,
                     "source_head_sha": "f" * 40,
                     "source_tree_sha": tree,
+                    "head_tree_sha": tree,
+                    "qualification_identity": "test-identity",
+                    "created_at_epoch": time.time(),
                     "status": "PASS",
                     "exact_commit_evidence": False,
                     "changed_paths": ["README.md"],

@@ -1,0 +1,29 @@
+version: 1
+status: active
+architecture_authority: architecture.lock.yaml
+service_resilience_policy: config/contracts/service-resilience-policy.yaml
+service_mesh_policy: config/contracts/service-mesh-policy.yaml
+
+layers:
+  public_api:
+    authority: kong
+    scope: route-consumer-api
+    default: disabled-until-versioned-limit-exists
+  internal_l7:
+    authority: istio-waypoint
+    allowed_only_when: service-mesh-policy-waypoint-required
+    default: disabled
+  transport_connection_pressure:
+    authority: haproxy-cilium
+    scope: connection-and-l4-protection
+  business_rules:
+    authority: application
+    examples: [checkout-attempt-limits, fraud-thresholds, payment-operation-limits]
+
+rules:
+  one-effective-rate-limit-authority-per-policy: true
+  caddy-business-rate-limit: forbidden
+  duplicate-kong-and-waypoint-limit-for-same-policy: forbidden
+  business-rate-limit-must-not-be-implemented-as-network-policy: true
+  public-api-limit-requires-versioned-route-and-budget: true
+  internal-l7-limit-requires-waypoint-and-source-contract: true

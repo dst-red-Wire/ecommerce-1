@@ -5,6 +5,10 @@ pull_request_review:
   forge: github
   ci: tekton
 
+  owner_authorization:
+    authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+    local_override: forbidden
+
   deterministic_gate:
     authority: true
     required_for_merge: true
@@ -29,3 +33,32 @@ pull_request_review:
       - destructive_changes
       - state_migrations
       - dns_network_iam_secret_changes
+
+repository_delivery:
+  forge: github
+  default_branch: main
+
+  publish:
+    qualification: exact-sha
+    exact_evidence_required: true
+    force_push: forbidden
+    direct_default_branch_write: forbidden
+    push_target: current-feature-branch
+
+  pull_request:
+    required: true
+    head_sha_binding: exact
+    draft_merge: forbidden
+    record_after_merge: retained-by-forge
+
+  merge:
+    method: merge
+    match_head_commit: required
+    branch_protection: required
+    required_checks: when-configured
+    bypass_branch_protection: forbidden
+
+  cleanup:
+    merged_pr_state: merged-closed
+    remote_branch: delete
+    local_branch: delete
