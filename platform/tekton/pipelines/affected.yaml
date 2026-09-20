@@ -70,6 +70,10 @@ spec:
       runAfter: [classify]
       taskRef:
         name: ecommerce-global-gates
+      matrix:
+        params:
+          - name: gate
+            value: $(tasks.classify.results.global-gates[*])
       params:
         - name: runner-image
           value: $(params.runner-image)
