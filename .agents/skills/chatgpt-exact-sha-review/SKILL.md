@@ -26,13 +26,16 @@ Never trigger, request, rerun, poll, or rely on Codex review workflows. Do not p
 
 ## Deterministic evidence
 
-Prefer repository evidence before model analysis:
+The normal delivery path is `make deliver`; it owns qualification, exact-SHA evidence, commit, push, and PR refresh.
+
+For review analysis, reuse the evidence produced by `make deliver`. Use these lower-level commands only for bounded diagnostics or investigation:
 
 - `make affected BASE=<last-reviewed-sha> HEAD=<head-sha>`
 - `make diff-context BASE=<last-reviewed-sha>`
 - `make failure-context GATE=<gate>` or `COMPONENT=<component>`
 - `make verify-change BASE=<base> HEAD=<head>`
-- exact-commit evidence under `.context/evidence/<head-sha>.json` when repository policy produces it
+
+Do not require a manual sequence of `verify-change` + evidence JSON inspection + `git push` after a successful `make deliver`.
 
 Reuse valid evidence for identical inputs. Do not rerun a proven gate merely because time passed.
 
