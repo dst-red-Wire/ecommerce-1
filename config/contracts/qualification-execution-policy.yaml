@@ -398,7 +398,6 @@ performance:
     platform:ansible: 28.639
     service:product: 14.821
   campaign:
-    repetitions: 3
     cold_clears_qualification_content_cache_only: true
     preserve_dependency_and_native_tool_caches: true
     scenarios:
