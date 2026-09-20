@@ -4010,6 +4010,63 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     return 1 if failures else 0
 
 
+def roadmap_check(*, quiet: bool = False) -> int:
+    command = [sys.executable, "scripts/roadmap_sync.py", "check"]
+    if quiet:
+        command.append("--quiet")
+    return run(command, check=False).returncode
+
+
+def roadmap_sync() -> int:
+    return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
+
+
+def _roadmap_followup_after_merge() -> int:
+    if roadmap_check(quiet=True) == 0:
+        print("PASS finish-pr: roadmap already synchronized")
+        return 0
+
+    main_sha = git("rev-parse", "HEAD").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
+        return fail("roadmap follow-up requires exact main SHA")
+
+    policy = repository_delivery_policy()
+    default_branch = str(policy["default_branch"])
+    if git("branch", "--show-current").strip() != default_branch:
+        return fail("roadmap follow-up requires the default branch checkout")
+
+    followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
+    local_exists = run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
+        check=False,
+    ).returncode == 0
+    remote_exists = run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{followup_branch}"],
+        check=False,
+    ).returncode == 0
+
+    if local_exists:
+        run(["git", "switch", followup_branch])
+    elif remote_exists:
+        run(["git", "switch", "-c", followup_branch, "--track", f"origin/{followup_branch}"])
+    else:
+        run(["git", "switch", "-c", followup_branch, f"origin/{default_branch}"])
+
+    if roadmap_sync():
+        return 1
+    if roadmap_check(quiet=True):
+        return fail("roadmap-sync did not converge")
+
+    title = f"chore: synchronize roadmap after {main_sha[:12]}"
+    if deliver(default_branch, title, title):
+        return 1
+
+    run(["git", "switch", default_branch])
+    run(["git", "merge", "--ff-only", f"origin/{default_branch}"])
+    print(f"PASS finish-pr: roadmap synchronization PR published from {followup_branch}")
+    return 0
+
+
 def git_sync() -> int:
     branch = git("branch", "--show-current").strip()
     if not branch:
@@ -4704,9 +4761,16 @@ def finish_pr(base: str) -> int:
     cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
     if cleanup_rc:
         print("ADVISORY finish-pr merged successfully but stale-branch cleanup was incomplete", file=sys.stderr)
+
+    roadmap_rc = _roadmap_followup_after_merge()
+    if roadmap_rc:
+        return fail(
+            f"finish-pr merged PR #{number} successfully but automatic roadmap synchronization failed"
+        )
+
     print(
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
-        f"PR record retained by GitHub; remote/local branch {branch} removed"
+        f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciled"
     )
     return 0
 
@@ -4758,6 +4822,8 @@ def main() -> int:
         sub.add_parser(name)
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
+    sub.add_parser("roadmap-check")
+    sub.add_parser("roadmap-sync")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -4969,6 +5035,10 @@ def main() -> int:
             return git_sync()
         if args.cmd == "branch-cleanup":
             return branch_cleanup(dry_run=args.dry_run)
+        if args.cmd == "roadmap-check":
+            return roadmap_check()
+        if args.cmd == "roadmap-sync":
+            return roadmap_sync()
         if args.cmd == "publish":
             return publish(args.base, args.message)
         if args.cmd == "publish-change":
