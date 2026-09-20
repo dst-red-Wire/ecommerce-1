@@ -22,8 +22,8 @@ class PerformanceAuditTests(unittest.TestCase):
             "status": "PASS",
             "verification": {"mode": "incremental"},
             "gates": [
-                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0},
-                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0},
+                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0, "parallel_safe": False},
+                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0, "parallel_safe": True},
                 {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 4.0},
                 {"gate": "service:product", "status": "PASS", "duration_seconds": 1.0},
                 {
@@ -72,13 +72,25 @@ class PerformanceAuditTests(unittest.TestCase):
     def test_tekton_critical_path_models_bounded_parallel_global_and_component_matrix(self):
         critical = AUDIT.tekton_critical_path(self.evidence()["gates"], max_workers=4)
         self.assertEqual("tekton-affected-v2", critical["model"])
-        self.assertEqual(3.0, critical["global_branch_seconds"])
+        self.assertEqual(5.0, critical["global_branch_seconds"])
         self.assertEqual(4.0, critical["component_matrix_branch_seconds"])
-        self.assertEqual(4.0, critical["critical_path_estimate_seconds"])
-        self.assertEqual("component-matrix", critical["critical_branch"])
-        self.assertEqual(["frontend:storefront"], critical["critical_gates"])
-        self.assertEqual(6.0, critical["parallelization_headroom_seconds"])
-        self.assertEqual(2.5, critical["theoretical_gate_only_parallel_speedup"])
+        self.assertEqual(5.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("global-gates", critical["critical_branch"])
+        self.assertEqual(["governance", "contracts"], critical["critical_gates"])
+        self.assertEqual(5.0, critical["parallelization_headroom_seconds"])
+        self.assertEqual(2.0, critical["theoretical_gate_only_parallel_speedup"])
+
+    def test_ordered_schedule_respects_serial_barriers(self):
+        seconds, path = AUDIT._ordered_parallel_schedule(
+            [
+                ("governance", 2.0, False),
+                ("contracts", 3.0, True),
+                ("automation", 1.0, True),
+            ],
+            4,
+        )
+        self.assertEqual(5.0, seconds)
+        self.assertEqual(["governance", "contracts"], path)
 
     def test_recorded_ci_worker_budget_overrides_local_default(self):
         evidence = self.evidence()
@@ -132,7 +144,7 @@ class PerformanceAuditTests(unittest.TestCase):
             report = AUDIT.audit(self.evidence(), root=self.make_root(temp))
         self.assertFalse(report["safety"]["content_cache_authorizes_pass_reuse"])
         self.assertEqual("exact-direct-parent-only", report["safety"]["verdict_reuse_policy"])
-        self.assertEqual("component-matrix", report["critical_path"]["critical_branch"])
+        self.assertEqual("global-gates", report["critical_path"]["critical_branch"])
         self.assertTrue(report["recommendations"])
 
     def test_baseline_comparison_reports_measured_gate_savings(self):
