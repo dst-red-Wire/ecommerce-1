@@ -84,20 +84,12 @@
   register: vm_initial
   changed_when: false
 - name: Require actual network isolation and bounded VM resources
-  ansible.builtin.assert:
-    that:
-      - "'name=\"' ~ vm_name ~ '\"' in vm_initial.stdout"
-      - "'nic1=\"null\"' in vm_initial.stdout"
-      - "'nic2=\"none\"' in vm_initial.stdout"
-      - "'nic3=\"none\"' in vm_initial.stdout"
-      - "'nic4=\"none\"' in vm_initial.stdout"
-      - "'nic5=\"none\"' in vm_initial.stdout"
-      - "'nic6=\"none\"' in vm_initial.stdout"
-      - "'nic7=\"none\"' in vm_initial.stdout"
-      - "'nic8=\"none\"' in vm_initial.stdout"
-      - "'cpus=' ~ (vm_cpus | int | string) in vm_initial.stdout_lines"
-      - "'memory=' ~ (vm_memory | int | string) in vm_initial.stdout_lines"
-      - "'ioapic=\"on\"' in vm_initial.stdout"
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, 'null',
+           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
+    stdin: "{{ vm_initial.stdout }}"
+  changed_when: false
 - name: Record initial VM isolation
   ansible.builtin.copy:
     content: "{{ vm_initial.stdout }}\n"

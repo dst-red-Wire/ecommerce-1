@@ -63,8 +63,13 @@
             state: absent
           when: (vm_id_file.content | b64decode | trim) not in vm_registered.stdout
   always:
-    - name: Remove only generated fixture private key
+    - name: Remove generated local credentials and rendered token-bearing inputs
       ansible.builtin.file:
-        path: "{{ vm_state }}/identity"
+        path: "{{ item }}"
         state: absent
+      loop:
+        - "{{ vm_state }}/identity"
+        - "{{ vm_state }}/rke2-token"
+        - "{{ vm_state }}/server.yml"
+        - "{{ vm_state }}/server-inventory.json"
       no_log: true

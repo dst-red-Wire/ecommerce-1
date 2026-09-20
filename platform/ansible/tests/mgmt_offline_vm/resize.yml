@@ -19,14 +19,13 @@
   register: vm_resize_before
   changed_when: false
 
-- name: Refuse resizing a renamed or differently networked machine
-  ansible.builtin.assert:
-    that:
-      - "'name=\"' ~ vm_name ~ '\"' in vm_resize_before.stdout"
-      - "'nic1=\"hostonly\"' in vm_resize_before.stdout"
-      - "'hostonlyadapter1=\"' ~ vm_hostonly_adapter ~ '\"' in vm_resize_before.stdout"
-      - "'macaddress1=\"' ~ (vm_mac | lower) ~ '\"' in (vm_resize_before.stdout | lower)"
-      - "'nic2=\"none\"' in vm_resize_before.stdout"
+- name: Refuse resizing unless the central isolation contract passes
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, hostonly,
+           --adapter, "{{ vm_hostonly_adapter }}", --mac, "{{ vm_mac }}"]
+    stdin: "{{ vm_resize_before.stdout }}"
+  changed_when: false
 
 - name: Request graceful shutdown before changing resources
   ansible.builtin.command:

@@ -7,6 +7,7 @@ import subprocess
 
 KUBECTL = "/var/lib/rancher/rke2/bin/kubectl"
 KUBECONFIG = "/etc/rancher/rke2/rke2.yaml"
+EGRESS_TABLE = "ecommerce_mgmt_bootstrap"
 
 
 def output(*arguments: str) -> str:
@@ -17,7 +18,27 @@ def kubectl(*arguments: str) -> dict:
     return json.loads(output(KUBECTL, "--kubeconfig", KUBECONFIG, *arguments, "-o", "json"))
 
 
+def require_default_deny(document: dict) -> dict[str, str]:
+    chains = [
+        row["chain"] for row in document.get("nftables", [])
+        if isinstance(row, dict) and isinstance(row.get("chain"), dict)
+        and row["chain"].get("family") == "inet"
+        and row["chain"].get("table") == EGRESS_TABLE
+        and row["chain"].get("hook") in {"output", "forward"}
+    ]
+    policies = {
+        hook: [chain.get("policy") for chain in chains if chain.get("hook") == hook]
+        for hook in ("output", "forward")
+    }
+    if policies != {"output": ["drop"], "forward": ["drop"]}:
+        raise ValueError("canonical nftables output/forward policies are not uniquely default-deny")
+    return {hook: values[0] for hook, values in policies.items()}
+
+
 def main() -> None:
+    nft_policies = require_default_deny(json.loads(output(
+        "nft", "-j", "list", "table", "inet", EGRESS_TABLE,
+    )))
     nodes = kubectl("get", "nodes")["items"]
     if len(nodes) != 1:
         raise SystemExit("single-node fixture must expose exactly one node")
@@ -73,6 +94,7 @@ def main() -> None:
         "node_ready": True,
         "pending_pods": sorted(pending),
         "pod_count": len(pods),
+        "nft_policies": nft_policies,
         "public_connect_error": public_error,
         "rke2_version": output("/usr/local/bin/rke2", "--version").splitlines()[0],
         "selinux": output("getenforce"),

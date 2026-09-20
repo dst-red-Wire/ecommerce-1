@@ -4,8 +4,12 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"
@@ -44,6 +48,75 @@ class MgmtAirgapBundleLockTests(unittest.TestCase):
         ]
         self.assertTrue(all(item["url"].startswith("https://") for item in entries))
         self.assertRegex(self.lock["preparer_image"], r"@sha256:[0-9a-f]{64}$")
+
+    def test_offline_compressed_only_source_fails_before_decompression(self):
+        compressed = b"locked compressed bytes"
+        uncompressed = b"locked uncompressed bytes"
+        entry = {
+            "file": "images.tar",
+            "sha256": hashlib.sha256(uncompressed).hexdigest(),
+            "compressed_file": "images.tar.zst",
+            "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
+            "url": "https://example.invalid/images.tar.zst",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            cache = root / "cache"
+            source.mkdir()
+            cache.mkdir()
+            (source / entry["compressed_file"]).write_bytes(compressed)
+            with (
+                mock.patch.object(BUILDER, "decompress_zstd") as decompressor,
+                self.assertRaisesRegex(BUILDER.BuildError, "networked decompression is forbidden"),
+            ):
+                BUILDER.materialize_release(
+                    entry, cache, source, root / entry["file"],
+                    "example.invalid/preparer@sha256:" + "0" * 64, True,
+                )
+            decompressor.assert_not_called()
+
+    def test_offline_prefers_verified_uncompressed_bytes(self):
+        compressed = b"locked compressed bytes"
+        uncompressed = b"locked uncompressed bytes"
+        entry = {
+            "file": "images.tar",
+            "sha256": hashlib.sha256(uncompressed).hexdigest(),
+            "compressed_file": "images.tar.zst",
+            "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
+            "url": "https://example.invalid/images.tar.zst",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            cache = root / "cache"
+            source.mkdir()
+            cache.mkdir()
+            (source / entry["compressed_file"]).write_bytes(compressed)
+            (source / entry["file"]).write_bytes(uncompressed)
+            output = root / "output.tar"
+            with mock.patch.object(BUILDER, "decompress_zstd") as decompressor:
+                BUILDER.materialize_release(
+                    entry, cache, source, output,
+                    "example.invalid/preparer@sha256:" + "0" * 64, True,
+                )
+            self.assertEqual(output.read_bytes(), uncompressed)
+            decompressor.assert_not_called()
+
+    def test_fixture_services_have_one_contract_and_both_consumers(self):
+        fixture = ROOT / "platform/ansible/tests/mgmt_offline_vm"
+        contract = yaml.safe_load((fixture / "contract.yml").read_text())
+        services = contract["mgmt_local_vm_contract"]["services"]
+        normalized = BUILDER.checked_services(json.dumps(services))
+        self.assertEqual(json.loads(normalized), services)
+        main = (fixture / "main.yml").read_text()
+        builder = (fixture / "build_bundle.yml").read_text()
+        self.assertIn("mgmt_local_vm_contract.services.dns", main)
+        self.assertIn("mgmt_local_vm_contract.services.ntp", main)
+        self.assertIn("mgmt_local_vm_contract.services | to_json", builder)
+        for address in services["dns"] + services["ntp"]:
+            self.assertNotIn(address, main)
+            self.assertNotIn(address, builder)
 
 
 if __name__ == "__main__":

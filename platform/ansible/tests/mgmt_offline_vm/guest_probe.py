@@ -23,16 +23,22 @@ def sha256(path):
 
 
 def main():
+    restage = "--before-restage" in sys.argv or "--restage" in sys.argv
     selinux = output("getenforce")
     assert selinux == "Enforcing", "SELinux must remain enforcing"
     routes = json.loads(output("ip", "-j", "route"))
     routes6 = json.loads(output("ip", "-j", "-6", "route"))
-    assert not any(row.get("dst") == "default" for row in routes + routes6)
     with socket.socket() as connection:
         connection.settimeout(3)
         errno = connection.connect_ex(("1.1.1.1", 443))
-    assert errno == 101, "public connection must fail with ENETUNREACH"
-    nft = json.loads(output("nft", "-j", "list", "table", "inet", "ecommerce_test_offline"))
+    if restage:
+        assert errno != 0, "public connection must remain denied during restaging"
+        table = "ecommerce_mgmt_bootstrap"
+    else:
+        assert not any(row.get("dst") == "default" for row in routes + routes6)
+        assert errno == 101, "public connection must fail with ENETUNREACH"
+        table = "ecommerce_test_offline"
+    nft = json.loads(output("nft", "-j", "list", "table", "inet", table))
     policies = {row["chain"]["name"]: row["chain"].get("policy") for row in nft["nftables"] if "chain" in row}
     assert policies == {"output": "drop", "forward": "drop"}
     sshd = dict(line.split(" ", 1) for line in output("/usr/sbin/sshd", "-T").splitlines())
@@ -64,7 +70,7 @@ def main():
         "nft_policies": policies,
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
     }
-    if len(sys.argv) > 1 and sys.argv[1] == "--before":
+    if len(sys.argv) > 1 and sys.argv[1] in {"--before", "--before-restage"}:
         packages = output(
             "rpm", "-qa", "--queryformat", "%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n"
         ).splitlines()

@@ -102,13 +102,14 @@ def acquire(entry: dict, cache: Path, source: Path | None, offline: bool,
             compressed: bool = False) -> Path:
     filename = safe_name(entry["compressed_file"] if compressed else entry["file"])
     expected = entry["compressed_sha256"] if compressed else entry["sha256"]
+    roots = [path for path in (source, cache) if path is not None]
     candidates = []
-    if source is not None:
-        candidates.append(source / filename)
-        if compressed:
-            # A prepared source bundle can provide the verified uncompressed file.
-            candidates.append(source / safe_name(entry["file"]))
-    candidates.append(cache / filename)
+    if compressed:
+        # A prepared source bundle or cache may provide the already verified,
+        # uncompressed bytes. Prefer them so an offline build never needs a
+        # decompressor container or package repository.
+        candidates.extend(path / safe_name(entry["file"]) for path in roots)
+    candidates.extend(path / filename for path in roots)
     for candidate in candidates:
         if candidate.is_file():
             candidate_expected = entry["sha256"] if candidate.name == entry["file"] else expected
@@ -143,6 +144,20 @@ def decompress_zstd(source: Path, destination: Path, image: str) -> None:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def materialize_release(entry: dict, cache: Path, source: Path | None,
+                        destination: Path, image: str, offline: bool) -> None:
+    acquired = acquire(entry, cache, source, offline, compressed=True)
+    if acquired.name == entry["file"]:
+        shutil.copyfile(acquired, destination)
+    else:
+        require(not offline,
+                "offline mode requires the verified uncompressed artifact; "
+                "networked decompression is forbidden")
+        decompress_zstd(acquired, destination, image)
+    require(digest(destination) == entry["sha256"],
+            "decompressed artifact digest mismatch")
+
+
 def manifest_from_lock(lock: dict) -> dict:
     artifacts = []
     for entry in lock["rpm_signing_keys"]:
@@ -165,9 +180,20 @@ def manifest_from_lock(lock: dict) -> dict:
     }
 
 
+def checked_services(value: str) -> str:
+    services = json.loads(value)
+    require(isinstance(services, dict) and set(services) == {"dns", "ntp"},
+            "fixture services must contain only dns and ntp")
+    for name in ("dns", "ntp"):
+        require(isinstance(services[name], list) and services[name],
+                f"fixture {name} service addresses are required")
+        require(all(isinstance(address, str) for address in services[name]),
+                f"fixture {name} service addresses must be strings")
+    return json.dumps(services, separators=(",", ":"), sort_keys=True)
+
+
 def validate_in_pinned_container(bundle: Path, manifest_sha256: str, lock: dict,
-                                 repository: Path) -> dict:
-    services = json.dumps({"dns": ["10.243.1.2"], "ntp": ["10.243.1.3"]}, separators=(",", ":"))
+                                 repository: Path, services: str) -> dict:
     result = docker(
         "run", "--rm", "--network", "none",
         "--mount", f"type=bind,src={bundle},dst=/bundle,readonly",
@@ -198,21 +224,20 @@ def build(args: argparse.Namespace) -> dict:
                 acquired = acquire(entry, cache, source, args.offline)
                 shutil.copyfile(acquired, staging / entry["file"])
                 continue
-            acquired = acquire(entry, cache, source, args.offline, compressed=True)
             destination = staging / entry["file"]
-            if acquired.name == entry["file"]:
-                shutil.copyfile(acquired, destination)
-            else:
-                decompress_zstd(acquired, destination, lock["preparer_image"])
-            require(digest(destination) == entry["sha256"],
-                    "decompressed artifact digest mismatch")
+            materialize_release(
+                entry, cache, source, destination, lock["preparer_image"], args.offline,
+            )
         manifest = manifest_from_lock(lock)
         manifest_path = staging / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         manifest_sha256 = digest(manifest_path)
         require(manifest_sha256 == lock["approved_manifest_sha256"],
                 "generated manifest differs from independent approval")
-        validation = validate_in_pinned_container(staging, manifest_sha256, lock, args.repository.resolve())
+        validation = validate_in_pinned_container(
+            staging, manifest_sha256, lock, args.repository.resolve(),
+            checked_services(args.services_json),
+        )
         os.replace(staging, output)
     return {
         "bundle": str(output),
@@ -232,6 +257,7 @@ def main() -> int:
     parser.add_argument("--source", type=Path,
                         help="optional trusted directory containing locked source bytes")
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--services-json", required=True)
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
     try:

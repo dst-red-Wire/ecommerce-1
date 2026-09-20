@@ -10,17 +10,28 @@
   register: vm_server_current
   changed_when: false
 
-- name: Require running host-only RKE2-sized fixture
-  ansible.builtin.assert:
-    that:
-      - "'name=\"' ~ vm_name ~ '\"' in vm_server_current.stdout"
-      - "'VMState=\"running\"' in vm_server_current.stdout"
-      - "'nic1=\"hostonly\"' in vm_server_current.stdout"
-      - "'nic2=\"none\"' in vm_server_current.stdout"
-      - "'cpus=' ~ (mgmt_local_vm_contract.resources.rke2_server.cpus | string) in vm_server_current.stdout_lines"
-      - "'memory=' ~ (mgmt_local_vm_contract.resources.rke2_server.memory_mib | string) in vm_server_current.stdout_lines"
+- name: Require the centrally validated running host-only RKE2 fixture
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ playbook_dir }}/virtualbox_probe.py"
+      - --name
+      - "{{ vm_name }}"
+      - --nic1
+      - hostonly
+      - --adapter
+      - "{{ vm_hostonly_adapter }}"
+      - --mac
+      - "{{ vm_mac }}"
+      - --cpus
+      - "{{ mgmt_local_vm_contract.resources.rke2_server.cpus }}"
+      - --memory
+      - "{{ mgmt_local_vm_contract.resources.rke2_server.memory_mib }}"
+      - --running
+    stdin: "{{ vm_server_current.stdout }}"
+  changed_when: false
 
-- name: Require the exact verified bundle is already staged
+- name: Inspect whether the canonical RKE2 server is already active
   ansible.builtin.command:
     argv:
       - ssh
@@ -29,10 +40,74 @@
       - "{{ vm_name }}"
       - sudo
       - -n
-      - test
-      - -f
-      - "/var/lib/ecommerce/bootstrap/{{ mgmt_offline_manifest_sha256 }}/rke2.linux-amd64"
+      - systemctl
+      - is-active
+      - rke2-server.service
+  register: vm_server_active_probe
   changed_when: false
+  failed_when: vm_server_active_probe.rc not in [0, 3, 4]
+
+- name: Decide whether this invocation installs or only rechecks the active server
+  ansible.builtin.set_fact:
+    vm_server_install_required: "{{ vm_server_active_probe.stdout | trim != 'active' }}"
+
+- name: Revalidate every staged byte immediately before privileged installation
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - sudo
+      - -n
+      - /usr/bin/python3
+      - /usr/local/libexec/ecommerce-mgmt-airgap.py
+      - --rpm-metadata-check
+      - --rpm-signature-check
+      - --bundle
+      - "/var/lib/ecommerce/bootstrap/{{ mgmt_offline_manifest_sha256 }}"
+      - --manifest-sha256
+      - "{{ mgmt_offline_manifest_sha256 }}"
+      - --rke2-version
+      - "{{ (lookup('file', vm_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}"
+      - --services-json
+      - "{{ {'dns': vm_dns_fixture, 'ntp': vm_ntp_fixture} | to_json }}"
+  register: vm_server_bundle_validation
+  changed_when: false
+  when: vm_server_install_required | bool
+
+- name: Derive artifact trust only from the immediate complete validation
+  ansible.builtin.set_fact:
+    vm_server_bundle_verified: >-
+      {{ vm_server_install_required | bool
+         and (vm_server_bundle_validation.rc | default(1) | int == 0) }}
+
+- name: Record exact Git and source identities used by this server invocation
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/server.yml"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/rke2_probe.py"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py"
+      - "{{ vm_repo }}/platform/ansible/roles/rke2_server/tasks/main.yml"
+      - "{{ vm_repo }}/platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2"
+      - "{{ vm_repo }}/scripts/mgmt_airgap.py"
+  register: vm_server_source_hashes
+  changed_when: false
+
+- name: Resolve the exact repository commit used by this server invocation
+  ansible.builtin.command:
+    argv: [git, -C, "{{ vm_repo }}", rev-parse, HEAD]
+  register: vm_server_git_sha
+  changed_when: false
+
+- name: Preserve bounded server source evidence
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server-source.json"
+    mode: '0600'
+    content: >-
+      {{ {'git_sha': vm_server_git_sha.stdout | trim,
+          'source_sha256': vm_server_source_hashes.stdout_lines} | to_nice_json }}
 
 - name: Generate an invocation-local RKE2 token when absent
   ansible.builtin.command:
@@ -106,7 +181,8 @@
             '406': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[406].cidr | to_json }}
           mgmt_internal_dns: {{ vm_dns_fixture | to_json }}
           mgmt_internal_ntp: {{ vm_ntp_fixture | to_json }}
-          mgmt_offline_artifacts_verified: true
+          rke2_install_required: {{ vm_server_install_required | bool | to_json }}
+          mgmt_offline_artifacts_verified: {{ vm_server_bundle_verified | bool | to_json }}
           rke2_offline_binary: {{ ('/var/lib/ecommerce/bootstrap/' ~ mgmt_offline_manifest_sha256 ~ '/rke2.linux-amd64') | to_json }}
         tasks:
           - name: Render canonical complete private firewall zone
@@ -193,10 +269,12 @@
           - name: Invoke the actual RKE2 server role
             ansible.builtin.include_role:
               name: {{ (vm_repo ~ '/platform/ansible/roles/rke2_server') | to_json }}
+            when: rke2_install_required | bool
           - name: Release local controller transfer staging after verified installation
             ansible.builtin.file:
               path: {{ ('/var/lib/ecommerce/bootstrap/' ~ mgmt_offline_manifest_sha256) | to_json }}
               state: absent
+            when: rke2_install_required | bool
           - name: Release local image import archives after the first successful start
             ansible.builtin.file:
               path: /var/lib/rancher/rke2/agent/images/{{ "{{ item }}" }}
@@ -204,6 +282,7 @@
             loop:
               - rke2-images-core.linux-amd64.tar
               - rke2-images-cilium.linux-amd64.tar
+            when: rke2_install_required | bool
           - name: Wait for local node readiness
             ansible.builtin.command:
               argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig,

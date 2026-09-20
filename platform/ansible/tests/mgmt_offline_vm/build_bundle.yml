@@ -40,7 +40,8 @@
               '--rke2-version', bundle_version,
               '--output', bundle_output,
               '--cache', bundle_cache,
-              '--repository', bundle_repo]
+              '--repository', bundle_repo,
+              '--services-json', mgmt_local_vm_contract.services | to_json]
              + (['--source', bundle_source] if bundle_source is defined else [])
              + (['--offline'] if bundle_offline | bool else []) }}
       register: bundle_build

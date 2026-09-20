@@ -31,7 +31,9 @@ The builder downloads exact locked bytes, verifies every checksum, decompresses 
 two image archives, recreates the canonical manifest and requires its independently
 approved SHA256. It then validates image contents, RPM metadata and RPM signatures
 inside the digest-pinned Rocky preparer image. To prove a cached rebuild without any
-network access, supply an existing byte source and a fresh output directory:
+network access, supply an existing byte source containing the verified uncompressed
+image archives and a fresh output directory. Offline mode fails closed rather than
+starting the connected decompressor used during preparation:
 
 ```console
 PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/build_bundle.yml \
@@ -77,6 +79,7 @@ PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost,
 PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=create
 PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=test
 PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=server
+PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=server
 PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=destroy
 ```
 
@@ -93,19 +96,28 @@ RPM metadata and signatures before installing with every repository disabled.
 `server` activates the canonical nftables and firewalld templates, invokes the real
 `rke2_server` role, and requires `Node Ready`, Cilium ready, CoreDNS available, every
 deployed component to have an available replica, SELinux `Enforcing`, and denied
-public egress. The second Cilium operator replica may remain Pending because required
+public egress. Immediately before the first privileged installation it revalidates
+the complete staged bundle; its trust variable is derived only from that successful
+validation. A second `server` action follows the idempotent existing-server path and
+rechecks the cluster, the canonical output/forward `drop` policies, and all eight VM
+adapters without requiring deleted transfer bytes. The second Cilium operator replica
+may remain Pending because required
 anti-affinity cannot place two replicas on one node; this is recorded in the result.
 
 The official box has a 10 GiB disk. After the verified RPM transaction and first
 successful image import, the fixture removes only its disposable transfer copy and
 the already-imported tar archives so kubelet does not enter `DiskPressure`. The
-installed RPMs, RKE2 binary and containerd content remain. A later replay that needs
-the source bytes must run the artifact `test` action again.
+installed RPMs, RKE2 binary and containerd content remain. To reconstruct transfer
+bytes after cleanup, run `vm_action=restage`; it stops the local server, executes the
+same complete offline validation and staging role, and leaves restart to the next
+`server` action. A normal `test` action refuses an active server so a cold trial cannot
+be confused with recovery.
 
 Evidence is written under `.context/mgmt-offline-vm/<name>`: VM identity and adapter
-state, cold preflight, source hashes, role result, resource measurement, logs and
-`rke2-result.json`. Secrets and raw logs remain ignored. `destroy` checks the exact
-Vagrant UUID and machine name before removing only the owned VM and its generated key.
+state, cold preflight, source hashes, role result, resource measurement, logs,
+`server-source.json` and `rke2-result.json`. Secrets and raw logs remain ignored.
+`destroy` checks the exact Vagrant UUID and machine name before removing only the owned
+VM, then removes the generated SSH key, RKE2 token and rendered token-bearing inputs.
 
 ## Qualification boundary
 

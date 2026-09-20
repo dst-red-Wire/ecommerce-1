@@ -20,13 +20,13 @@
     vm_state: "{{ vm_repo }}/.context/mgmt-offline-vm/{{ vm_name }}"
     vm_python: "{{ ansible_playbook_python }}"
     vm_bridge: "{{ playbook_dir }}/transport.py"
-    vm_dns_fixture: ['10.243.1.2']
-    vm_ntp_fixture: ['10.243.1.3']
+    vm_dns_fixture: "{{ mgmt_local_vm_contract.services.dns }}"
+    vm_ntp_fixture: "{{ mgmt_local_vm_contract.services.ntp }}"
   tasks:
     - name: Validate explicit disposable resource inputs
       ansible.builtin.assert:
         that:
-          - vm_action in ['validate', 'create', 'resize', 'test', 'server', 'qualify', 'destroy']
+          - vm_action in ['validate', 'create', 'resize', 'test', 'restage', 'server', 'qualify', 'destroy']
           - vm_resume_owned_creation | bool in [true, false]
           - vm_name is match('^ecommerce-mgmt-test-[a-z0-9-]+$')
           - vm_vagrant_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
@@ -113,7 +113,7 @@
           when: vm_action == 'resize'
         - name: Execute actual repository artifact role
           ansible.builtin.include_tasks: test.yml
-          when: vm_action in ['test', 'qualify']
+          when: vm_action in ['test', 'restage', 'qualify']
         - name: Start and functionally verify canonical RKE2 server
           ansible.builtin.include_tasks: server.yml
           when: vm_action == 'server'
