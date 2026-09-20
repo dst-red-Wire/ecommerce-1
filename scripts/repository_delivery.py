@@ -63,10 +63,14 @@ def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     saved_seconds = round(sum(float(r.get("source_duration_seconds", 0.0) or 0.0) for r in reused_records), 3)
     equivalent_full = round(executed_seconds + saved_seconds, 3)
     savings_percent = round((saved_seconds / equivalent_full) * 100.0, 1) if equivalent_full else 0.0
+    content_cache_gates = [r for r in executed if int(r.get("content_cache_hits", 0) or 0) > 0]
+    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in content_cache_gates)
     return {
         "executed_gates": len(executed),
         "reused_gates": len(reused_records),
         "skipped_gates": len(skipped),
+        "content_cache_gates": len(content_cache_gates),
+        "content_cache_hits": content_cache_hits,
         "executed_seconds": executed_seconds,
         "estimated_saved_seconds": saved_seconds,
         "equivalent_full_seconds": equivalent_full,
