@@ -91,61 +91,40 @@ gates:
       - config/contracts/**/*
       - config/infrastructure/**/*
       - scripts/architecture_authority.py
-      - tests/test_architecture_authority.py
-  governance:cache-contract:
-    scope: internal
-    parallel_safe: true
-    cache_mode: content-pass
-    dependencies: []
-    tools: [python3, ruby]
-    validators:
-      - scripts/repoctl.py
-      - scripts/qualification_cache.py
-    inputs:
-      - architecture.lock.yaml
-      - config/contracts/cache-policy.yaml
-      - config/contracts/qualification-execution-policy.yaml
-      - scripts/qualification_cache.py
-      - tests/test_qualification_cache.py
-      - tests/test_qualification_execution_policy.py
-  governance:ruby-validators:
+  "governance:validator:*":
     scope: internal
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
     tools: [ruby]
     validators:
+      - <target>
       - scripts/repoctl.py
       - scripts/qualification_cache.py
-      - scripts/validate-architecture.rb
-      - scripts/validate-architecture-boundaries.rb
-      - scripts/validate-service-policy-chain.rb
-      - scripts/validate-service-mesh-policy.rb
-      - scripts/validate-contract-consistency.rb
-      - scripts/validate-observability.rb
     inputs:
+      - <target>
       - architecture.lock.yaml
       - config/contracts/**/*
       - config/infrastructure/**/*
       - contracts/**/*
-      - scripts/validate-*.rb
-  governance:ruby-tests:
+  "governance:test:*":
     scope: internal
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
-    tools: [ruby]
+    tools: [python3, ruby, git]
     validators:
+      - <target>
       - scripts/repoctl.py
       - scripts/qualification_cache.py
     inputs:
+      - <target>
       - architecture.lock.yaml
       - config/contracts/**/*
-      - tests/architecture_validator_test.rb
-      - tests/observability_topology_test.rb
-      - tests/ci_authority_test.rb
-      - tests/ci_affected_test.rb
-      - scripts/validate-*.rb
+      - config/infrastructure/**/*
+      - contracts/**/*
+      - scripts/**/*.py
+      - scripts/**/*.rb
   governance:documentation:
     scope: internal
     parallel_safe: true
