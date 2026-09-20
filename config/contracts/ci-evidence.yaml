@@ -41,6 +41,13 @@ gate_records:
 performance_campaign:
   authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
   repetitions: 3
+  bind_fields:
+    - head_sha
+    - head_tree_sha
+    - qualification_identity
+    - budgets
+    - final_product_exact
+    - final_verify_exact
   output: .context/performance/campaign-<sha>.json
   required_before_merge: true
   budget_failure_blocks_readiness: true
