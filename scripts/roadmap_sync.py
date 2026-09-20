@@ -73,8 +73,11 @@ def policy() -> dict[str, Any]:
         seen.add(milestone_id)
         if "fixed_status" not in item:
             tracker = item.get("tracker")
+            heading = item.get("section_heading")
             if type(tracker) is not int or tracker <= 0:
                 raise RuntimeError(f"roadmap milestone {item.get('id')} requires a positive tracker issue number")
+            if not isinstance(heading, str) or not heading.startswith("### "):
+                raise RuntimeError(f"roadmap milestone {item.get('id')} requires a section_heading")
     return value
 
 
@@ -201,19 +204,19 @@ def render_table(roadmap_policy: dict[str, Any], statuses: dict[str, str]) -> st
 def replace_tracker_line(document: str, heading: str, tracker: int) -> str:
     start = document.find(heading)
     if start < 0:
-        return document
+        raise RuntimeError(f"roadmap document missing milestone section {heading!r}")
     next_h3 = document.find("\n### ", start + len(heading))
     next_h2 = document.find("\n## ", start + len(heading))
     ends = [value for value in (next_h3, next_h2) if value >= 0]
     end = min(ends) if ends else len(document)
     section = document[start:end]
     pattern = r"Canonical tracker: GitHub issue `#\d+`\."
-    if re.search(pattern, section):
-        tick = chr(96)
-        replacement = f"Canonical tracker: GitHub issue {tick}#{tracker}{tick}."
-        section = re.sub(pattern, replacement, section, count=1)
-        return document[:start] + section + document[end:]
-    return document
+    if not re.search(pattern, section):
+        raise RuntimeError(f"roadmap section {heading!r} is missing its canonical tracker projection")
+    tick = chr(96)
+    replacement = f"Canonical tracker: GitHub issue {tick}#{tracker}{tick}."
+    section = re.sub(pattern, replacement, section, count=1)
+    return document[:start] + section + document[end:]
 
 
 def render_document(
