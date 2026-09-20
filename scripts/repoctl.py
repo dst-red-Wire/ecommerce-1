@@ -319,6 +319,10 @@ def _gate_cache_key(name: str, options: dict) -> tuple[str, str]:
     return key, input_digest
 
 
+def _emit_cache_meta(payload: dict) -> None:
+    print("QUALIFICATION_CACHE_META " + json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
 def _run_cached_gate(name: str, options: dict, producer) -> int:
     policy = _resolved_gate_policy(name)
     if policy.get("cache_mode") != "content-pass":
@@ -328,11 +332,29 @@ def _run_cached_gate(name: str, options: dict, producer) -> int:
     cached = qualification_cache.load_success(namespace, key)
     if cached is not None:
         saved = float(cached.get("duration_seconds", 0.0) or 0.0)
+        _emit_cache_meta(
+            {
+                "gate": name,
+                "status": "hit",
+                "cache_key": key,
+                "input_digest": input_digest,
+                "source_duration_seconds": saved,
+            }
+        )
         print(f"PASS {name} qualification cache hit inputs={input_digest[:12]} saved~{saved:.3f}s")
         return 0
     started = time.monotonic()
     result = producer()
     duration = round(time.monotonic() - started, 3)
+    _emit_cache_meta(
+        {
+            "gate": name,
+            "status": "miss",
+            "cache_key": key,
+            "input_digest": input_digest,
+            "source_duration_seconds": duration,
+        }
+    )
     if result == 0:
         qualification_cache.store_success(
             namespace,
@@ -2446,12 +2468,36 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
+    effective_env = dict(env or os.environ)
     start = time.monotonic()
+    try:
+        anchor = float(effective_env.get("ECOMMERCE_QUALIFICATION_MONOTONIC_START", start))
+    except ValueError:
+        anchor = start
     with log_path.open("w", encoding="utf-8") as log:
-        p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
+        p = subprocess.run(command, cwd=ROOT, env=effective_env, text=True, stdout=log, stderr=subprocess.STDOUT)
     duration = round(time.monotonic() - start, 3)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
-    content_cache_hits = log_text.count("qualification cache hit")
+
+    cache_entries: list[dict] = []
+    for line in log_text.splitlines():
+        if not line.startswith("QUALIFICATION_CACHE_META "):
+            continue
+        try:
+            payload = json.loads(line.split(" ", 1)[1])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            cache_entries.append(payload)
+
+    policy = _resolved_gate_policy(name)
+    hits = sum(1 for item in cache_entries if item.get("status") == "hit")
+    misses = sum(1 for item in cache_entries if item.get("status") == "miss")
+    execution = "fresh"
+    direct = next((item for item in cache_entries if item.get("gate") == name), None)
+    if direct and direct.get("status") == "hit":
+        execution = "content-cache"
+
     record = {
         "gate": name,
         "status": "PASS" if p.returncode == 0 else "FAIL",
@@ -2459,12 +2505,20 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "duration_seconds": duration,
         "command": command,
         "log": str(log_path.relative_to(ROOT)),
-        "execution": "fresh",
-        "parallel_safe": _gate_parallel_safe(name),
+        "execution": execution,
+        "cache_mode": policy.get("cache_mode"),
+        "parallel_safe": bool(policy.get("parallel_safe")),
+        "parallel_group": effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial"),
+        "started_at_monotonic_offset": round(max(0.0, start - anchor), 6),
     }
-    if content_cache_hits:
-        record["content_cache_hits"] = content_cache_hits
-    effective_env = env or os.environ
+    if cache_entries:
+        record["cache_entries"] = cache_entries
+        record["content_cache_hits"] = hits
+        record["content_cache_misses"] = misses
+    if direct:
+        record["cache_key"] = direct.get("cache_key")
+        record["input_digest"] = direct.get("input_digest")
+        record["source_duration_seconds"] = float(direct.get("source_duration_seconds", duration) or 0.0)
     if effective_env.get("ECOMMERCE_EXECUTION_SCOPE", "").strip().lower() == "ci":
         raw_workers = effective_env.get("ECOMMERCE_QUALIFICATION_MAX_WORKERS", "").strip()
         if raw_workers:
@@ -2497,15 +2551,26 @@ def _run_gate_batch(
     if not items:
         return True
 
+    group_counter = 0
+
+    def grouped_env(label: str) -> dict[str, str]:
+        value = dict(env or os.environ)
+        value["ECOMMERCE_PARALLEL_GROUP"] = value.get("ECOMMERCE_PARALLEL_GROUP", label)
+        value.setdefault("ECOMMERCE_QUALIFICATION_MONOTONIC_START", str(time.monotonic()))
+        return value
+
     def flush(batch: list[tuple[str, list[str]]]) -> bool:
+        nonlocal group_counter
         if not batch:
             return True
+        group_counter += 1
+        batch_env = grouped_env(f"local-parallel-{group_counter}")
         workers = min(_execution_workers(), len(batch))
         if workers <= 1:
-            return all(_run_gate(name, command, records, env) for name, command in batch)
+            return all(_run_gate(name, command, records, batch_env) for name, command in batch)
         results: dict[str, tuple[bool, dict]] = {}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gate") as executor:
-            futures = {name: executor.submit(_execute_gate, name, command, env) for name, command in batch}
+            futures = {name: executor.submit(_execute_gate, name, command, batch_env) for name, command in batch}
             for name, _command in batch:
                 results[name] = futures[name].result()
         ok_all = True
@@ -2524,7 +2589,8 @@ def _run_gate_batch(
         if not flush(pending):
             return False
         pending = []
-        if not _run_gate(name, command, records, env):
+        group_counter += 1
+        if not _run_gate(name, command, records, grouped_env(f"local-serial-{group_counter}")):
             return False
     return flush(pending)
 
@@ -2582,6 +2648,13 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "reused_from_sha": parent_sha,
             "original_execution_sha": original_execution_sha,
             "source_duration_seconds": source_duration,
+            "execution": "parent-evidence",
+            "cache_mode": _resolved_gate_policy(name).get("cache_mode"),
+            "parallel_safe": bool(_resolved_gate_policy(name).get("parallel_safe")),
+            "parallel_group": "parent-evidence",
+            "started_at_monotonic_offset": 0.0,
+            "cache_key": source.get("cache_key"),
+            "input_digest": source.get("input_digest"),
             "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
         }
     )
