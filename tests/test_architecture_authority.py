@@ -463,6 +463,7 @@ graph LR
                     "      marker: chatgpt-exact-sha-review:v1",
                     "      marker: external-ai-review:v1",
                 ),
+                ("      comment_author: repository-owner", "      comment_author: any-commenter"),
             )
             for before, after in mutations:
                 with self.subTest(mutation=f"{before} -> {after}"):
