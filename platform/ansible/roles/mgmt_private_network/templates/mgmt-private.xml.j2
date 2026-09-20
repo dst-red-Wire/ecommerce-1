@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ansible owns this complete dedicated zone. Removed grants must not survive. -->
+<zone target="DROP">
+{% for cidr in mgmt_firewall_cidrs.values() | sort %}
+  <source address="{{ cidr | e }}"/>
+{% endfor %}
+  <rule family="ipv4">
+    <source address="{{ mgmt_firewall_cidrs['401'] | e }}"/>
+    <service name="ssh"/>
+    <accept/>
+  </rule>
+{% for port, protocol in [('10250', 'tcp'), ('8472', 'udp')] %}
+  <rule family="ipv4">
+    <source address="{{ mgmt_firewall_cidrs['402'] | e }}"/>
+    <port port="{{ port }}" protocol="{{ protocol }}"/>
+    <accept/>
+  </rule>
+{% endfor %}
+{% if mgmt_firewall_role == 'control-plane' %}
+{% for port in ['6443', '9345', '2379-2381'] %}
+  <rule family="ipv4">
+    <source address="{{ mgmt_firewall_cidrs['402'] | e }}"/>
+    <port port="{{ port }}" protocol="tcp"/>
+    <accept/>
+  </rule>
+{% endfor %}
+  <rule family="ipv4">
+    <source address="{{ hostvars[groups['access_gateways'][0]]['mgmt_ip'] | e }}/32"/>
+    <port port="6443" protocol="tcp"/>
+    <accept/>
+  </rule>
+{% else %}
+{% for segment in ['403', '405'] %}
+  <rule family="ipv4">
+    <source address="{{ mgmt_firewall_cidrs[segment] | e }}"/>
+    <accept/>
+  </rule>
+{% endfor %}
+{% endif %}
+</zone>

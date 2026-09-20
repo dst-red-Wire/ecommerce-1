@@ -38,6 +38,7 @@ class AnsibleParallelPolicyTests(unittest.TestCase):
 
         self.assertEqual(
             {
+                "mgmt_offline_artifacts": 10,
                 "rocky_baseline": 10,
                 "mgmt_private_network": 10,
                 "rke2_agent": 5,

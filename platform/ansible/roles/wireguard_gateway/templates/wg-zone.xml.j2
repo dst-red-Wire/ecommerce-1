@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<zone target="DROP">
+  <interface name="wg0"/>
+{% for peer in wireguard_validated_material.peers %}
+  <rule family="ipv4">
+    <source address="{{ peer.allowed_ip }}"/>
+    <destination address="{{ wireguard_snat_to_source }}/32"/>
+    <port port="22" protocol="tcp"/>
+    <log prefix="WGMG-HOST " level="info"><limit value="1/s"/></log>
+    <accept/>
+  </rule>
+{% endfor %}
+</zone>

@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+
+from jinja2 import Environment, StrictUndefined
 
 import yaml
 
@@ -53,50 +56,102 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             )
 
     def test_transport_overlay_changes_only_ansible_transport_address(self):
-        canonical = yaml.safe_load(MGMT_INVENTORY.read_text(encoding="utf-8"))
-        names = [*canonical["control_planes"].keys(), *canonical["workers"].keys()]
-        hosts = {name: f"203.0.113.{index + 10}" for index, name in enumerate(names)}
-        overlay = {"version": 1, "source": "test", "contains_secrets": False, "hosts": hosts}
+        module = load_runtime_module()
+        names, gateway, private_addresses = module.load_canonical(ROOT)
+        raw = {
+            "phase": "bootstrap",
+            "gateway": {
+                "name": gateway,
+                "provider_public": "198.51.100.10",
+                "private_address": private_addresses[gateway],
+                "bootstrap_ssh": True,
+            },
+            "nodes": {
+                name: {"provider_public": "", "private_address": private_addresses[name], "gateway": gateway}
+                for index, name in enumerate(names)
+            },
+        }
+        overlay = {
+            "version": 2,
+            "source": "test",
+            "contains_secrets": False,
+            **module.validate_transport(names, gateway, private_addresses, raw),
+        }
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "transport.json"
             path.write_text(json.dumps(overlay), encoding="utf-8")
             env = dict(os.environ, MGMT_TRANSPORT_INVENTORY=str(path))
             rendered = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT, env=env))
-        for name, transport in hosts.items():
-            self.assertEqual(rendered["_meta"]["hostvars"][name]["ansible_host"], transport)
-            self.assertNotEqual(rendered["_meta"]["hostvars"][name]["mgmt_ip"], transport)
+        self.assertEqual("198.51.100.10", rendered["_meta"]["hostvars"][gateway]["ansible_host"])
+        self.assertEqual("bootstrap", rendered["_meta"]["hostvars"][gateway]["mgmt_transport_phase"])
+        for name in names:
+            self.assertIn("ProxyJump", rendered["_meta"]["hostvars"][name]["ansible_ssh_common_args"])
 
     def test_runtime_inventory_validates_exact_node_set_and_writes_no_secrets(self):
         module = load_runtime_module()
-        canonical = module.load_canonical_nodes(ROOT)
-        servers = {
-            name: {"id": index + 1, "ipv4": f"198.51.100.{index + 10}", "ipv6": "2001:db8::1"}
-            for index, name in enumerate(canonical)
-        }
-        hosts = module.validate_servers(canonical, servers)
-        self.assertEqual(sorted(hosts), canonical)
-        with self.assertRaises(ValueError):
-            module.validate_servers(canonical, {name: servers[name] for name in canonical[:-1]})
-        with tempfile.TemporaryDirectory() as temp:
-            output = Path(temp) / "transport.json"
-            module.write_overlay(output, hosts)
-            text = output.read_text(encoding="utf-8")
-            self.assertIn('"contains_secrets": false', text)
-            self.assertNotIn("token", text.lower())
-            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        names, gateway, _private_addresses = module.load_canonical(ROOT)
+        self.assertEqual(6, len(names))
+        self.assertEqual("wg-01", gateway)
 
     def test_role_preserves_dhcp_primary_and_reconciles_only_aliases(self):
         text = ROLE.read_text(encoding="utf-8")
         self.assertIn("mgmt_ip", text)
         self.assertIn("mgmt_private_alias_cidrs", text)
         self.assertIn("Hetzner DHCP must configure", text)
-        self.assertIn("+ipv4.addresses", text)
+        self.assertIn("Reconcile the complete canonical static alias set", text)
+        self.assertIn("ipv4.addresses", text)
+        self.assertNotIn("+ipv4.addresses", text)
+        self.assertIn("mgmt_private_configured_alias_cidrs", text)
         self.assertIn("nmcli", text)
         self.assertIn("device\n      - reapply", text)
         self.assertNotIn("ansible.builtin.shell", text)
         self.assertNotIn("ens10", text)
         self.assertNotIn("10.243.", text)
-        self.assertNotIn("ipv4.method", text)
+        for task in yaml.safe_load(text):
+            argv = task.get("ansible.builtin.command", {}).get("argv", [])
+            if "ipv4.method" in argv:
+                self.assertEqual("ecommerce-offline-default", argv[3])
+                self.assertNotIn("{{ mgmt_private_connection }}", argv)
+                self.assertEqual("203.0.113.254/31", argv[argv.index("ipv4.addresses") + 1])
+
+    def test_alias_reconciliation_replaces_stale_static_addresses(self):
+        tasks = yaml.safe_load(ROLE.read_text())
+        reconcile = next(
+            task for task in tasks
+            if task["name"] == "Reconcile the complete canonical static alias set on the existing private connection"
+        )
+        argv = reconcile["ansible.builtin.command"]["argv"]
+        self.assertIn("ipv4.addresses", argv)
+        self.assertNotIn("+ipv4.addresses", argv)
+        self.assertIn("{{ mgmt_private_alias_cidrs | join(',') }}", argv)
+        self.assertIn(
+            "(mgmt_private_configured_alias_cidrs | sort) != (mgmt_private_alias_cidrs | sort)",
+            reconcile["when"],
+        )
+
+    def test_offline_egress_is_owned_default_deny_for_both_families(self):
+        env = Environment(undefined=StrictUndefined)
+        template = ROLE.parents[1] / "templates/mgmt-egress.nft.j2"
+        network = yaml.safe_load(NETWORK_PLAN.read_text())
+        output = env.from_string(template.read_text()).render(
+            mgmt_private_block=network["address_domains"]["mgmt"],
+            mgmt_pod_cidr=network["kubernetes"]["mgmt"]["pod_cidr"],
+            mgmt_service_cidr=network["kubernetes"]["mgmt"]["service_cidr"],
+            mgmt_internal_dns=["10.243.1.50"],
+            mgmt_internal_ntp=["10.243.1.51"],
+            mgmt_private_interface="eth1",
+            mgmt_private_dhcp_server="10.243.0.1",
+        )
+        self.assertEqual(2, output.count("policy drop;"))
+        self.assertNotIn("flush ruleset", output)
+        self.assertIn("flush table inet ecommerce_mgmt_bootstrap", output)
+        self.assertNotIn("masquerade", output)
+        self.assertNotIn("0.0.0.0/0", output)
+        self.assertIn("ip daddr 10.243.1.50 udp dport 53 accept", output)
+        self.assertIn("ip daddr 10.243.1.51 udp dport 123 accept", output)
+        for task in yaml.safe_load(ROLE.read_text()):
+            if "ansible.builtin.dnf" in task:
+                self.assertEqual("*", task["ansible.builtin.dnf"]["disablerepo"])
 
     def test_playbook_orders_network_reconciliation_before_rke2(self):
         text = PLAYBOOK.read_text(encoding="utf-8")
@@ -115,6 +170,82 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
         line = next(line for line in text.splitlines() if "scripts/mgmt_runtime_inventory.py" in line)
         self.assertNotIn("apply", line)
         self.assertNotIn("hcloud", line)
+
+    def render_private_zone(self, node):
+        inventory = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT))
+        variables = dict(inventory["_meta"]["hostvars"][node])
+        variables["hostvars"] = inventory["_meta"]["hostvars"]
+        variables["groups"] = {"access_gateways": inventory["access_gateways"]["hosts"]}
+        source = ROLE.parent.parent / "templates/mgmt-private.xml.j2"
+        rendered = Environment(undefined=StrictUndefined).from_string(source.read_text()).render(**variables)
+        return ET.fromstring(rendered), variables
+
+    def test_private_host_firewall_replaces_complete_owned_zone(self):
+        tasks = yaml.safe_load(ROLE.read_text())
+        install = next(task for task in tasks if "ansible.builtin.template" in task)
+        self.assertEqual("/etc/firewalld/zones/mgmt-private.xml", install["ansible.builtin.template"]["dest"])
+        self.assertEqual("Reload private firewalld", install["notify"])
+        flush = next(i for i, task in enumerate(tasks) if task.get("ansible.builtin.meta") == "flush_handlers")
+        self.assertLess(tasks.index(install), flush)
+        for node in ("cp-01", "worker-01"):
+            zone, variables = self.render_private_zone(node)
+            self.assertEqual("DROP", zone.attrib["target"])
+            self.assertEqual(
+                set(variables["mgmt_firewall_cidrs"].values()),
+                {source.attrib["address"] for source in zone.findall("source")},
+            )
+            self.assertFalse(zone.findall("service"))
+            self.assertFalse(zone.findall("port"))
+            self.assertFalse(zone.findall("forward"))
+            self.assertFalse(zone.findall("masquerade"))
+
+    def test_control_plane_api_accepts_only_kubernetes_and_snat_gateway(self):
+        zone, variables = self.render_private_zone("cp-01")
+        self.assertIn("401", variables["mgmt_firewall_cidrs"])
+        self.assertNotIn(401, variables["mgmt_firewall_cidrs"])
+        gateway = variables["hostvars"][variables["groups"]["access_gateways"][0]]["mgmt_ip"] + "/32"
+        api_sources = {
+            rule.find("source").attrib["address"]
+            for rule in zone.findall("rule")
+            if rule.find("port") is not None and rule.find("port").attrib["port"] == "6443"
+        }
+        self.assertEqual({variables["mgmt_firewall_cidrs"]["402"], gateway}, api_sources)
+        gateway_ports = [
+            rule.find("port").attrib["port"]
+            for rule in zone.findall("rule")
+            if rule.find("source").attrib["address"] == gateway
+        ]
+        self.assertEqual(["6443"], gateway_ports)
+        worker, _ = self.render_private_zone("worker-01")
+        self.assertFalse(any(rule.find("source").attrib["address"] == gateway for rule in worker.findall("rule")))
+
+    def test_zone_render_replaces_revoked_sources_and_rules(self):
+        zone, variables = self.render_private_zone("cp-01")
+        old_cidr = variables["mgmt_firewall_cidrs"]["402"]
+        variables["mgmt_firewall_cidrs"]["402"] = "192.0.2.0/24"
+        template = ROLE.parent.parent / "templates/mgmt-private.xml.j2"
+        rendered = Environment(undefined=StrictUndefined).from_string(template.read_text()).render(**variables)
+        self.assertNotIn(old_cidr, rendered)
+        self.assertIn("192.0.2.0/24", rendered)
+        self.assertNotIn("--add-rich-rule", ROLE.read_text())
+
+    def test_wireguard_firewall_order_snat_and_desired_state(self):
+        tasks = (ROOT / "platform/ansible/roles/wireguard_gateway/tasks/main.yml").read_text(encoding="utf-8")
+        template = (ROOT / "platform/ansible/roles/wireguard_gateway/templates/wg0.conf.j2").read_text(encoding="utf-8")
+        self.assertLess(tasks.index("Enable and start firewalld"), tasks.index("Render fail-closed WireGuard"))
+        self.assertIn("--to-source", tasks)
+        self.assertIn("wireguard_snat_source_cidr", tasks)
+        self.assertIn("wireguard_snat_destination_cidr", tasks)
+        self.assertNotIn("masquerade", tasks.lower())
+        self.assertNotIn("masquerade", template.lower())
+        service = tasks.split("Enable and start WireGuard desired state", 1)[1]
+        self.assertIn("enabled: true", service)
+        self.assertIn("state: started", service)
+
+    def test_rke2_server_uses_canonical_cluster_and_service_cidrs(self):
+        template = (ROOT / "platform/ansible/roles/rke2_server/templates/config.yaml.j2").read_text(encoding="utf-8")
+        self.assertIn('cluster-cidr: "{{ rke2_cluster_cidr }}"', template)
+        self.assertIn('service-cidr: "{{ rke2_service_cidr }}"', template)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import ipaddress
+import re
 from pathlib import Path
 import unittest
 
@@ -79,6 +80,57 @@ class TerraformNetworkChecksTest(unittest.TestCase):
         for node in inventory["workers"].values():
             aliases = [node["k8s_ip"], node["storage_ip"], node["backup_ip"]]
             self.assertEqual(3, len(set(aliases)))
+
+    def test_bootstrap_ssh_is_temporary_restricted_and_gateway_only(self):
+        module = MODULE_MAIN.read_text(encoding="utf-8")
+        variables = ENV_VARIABLES.read_text(encoding="utf-8")
+        self.assertIn("default     = false", variables)
+        self.assertIn("bootstrap_ssh_allowed_cidrs", module)
+        self.assertIn("bootstrap_ssh_human_gate_confirmed", module)
+        self.assertIn('dynamic "rule"', module)
+        self.assertIn("TEMPORARY human-gated wg-01 bootstrap SSH", module)
+        node_resource = module.split('resource "hcloud_server" "node"', 1)[1].split(
+            'resource "hcloud_server" "access_gateway"', 1
+        )[0]
+        self.assertNotIn('port        = "22"', node_resource)
+        self.assertIn('try(tonumber(split("/", cidr)[1]) > 0, false)', variables)
+
+    def test_existing_public_ssh_key_ids_reach_both_host_classes(self):
+        module = MODULE_MAIN.read_text()
+        self.assertIn("ssh_key_ids  = var.hcloud_ssh_key_ids", ENV_MAIN.read_text())
+        self.assertEqual(2, module.count("ssh_keys    = var.ssh_key_ids"))
+        for text, variable in ((ENV_VARIABLES.read_text(), "hcloud_ssh_key_ids"), (module, "ssh_key_ids")):
+            self.assertIn(f"length(var.{variable}) > 0", text)
+            self.assertIn("key_id > 0 && floor(key_id) == key_id", text)
+        self.assertNotIn('resource "tls_private_key"', module)
+
+    def test_provider_internal_firewall_matches_rke2_and_cilium_ports(self):
+        module = MODULE_MAIN.read_text()
+        internal = module.split('resource "hcloud_firewall" "internal_nodes"', 1)[1].split(
+            "# Segment 401", 1
+        )[0]
+        self.assertNotIn('port        = "6443-9345"', internal)
+        for protocol, port in (
+            ("tcp", "2379-2381"),
+            ("tcp", "6443"),
+            ("tcp", "9345"),
+            ("tcp", "10250"),
+            ("udp", "8472"),
+        ):
+            pattern = rf'protocol\s*=\s*"{re.escape(protocol)}".*?port\s*=\s*"{re.escape(port)}"'
+            self.assertRegex(internal, re.compile(pattern, re.DOTALL))
+
+    def test_provider_api_rule_uses_gateway_host_route(self):
+        module = MODULE_MAIN.read_text()
+        self.assertIn('source_ips  = [for gateway in values(var.access_gateways) : "${gateway.mgmt_ip}/32"]', module)
+        self.assertIn('port        = "6443"', module)
+
+    def test_runtime_transport_keeps_private_nodes_and_gateway_explicit(self):
+        module = MODULE_MAIN.read_text(encoding="utf-8")
+        self.assertIn('output "runtime_transport"', module)
+        self.assertIn("private_address = attachment.ip", module)
+        self.assertIn("provider_public = hcloud_server.node[name].ipv4_address", module)
+        self.assertIn('gateway         = "wg-01"', module)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,10 @@ locals {
     file("${local.repository_root}/config/infrastructure/network-plan.yaml")
   )
 
+  access_inventory = yamldecode(
+    file("${local.repository_root}/config/infrastructure/mgmt-access-gateways.yaml")
+  )
+
   control_planes = local.mgmt_inventory.control_planes
   workers        = local.mgmt_inventory.workers
 
@@ -28,6 +32,9 @@ locals {
   mgmt_private_block = local.mgmt_inventory.private_block
   mgmt_segments      = local.network_plan.vlans.mgmt
   mgmt_static_ips    = local.network_plan.static_allocations.mgmt
+  access_gateways    = local.access_inventory.access_gateways
+  access_profiles    = local.access_inventory.vm_profiles
+  wireguard          = local.network_plan.wireguard.mgmt
 
   # Terraform has no built-in IPv4 containment predicate. Convert addresses to
   # integers so checks can compare each inventory address to its CIDR bounds.

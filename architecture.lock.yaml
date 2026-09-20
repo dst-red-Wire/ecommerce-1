@@ -356,6 +356,7 @@ topology_contracts:
   prod: docs/architecture/PROD_TOPOLOGY_V2.md
   network_ipam: docs/architecture/NETWORK_IPAM_CONTRACT.md
   mgmt_wireguard_access: docs/architecture/MGMT_WIREGUARD_ACCESS.md
+  mgmt_bootstrap: docs/architecture/MGMT_BOOTSTRAP_V1.md
   storage: docs/architecture/STORAGE_TOPOLOGY_V2.md
   service_ownership: docs/architecture/SERVICE_OWNERSHIP_MATRIX.md
   data_ownership: docs/architecture/DATA_OWNERSHIP_MATRIX.md
@@ -387,6 +388,7 @@ machine_contracts:
   mesh_observability_policy: config/contracts/mesh-observability-policy.yaml
   mesh_policy_authority: config/contracts/mesh-policy-authority.yaml
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
+  mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml

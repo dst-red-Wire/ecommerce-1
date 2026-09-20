@@ -1,0 +1,14 @@
+---
+wireguard_secret_mode: ""
+wireguard_bootstrap_human_gate: false
+wireguard_openbao_transition_human_gate: false
+wireguard_bootstrap_peers_json: ""
+wireguard_openbao_addr: ""
+wireguard_openbao_token: ""
+wireguard_openbao_gateway_path: mgmt/wireguard/wg-01
+wireguard_openbao_peers_path: mgmt/wireguard/peers
+wireguard_config_file: /etc/wireguard/wg0.conf
+wireguard_bootstrap_key_file: /etc/wireguard/bootstrap-private.key
+wireguard_bootstrap_peer_staging_file: /etc/wireguard/bootstrap-peers.json
+wireguard_authority_marker: /etc/wireguard/.openbao-authority-active
+wireguard_break_glass_authorized: false

@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Build a non-secret Ansible transport overlay from Terraform MGMT state.
-
-This command is read-only with respect to Terraform and provider state. By default it
-reads the canonical root `terraform output -json servers`. For recovery of an older local
-state created before the root output existed, `--terraform-state` reads that state through
-`terraform show -json` and extracts only the canonical hcloud_server transport addresses.
-It never refreshes, plans, applies, imports, moves, removes, or rewrites Terraform state.
-"""
+"""Build the non-secret MGMT Ansible transport overlay from Terraform output."""
 
 from __future__ import annotations
 
@@ -21,164 +14,114 @@ from typing import Any
 
 import yaml
 
-MGMT_MODULE_ADDRESS = "module.hcloud_mgmt"
-MGMT_SERVER_TYPE = "hcloud_server"
-MGMT_SERVER_NAME = "node"
-MGMT_PROJECT_LABEL = "ecommerce-1"
-MGMT_SITE_LABEL = "mgmt"
+
+def load_canonical(root: Path) -> tuple[list[str], str, dict[str, str]]:
+    inventory = yaml.safe_load((root / "config/infrastructure/mgmt-inventory.yaml").read_text())
+    access = yaml.safe_load((root / "config/infrastructure/mgmt-access-gateways.yaml").read_text())
+    node_records = {**inventory["control_planes"], **inventory["workers"]}
+    nodes = sorted(node_records)
+    gateways = list(access["access_gateways"])
+    if len(nodes) != 6 or gateways != ["wg-01"]:
+        raise ValueError("canonical MGMT transport requires six RKE2 nodes and wg-01")
+    gateway = gateways[0]
+    private_addresses = {name: str(node_records[name]["mgmt_ip"]) for name in nodes}
+    private_addresses[gateway] = str(access["access_gateways"][gateway]["mgmt_ip"])
+    return nodes, gateway, private_addresses
 
 
-def load_canonical_nodes(root: Path) -> list[str]:
-    doc = yaml.safe_load((root / "config/infrastructure/mgmt-inventory.yaml").read_text(encoding="utf-8"))
-    nodes = [*doc["control_planes"].keys(), *doc["workers"].keys()]
-    if len(nodes) != len(set(nodes)):
-        raise ValueError("canonical MGMT inventory contains duplicate node names")
-    return sorted(nodes)
-
-
-def validate_servers(canonical_nodes: list[str], servers: Any) -> dict[str, str]:
-    if not isinstance(servers, dict):
-        raise ValueError("Terraform servers output must be a mapping")
-    if sorted(servers.keys()) != canonical_nodes:
-        raise ValueError(
-            f"Terraform servers output node set mismatch: expected {canonical_nodes}, got {sorted(servers.keys())}"
-        )
-
-    hosts: dict[str, str] = {}
-    for name in canonical_nodes:
-        value = servers[name]
-        if not isinstance(value, dict):
-            raise ValueError(f"Terraform servers output for {name} must be a mapping")
-        raw = value.get("ipv4")
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError(f"Terraform servers output for {name} requires non-empty ipv4")
-        address = ipaddress.ip_address(raw.strip())
-        if address.version != 4 or address.is_loopback or address.is_unspecified or address.is_multicast:
-            raise ValueError(f"Terraform servers output for {name} has invalid transport IPv4 {raw!r}")
-        hosts[name] = str(address)
-    return hosts
-
-
-def terraform_servers(terraform_dir: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        ["terraform", f"-chdir={terraform_dir}", "output", "-json", "servers"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if proc.returncode:
-        detail = " ".join((proc.stderr or proc.stdout).strip().split())
-        raise RuntimeError(f"terraform output servers failed: {detail}")
-    try:
-        value = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"terraform output servers returned invalid JSON: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError("terraform output servers must decode to a mapping")
-    return value
-
-
-def extract_servers_from_show(show_doc: Any) -> dict[str, Any]:
-    if not isinstance(show_doc, dict):
-        raise ValueError("terraform show JSON must be a mapping")
-    values = show_doc.get("values")
-    if not isinstance(values, dict):
-        raise ValueError("terraform show JSON requires values mapping")
-    root_module = values.get("root_module")
-    if not isinstance(root_module, dict):
-        raise ValueError("terraform show JSON requires values.root_module mapping")
-    children = root_module.get("child_modules")
-    if not isinstance(children, list):
-        raise ValueError("terraform show JSON requires root child_modules")
-
-    modules = [item for item in children if isinstance(item, dict) and item.get("address") == MGMT_MODULE_ADDRESS]
-    if len(modules) != 1:
-        raise ValueError(f"terraform show JSON requires exactly one {MGMT_MODULE_ADDRESS}, got {len(modules)}")
-    resources = modules[0].get("resources")
-    if not isinstance(resources, list):
-        raise ValueError(f"{MGMT_MODULE_ADDRESS} requires resources list")
-
-    servers: dict[str, Any] = {}
-    for item in resources:
-        if not isinstance(item, dict):
-            continue
+def _ipv4(value: Any, label: str, *, public: bool = False) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} requires a non-empty IPv4 address")
+    address = ipaddress.ip_address(value.strip())
+    if address.version != 4 or address.is_unspecified or address.is_loopback or address.is_multicast:
+        raise ValueError(f"{label} has invalid IPv4 address")
+    if public and address.is_private:
+        # TEST-NET ranges are classified private by Python; accept only globally
+        # routable addresses in real output and explicit documentation ranges in tests.
         if (
-            item.get("mode") != "managed"
-            or item.get("type") != MGMT_SERVER_TYPE
-            or item.get("name") != MGMT_SERVER_NAME
+            not address in ipaddress.ip_network("192.0.2.0/24")
+            and not address in ipaddress.ip_network("198.51.100.0/24")
+            and not address in ipaddress.ip_network("203.0.113.0/24")
         ):
-            continue
-        index = item.get("index")
-        resource_values = item.get("values")
-        if not isinstance(index, str) or not index:
-            raise ValueError("MGMT hcloud_server resource requires non-empty string index")
-        if not isinstance(resource_values, dict):
-            raise ValueError(f"MGMT hcloud_server {index} requires values mapping")
-        if index in servers:
-            raise ValueError(f"duplicate MGMT hcloud_server index {index}")
-        resource_name = resource_values.get("name")
-        if resource_name != index:
-            raise ValueError(
-                f"MGMT hcloud_server {index} resource name mismatch: expected {index!r}, got {resource_name!r}"
-            )
-        labels = resource_values.get("labels")
-        if not isinstance(labels, dict):
-            raise ValueError(f"MGMT hcloud_server {index} requires labels mapping")
-        if labels.get("project") != MGMT_PROJECT_LABEL or labels.get("site") != MGMT_SITE_LABEL:
-            raise ValueError(f"MGMT hcloud_server {index} ownership labels do not match ecommerce-1/mgmt")
-        ipv4 = resource_values.get("ipv4_address")
-        ipv6 = resource_values.get("ipv6_address")
-        resource_id = resource_values.get("id")
-        if not isinstance(ipv4, str) or not ipv4.strip():
-            raise ValueError(f"MGMT hcloud_server {index} requires ipv4_address")
-        servers[index] = {
-            "id": resource_id,
-            "ipv4": ipv4,
-            "ipv6": ipv6,
+            raise ValueError(f"{label} must be a provider public IPv4 address")
+    return str(address)
+
+
+def validate_transport(
+    canonical_nodes: list[str], gateway_name: str, canonical_private: dict[str, str], value: Any
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("Terraform runtime_transport output must be a mapping")
+    phase = value.get("phase")
+    if phase not in {"bootstrap", "steady-state"}:
+        raise ValueError("runtime transport phase must be bootstrap or steady-state")
+    gateway = value.get("gateway")
+    nodes = value.get("nodes")
+    if not isinstance(gateway, dict) or gateway.get("name") != gateway_name:
+        raise ValueError("runtime transport requires the canonical wg-01 gateway")
+    if not isinstance(nodes, dict) or sorted(nodes) != canonical_nodes:
+        raise ValueError("runtime transport node set mismatch")
+
+    expected_hosts = {gateway_name, *canonical_nodes}
+    if set(canonical_private) != expected_hosts:
+        raise ValueError("canonical MGMT private-address map mismatch")
+    gateway_private = _ipv4(gateway.get("private_address"), "wg-01 private_address")
+    if gateway_private != canonical_private[gateway_name]:
+        raise ValueError("wg-01 private_address does not match canonical mgmt_ip")
+    gateway_public = gateway.get("provider_public")
+    bootstrap_ssh = gateway.get("bootstrap_ssh") is True
+    if phase == "bootstrap":
+        if not bootstrap_ssh:
+            raise ValueError("bootstrap phase requires explicit gateway transport")
+        gateway_host = _ipv4(gateway_public, "wg-01 provider_public", public=True)
+    else:
+        if bootstrap_ssh:
+            raise ValueError("steady-state transport must not retain public SSH")
+        gateway_host = gateway_private
+
+    hosts: dict[str, Any] = {
+        gateway_name: {
+            "ansible_host": gateway_host,
+            "transport": "temporary-public-ssh" if phase == "bootstrap" else "wireguard-private",
         }
-    if not servers:
-        raise ValueError("terraform show JSON contains no canonical MGMT hcloud_server resources")
-    return servers
+    }
+    for name in canonical_nodes:
+        node = nodes[name]
+        if not isinstance(node, dict) or node.get("gateway") != gateway_name:
+            raise ValueError(f"{name} requires gateway transport through wg-01")
+        if node.get("provider_public") not in {None, ""}:
+            raise ValueError(f"{name} must not use a provider public address")
+        private = _ipv4(node.get("private_address"), f"{name} private_address")
+        if private != canonical_private[name]:
+            raise ValueError(f"{name} private_address does not match canonical mgmt_ip")
+        host = {"ansible_host": private, "transport": "wireguard-private"}
+        if phase == "bootstrap":
+            host["ansible_ssh_common_args"] = (
+                f"-o ForwardAgent=no -o ClearAllForwardings=yes -o ProxyJump={gateway_host}"
+            )
+        hosts[name] = host
+    return {"phase": phase, "gateway": gateway_name, "hosts": hosts}
 
 
-def terraform_servers_from_state(terraform_dir: Path, state_path: Path) -> dict[str, Any]:
-    if not state_path.is_absolute():
-        raise ValueError("Terraform state path must be absolute")
-    if not state_path.is_file():
-        raise ValueError(f"Terraform state file not found: {state_path}")
+def terraform_transport(terraform_dir: Path) -> dict[str, Any]:
     proc = subprocess.run(
-        ["terraform", f"-chdir={terraform_dir}", "show", "-json", str(state_path)],
+        ["terraform", f"-chdir={terraform_dir}", "output", "-json", "runtime_transport"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if proc.returncode:
-        # Do not include stdout here: terraform show -json can contain sensitive state values.
-        detail = " ".join((proc.stderr or "terraform show failed").strip().split())
-        raise RuntimeError(f"terraform show state failed: {detail}")
-    try:
-        show_doc = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"terraform show state returned invalid JSON: {exc}") from exc
-    return extract_servers_from_show(show_doc)
+        raise RuntimeError("terraform output runtime_transport failed: " + " ".join(proc.stderr.split()))
+    return json.loads(proc.stdout)
 
 
-def write_overlay(
-    output: Path,
-    hosts: dict[str, str],
-    source: str = "terraform-output:servers",
-) -> None:
-    if source not in {"terraform-output:servers", "terraform-state:show", "servers-json"}:
-        raise ValueError(f"unsupported MGMT transport provenance source: {source}")
+def write_overlay(output: Path, transport: dict[str, Any], source: str = "terraform-output:runtime_transport") -> None:
+    if source not in {"terraform-output:runtime_transport", "transport-json"}:
+        raise ValueError("unsupported MGMT transport provenance")
+    payload = {"version": 2, "source": source, "contains_secrets": False, **transport}
     output.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "version": 1,
-        "source": source,
-        "contains_secrets": False,
-        "hosts": hosts,
-    }
     temp = output.with_suffix(output.suffix + ".tmp")
-    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.chmod(temp, 0o600)
     temp.replace(output)
 
@@ -186,47 +129,27 @@ def write_overlay(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=".context/runtime/mgmt-ansible-transport.json")
-    parser.add_argument(
-        "--terraform-dir",
-        default="platform/terraform/environments/mgmt",
-        help="Terraform MGMT root containing the applied state/outputs",
-    )
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument(
-        "--servers-json",
-        help="Offline/test input containing the decoded Terraform `servers` output; skips terraform command",
-    )
-    source.add_argument(
-        "--terraform-state",
-        help="Absolute local state path for read-only recovery through `terraform show -json`",
-    )
+    parser.add_argument("--terraform-dir", default="platform/terraform/environments/mgmt")
+    parser.add_argument("--transport-json")
     args = parser.parse_args()
-
     root = Path(__file__).resolve().parents[1]
     try:
-        canonical_nodes = load_canonical_nodes(root)
-        terraform_dir = root / args.terraform_dir
-        if args.servers_json:
-            servers = json.loads(Path(args.servers_json).read_text(encoding="utf-8"))
-            provenance = "servers-json"
-        elif args.terraform_state:
-            state_path = Path(args.terraform_state).expanduser()
-            if not state_path.is_absolute():
-                raise ValueError("--terraform-state must be an absolute path")
-            servers = terraform_servers_from_state(terraform_dir, state_path.resolve())
-            provenance = "terraform-state:show"
-        else:
-            servers = terraform_servers(terraform_dir)
-            provenance = "terraform-output:servers"
-        hosts = validate_servers(canonical_nodes, servers)
+        nodes, gateway, private_addresses = load_canonical(root)
+        raw = (
+            json.loads(Path(args.transport_json).read_text())
+            if args.transport_json
+            else terraform_transport(root / args.terraform_dir)
+        )
+        transport = validate_transport(nodes, gateway, private_addresses, raw)
         output = Path(args.output)
-        if not output.is_absolute():
-            output = root / output
-        write_overlay(output, hosts, provenance)
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
+        write_overlay(
+            output if output.is_absolute() else root / output,
+            transport,
+            "transport-json" if args.transport_json else "terraform-output:runtime_transport",
+        )
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
         print(f"FAIL mgmt-runtime-inventory: {exc}", file=sys.stderr)
         return 2
-
     print(f"PASS mgmt-runtime-inventory: {output}")
     return 0
 

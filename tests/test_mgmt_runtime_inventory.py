@@ -7,115 +7,87 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "scripts" / "mgmt_runtime_inventory.py"
-spec = importlib.util.spec_from_file_location("mgmt_runtime_inventory", MODULE_PATH)
+spec = importlib.util.spec_from_file_location("mgmt_runtime_inventory", ROOT / "scripts/mgmt_runtime_inventory.py")
 module = importlib.util.module_from_spec(spec)
-assert spec.loader is not None
+assert spec.loader
 spec.loader.exec_module(module)
 
 
 class MgmtRuntimeInventoryTests(unittest.TestCase):
-    def show_doc(self, resources):
-        return {
-            "values": {
-                "root_module": {
-                    "child_modules": [
-                        {
-                            "address": "module.hcloud_mgmt",
-                            "resources": resources,
-                        }
-                    ]
-                }
-            }
-        }
+    def setUp(self):
+        self.nodes, self.gateway, self.private = module.load_canonical(ROOT)
 
-    def server(self, name: str, ipv4: str = "198.51.100.10"):
+    def transport(self, phase="bootstrap"):
         return {
-            "mode": "managed",
-            "type": "hcloud_server",
-            "name": "node",
-            "index": name,
-            "values": {
-                "id": f"id-{name}",
-                "name": name,
-                "labels": {
-                    "project": "ecommerce-1",
-                    "site": "mgmt",
-                    "role": "server",
-                },
-                "ipv4_address": ipv4,
-                "ipv6_address": "2001:db8::1",
+            "phase": phase,
+            "gateway": {
+                "name": "wg-01",
+                "provider_public": "198.51.100.10",
+                "private_address": self.private[self.gateway],
+                "bootstrap_ssh": phase == "bootstrap",
+            },
+            "nodes": {
+                name: {"provider_public": "", "private_address": self.private[name], "gateway": "wg-01"}
+                for i, name in enumerate(self.nodes)
             },
         }
 
-    def test_extract_servers_from_terraform_show_json(self):
-        servers = module.extract_servers_from_show(
-            self.show_doc(
-                [
-                    self.server("mgmt-cp-1", "198.51.100.11"),
-                    self.server("mgmt-worker-1", "198.51.100.12"),
-                ]
-            )
-        )
+    def test_bootstrap_overlay_is_complete_and_uses_private_nodes_via_proxyjump(self):
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport())
+        self.assertEqual({"wg-01", *self.nodes}, set(value["hosts"]))
+        self.assertEqual("198.51.100.10", value["hosts"]["wg-01"]["ansible_host"])
+        for name in self.nodes:
+            self.assertTrue(value["hosts"][name]["ansible_host"].startswith("10.243.1."))
+            self.assertIn("ProxyJump=198.51.100.10", value["hosts"][name]["ansible_ssh_common_args"])
 
-        self.assertEqual("198.51.100.11", servers["mgmt-cp-1"]["ipv4"])
-        self.assertEqual("id-mgmt-worker-1", servers["mgmt-worker-1"]["id"])
+    def test_steady_state_uses_private_addresses_and_forbids_public_ssh(self):
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport("steady-state"))
+        self.assertEqual("10.243.1.41", value["hosts"]["wg-01"]["ansible_host"])
+        self.assertNotIn("ansible_ssh_common_args", value["hosts"][self.nodes[0]])
+        mutated = self.transport("steady-state")
+        mutated["gateway"]["bootstrap_ssh"] = True
+        with self.assertRaisesRegex(ValueError, "must not retain public SSH"):
+            module.validate_transport(self.nodes, self.gateway, self.private, mutated)
 
-    def test_missing_management_module_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "exactly one module.hcloud_mgmt"):
-            module.extract_servers_from_show({"values": {"root_module": {"child_modules": []}}})
+    def test_required_transport_mutations_fail_closed(self):
+        mutations = []
+        missing_gateway = self.transport()
+        missing_gateway["gateway"] = {}
+        mutations.append(missing_gateway)
+        missing_node = self.transport()
+        missing_node["nodes"].pop(self.nodes[-1])
+        mutations.append(missing_node)
+        public_node = self.transport()
+        public_node["nodes"][self.nodes[0]]["provider_public"] = "198.51.100.20"
+        mutations.append(public_node)
+        empty_private = self.transport()
+        empty_private["nodes"][self.nodes[0]]["private_address"] = ""
+        mutations.append(empty_private)
+        no_proxy = self.transport()
+        no_proxy["nodes"][self.nodes[0]].pop("gateway")
+        mutations.append(no_proxy)
+        wrong_private = self.transport()
+        wrong_private["nodes"][self.nodes[-1]]["private_address"] = "10.243.1.99"
+        mutations.append(wrong_private)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(ValueError):
+                    module.validate_transport(self.nodes, self.gateway, self.private, mutation)
 
-    def test_duplicate_server_index_fails_closed(self):
-        with self.assertRaisesRegex(ValueError, "duplicate MGMT hcloud_server index"):
-            module.extract_servers_from_show(
-                self.show_doc(
-                    [
-                        self.server("mgmt-cp-1"),
-                        self.server("mgmt-cp-1", "198.51.100.20"),
-                    ]
-                )
-            )
-
-    def test_validate_servers_requires_exact_canonical_node_set(self):
-        with self.assertRaisesRegex(ValueError, "node set mismatch"):
-            module.validate_servers(
-                ["mgmt-cp-1", "mgmt-worker-1"],
-                {"mgmt-cp-1": {"ipv4": "198.51.100.11"}},
-            )
-
-    def test_recovered_server_requires_exact_resource_name(self):
-        resource = self.server("mgmt-cp-1")
-        resource["values"]["name"] = "other-node"
-        with self.assertRaisesRegex(ValueError, "resource name mismatch"):
-            module.extract_servers_from_show(self.show_doc([resource]))
-
-    def test_recovered_server_requires_ecommerce_mgmt_ownership_labels(self):
-        resource = self.server("mgmt-cp-1")
-        resource["values"]["labels"]["site"] = "other"
-        with self.assertRaisesRegex(ValueError, "ownership labels"):
-            module.extract_servers_from_show(self.show_doc([resource]))
-
-    def test_overlay_records_exact_recovery_provenance(self):
+    def test_overlay_is_non_secret_root_only(self):
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport())
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "transport.json"
-            module.write_overlay(output, {"cp-01": "198.51.100.11"}, "terraform-state:show")
-            payload = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual("terraform-state:show", payload["source"])
-        self.assertFalse(payload["contains_secrets"])
+            module.write_overlay(output, value)
+            payload = json.loads(output.read_text())
+            self.assertFalse(payload["contains_secrets"])
+            self.assertEqual("terraform-output:runtime_transport", payload["source"])
+            self.assertEqual(0o600, output.stat().st_mode & 0o777)
 
-    def test_overlay_rejects_unknown_provenance(self):
+    def test_unknown_provenance_fails(self):
         with tempfile.TemporaryDirectory() as td:
-            output = Path(td) / "transport.json"
-            with self.assertRaisesRegex(ValueError, "unsupported MGMT transport provenance"):
-                module.write_overlay(output, {"cp-01": "198.51.100.11"}, "unknown")
-
-    def test_overlay_keeps_historical_default_provenance(self):
-        with tempfile.TemporaryDirectory() as td:
-            output = Path(td) / "transport.json"
-            module.write_overlay(output, {"cp-01": "198.51.100.11"})
-            payload = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual("terraform-output:servers", payload["source"])
-        self.assertFalse(payload["contains_secrets"])
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                module.write_overlay(Path(td) / "x", {}, "old-server-public-ip-model")
 
 
 if __name__ == "__main__":

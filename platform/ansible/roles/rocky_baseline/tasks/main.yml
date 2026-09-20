@@ -4,12 +4,14 @@
     that:
       - ansible_facts.distribution == "Rocky"
       - ansible_facts.distribution_major_version == "9"
-    fail_msg: "MGMT nodes must run Rocky Linux 9.x."
+      - mgmt_offline_artifacts_verified | default(false) | bool
+      - mgmt_offline_curl_package in ['curl', 'curl-minimal']
+    fail_msg: "MGMT nodes require Rocky Linux 9.x and verified offline artifacts with an approved curl package variant."
 
 - name: Install baseline packages
   ansible.builtin.dnf:
     name:
-      - curl
+      - "{{ mgmt_offline_curl_package }}"
       - ca-certificates
       - chrony
       - jq
@@ -18,12 +20,64 @@
       - tar
       - unzip
     state: present
+    disablerepo: '*'
+    disable_plugin: ['*']
 
 - name: Enable and start NetworkManager
   ansible.builtin.systemd_service:
     name: NetworkManager
     enabled: true
     state: started
+
+- name: Disable DNS learned from DHCP or connection profiles
+  ansible.builtin.copy:
+    dest: /etc/NetworkManager/conf.d/90-mgmt-offline-dns.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [main]
+      dns=none
+  register: mgmt_dns_policy
+
+- name: Apply exclusive DNS policy  # noqa: no-handler -- must precede writing resolv.conf
+  ansible.builtin.systemd_service:
+    name: NetworkManager
+    state: restarted
+  when: mgmt_dns_policy.changed
+
+- name: Configure only explicitly approved internal DNS addresses
+  ansible.builtin.copy:
+    dest: /etc/resolv.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {% for address in mgmt_internal_dns %}
+      nameserver {{ address }}
+      {% endfor %}
+      options timeout:2 attempts:2
+
+- name: Configure chrony exclusively from approved internal servers
+  ansible.builtin.copy:
+    dest: /etc/chrony.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {% for address in mgmt_internal_ntp %}
+      server {{ address }} iburst
+      {% endfor %}
+      driftfile /var/lib/chrony/drift
+      makestep 1.0 3
+      rtcsync
+  register: mgmt_ntp_policy
+
+- name: Restart chronyd when the internal server policy changes  # noqa: no-handler -- apply before RKE2 starts
+  ansible.builtin.systemd_service:
+    name: chronyd
+    state: restarted
+  when: mgmt_ntp_policy.changed
 
 - name: Enable and start chronyd
   ansible.builtin.systemd_service:

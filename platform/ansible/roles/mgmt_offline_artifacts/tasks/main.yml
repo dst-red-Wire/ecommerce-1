@@ -1,0 +1,178 @@
+---
+- name: Require approved offline bootstrap inputs
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == "Rocky"
+      - ansible_facts.distribution_major_version == "9"
+      - ansible_facts.architecture == "x86_64"
+      - mgmt_offline_bundle_dir is match('^/')
+      - mgmt_offline_manifest_sha256 is match('^[0-9a-f]{64}$')
+    fail_msg: "Require approved bundle and internal DNS/NTP before any offline package transaction."
+
+- name: Validate controller bundle before transfer
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ playbook_dir }}/../../scripts/mgmt_airgap.py"
+      - --bundle
+      - "{{ mgmt_offline_bundle_dir }}"
+      - --manifest-sha256
+      - "{{ mgmt_offline_manifest_sha256 }}"
+      - --rke2-version
+      - "{{ rke2_version }}"
+      - --services-json
+      - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Create digest-specific node artifact directory
+  ansible.builtin.file:
+    path: "{{ mgmt_offline_target_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Transfer approved bundle over existing SSH access
+  ansible.builtin.copy:
+    src: "{{ mgmt_offline_bundle_dir }}/"
+    dest: "{{ mgmt_offline_target_dir }}/"
+    owner: root
+    group: root
+    mode: "0600"
+    directory_mode: "0700"
+
+- name: Create local validator directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install deterministic offline validator on node
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../scripts/mgmt_airgap.py"
+    dest: /usr/local/libexec/ecommerce-mgmt-airgap.py
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Verify transferred bytes before package installation
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - /usr/local/libexec/ecommerce-mgmt-airgap.py
+      - --rpm-metadata-check
+      - --bundle
+      - "{{ mgmt_offline_target_dir }}"
+      - --manifest-sha256
+      - "{{ mgmt_offline_manifest_sha256 }}"
+      - --rke2-version
+      - "{{ rke2_version }}"
+      - --services-json
+      - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
+  register: mgmt_offline_validated
+  changed_when: false
+
+- name: Verify every local RPM signature against isolated approved keys
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - /usr/local/libexec/ecommerce-mgmt-airgap.py
+      - --rpm-metadata-check
+      - --rpm-signature-check
+      - --bundle
+      - "{{ mgmt_offline_target_dir }}"
+      - --manifest-sha256
+      - "{{ mgmt_offline_manifest_sha256 }}"
+      - --rke2-version
+      - "{{ rke2_version }}"
+      - --services-json
+      - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
+  register: mgmt_offline_signed
+  changed_when: false
+
+- name: Import only manifest-approved offline RPM signing keys
+  ansible.builtin.rpm_key:
+    key: "{{ mgmt_offline_target_dir }}/{{ item }}"
+    state: present
+  loop: "{{ (mgmt_offline_validated.stdout | from_json).signing_keys }}"
+
+- name: Install complete local RPM set with all repositories disabled
+  ansible.builtin.dnf:
+    name: "{{ (mgmt_offline_validated.stdout | from_json).rpms | map('regex_replace', '^', mgmt_offline_target_dir + '/') | list }}"
+    state: present
+    disablerepo: '*'
+    disable_plugin: ['*']
+    disable_gpg_check: false
+
+- name: Require SELinux enforcement and installed RKE2 policy
+  ansible.builtin.command:
+    argv: [/usr/sbin/getenforce]
+  register: mgmt_offline_selinux
+  changed_when: false
+  failed_when: mgmt_offline_selinux.stdout != 'Enforcing'
+
+- name: Create RKE2 image and configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - /var/lib/rancher/rke2/agent/images
+    - /etc/rancher/rke2
+
+- name: Stage verified core and Cilium images before starting Kubernetes
+  ansible.builtin.copy:
+    src: "{{ mgmt_offline_target_dir }}/{{ item }}"
+    dest: "/var/lib/rancher/rke2/agent/images/{{ item }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - rke2-images-core.linux-amd64.tar
+    - rke2-images-cilium.linux-amd64.tar
+
+- name: Disable conditional image cache so every service start imports images
+  ansible.builtin.file:
+    path: /var/lib/rancher/rke2/agent/images/.cache.json
+    state: absent
+
+- name: Inspect the image import directory for unapproved inputs
+  ansible.builtin.find:
+    paths: /var/lib/rancher/rke2/agent/images
+    file_type: any
+    hidden: true
+    recurse: false
+  register: mgmt_offline_image_inputs
+
+- name: Refuse stale or unapproved image import inputs
+  ansible.builtin.assert:
+    that:
+      - >-
+        mgmt_offline_image_inputs.files | map(attribute='path') | map('basename')
+        | difference(['rke2-images-core.linux-amd64.tar', 'rke2-images-cilium.linux-amd64.tar']) | length == 0
+    fail_msg: "Remove or explicitly govern previous image import inputs before offline bootstrap."
+
+- name: Deny registry fallback for every registry including implicit docker.io
+  ansible.builtin.copy:
+    dest: /etc/rancher/rke2/registries.yaml
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      mirrors:
+        "*":
+          endpoint:
+            - "https://127.0.0.1:1"
+
+- name: Record verified offline artifacts for subsequent RKE2 plays
+  ansible.builtin.set_fact:
+    mgmt_offline_artifacts_verified: true
+    mgmt_offline_curl_package: "{{ (mgmt_offline_validated.stdout | from_json).curl_package }}"
+    rke2_offline_binary: "{{ mgmt_offline_target_dir }}/rke2.linux-amd64"

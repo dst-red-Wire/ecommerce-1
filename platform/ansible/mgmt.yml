@@ -1,12 +1,39 @@
 ---
+- name: Configure controlled MGMT WireGuard access gateway
+  hosts: access_gateways
+  become: true
+  gather_facts: true
+  serial: 1
+  vars:
+    wireguard_secret_mode: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_SECRET_MODE') }}"
+    wireguard_bootstrap_human_gate: "{{ lookup('ansible.builtin.env', 'MGMT_BOOTSTRAP_HUMAN_GATE') | bool }}"
+    wireguard_openbao_transition_human_gate: "{{ lookup('ansible.builtin.env', 'MGMT_OPENBAO_AUTHORITY_TRANSITION_HUMAN_GATE') | bool }}"
+    wireguard_bootstrap_peers_json: "{{ lookup('ansible.builtin.env', 'MGMT_WIREGUARD_BOOTSTRAP_PEERS_JSON') }}"
+    wireguard_openbao_addr: "{{ lookup('ansible.builtin.env', 'MGMT_OPENBAO_ADDR') }}"
+    wireguard_openbao_token: "{{ lookup('ansible.builtin.env', 'MGMT_OPENBAO_RUNTIME_TOKEN') }}"
+  roles:
+    - wireguard_gateway
+
 - name: Configure MGMT Rocky Linux baseline in parallel
-  hosts: all
+  hosts: rke2_servers:rke2_agents
   become: true
   gather_facts: true
   # Hosts are intentionally independent; no task uses run_once in this play.
   strategy: free  # noqa: run-once[play]
 
+  vars:
+    mgmt_offline_bundle_dir: "{{ lookup('ansible.builtin.env', 'MGMT_OFFLINE_BUNDLE_DIR') }}"
+    mgmt_offline_manifest_sha256: "{{ lookup('ansible.builtin.env', 'MGMT_OFFLINE_MANIFEST_SHA256') }}"
+    mgmt_internal_dns: "{{ lookup('ansible.builtin.env', 'MGMT_INTERNAL_DNS_JSON') | from_json }}"
+    mgmt_internal_ntp: "{{ lookup('ansible.builtin.env', 'MGMT_INTERNAL_NTP_JSON') | from_json }}"
+
   tasks:
+    - name: Verify and install controller-delivered offline prerequisites
+      ansible.builtin.include_role:
+        name: mgmt_offline_artifacts
+        apply:
+          throttle: 10
+
     - name: Apply Rocky baseline with bounded host concurrency
       ansible.builtin.include_role:
         name: rocky_baseline
@@ -24,6 +51,8 @@
   become: true
   gather_facts: false
   serial: 1
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Configure bootstrap RKE2 server
@@ -37,6 +66,8 @@
   become: true
   gather_facts: false
   serial: 1
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Join one additional control plane at a time
@@ -50,6 +81,8 @@
   # Worker enrolment is safe to schedule independently within rolling batches.
   strategy: free  # noqa: run-once[play]
   serial: '25%'
+  vars:
+    rke2_token: "{{ lookup('ansible.builtin.env', 'MGMT_RKE2_TOKEN') }}"
 
   tasks:
     - name: Join workers without overloading the control plane
