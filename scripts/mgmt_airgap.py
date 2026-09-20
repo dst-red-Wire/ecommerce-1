@@ -158,7 +158,6 @@ def validate_image_archive(path: Path) -> list[str]:
         return sorted(set(identities))
 
 
-def validate_bundle(
 def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_metadata: bool = False, rpm_signatures: bool = False) -> dict:
     require(directory.is_absolute() and not directory.is_symlink() and directory.is_dir(),
             "bundle must be an absolute regular directory")
