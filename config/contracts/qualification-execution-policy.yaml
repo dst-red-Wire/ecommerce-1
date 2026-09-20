@@ -30,9 +30,17 @@ cache_modes:
 gates:
   governance:
     scope: global
-    parallel_safe: true
+    parallel_safe: false
     cache_mode: composed
     dependencies: []
+    owned_tests:
+      - tests/test_architecture_authority.py
+      - tests/test_qualification_cache.py
+      - tests/test_qualification_execution_policy.py
+      - tests/architecture_validator_test.rb
+      - tests/observability_topology_test.rb
+      - tests/ci_authority_test.rb
+      - tests/ci_affected_test.rb
     tools: [python3, ruby, git]
     validators:
       - scripts/repoctl.py
@@ -158,6 +166,9 @@ gates:
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
+    owned_tests:
+      - tests/runtime_efficiency_test.rb
+      - tests/resource_sizing_test.rb
     tools: [python3, ruby]
     validators:
       - scripts/repoctl.py
@@ -181,6 +192,9 @@ gates:
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
+    owned_tests:
+      - tests/openapi_validator_test.rb
+      - tests/contract_consistency_test.rb
     tools: [python3, ruby, git, go, oasdiff, oapi-codegen]
     validators:
       - scripts/repoctl.py
@@ -230,7 +244,7 @@ gates:
       - exact-git-history-and-worktree-scan
   system:
     scope: component
-    parallel_safe: true
+    parallel_safe: false
     cache_mode: composed
     dependencies: []
     tools: [python3, ruby, git]
@@ -240,66 +254,29 @@ gates:
     inputs:
       - tests/**/*
       - scripts/**/*
-  system:ruby:
+  "system:test:*":
     scope: internal
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
-    tools: [ruby]
+    tools: [python3, ruby, git]
     validators:
+      - <target>
       - scripts/repoctl.py
       - scripts/qualification_cache.py
     inputs:
-      - tests/*_test.rb
-      - scripts/**/*.rb
+      - <target>
       - architecture.lock.yaml
       - config/contracts/**/*
-  system:python-root:
-    scope: internal
-    parallel_safe: true
-    cache_mode: content-pass
-    dependencies: []
-    tools: [python3, git]
-    validators:
-      - scripts/repoctl.py
-      - scripts/qualification_cache.py
-    inputs:
-      - tests/test_*.py
-      - scripts/**/*.py
-      - architecture.lock.yaml
-      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - contracts/**/*
+      - frontend/**/*
       - platform/**/*
-  system:python-delivery:
-    scope: internal
-    parallel_safe: true
-    cache_mode: content-pass
-    dependencies: []
-    tools: [python3, git]
-    validators:
-      - scripts/repoctl.py
-      - scripts/qualification_cache.py
-    inputs:
-      - tests/delivery/test_*.py
-      - scripts/repoctl.py
-      - scripts/repository_delivery.py
-      - scripts/qualification_cache.py
-      - platform/tekton/**/*
-      - config/contracts/ci-evidence.yaml
-      - config/contracts/ci-topology.yaml
-  system:python-context:
-    scope: internal
-    parallel_safe: true
-    cache_mode: content-pass
-    dependencies: []
-    tools: [python3, git]
-    validators:
-      - scripts/repoctl.py
-      - scripts/qualification_cache.py
-    inputs:
-      - tests/context/test_*.py
-      - scripts/context-pack.py
-      - scripts/repoctl.py
-      - config/context/**/*
+      - scripts/**/*
+      - services/**/*
+      - Makefile
+      - BUILD.bazel
+      - go.work
   platform:ansible:
     scope: component
     parallel_safe: false
