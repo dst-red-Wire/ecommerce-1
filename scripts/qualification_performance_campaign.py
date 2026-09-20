@@ -97,7 +97,7 @@ def _synthetic_worktree(kind: str):
                     raise RuntimeError("Product synthetic impact requires at least one Go source")
                 target = next((path for path in candidates if not path.name.endswith("_templ.go")), candidates[0])
                 with target.open("a", encoding="utf-8") as handle:
-                    handle.write("\n// qualification-performance-campaign product impact\n")
+                    handle.write("// qualification-performance-campaign product impact\n")
             elif kind == "governance":
                 target = self.root / "config" / "contracts" / "review-policy.yaml"
                 with target.open("a", encoding="utf-8") as handle:
