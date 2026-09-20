@@ -107,6 +107,8 @@ ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
 - A finding may be resolved only after the correction exists on a published SHA and supporting deterministic evidence is available.
 - Merge readiness requires exact-SHA qualification plus completed ChatGPT CODE and SECURITY review for that same SHA, with no unresolved blocking finding.
 - Deterministic gates and tests are evidence for the review; they do not replace ChatGPT CODE or SECURITY review.
+- Final ChatGPT review results are recorded on the PR with `chatgpt-exact-sha-review:v1` machine markers for `code` and `security`; both must bind the current full head SHA and be PASS with zero blocking findings.
+- `finish-pr` consumes only those ChatGPT markers. Codex comments, reactions, summaries, statuses, and completed reviews are ignored for merge readiness.
 
 ## Automated delivery
 
