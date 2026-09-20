@@ -53,6 +53,8 @@ metrics:
   report_executed_reused_skipped_counts: true
   compare_full_and_incremental_runs: true
   report_evidence_reuse_hit_ratio: true
+  report_content_cache_hits: true
+  distinguish_content_cache_from_evidence_reuse: true
   report_critical_path_estimate: true
   report_parallelization_headroom: true
   report_amdahl_priorities: true
