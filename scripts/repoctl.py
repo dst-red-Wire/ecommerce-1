@@ -3836,7 +3836,7 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     }
 
     owner_response = run(
-        [gh, "repo", "view", "--json", "owner"],
+        [gh, "repo", "view", "--json", "owner,nameWithOwner"],
         check=False,
         capture=True,
     )
@@ -3848,8 +3848,11 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     except json.JSONDecodeError:
         return False, "invalid GitHub repository owner JSON"
     owner_login = str((owner_payload.get("owner") or {}).get("login") or "")
+    name_with_owner = str(owner_payload.get("nameWithOwner") or "")
     if not owner_login:
         return False, "repository owner login is missing"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
+        return False, "repository nameWithOwner is missing or invalid"
 
     response = run(
         [
@@ -3857,7 +3860,7 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
             "api",
             "--paginate",
             "--slurp",
-            f"repos/{owner_login}/{ROOT.name}/issues/{pr_number}/comments?per_page=100",
+            f"repos/{name_with_owner}/issues/{pr_number}/comments?per_page=100",
         ],
         check=False,
         capture=True,
