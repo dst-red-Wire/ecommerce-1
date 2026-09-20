@@ -100,7 +100,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -129,6 +129,12 @@ git-sync: ## Fetch/prune and fast-forward current branch
 branch-cleanup: ## Delete safe stale local/remote branches; DRY_RUN=1 only reports candidates
 	@$(PYTHON) scripts/repoctl.py branch-cleanup $(if $(DRY_RUN),--dry-run,)
 
+roadmap-check: ## Check GitHub-backed milestone/tracker state against the generated roadmap
+	@$(PYTHON) scripts/repoctl.py roadmap-check
+
+roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from GitHub
+	@$(PYTHON) scripts/repoctl.py roadmap-sync
+
 publish: ## Commit, exact-SHA verify and push current feature branch
 	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
 
@@ -138,7 +144,7 @@ publish-change: ## Canonical alias: qualify, commit and push the current feature
 deliver: ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-finish-pr: ## Merge the exact reviewed PR and remove its feature branches; GitHub retains the merged PR record
+finish-pr: ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
 	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
