@@ -2788,23 +2788,6 @@ def verify_change(base: str, head: str) -> int:
     env = os.environ.copy()
     env.update({"BASE": base, "HEAD": head})
 
-    def run_stable_gate(name: str, command: list[str]) -> bool:
-        before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
-        ok = _run_gate(name, command, records, env)
-        if head != "WORKTREE":
-            return ok
-        after_tree = worktree_tree_sha()
-        if after_tree == before_tree:
-            return ok
-        mutated_paths = git("diff", "--name-only", before_tree, after_tree).splitlines()
-        if records and records[-1].get("gate") == name:
-            records[-1]["status"] = "FAIL"
-            records[-1]["exit_code"] = 1
-            records[-1]["reason"] = "gate mutated worktree"
-            records[-1]["mutated_paths"] = mutated_paths
-        print(f"FAIL {name} mutated worktree: {mutated_paths}", file=sys.stderr)
-        return False
-
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
     verification: dict = {"mode": "full"}
@@ -2846,6 +2829,7 @@ def verify_change(base: str, head: str) -> int:
             return fail("parallel global gate batch mutated worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
+    component_commands: list[tuple[str, list[str]]] = []
     if combined:
         frontend_delta = bool({"frontend:storefront", "frontend:admin"} & delta_components)
         reused = bool(
@@ -2854,9 +2838,8 @@ def verify_change(base: str, head: str) -> int:
             and not frontend_delta
             and _reuse_gate("frontend:all", parent_sha, parent_evidence, records)
         )
-        if not reused and not _run_gate("frontend:all", _controller_command("frontend", "check", "all"), records, env):
-            write_evidence(base, head, paths, components, records, verification)
-            return 1
+        if not reused:
+            component_commands.append(("frontend:all", _controller_command("frontend", "check", "all")))
 
     for component in components:
         if component == "global" or (combined and component.startswith("frontend:")):
@@ -2868,9 +2851,28 @@ def verify_change(base: str, head: str) -> int:
         if parent_evidence and parent_sha and component not in delta_components:
             if _reuse_gate(component, parent_sha, parent_evidence, records):
                 continue
-        if not run_stable_gate(component, command):
+        component_commands.append((component, command))
+
+    before_component_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_gate_batch(component_commands, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE":
+        after_component_tree = worktree_tree_sha()
+        if after_component_tree != before_component_tree:
+            mutated_paths = git("diff", "--name-only", before_component_tree, after_component_tree).splitlines()
+            records.append(
+                {
+                    "gate": "worktree-stability",
+                    "status": "FAIL",
+                    "exit_code": 1,
+                    "duration_seconds": 0.0,
+                    "reason": "parallel component gate batch mutated worktree",
+                    "mutated_paths": mutated_paths,
+                }
+            )
             write_evidence(base, head, paths, components, records, verification)
-            return 1
+            return fail(f"parallel component gate batch mutated worktree: {mutated_paths}", 1)
 
     if head == "WORKTREE":
         final_tree_sha = worktree_tree_sha()
@@ -3561,9 +3563,15 @@ def main() -> int:
         if args.cmd == "runtime-efficiency":
             return _run_cached_static_gate("runtime-efficiency", {}, runtime_efficiency_check)
         if args.cmd == "contracts":
+            contract_changed = False
+            if args.base:
+                diff_args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", args.base]
+                if args.head != "WORKTREE":
+                    diff_args.append(args.head)
+                diff_args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
+                contract_changed = bool(git(*diff_args).strip())
             contract_options = {
-                "base_tree": git("rev-parse", f"{args.base}^{{tree}}").strip() if args.base else "",
-                "head_tree": worktree_tree_sha() if args.head == "WORKTREE" else git("rev-parse", f"{args.head}^{{tree}}").strip(),
+                "compat_base_sha": git("rev-parse", args.base).strip() if args.base and contract_changed else "",
                 "generate": bool(args.generate),
             }
             return _run_cached_static_gate(
