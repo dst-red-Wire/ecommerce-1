@@ -128,6 +128,6 @@
     argv: [systemctl, is-active, rke2-server.service]
   register: rke2_server_active
   changed_when: false
-  until: rke2_server_active.stdout | trim == 'active'
+  until: rke2_server_active.stdout | default('') | trim == 'active'
   retries: 180
   delay: 5

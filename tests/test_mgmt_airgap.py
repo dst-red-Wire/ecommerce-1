@@ -444,7 +444,7 @@ class OfflineAnsibleContractTests(unittest.TestCase):
         self.assertLess(enable, flush)
         self.assertLess(flush, readiness)
         self.assertIn('no_block: true', tasks[enable:flush])
-        self.assertIn('until:', tasks[readiness:])
+        self.assertIn("stdout | default('') | trim == 'active'", tasks[readiness:])
         self.assertIn('retries:', tasks[readiness:])
 
 
