@@ -13,6 +13,8 @@ class TektonAffectedContractTests(unittest.TestCase):
         self.assertIn("name: ecommerce-affected", pipeline)
         self.assertIn("$(tasks.classify.results.components[*])", pipeline)
         self.assertIn("name: global-gates", pipeline)
+        self.assertIn("name: max-workers", pipeline)
+        self.assertIn("value: $(params.max-workers)", pipeline)
         self.assertIn("finally:", pipeline)
         self.assertIn("name: finalize-evidence", pipeline)
 
@@ -47,6 +49,8 @@ class TektonAffectedContractTests(unittest.TestCase):
         self.assertIn("enforcement: kubernetes-resourcequota-and-runner-pod-resources", contract)
         self.assertIn("hardcoded_concurrency_without_measurement_forbidden: true", contract)
         self.assertIn("performance_evidence_required_before_tuning: true", contract)
+        self.assertIn("qualification_max_workers_parameter: max-workers", contract)
+        self.assertIn("qualification_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS", contract)
         self.assertIn("bounded-execution-budget-proven", contract)
 
     def test_parallel_gate_taskruns_use_ephemeral_isolated_checkouts(self):
@@ -67,8 +71,14 @@ class TektonAffectedContractTests(unittest.TestCase):
         global_task = self.read("platform/tekton/tasks/global-gates.yaml")
         self.assertIn("name: ECOMMERCE_TOOL_HOME", global_task)
         self.assertIn(".context/cache/tool-home", global_task)
+        self.assertIn("name: ECOMMERCE_EXECUTION_SCOPE", global_task)
+        self.assertIn("name: ECOMMERCE_QUALIFICATION_MAX_WORKERS", global_task)
+        self.assertIn("value: $(params.max-workers)", global_task)
         self.assertIn("name: ECOMMERCE_TOOL_HOME", component)
         self.assertIn(".context/cache/tool-home", component)
+        self.assertIn("name: ECOMMERCE_EXECUTION_SCOPE", component)
+        self.assertIn("name: ECOMMERCE_QUALIFICATION_MAX_WORKERS", component)
+        self.assertIn("value: $(params.max-workers)", component)
         self.assertIn("name: GOCACHE", component)
         self.assertIn(".context/cache/go-build", component)
         self.assertIn("name: GOMODCACHE", component)
