@@ -172,7 +172,7 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
         )
         proof = tasks[names.index("Prove the OpenBao key replaces the effective bootstrap credential")]
         self.assertEqual(
-            ["wireguard_openbao_replacement_public_key.stdout | trim != wireguard_pre_transition_public_key.stdout | trim"],
+            ["(wireguard_openbao_replacement_public_key.stdout | trim) != (wireguard_pre_transition_public_key.stdout | trim)"],
             proof["ansible.builtin.assert"]["that"],
         )
         defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
