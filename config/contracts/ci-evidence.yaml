@@ -15,6 +15,38 @@ evidence:
   qualification_identity_required: true
   commit_tree_required: true
 
+gate_records:
+  required:
+    - gate
+    - status
+    - duration_seconds
+    - execution
+    - cache_mode
+    - scope
+    - parallel_safe
+    - parallel_group
+    - started_at_monotonic_offset
+  execution_values:
+    - fresh
+    - content-cache
+    - parent-evidence
+    - skipped
+  conditional_content_cache_fields:
+    - cache_key
+    - input_digest
+    - source_duration_seconds
+    - cache_entries
+  dynamic_runtime_cache_authority: forbidden
+
+performance_campaign:
+  authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
+  repetitions: 3
+  output: .context/performance/campaign-<sha>.json
+  required_before_merge: true
+  budget_failure_blocks_readiness: true
+  native_dependency_caches_must_be_preserved: true
+  synthetic_impacts_must_use_isolated_worktrees: true
+
 remote_store:
   authority: harbor
   transport: oci-distribution
