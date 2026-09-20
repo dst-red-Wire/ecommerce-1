@@ -33,6 +33,9 @@ gates:
     parallel_safe: false
     cache_mode: composed
     dependencies: []
+    command:
+      action: governance
+    ci_fanout: true
     owned_tests:
       - tests/test_architecture_authority.py
       - tests/test_qualification_cache.py
@@ -145,6 +148,9 @@ gates:
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
+    command:
+      action: runtime-efficiency
+    ci_fanout: true
     owned_tests:
       - tests/runtime_efficiency_test.rb
       - tests/resource_sizing_test.rb
@@ -171,6 +177,10 @@ gates:
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
+    command:
+      action: contracts
+      context_args: base-head
+    ci_fanout: true
     owned_tests:
       - tests/openapi_validator_test.rb
       - tests/contract_consistency_test.rb
@@ -198,6 +208,9 @@ gates:
     parallel_safe: true
     cache_mode: content-pass
     dependencies: []
+    command:
+      action: automation-policy
+    ci_fanout: true
     tools: [python3, git]
     validators:
       - scripts/repoctl.py
@@ -213,6 +226,9 @@ gates:
     parallel_safe: true
     cache_mode: fresh
     dependencies: []
+    command:
+      action: security
+    ci_fanout: true
     tools: [gitleaks, git]
     validators:
       - scripts/repoctl.py
@@ -226,6 +242,8 @@ gates:
     parallel_safe: false
     cache_mode: composed
     dependencies: []
+    command:
+      action: system
     tools: [python3, ruby, git]
     validators:
       - scripts/repoctl.py
@@ -261,6 +279,8 @@ gates:
     parallel_safe: false
     cache_mode: content-pass
     dependencies: []
+    command:
+      action: ansible
     tools: [ansible-lint, ansible-playbook, ansible-galaxy]
     validators:
       - scripts/repoctl.py
@@ -279,6 +299,8 @@ gates:
     parallel_safe: false
     cache_mode: content-pass
     dependencies: []
+    command:
+      action: terraform
     tools: [tofu, terraform]
     validators:
       - scripts/repoctl.py
@@ -300,6 +322,10 @@ gates:
     parallel_safe: true
     cache_mode: native-only
     dependencies: []
+    command:
+      action: frontend
+      static_args: [check]
+      suffix_arg: true
     tools: [go, gofmt, templ]
     validators:
       - scripts/repoctl.py
@@ -327,6 +353,9 @@ gates:
     parallel_safe: true
     cache_mode: native-only
     dependencies: []
+    command:
+      action: service
+      suffix_arg: true
     tools: [go, gofmt]
     validators:
       - scripts/repoctl.py
@@ -337,6 +366,33 @@ gates:
       - config/contracts/toolchain-lock.json
     fresh_prechecks:
       - docker-runtime-when-testcontainers-are-used
+
+performance:
+  baselines_seconds:
+    system: 110.054
+    governance: 86.060
+    platform:ansible: 28.639
+    service:product: 14.821
+  campaign:
+    repetitions: 3
+    cold_clears_qualification_content_cache_only: true
+    preserve_dependency_and_native_tool_caches: true
+    scenarios:
+      - cold-verify-change
+      - warm-verify-change
+      - affected-product
+      - affected-governance
+  budgets_seconds:
+    cold_verify_change_wall_max: 90
+    warm_verify_change_wall_max: 30
+    affected_product_wall_max: 30
+    system_warm_wall_max: 2
+    governance_warm_wall_max: 2
+    ansible_warm_wall_max: 5
+  regression:
+    compare_median: true
+    evidence_required: true
+    fail_on_budget_regression: true
 
 dynamic_state:
   always_fresh:
