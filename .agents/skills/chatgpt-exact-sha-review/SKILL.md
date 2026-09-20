@@ -96,6 +96,36 @@ A final review result must state:
 
 A prior review on another SHA is historical context only.
 
+## Machine-readable review recording
+
+Final ChatGPT review results must be recorded on the GitHub PR as ordinary PR conversation comments.
+
+Each final result must include exactly one hidden marker on a single line:
+
+```text
+<!-- chatgpt-exact-sha-review:v1 {"provider":"ChatGPT","kind":"code","head_sha":"<40-hex-sha>","status":"PASS","blocking_findings":0} -->
+```
+
+or:
+
+```text
+<!-- chatgpt-exact-sha-review:v1 {"provider":"ChatGPT","kind":"security","head_sha":"<40-hex-sha>","status":"PASS","blocking_findings":0} -->
+```
+
+Rules:
+
+- `provider` must be exactly `ChatGPT`.
+- `kind` must be exactly `code` or `security`.
+- `head_sha` must be the full current published PR head SHA.
+- `status` is `PASS` only when that review kind has no unresolved blocking finding.
+- `blocking_findings` is the exact unresolved blocking count for that review kind.
+- A blocked review must use a non-PASS status such as `BLOCKED` and a positive `blocking_findings`.
+- Never emit PASS markers for an uncommitted worktree or for a different SHA.
+- A later head invalidates earlier markers for merge readiness.
+- Codex comments, reactions, review summaries, statuses, or hidden markers never satisfy this contract.
+
+`finish-pr` consumes these exact ChatGPT markers and requires PASS for both review kinds.
+
 ## Merge-readiness rule
 
 A candidate is review-ready only when all are true:
