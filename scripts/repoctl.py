@@ -3726,6 +3726,241 @@ def doctor() -> int:
     return rc
 
 
+def _branch_ref_map(prefix: str, *, remote: str = "") -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in output(["git", "for-each-ref", "--format=%(refname:short)%09%(objectname)", prefix]).splitlines():
+        if not line.strip() or "\t" not in line:
+            continue
+        name, sha = line.split("\t", 1)
+        if remote:
+            marker = f"{remote}/"
+            if not name.startswith(marker):
+                continue
+            name = name[len(marker):]
+            if name == "HEAD":
+                continue
+        if name and re.fullmatch(r"[0-9a-f]{40}", sha):
+            result[name] = sha
+    return result
+
+
+def _active_worktree_branches() -> set[str]:
+    branches: set[str] = set()
+    for line in git("worktree", "list", "--porcelain").splitlines():
+        if line.startswith("branch refs/heads/"):
+            branches.add(line.removeprefix("branch refs/heads/").strip())
+    return branches
+
+
+def _git_is_ancestor(head_sha: str, base_ref: str) -> bool:
+    return run(
+        ["git", "merge-base", "--is-ancestor", head_sha, base_ref],
+        check=False,
+        capture=True,
+    ).returncode == 0
+
+
+def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        print("INFO branch-cleanup: GitHub CLI unavailable; using ancestry proof only")
+        return {}
+
+    repository = run([gh, "repo", "view", "--json", "nameWithOwner"], check=False, capture=True)
+    if repository.returncode:
+        print("ADVISORY branch-cleanup: cannot resolve GitHub repository; using ancestry proof only", file=sys.stderr)
+        return {}
+    try:
+        name_with_owner = str(json.loads(repository.stdout or "{}").get("nameWithOwner") or "")
+    except json.JSONDecodeError:
+        name_with_owner = ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
+        print("ADVISORY branch-cleanup: invalid GitHub repository identity; using ancestry proof only", file=sys.stderr)
+        return {}
+
+    response = run(
+        [
+            gh,
+            "api",
+            "--method",
+            "GET",
+            "--paginate",
+            "--slurp",
+            f"repos/{name_with_owner}/pulls",
+            "-f",
+            "state=closed",
+            "-f",
+            f"base={default_branch}",
+            "-f",
+            "per_page=100",
+        ],
+        check=False,
+        capture=True,
+    )
+    if response.returncode:
+        print("ADVISORY branch-cleanup: merged PR history unavailable; using ancestry proof only", file=sys.stderr)
+        return {}
+    try:
+        pages = json.loads(response.stdout or "[]")
+    except json.JSONDecodeError:
+        print("ADVISORY branch-cleanup: malformed merged PR history; using ancestry proof only", file=sys.stderr)
+        return {}
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        print("ADVISORY branch-cleanup: invalid paginated PR payload; using ancestry proof only", file=sys.stderr)
+        return {}
+
+    merged: dict[str, set[str]] = {}
+    for page in pages:
+        for pull in page:
+            if not isinstance(pull, dict) or not pull.get("merged_at"):
+                continue
+            base = pull.get("base") or {}
+            head = pull.get("head") or {}
+            if not isinstance(base, dict) or not isinstance(head, dict):
+                continue
+            if str(base.get("ref") or "") != default_branch:
+                continue
+            branch_name = str(head.get("ref") or "")
+            head_sha = str(head.get("sha") or "")
+            if branch_name and re.fullmatch(r"[0-9a-f]{40}", head_sha):
+                merged.setdefault(branch_name, set()).add(head_sha)
+    return merged
+
+
+def _plan_branch_cleanup(
+    local_refs: dict[str, str],
+    remote_refs: dict[str, str],
+    *,
+    current_branch: str,
+    default_branch: str,
+    active_worktrees: set[str],
+    ancestor_heads: dict[str, bool],
+    merged_pr_heads: dict[str, set[str]],
+) -> list[dict]:
+    actions: list[dict] = []
+    protected = {default_branch, "master"}
+    for branch in sorted(set(local_refs) | set(remote_refs)):
+        branch_guard = ""
+        if branch in protected:
+            branch_guard = "protected-branch"
+        elif branch == current_branch:
+            branch_guard = "current-branch"
+        elif branch in active_worktrees:
+            branch_guard = "active-worktree"
+
+        for scope, refs in (("remote", remote_refs), ("local", local_refs)):
+            head_sha = refs.get(branch)
+            if not head_sha:
+                continue
+            if branch_guard:
+                action, reason = "keep", branch_guard
+            elif ancestor_heads.get(head_sha) is True:
+                action, reason = "delete", "head-is-ancestor-of-default-branch"
+            elif head_sha in merged_pr_heads.get(branch, set()):
+                action, reason = "delete", "merged-pr-head-matches-current-branch-head"
+            elif merged_pr_heads.get(branch):
+                action, reason = "keep", "branch-advanced-after-merged-pr"
+            else:
+                action, reason = "keep", "branch-with-unabsorbed-head"
+            actions.append(
+                {
+                    "branch": branch,
+                    "scope": scope,
+                    "head_sha": head_sha,
+                    "action": action,
+                    "reason": reason,
+                }
+            )
+    return actions
+
+
+def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
+    policy = repository_delivery_policy()
+    cleanup = policy["cleanup"]["automatic_branch_cleanup"]
+    if cleanup.get("enabled") is not True:
+        return fail("branch-cleanup is disabled by repository policy")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("branch-cleanup requires a clean current worktree")
+
+    default_branch = str(policy["default_branch"])
+    base_ref = f"origin/{default_branch}"
+    if fetch_remote:
+        run(["git", "fetch", "origin", "--prune"])
+    if run(["git", "rev-parse", "--verify", base_ref], check=False, capture=True).returncode:
+        return fail(f"branch-cleanup cannot resolve {base_ref}")
+
+    current_branch = git("branch", "--show-current").strip()
+    if not current_branch:
+        return fail("branch-cleanup refuses detached HEAD")
+    local_refs = _branch_ref_map("refs/heads")
+    remote_refs = _branch_ref_map("refs/remotes/origin", remote="origin")
+    active_worktrees = _active_worktree_branches()
+    merged_pr_heads = _merged_pr_exact_heads(default_branch)
+    unique_heads = set(local_refs.values()) | set(remote_refs.values())
+    ancestor_heads = {sha: _git_is_ancestor(sha, base_ref) for sha in unique_heads}
+    plan = _plan_branch_cleanup(
+        local_refs,
+        remote_refs,
+        current_branch=current_branch,
+        default_branch=default_branch,
+        active_worktrees=active_worktrees,
+        ancestor_heads=ancestor_heads,
+        merged_pr_heads=merged_pr_heads,
+    )
+
+    failures: list[str] = []
+    deleted = 0
+    remote_failures: set[str] = set()
+    for item in plan:
+        branch = str(item["branch"])
+        scope = str(item["scope"])
+        if item["action"] != "delete":
+            if dry_run and item["reason"] not in {"protected-branch", "current-branch"}:
+                print(f"KEEP {scope:6} {branch} | {item['reason']}")
+            continue
+
+        label = "WOULD_DELETE" if dry_run else "DELETE"
+        print(f"{label} {scope:6} {branch} | {item['reason']} | {str(item['head_sha'])[:12]}")
+        if dry_run:
+            continue
+
+        if scope == "remote":
+            result = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
+            if result.returncode:
+                detail = (result.stderr or result.stdout or "").strip()
+                failures.append(f"remote {branch}: {detail or 'delete failed'}")
+                remote_failures.add(branch)
+            else:
+                deleted += 1
+            continue
+
+        if branch in remote_failures:
+            failures.append(f"local {branch}: preserved because remote deletion failed")
+            continue
+        force = item["reason"] == "merged-pr-head-matches-current-branch-head"
+        flag = "-D" if force else "-d"
+        result = run(["git", "branch", flag, branch], check=False, capture=True)
+        if result.returncode:
+            detail = (result.stderr or result.stdout or "").strip()
+            failures.append(f"local {branch}: {detail or 'delete failed'}")
+        else:
+            deleted += 1
+
+    if not dry_run:
+        run(["git", "worktree", "prune"], check=False)
+        run(["git", "fetch", "origin", "--prune"], check=False)
+
+    candidates = sum(1 for item in plan if item["action"] == "delete")
+    kept = sum(1 for item in plan if item["action"] == "keep")
+    print(
+        f"{'DRY_RUN' if dry_run else 'PASS'} branch-cleanup "
+        f"candidates={candidates} deleted={deleted} kept={kept} failures={len(failures)}"
+    )
+    for failure in failures:
+        print(f"ADVISORY branch-cleanup {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def git_sync() -> int:
     branch = git("branch", "--show-current").strip()
     if not branch:
@@ -3734,6 +3969,9 @@ def git_sync() -> int:
         return fail("git-sync requires clean tree")
     run(["git", "fetch", "origin", "--prune"])
     run(["git", "merge", "--ff-only", f"origin/{branch}"])
+    cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
+    if cleanup_rc:
+        print("ADVISORY git-sync completed but automatic branch cleanup was incomplete", file=sys.stderr)
     print(f"PASS git-sync {branch}")
     return 0
 
@@ -3754,6 +3992,30 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     pull_request_policy = policy["pull_request"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
+    automatic_cleanup = cleanup_policy.get("automatic_branch_cleanup")
+    expected_automatic_cleanup = {
+        "enabled": True,
+        "triggers": ["git-sync", "finish-pr"],
+        "default_branch_ref": "origin/<default-branch>",
+        "delete_when": [
+            "head-is-ancestor-of-default-branch",
+            "merged-pr-head-matches-current-branch-head",
+        ],
+        "merged_pr_base_must_match_default": True,
+        "github_merge_proof": "exact-head-sha",
+        "preserve": [
+            "default-branch",
+            "master",
+            "current-branch",
+            "active-worktree",
+            "branch-with-unabsorbed-head",
+            "branch-advanced-after-merged-pr",
+        ],
+        "github_cli_optional_for_ancestor_cleanup": True,
+        "force_local_delete_after_exact_merged_pr_proof": True,
+    }
+    if automatic_cleanup != expected_automatic_cleanup:
+        raise RuntimeError("invalid repository_delivery contract: automatic branch cleanup policy drift")
     for section_name, section in (
         ("publish", publish_policy),
         ("pull_request", pull_request_policy),
@@ -4389,6 +4651,9 @@ def finish_pr(base: str) -> int:
     if local_branch.returncode == 0:
         run(["git", "branch", "-d", branch])
 
+    cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
+    if cleanup_rc:
+        print("ADVISORY finish-pr merged successfully but stale-branch cleanup was incomplete", file=sys.stderr)
     print(
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
         f"PR record retained by GitHub; remote/local branch {branch} removed"
@@ -4441,6 +4706,8 @@ def main() -> int:
         "product-benchmark",
     ]:
         sub.add_parser(name)
+    bc = sub.add_parser("branch-cleanup")
+    bc.add_argument("--dry-run", action="store_true")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -4650,6 +4917,8 @@ def main() -> int:
             return doctor()
         if args.cmd == "git-sync":
             return git_sync()
+        if args.cmd == "branch-cleanup":
+            return branch_cleanup(dry_run=args.dry_run)
         if args.cmd == "publish":
             return publish(args.base, args.message)
         if args.cmd == "publish-change":
