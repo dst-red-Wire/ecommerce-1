@@ -1698,39 +1698,57 @@ def service_check(service: str) -> int:
     module = ROOT / "services" / service
     if not (module / "go.mod").is_file():
         return fail(f"service module does not exist: services/{service}/go.mod")
+
     capabilities = ["go", "cgo"]
     if (module / "sqlc.yaml").is_file():
         capabilities.append("sqlc")
     selected_tests = list(module.rglob("*_test.go"))
     needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
+
+    # Capability reconciliation is always fresh. Content cache only covers deterministic
+    # source checks after the required pinned tools are proven available.
     ensure_developer(",".join(capabilities))
     env = os.environ.copy()
     env["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{env.get('PATH', '')}"
     env.pop("GOROOT", None)
     env.pop("GOTOOLDIR", None)
     env["CGO_ENABLED"] = "1"
-    if (module / "sqlc.yaml").is_file():
-        cfg = ruby_yaml(str(module / "sqlc.yaml"))
-        out_dir = cfg["sql"][0]["gen"]["go"]["out"]
-        with tempfile.TemporaryDirectory(prefix=f"{service}-sqlc-") as temp:
-            tmp = Path(temp)
-            shutil.copytree(module, tmp / service, dirs_exist_ok=True)
-            run(["sqlc", "generate"], cwd=tmp / service, env=env)
-            run(["sqlc", "vet"], cwd=tmp / service, env=env)
-            diff = run(["diff", "-ru", str(module / out_dir), str(tmp / service / out_dir)], check=False, capture=True)
-            if diff.returncode:
-                print(diff.stdout)
-                return fail(f"{service} sqlc generated code is stale")
-    require("gofmt")
-    go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
-    if go_files:
-        p = run(["gofmt", "-l", *go_files], capture=True)
-        if p.stdout.strip():
-            print(p.stdout, file=sys.stderr)
-            return fail(f"gofmt required for {service}", 1)
-    run(["go", "test", "-race", "./..."], cwd=module, env=env)
-    run(["go", "vet", "./..."], cwd=module, env=env)
-    run(["go", "build", "./..."], cwd=module, env=env)
+
+    def static_checks() -> int:
+        if (module / "sqlc.yaml").is_file():
+            cfg = ruby_yaml(str(module / "sqlc.yaml"))
+            out_dir = cfg["sql"][0]["gen"]["go"]["out"]
+            with tempfile.TemporaryDirectory(prefix=f"{service}-sqlc-") as temp:
+                tmp = Path(temp)
+                shutil.copytree(module, tmp / service, dirs_exist_ok=True)
+                run(["sqlc", "generate"], cwd=tmp / service, env=env)
+                run(["sqlc", "vet"], cwd=tmp / service, env=env)
+                diff = run(
+                    ["diff", "-ru", str(module / out_dir), str(tmp / service / out_dir)],
+                    check=False,
+                    capture=True,
+                )
+                if diff.returncode:
+                    print(diff.stdout)
+                    return fail(f"{service} sqlc generated code is stale")
+
+        require("gofmt")
+        go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
+        if go_files:
+            formatted = run(["gofmt", "-l", *go_files], capture=True)
+            if formatted.stdout.strip():
+                print(formatted.stdout, file=sys.stderr)
+                return fail(f"gofmt required for {service}", 1)
+        run(["go", "vet", "./..."], cwd=module, env=env)
+        run(["go", "build", "./..."], cwd=module, env=env)
+        return 0
+
+    static_rc = _run_cached_gate(f"service-static:{service}", {}, static_checks)
+    if static_rc:
+        return static_rc
+
+    # Runtime capability must never be content-cached. Check it before starting any
+    # Testcontainers-aware test suite so incapable hosts fail fast.
     if needs_containers:
         docker = shutil.which("docker")
         forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
@@ -1741,6 +1759,8 @@ def service_check(service: str) -> int:
                 "and net.ipv4.ip_forward=1",
                 2,
             )
+
+    run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
         run(
             ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
