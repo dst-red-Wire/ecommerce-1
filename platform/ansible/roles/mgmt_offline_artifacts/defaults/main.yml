@@ -1,0 +1,6 @@
+---
+mgmt_offline_bundle_dir: ""
+mgmt_offline_manifest_sha256: ""
+mgmt_internal_dns: []
+mgmt_internal_ntp: []
+mgmt_offline_target_dir: "/var/lib/ecommerce/bootstrap/{{ mgmt_offline_manifest_sha256 }}"

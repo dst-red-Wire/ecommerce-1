@@ -1,0 +1,12 @@
+[Unit]
+Description=MGMT bootstrap deny Internet egress
+After=network-pre.target firewalld.service
+Before=rke2-server.service rke2-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft --file /etc/ecommerce/mgmt-egress.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
