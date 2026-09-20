@@ -92,6 +92,22 @@ Use `make diff-context` for review-oriented work and `make failure-context GATE=
 
 Context escalation is automatic: L0 for local implementation, L1 for domain/contract work, and L2 for architecture/control-plane work. Do not manually escalate to broader context unless the reduced pack is insufficient or an exact contract requires it.
 
+
+## CODE and SECURITY review authority
+
+ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
+
+- Do not trigger, request, rerun, poll, or depend on Codex reviews for merge readiness. This includes `@codex review`, `@codex security review`, and equivalent automated Codex review workflows.
+- Historical Codex findings may be used as input evidence, but they are not current review authority and must not cause a new Codex invocation.
+- Every ChatGPT CODE review and SECURITY review must be bound to the PR's exact published head SHA. Record that full SHA in the review result.
+- If the PR head SHA changes, the previous final review is not valid for the new head. Review the bounded delta, re-run relevant deterministic evidence, then issue final CODE and SECURITY conclusions for the new exact SHA.
+- CODE review covers correctness, regressions, repository contracts, architecture adherence, tests, operational behavior, and failure handling.
+- SECURITY review covers secrets, authentication and authorization, trust boundaries, input validation, network exposure, privilege, supply chain, artifact integrity, unsafe defaults, and destructive behavior.
+- Findings must identify severity, path or owning component, concrete risk, and the exact SHA reviewed.
+- A finding may be resolved only after the correction exists on a published SHA and supporting deterministic evidence is available.
+- Merge readiness requires exact-SHA qualification plus completed ChatGPT CODE and SECURITY review for that same SHA, with no unresolved blocking finding.
+- Deterministic gates and tests are evidence for the review; they do not replace ChatGPT CODE or SECURITY review.
+
 ## Automated delivery
 
 Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
