@@ -3775,6 +3775,36 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def _valid_performance_campaign(head_sha: str) -> Path | None:
+    campaign_contract = ruby_yaml("config/contracts/ci-evidence.yaml").get("performance_campaign", {})
+    if campaign_contract.get("required_before_merge") is not True:
+        return None
+    path = CONTEXT / "performance" / f"campaign-{head_sha}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    repetitions = int(qualification_execution_policy()["performance"]["campaign"]["repetitions"])
+    expected_tree = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("status") != "PASS"
+        or payload.get("head_sha") != head_sha
+        or payload.get("head_tree_sha") != expected_tree
+        or payload.get("qualification_identity") != qualification_identity()
+        or payload.get("repetitions") != repetitions
+        or not isinstance(payload.get("budgets"), dict)
+        or not payload["budgets"]
+        or any(item.get("status") != "PASS" for item in payload["budgets"].values())
+        or payload.get("safety", {}).get("native_dependency_caches_preserved") is not True
+        or payload.get("safety", {}).get("product_runtime_tests_remain_fresh") is not True
+    ):
+        return None
+    return path
+
+
 def finish_pr(base: str) -> int:
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
@@ -3809,6 +3839,13 @@ def finish_pr(base: str) -> int:
         evidence = _valid_exact_evidence(base_ref, head)
     if evidence is None:
         return fail(f"finish-pr exact PASS evidence missing for {head}")
+
+    campaign = _valid_performance_campaign(head)
+    if campaign is None:
+        return fail(
+            f"finish-pr performance campaign PASS proof missing/invalid for {head}; "
+            "run make qualification-proof on the exact clean head"
+        )
 
     raw_prs = output(
         [
