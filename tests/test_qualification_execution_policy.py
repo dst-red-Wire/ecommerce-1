@@ -382,6 +382,71 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIn('TemporaryDirectory(prefix="ecommerce-terraform-validation-")', source)
         self.assertIn('collections_install_root', (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
 
+    def test_tekton_finalizer_rejects_skip_for_planned_fresh_gate(self):
+        head = "a" * 40
+        base_sha = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            record_dir = Path(directory)
+            (record_dir / "plan.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "schema_version": 2,
+                        "head_sha": head,
+                        "base_sha": base_sha,
+                        "gates": ["security"],
+                        "execution_plan": [
+                            {
+                                "gate": "security",
+                                "scope": "global",
+                                "action": "fresh",
+                                "cache_mode": "fresh",
+                                "parallel_safe": True,
+                                "ci_fanout": True,
+                            }
+                        ],
+                        "precomputed_records": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (record_dir / "global-security.json").write_text(
+                __import__("json").dumps(
+                    {
+                        "head_sha": head,
+                        "records": [
+                            {
+                                "gate": "security",
+                                "status": "SKIP",
+                                "duration_seconds": 0.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_git(*args, check=True):
+                if args == ("rev-parse", "origin/main"):
+                    return base_sha + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "_require_clean_exact_checkout", return_value=(head, head)),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "publish_remote_status") as publish,
+                mock.patch.object(MOD, "write_evidence") as write,
+            ):
+                self.assertEqual(1, MOD.ci_finalize("origin/main", head, str(record_dir)))
+
+            write.assert_not_called()
+            self.assertTrue(
+                any(
+                    call.args[1] == "failure"
+                    for call in publish.call_args_list
+                    if len(call.args) > 1
+                )
+            )
+
     def test_security_and_dynamic_runtime_state_cannot_be_content_cached(self):
         policy = MOD.qualification_execution_policy()
         self.assertEqual("fresh", MOD._resolved_gate_policy("security")["cache_mode"])
