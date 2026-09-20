@@ -100,7 +100,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -153,6 +153,12 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
+perf-campaign: ## Run the blocking 3x cold/warm/Product/governance performance campaign
+	@$(PYTHON) scripts/qualification_performance_campaign.py --base "${BASE:-origin/main}" --repetitions 3 $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
+
+qualification-proof: ## Final exact-SHA qualification + performance budgets + Product/Testcontainers proof
+	@$(PYTHON) scripts/qualification_performance_campaign.py --base "${BASE:-origin/main}" --repetitions 3
+	@SHA="$(git rev-parse HEAD)"; $(PYTHON) scripts/performance_audit.py --evidence ".context/evidence/$SHA.json"
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
 
 context: ## Build bounded task-aware context pack; use TASK="..."
