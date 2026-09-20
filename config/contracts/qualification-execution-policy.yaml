@@ -356,6 +356,7 @@ gates:
     command:
       action: service
       suffix_arg: true
+    requires_path: services/<target>/go.mod
     tools: [go, gofmt]
     validators:
       - scripts/repoctl.py
