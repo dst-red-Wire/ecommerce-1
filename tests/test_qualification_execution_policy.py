@@ -94,6 +94,29 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIn("tests/test_m1_qualification_runner.py", gate["validators"])
         self.assertNotIn("<target>", gate["inputs"])
 
+    def test_system_plan_excludes_dedicated_owned_tests(self):
+        with (
+            mock.patch.object(MOD, "_git_neutral_test_env", return_value={}),
+            mock.patch.object(MOD, "_run_functions_parallel", return_value=0) as runner,
+        ):
+            self.assertEqual(0, MOD.system_check())
+        names = [name for name, _producer in runner.call_args.args[0]]
+        self.assertNotIn("system:test:tests/test_architecture_authority.py", names)
+        self.assertNotIn("system:test:tests/openapi_validator_test.rb", names)
+        self.assertIn("system:test:tests/test_m1_qualification_runner.py", names)
+        self.assertIn("system:test:tests/delivery/test_performance_audit.py", names)
+
+    def test_governance_plan_shards_validators_and_owned_tests(self):
+        with mock.patch.object(MOD, "_run_functions_parallel", return_value=0) as runner:
+            self.assertEqual(0, MOD.governance())
+        names = [name for name, _producer in runner.call_args.args[0]]
+        self.assertIn("governance:authority", names)
+        self.assertIn("governance:documentation", names)
+        self.assertIn("governance:validator:scripts/validate-architecture.rb", names)
+        self.assertIn("governance:test:tests/test_architecture_authority.py", names)
+        self.assertIn("governance:test:tests/test_qualification_execution_policy.py", names)
+        self.assertEqual(15, len(names))
+
     def test_dynamic_service_inputs_are_resolved_without_product_special_case(self):
         product = MOD._resolved_gate_policy("service:product")
         catalog = MOD._resolved_gate_policy("service:catalog")
