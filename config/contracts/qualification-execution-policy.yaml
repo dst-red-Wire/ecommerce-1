@@ -1,0 +1,239 @@
+version: 1
+kind: QualificationExecutionPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+
+principles:
+  single_execution_authority: true
+  fail_closed_on_unknown_gate: true
+  affected_only_by_default: true
+  cache_is_acceleration_not_authority: true
+  exact_sha_evidence_remains_authoritative: true
+  dynamic_state_must_be_fresh: true
+
+execution:
+  max_workers: 4
+  global_parallelism: bounded
+  component_parallelism: bounded
+  stable_output_order: true
+
+cache_modes:
+  content-pass: deterministic PASS may be reused from the content-addressed qualification cache
+  native-only: only tool-native caches may accelerate execution
+  fresh: always execute
+  forbidden: no cache of any kind may authorize skipping execution
+
+gates:
+  governance:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/architecture_authority.py
+      - scripts/validate-architecture.rb
+      - scripts/validate-architecture-boundaries.rb
+      - scripts/validate-service-policy-chain.rb
+      - scripts/validate-service-mesh-policy.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-observability.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - config/infrastructure/**/*
+      - config/toolchain/**/*
+      - contracts/**/*
+      - docs/architecture/**/*
+      - scripts/architecture_authority.py
+      - scripts/validate-architecture.rb
+      - scripts/validate-architecture-boundaries.rb
+      - scripts/validate-service-policy-chain.rb
+      - scripts/validate-service-mesh-policy.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-observability.rb
+      - tests/test_architecture_authority.py
+      - tests/test_qualification_cache.py
+      - tests/architecture_validator_test.rb
+      - tests/observability_topology_test.rb
+      - tests/ci_authority_test.rb
+      - tests/ci_affected_test.rb
+      - AGENTS.md
+      - README.md
+      - docs/api/README.md
+      - docs/project/CODEX_HANDOFFS.md
+  runtime-efficiency:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/validate-runtime-efficiency.rb
+      - scripts/resource-sizing.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/runtime-efficiency.yaml
+      - frontend/go.mod
+      - frontend/apps/storefront/main.go
+      - frontend/apps/admin/main.go
+      - frontend/internal/web/layout.templ
+      - services/*/Containerfile
+      - scripts/validate-runtime-efficiency.rb
+      - scripts/resource-sizing.rb
+      - tests/runtime_efficiency_test.rb
+      - tests/resource_sizing_test.rb
+  contracts:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby, git, go, oasdiff, oapi-codegen]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+      - scripts/validate-openapi.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-architecture.rb
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/public-api-contracts.yaml
+      - config/contracts/service-ownership.yaml
+      - config/contracts/dependency-map.yaml
+      - config/contracts/event-contracts.yaml
+      - contracts/openapi/**/*
+      - scripts/validate-openapi.rb
+      - scripts/validate-contract-consistency.rb
+      - scripts/validate-architecture.rb
+      - tests/openapi_validator_test.rb
+      - tests/contract_consistency_test.rb
+  automation:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - .gitignore
+      - BUILD.bazel
+      - "**/*.sh"
+      - platform/tekton/**/*
+      - scripts/repoctl.py
+  security:
+    scope: global
+    parallel_safe: true
+    cache_mode: fresh
+    dependencies: []
+    tools: [gitleaks, git]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/security-scan-policy.yaml
+    fresh_prechecks:
+      - exact-git-history-and-worktree-scan
+  system:
+    scope: component
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [python3, ruby, git]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/**/*
+      - contracts/**/*
+      - scripts/**/*.py
+      - scripts/**/*.rb
+      - tests/**/*.py
+      - tests/**/*.rb
+      - Makefile
+      - BUILD.bazel
+  platform:ansible:
+    scope: component
+    parallel_safe: false
+    cache_mode: content-pass
+    dependencies: []
+    tools: [ansible-lint, ansible-playbook, ansible-galaxy]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/source-quality-policy.yaml
+      - config/contracts/toolchain-lock.json
+      - platform/ansible/**/*
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    fresh_prechecks:
+      - project-owned-collection-version-reconciliation
+  platform:terraform:
+    scope: component
+    parallel_safe: false
+    cache_mode: content-pass
+    dependencies: []
+    tools: [tofu, terraform]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/source-quality-policy.yaml
+      - config/contracts/terraform-provider-lock.yaml
+      - config/contracts/toolchain-lock.json
+      - platform/terraform/**/*.tf
+      - platform/terraform/**/*.tftpl
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    fresh_prechecks:
+      - approved-terraform-executable-availability
+      - canonical-provider-lock-contract
+  "frontend:*":
+    scope: component
+    parallel_safe: true
+    cache_mode: native-only
+    dependencies: []
+    tools: [go, gofmt, templ]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - frontend/**/*
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+  "service:*":
+    scope: component
+    parallel_safe: true
+    cache_mode: native-only
+    dependencies: []
+    tools: [go, gofmt]
+    validators:
+      - scripts/repoctl.py
+    inputs:
+      - services/<service>/**/*
+      - go.work
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+    fresh_prechecks:
+      - docker-runtime-when-testcontainers-are-used
+
+dynamic_state:
+  always_fresh:
+    - git-status
+    - current-head-sha
+    - remote-ci-state
+    - review-state
+    - docker-runtime-state
+    - kubernetes-runtime-state
+    - network-state
+    - secrets-and-authentication
+    - provisioning-state
