@@ -221,9 +221,30 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
         global_seconds, global_path = _ordered_parallel_schedule(global_rows, workers)
         global_model = "ordered-bounded-local"
 
-    component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
-    longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
-    component_parallel_seconds = longest_component[1]
+    component_durations = [
+        (str(record.get("gate")), _seconds(record.get("duration_seconds")))
+        for record in components
+    ]
+    tekton_component_fanout = bool(components) and all(
+        record.get("parallel_group") == "tekton-component-matrix"
+        for record in components
+    )
+    if tekton_component_fanout:
+        longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
+        component_parallel_seconds = longest_component[1]
+        component_path = [longest_component[0]] if longest_component[0] else []
+        component_model = "tekton-matrix"
+    else:
+        component_rows = [
+            (
+                str(record.get("gate")),
+                _seconds(record.get("duration_seconds")),
+                bool(record.get("parallel_safe", False)),
+            )
+            for record in components
+        ]
+        component_parallel_seconds, component_path = _ordered_parallel_schedule(component_rows, workers)
+        component_model = "ordered-bounded-local"
 
     serial_seconds = sum(_seconds(record.get("duration_seconds")) for record in active)
     critical_seconds = max(global_seconds, component_parallel_seconds)
@@ -231,9 +252,9 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
     if global_seconds >= component_parallel_seconds and globals_:
         branch = "global-gates"
         gates = global_path
-    elif longest_component[0]:
-        branch = "component-matrix"
-        gates = [longest_component[0]]
+    elif component_path:
+        branch = "component-matrix" if tekton_component_fanout else "component-gates"
+        gates = component_path
     else:
         branch = "none"
         gates = []
@@ -245,6 +266,7 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
     return {
         "model": "tekton-affected-v3",
         "global_execution_model": global_model,
+        "component_execution_model": component_model,
         "assumption": "true Tekton global/component matrix fan-out when recorded; ordered bounded local execution otherwise",
         "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
