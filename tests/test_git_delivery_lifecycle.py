@@ -28,6 +28,9 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("forbidden", policy["merge"]["bypass_branch_protection"])
         self.assertEqual("delete", policy["cleanup"]["remote_branch"])
         self.assertEqual("delete", policy["cleanup"]["local_branch"])
+        automatic_cleanup = policy["cleanup"]["automatic_branch_cleanup"]
+        self.assertIs(True, automatic_cleanup["remote_delete_requires_exact_lease"])
+        self.assertIs(True, automatic_cleanup["local_delete_requires_compare_and_delete"])
 
     def test_unsafe_policy_mutations_are_rejected(self):
         policy = repoctl.repository_delivery_policy()
@@ -54,18 +57,27 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         source = inspect.getsource(repoctl.finish_pr)
         for marker in (
             "--match-head-commit",
-            "--delete-branch",
             "--required",
             "/protection",
             "/rules/branches/",
             "merge-base",
             "_valid_exact_evidence",
             "origin/{branch}",
-            "git\", \"branch\", \"-d",
+            '_delete_branch_ref("remote", branch, head)',
+            '_delete_branch_ref("local", branch, head)',
+            "remote_branch.returncode not in {0, 2}",
+            "cannot prove remote branch state",
         ):
             self.assertIn(marker, source)
-        self.assertNotIn("--admin", source)
-        self.assertNotIn("--force", source)
+        for marker in (
+            "--admin",
+            "git push origin --delete",
+            'git", "push", "origin", "--delete',
+            "git branch -d",
+            'git", "branch", "-d',
+            "--delete-branch",
+        ):
+            self.assertNotIn(marker, source)
         self.assertIn("no checks reported", source)
 
     def test_makefile_exposes_centralized_commands(self):

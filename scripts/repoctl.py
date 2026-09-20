@@ -4731,7 +4731,6 @@ def finish_pr(base: str) -> int:
             "merge",
             str(number),
             merge_flag,
-            "--delete-branch",
             "--match-head-commit",
             head,
         ],
