@@ -2508,6 +2508,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "execution": execution,
         "cache_mode": policy.get("cache_mode"),
         "parallel_safe": bool(policy.get("parallel_safe")),
+        "ci_fanout": bool(policy.get("ci_fanout")),
         "parallel_group": effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial"),
         "started_at_monotonic_offset": round(max(0.0, start - anchor), 6),
     }
@@ -2986,7 +2987,14 @@ def ci_global(gate: str, base: str, head: str, record_dir: str) -> int:
         return fail(f"ci-global gate is not executable: {gate}: {reason}", 2)
     records: list[dict] = []
     env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head, "ECOMMERCE_PARALLEL_GROUP": "tekton-global-matrix"})
+    env.update(
+        {
+            "BASE": base,
+            "HEAD": head,
+            "ECOMMERCE_PARALLEL_GROUP": "tekton-global-matrix",
+            "ECOMMERCE_QUALIFICATION_MONOTONIC_START": str(time.monotonic()),
+        }
+    )
     rc = 0 if _run_gate(gate, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"global-{gate}"), {"head_sha": requested, "records": records})
     return rc
@@ -3014,7 +3022,14 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
         rc = 0
     else:
         env = os.environ.copy()
-        env.update({"BASE": base, "HEAD": head, "ECOMMERCE_PARALLEL_GROUP": "tekton-component-matrix"})
+        env.update(
+            {
+                "BASE": base,
+                "HEAD": head,
+                "ECOMMERCE_PARALLEL_GROUP": "tekton-component-matrix",
+                "ECOMMERCE_QUALIFICATION_MONOTONIC_START": str(time.monotonic()),
+            }
+        )
         rc = 0 if _run_gate(component, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"component-{component}"), {"head_sha": requested, "records": records})
     return rc
@@ -3193,7 +3208,13 @@ def verify_change(base: str, head: str) -> int:
     components = affected(base, head)
     records: list[dict] = []
     env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
+    env.update(
+        {
+            "BASE": base,
+            "HEAD": head,
+            "ECOMMERCE_QUALIFICATION_MONOTONIC_START": str(time.monotonic()),
+        }
+    )
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
