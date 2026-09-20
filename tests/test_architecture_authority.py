@@ -476,6 +476,29 @@ graph LR
                     policy.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+    def test_review_budget_inherits_chatgpt_review_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            budget = root / "config/contracts/review-budget.json"
+            original = budget.read_text()
+            self.assertIn(
+                '"review_authority_source": "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"',
+                original,
+            )
+            budget.write_text(
+                original.replace(
+                    "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer",
+                    "external/codex-review-authority",
+                    1,
+                )
+            )
+            self.assertIn(
+                "review budget must inherit the canonical ChatGPT review authority",
+                authority.validate(root),
+            )
+            budget.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_topology_assertions_and_operational_subsets(self):
         for statement in (
             "The topology consists of 17 backend services.",
