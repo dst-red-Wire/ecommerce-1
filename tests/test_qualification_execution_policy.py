@@ -125,6 +125,89 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertNotEqual(product["inputs"], catalog["inputs"])
         self.assertEqual("service:*", product["_policy_name"])
 
+    def test_top_level_commands_and_ci_fanout_are_contract_driven(self):
+        globals_ = MOD._policy_gate_names("global")
+        self.assertEqual(
+            ["governance", "runtime-efficiency", "contracts", "automation", "security"],
+            globals_,
+        )
+        self.assertEqual(globals_, MOD._policy_gate_names("global", ci_fanout_only=True))
+        contracts, reason = MOD._gate_command("contracts", "origin/main", "HEAD")
+        self.assertIsNone(reason)
+        self.assertEqual(
+            ["contracts", "--base", "origin/main", "--head", "HEAD"],
+            contracts[-5:],
+        )
+        product, reason = MOD._gate_command("service:product")
+        self.assertIsNone(reason)
+        self.assertEqual(["service", "product"], product[-2:])
+
+    def test_execution_plan_emits_run_fresh_reuse_and_is_policy_complete(self):
+        parent = {
+            "gates": [
+                {"gate": "service:product", "status": "PASS"},
+                {"gate": "system", "status": "PASS"},
+            ]
+        }
+        plan = MOD.build_execution_plan(
+            "origin/main",
+            "HEAD",
+            ["global", "service:product", "system"],
+            parent_sha="a" * 40,
+            parent_evidence=parent,
+            delta_components={"global"},
+        )
+        by_gate = {entry["gate"]: entry for entry in plan}
+        self.assertEqual("fresh", by_gate["security"]["action"])
+        self.assertEqual("run", by_gate["governance"]["action"])
+        self.assertEqual("reuse", by_gate["service:product"]["action"])
+        self.assertEqual("reuse", by_gate["system"]["action"])
+        self.assertEqual(
+            set(MOD._policy_gate_names("global")) | {"service:product", "system"},
+            set(by_gate),
+        )
+
+    def test_dependency_cycle_and_unknown_dependency_fail_closed(self):
+        cycle = [
+            {
+                "gate": "a",
+                "scope": "global",
+                "action": "run",
+                "command": ["a"],
+                "dependencies": ["b"],
+            },
+            {
+                "gate": "b",
+                "scope": "global",
+                "action": "run",
+                "command": ["b"],
+                "dependencies": ["a"],
+            },
+        ]
+        with self.assertRaisesRegex(RuntimeError, "cycle or unsatisfied"):
+            MOD._execute_plan_scope(cycle, "global", [], {}, None, None)
+
+        unknown = [
+            {
+                "gate": "a",
+                "scope": "global",
+                "action": "run",
+                "command": ["a"],
+                "dependencies": ["missing"],
+            }
+        ]
+        with self.assertRaisesRegex(RuntimeError, "unknown gate"):
+            MOD._execute_plan_scope(unknown, "global", [], {}, None, None)
+
+    def test_performance_campaign_and_budgets_are_central_contract(self):
+        performance = MOD.qualification_execution_policy()["performance"]
+        self.assertEqual(3, performance["campaign"]["repetitions"])
+        self.assertEqual(110.054, performance["baselines_seconds"]["system"])
+        self.assertEqual(86.060, performance["baselines_seconds"]["governance"])
+        self.assertLessEqual(performance["budgets_seconds"]["warm_verify_change_wall_max"], 30)
+        self.assertLessEqual(performance["budgets_seconds"]["service_product_warm_wall_max"], 10)
+        self.assertIs(True, performance["regression"]["fail_on_budget_regression"])
+
     def test_unknown_gate_fails_closed(self):
         with self.assertRaisesRegex(RuntimeError, "does not declare gate"):
             MOD._resolved_gate_policy("unknown:gate")
