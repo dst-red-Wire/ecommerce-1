@@ -24,8 +24,30 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual("architecture.lock.yaml", policy["architecture_authority"])
         self.assertEqual("entire-repository", policy["scope"])
         self.assertEqual("enforced", policy["status"])
-        self.assertGreaterEqual(policy["execution"]["max_workers"], 1)
-        self.assertLessEqual(policy["execution"]["max_workers"], 16)
+        self.assertGreaterEqual(policy["execution"]["local_max_workers"], 1)
+        self.assertLessEqual(policy["execution"]["local_max_workers"], 16)
+        self.assertEqual(
+            "ECOMMERCE_QUALIFICATION_MAX_WORKERS",
+            policy["execution"]["ci_max_workers_env"],
+        )
+        self.assertIs(True, policy["execution"]["ci_max_workers_required"])
+
+    def test_ci_worker_budget_is_required_from_runtime(self):
+        execution = MOD.qualification_execution_policy()["execution"]
+        env_name = execution["ci_max_workers_env"]
+        with mock.patch.dict(
+            MOD.os.environ,
+            {"ECOMMERCE_EXECUTION_SCOPE": "ci", env_name: ""},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "runtime-provided"):
+                MOD._execution_workers()
+        with mock.patch.dict(
+            MOD.os.environ,
+            {"ECOMMERCE_EXECUTION_SCOPE": "ci", env_name: "3"},
+            clear=False,
+        ):
+            self.assertEqual(3, MOD._execution_workers())
 
     def test_cross_cutting_execution_domain_is_centralized(self):
         model = MOD.repository_authority_model()
