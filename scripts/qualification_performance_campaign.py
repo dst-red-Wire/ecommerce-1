@@ -119,6 +119,17 @@ def _synthetic_worktree(kind: str):
     return Worktree()
 
 
+def _baseline_comparison(baseline: float, actual: float) -> dict:
+    saved = baseline - actual
+    return {
+        "baseline_seconds": round(baseline, 3),
+        "actual_seconds": round(actual, 3),
+        "saved_seconds": round(saved, 3),
+        "savings_percent": round((saved / baseline) * 100.0, 1) if baseline else 0.0,
+        "speedup": round((baseline / actual), 3) if actual > 0.0 else None,
+    }
+
+
 def _budget_result(actual: float, maximum: float) -> dict:
     return {
         "actual_seconds": round(actual, 3),
@@ -244,6 +255,20 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
         "affected_product": product,
         "affected_governance": governance,
         "warm_gates": gate_warm,
+        "baseline_comparison": {
+            "system": _baseline_comparison(
+                float(baselines["system"]), gate_warm["system"]["median_wall_seconds"]
+            ),
+            "governance": _baseline_comparison(
+                float(baselines["governance"]), gate_warm["governance"]["median_wall_seconds"]
+            ),
+            "platform:ansible": _baseline_comparison(
+                float(baselines["platform:ansible"]), gate_warm["ansible"]["median_wall_seconds"]
+            ),
+            "service:product": _baseline_comparison(
+                float(baselines["service:product"]), gate_warm["service-product"]["median_wall_seconds"]
+            ),
+        },
         "final_product_exact": final_product,
         "final_verify_exact": final_verify,
         "budgets": checks,
