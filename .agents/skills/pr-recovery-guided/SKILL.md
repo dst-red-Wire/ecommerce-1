@@ -9,7 +9,7 @@ Use this skill when cleaning old pull requests/worktrees, recovering useful unco
 
 The user's explicit instructions take precedence.
 
-This skill complements `codex-review-budget`: that skill minimizes repeated AI review; this skill controls the safe operational sequence.
+This skill complements `chatgpt-exact-sha-review`: that skill owns exact-SHA CODE and SECURITY review; this skill controls the safe operational sequence.
 
 ## Interaction contract
 
@@ -135,13 +135,15 @@ Do not resolve GitHub threads until the correction exists on the exact published
 For a final candidate SHA:
 
 1. verify the PR current head equals the intended SHA;
-2. check whether equivalent CODE/SECURITY review already exists for that exact SHA;
-3. if absent, request CODE review on the exact SHA;
-4. separately request SECURITY review on the exact SHA;
-5. do not repeatedly request equivalent reviews for the same SHA;
-6. after reviews complete, inspect new threads/findings before merge.
+2. use ChatGPT to perform CODE review for that exact SHA;
+3. use ChatGPT to perform SECURITY review for that exact SHA;
+4. never trigger, request, rerun, poll, or depend on Codex review workflows;
+5. reuse valid deterministic evidence and review only the material delta after fixes;
+6. if the head SHA changes, treat the prior final review as historical and review the new exact SHA;
+7. resolve findings only after the fix exists on a published SHA and its evidence is verified;
+8. require no unresolved blocking finding before merge.
 
-Use `codex-review-budget` to avoid duplicate review work.
+Use `chatgpt-exact-sha-review` as the review authority and duplication-control contract.
 
 ## Phase 10 — Merge and cleanup
 
