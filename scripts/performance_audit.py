@@ -21,13 +21,6 @@ import subprocess
 import sys
 from typing import Any
 
-GLOBAL_GATES = (
-    "governance",
-    "runtime-efficiency",
-    "contracts",
-    "automation",
-    "security",
-)
 REUSE_FIELDS = (
     "reused_from_sha",
     "promoted_from_worktree",
@@ -186,9 +179,9 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
 
     def is_global(record: dict[str, Any]) -> bool:
         scope = record.get("scope")
-        if scope is not None:
-            return scope == "global"
-        return record.get("gate") in GLOBAL_GATES
+        if scope not in {"global", "component"}:
+            raise ValueError(f"gate {record.get('gate')} lacks canonical global/component scope")
+        return scope == "global"
 
     globals_ = [record for record in active if is_global(record)]
     components = [record for record in active if not is_global(record)]
