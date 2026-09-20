@@ -42,6 +42,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         self.assertEqual(1, proof["verify_change_runs"])
         self.assertEqual(1, proof["performance_audit_runs"])
+        self.assertEqual(".context/performance/<sha>.json", proof["performance_audit_output"])
         self.assertIs(False, proof["performance_campaign_required"])
         self.assertIs(True, proof["merge_authoritative"])
 
@@ -61,19 +62,25 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             raise AssertionError(args)
 
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        audit_path = ROOT / ".context" / "performance" / f"{head}.json"
         with (
             mock.patch.object(MOD, "git", side_effect=fake_git),
             mock.patch.object(MOD, "verify_change", return_value=0) as verify,
             mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
+            mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path) as valid_audit,
             mock.patch.object(MOD, "run", return_value=completed) as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
 
         verify.assert_called_once_with("origin/main", head)
+        valid_audit.assert_called_once_with("origin/main", head)
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertIn("scripts/performance_audit.py", command)
         self.assertEqual(1, command.count("--evidence"))
+        self.assertEqual(1, command.count("--output"))
+        self.assertEqual(str(audit_path), command[command.index("--output") + 1])
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
