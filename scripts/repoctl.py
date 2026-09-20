@@ -3798,7 +3798,13 @@ def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
         capture=True,
     )
     if response.returncode:
-        print("ADVISORY branch-cleanup: merged PR history unavailable; using ancestry proof only", file=sys.stderr)
+        detail = (response.stderr or response.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        print(
+            "ADVISORY branch-cleanup: merged PR history unavailable; using ancestry proof only"
+            + suffix,
+            file=sys.stderr,
+        )
         return {}
     try:
         pages = json.loads(response.stdout or "[]")
@@ -3848,20 +3854,37 @@ def _plan_branch_cleanup(
         elif branch in active_worktrees:
             branch_guard = "active-worktree"
 
-        for scope, refs in (("remote", remote_refs), ("local", local_refs)):
-            head_sha = refs.get(branch)
-            if not head_sha:
-                continue
-            if branch_guard:
-                action, reason = "keep", branch_guard
+        scoped_heads = [
+            (scope, refs.get(branch))
+            for scope, refs in (("remote", remote_refs), ("local", local_refs))
+            if refs.get(branch)
+        ]
+        exact_merged_heads = merged_pr_heads.get(branch, set())
+
+        if branch_guard:
+            branch_keep_reason = branch_guard
+        else:
+            unsafe_heads = [
+                head_sha
+                for _scope, head_sha in scoped_heads
+                if ancestor_heads.get(head_sha) is not True and head_sha not in exact_merged_heads
+            ]
+            if unsafe_heads:
+                branch_keep_reason = (
+                    "branch-advanced-after-merged-pr"
+                    if exact_merged_heads
+                    else "branch-with-unabsorbed-head"
+                )
+            else:
+                branch_keep_reason = ""
+
+        for scope, head_sha in scoped_heads:
+            if branch_keep_reason:
+                action, reason = "keep", branch_keep_reason
             elif ancestor_heads.get(head_sha) is True:
                 action, reason = "delete", "head-is-ancestor-of-default-branch"
-            elif head_sha in merged_pr_heads.get(branch, set()):
-                action, reason = "delete", "merged-pr-head-matches-current-branch-head"
-            elif merged_pr_heads.get(branch):
-                action, reason = "keep", "branch-advanced-after-merged-pr"
             else:
-                action, reason = "keep", "branch-with-unabsorbed-head"
+                action, reason = "delete", "merged-pr-head-matches-current-branch-head"
             actions.append(
                 {
                     "branch": branch,
