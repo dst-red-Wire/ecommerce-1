@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+import performance_audit
 import repoctl
 
 
@@ -288,6 +289,91 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     return report, report["status"] == "PASS"
 
 
+def _markdown_report(report: dict, audit_report: dict, files_changed: list[str], branch: str) -> str:
+    before = report["baselines_seconds"]
+    cold = report["cold_verify_change"]["median_wall_seconds"]
+    warm = report["warm_verify_change"]["median_wall_seconds"]
+    affected_product = report["affected_product"]["median_wall_seconds"]
+    affected_governance = report["affected_governance"]["median_wall_seconds"]
+    inventory = audit_report["inventory"]
+    critical = audit_report["critical_path"]
+    baseline_total = round(sum(float(value) for value in before.values()), 3)
+
+    lines = [
+        "BRANCH",
+        branch,
+        "",
+        "HEAD",
+        str(report["head_sha"]),
+        "",
+        "FILES CHANGED",
+        *[f"- {path}" for path in files_changed],
+        "",
+        "CENTRAL AUTHORITY",
+        "architecture.lock.yaml -> config/contracts/qualification-execution-policy.yaml",
+        "",
+        "ARCHITECTURE",
+        "canonical planner -> RUN/FRESH/REUSE/SKIP -> bounded local DAG / Tekton matrices -> exact-SHA evidence",
+        "",
+        "BEFORE",
+        f"system             {float(before['system']):.3f}s",
+        f"governance          {float(before['governance']):.3f}s",
+        f"platform:ansible    {float(before['platform:ansible']):.3f}s",
+        f"service:product     {float(before['service:product']):.3f}s",
+        "",
+        "AFTER COLD",
+        f"median verify-change {cold:.3f}s",
+        "",
+        "AFTER WARM",
+        f"median verify-change {warm:.3f}s",
+        f"system {report['warm_gates']['system']['median_wall_seconds']:.3f}s",
+        f"governance {report['warm_gates']['governance']['median_wall_seconds']:.3f}s",
+        f"ansible {report['warm_gates']['ansible']['median_wall_seconds']:.3f}s",
+        f"service:product {report['warm_gates']['service-product']['median_wall_seconds']:.3f}s",
+        "",
+        "AFFECTED PRODUCT",
+        f"median {affected_product:.3f}s",
+        "",
+        "AFFECTED GOVERNANCE",
+        f"median {affected_governance:.3f}s",
+        "",
+        "CACHE HIT RATIO",
+        f"exact-parent evidence reuse {inventory.get('evidence_reuse_hit_percent', 0.0):.1f}%",
+        f"content-cache hits {inventory.get('content_cache_hits', 0)}",
+        f"content-cache misses {inventory.get('content_cache_misses', 0)}",
+        "",
+        "CRITICAL PATH BEFORE",
+        f"{baseline_total:.3f}s baseline serial slice",
+        "",
+        "CRITICAL PATH AFTER",
+        f"{critical.get('critical_path_estimate_seconds', 0.0):.3f}s ({critical.get('critical_branch', 'none')})",
+        "",
+        "QUALIFICATION",
+        f"final verify-change {report['final_verify_exact']['wall_seconds']:.3f}s",
+        f"final Product/Testcontainers gate {report['final_product_exact']['wall_seconds']:.3f}s",
+        "",
+        "REGRESSION TESTS",
+        *[
+            f"- {name}: {value['status']} actual={value['actual_seconds']:.3f}s max={value['maximum_seconds']:.3f}s"
+            for name, value in sorted(report["budgets"].items())
+        ],
+        "",
+        "SECURITY / DYNAMIC CHECKS",
+        "fresh: security, Docker/Testcontainers, network, Kubernetes, secrets/authentication, provisioning state",
+        "",
+        "EXACT-SHA EVIDENCE",
+        f".context/evidence/{report['head_sha']}.json",
+        "",
+        "PR",
+        "resolved by the delivery/PR workflow for this branch",
+        "",
+        "VERDICT",
+        "READY FOR REVIEW" if report["status"] == "PASS" else "BLOCKED: performance/qualification budget failure",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the complete qualification performance campaign")
     parser.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
@@ -306,7 +392,27 @@ def main(argv: list[str] | None = None) -> int:
             destination = ROOT / destination
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps({"status": report["status"], "output": str(destination)}, sort_keys=True))
+
+        evidence_path = ROOT / ".context" / "evidence" / f"{report['head_sha']}.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        audit_report = performance_audit.audit(evidence, root=ROOT)
+        branch = subprocess.check_output(["git", "branch", "--show-current"], cwd=ROOT, text=True).strip() or "DETACHED"
+        files_changed = subprocess.check_output(
+            ["git", "diff", "--name-only", args.base, report["head_sha"], "--"],
+            cwd=ROOT,
+            text=True,
+        ).splitlines()
+        markdown = destination.with_suffix(".md")
+        markdown.write_text(
+            _markdown_report(report, audit_report, sorted(set(files_changed)), branch),
+            encoding="utf-8",
+        )
+        print(
+            json.dumps(
+                {"status": report["status"], "output": str(destination), "report": str(markdown)},
+                sort_keys=True,
+            )
+        )
         return 0 if passed else 1
     except (RuntimeError, OSError, subprocess.CalledProcessError, KeyError, ValueError) as exc:
         print(f"FAIL qualification performance campaign: {exc}", file=sys.stderr)
