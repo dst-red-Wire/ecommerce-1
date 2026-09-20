@@ -99,7 +99,7 @@ Do not hardcode credentials. Do not claim real provider provisioning when creden
 
 ## M2.5 prompt — Persistent MGMT Bootstrap
 
-Tracker: `#15`.
+Tracker: `#32`.
 
 Canonical milestone: `M2-5-persistent-mgmt-bootstrap`.
 

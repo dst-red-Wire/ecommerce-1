@@ -4010,6 +4010,66 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     return 1 if failures else 0
 
 
+def roadmap_check(*, quiet: bool = False) -> int:
+    command = [sys.executable, "scripts/roadmap_sync.py", "check"]
+    if quiet:
+        command.append("--quiet")
+    return run(command, check=False).returncode
+
+
+def roadmap_sync() -> int:
+    return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
+
+
+def _roadmap_followup_after_merge() -> int:
+    check_rc = roadmap_check(quiet=True)
+    if check_rc == 0:
+        print("PASS finish-pr: roadmap already synchronized")
+        return 0
+    if check_rc != 1:
+        return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
+
+    main_sha = git("rev-parse", "HEAD").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
+        return fail("roadmap follow-up requires exact main SHA")
+
+    policy = repository_delivery_policy()
+    default_branch = str(policy["default_branch"])
+    if git("branch", "--show-current").strip() != default_branch:
+        return fail("roadmap follow-up requires the default branch checkout")
+
+    followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
+    local_exists = run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
+        check=False,
+    ).returncode == 0
+    remote_exists = run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{followup_branch}"],
+        check=False,
+    ).returncode == 0
+
+    if local_exists:
+        run(["git", "switch", followup_branch])
+    elif remote_exists:
+        run(["git", "switch", "-c", followup_branch, "--track", f"origin/{followup_branch}"])
+    else:
+        run(["git", "switch", "-c", followup_branch, f"origin/{default_branch}"])
+
+    if roadmap_sync():
+        return 1
+    if roadmap_check(quiet=True):
+        return fail("roadmap-sync did not converge")
+
+    title = f"chore: synchronize roadmap after {main_sha[:12]}"
+    if deliver(default_branch, title, title):
+        return 1
+
+    run(["git", "switch", default_branch])
+    run(["git", "merge", "--ff-only", f"origin/{default_branch}"])
+    print(f"PASS finish-pr: roadmap synchronization PR published from {followup_branch}")
+    return 0
+
+
 def git_sync() -> int:
     branch = git("branch", "--show-current").strip()
     if not branch:
@@ -4028,7 +4088,7 @@ def git_sync() -> int:
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
-    required_sections = {"publish", "pull_request", "merge", "cleanup"}
+    required_sections = {"publish", "pull_request", "merge", "cleanup", "post_merge"}
     missing = sorted(required_sections - set(policy))
     if missing:
         raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
@@ -4041,6 +4101,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     pull_request_policy = policy["pull_request"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
+    post_merge_policy = policy["post_merge"]
     automatic_cleanup = cleanup_policy.get("automatic_branch_cleanup")
     expected_automatic_cleanup = {
         "enabled": True,
@@ -4071,6 +4132,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         ("pull_request", pull_request_policy),
         ("merge", merge_policy),
         ("cleanup", cleanup_policy),
+        ("post_merge", post_merge_policy),
     ):
         if not isinstance(section, dict):
             raise RuntimeError(f"review-policy repository_delivery.{section_name} must be a mapping")
@@ -4104,6 +4166,16 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         (cleanup_policy.get("merged_pr_state") == "merged-closed", "merged PR state must be merged-closed"),
         (cleanup_policy.get("remote_branch") == "delete", "remote feature branch cleanup must be delete"),
         (cleanup_policy.get("local_branch") == "delete", "local feature branch cleanup must be delete"),
+        (
+            post_merge_policy.get("roadmap") == {
+                "authority": "architecture.lock.yaml#machine_contracts.roadmap_policy",
+                "check": "required",
+                "sync_on_drift": "required",
+                "delivery": "qualified-pull-request",
+                "direct_default_branch_write": "forbidden",
+            },
+            "post-merge roadmap reconciliation contract must remain exact",
+        ),
     )
     for valid, message in required_invariants:
         if not valid:
@@ -4659,7 +4731,6 @@ def finish_pr(base: str) -> int:
             "merge",
             str(number),
             merge_flag,
-            "--delete-branch",
             "--match-head-commit",
             head,
         ],
@@ -4686,11 +4757,19 @@ def finish_pr(base: str) -> int:
         check=False,
         capture=True,
     )
+    if remote_branch.returncode not in {0, 2}:
+        detail = (remote_branch.stderr or remote_branch.stdout or "").strip()
+        return fail(
+            f"finish-pr cannot prove remote branch state for {branch}: "
+            f"{detail or 'git ls-remote failed'}"
+        )
     if remote_branch.returncode == 0:
-        deletion = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
-        if deletion.returncode:
-            detail = (deletion.stderr or deletion.stdout or "").strip()
-            return fail(f"finish-pr could not delete remote branch {branch}: {detail}")
+        deleted, detail = _delete_branch_ref("remote", branch, head)
+        if not deleted:
+            return fail(
+                f"finish-pr preserved remote branch {branch} because exact-SHA deletion failed: "
+                f"{detail or 'lease mismatch'}"
+            )
 
     switch = run(["git", "switch", base_name], check=False, capture=True)
     if switch.returncode:
@@ -4699,14 +4778,26 @@ def finish_pr(base: str) -> int:
 
     local_branch = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
     if local_branch.returncode == 0:
-        run(["git", "branch", "-d", branch])
+        deleted, detail = _delete_branch_ref("local", branch, head)
+        if not deleted:
+            return fail(
+                f"finish-pr preserved local branch {branch} because compare-and-delete failed: "
+                f"{detail or 'head mismatch'}"
+            )
 
     cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
     if cleanup_rc:
         print("ADVISORY finish-pr merged successfully but stale-branch cleanup was incomplete", file=sys.stderr)
+
+    roadmap_rc = _roadmap_followup_after_merge()
+    if roadmap_rc:
+        return fail(
+            f"finish-pr merged PR #{number} successfully but automatic roadmap synchronization failed"
+        )
+
     print(
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
-        f"PR record retained by GitHub; remote/local branch {branch} removed"
+        f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
     )
     return 0
 
@@ -4758,6 +4849,8 @@ def main() -> int:
         sub.add_parser(name)
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
+    sub.add_parser("roadmap-check")
+    sub.add_parser("roadmap-sync")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -4969,6 +5062,10 @@ def main() -> int:
             return git_sync()
         if args.cmd == "branch-cleanup":
             return branch_cleanup(dry_run=args.dry_run)
+        if args.cmd == "roadmap-check":
+            return roadmap_check()
+        if args.cmd == "roadmap-sync":
+            return roadmap_sync()
         if args.cmd == "publish":
             return publish(args.base, args.message)
         if args.cmd == "publish-change":

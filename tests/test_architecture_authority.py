@@ -936,9 +936,11 @@ graph LR
                 readiness.write_text(original)
             handoff = root / "docs/project/CODEX_HANDOFFS.md"
             original_handoff = handoff.read_text()
+            roadmap = authority.load_yaml(root / "config/contracts/roadmap-policy.yaml")
+            m25 = next(item for item in roadmap["milestones"] if item["id"] == "M2.5")
             for required in (
                 "## M2.5 prompt",
-                "Tracker: `#15`",
+                f"Tracker: `#{m25['tracker']}`",
                 "Entry gate: M1 PROVEN",
                 "Evidence required for M2.5 PROVEN",
                 "That PROVEN state enables M3",

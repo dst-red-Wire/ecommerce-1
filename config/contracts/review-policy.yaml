@@ -101,3 +101,11 @@ repository_delivery:
       github_cli_optional_for_ancestor_cleanup: true
       remote_delete_requires_exact_lease: true
       local_delete_requires_compare_and_delete: true
+
+  post_merge:
+    roadmap:
+      authority: architecture.lock.yaml#machine_contracts.roadmap_policy
+      check: required
+      sync_on_drift: required
+      delivery: qualified-pull-request
+      direct_default_branch_write: forbidden
