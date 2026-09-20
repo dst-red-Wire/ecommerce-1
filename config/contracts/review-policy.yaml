@@ -30,6 +30,12 @@ pull_request_review:
       trigger: forbidden
       polling: forbidden
       merge_readiness_dependency: forbidden
+    evidence:
+      transport: github-pr-comment
+      marker: chatgpt-exact-sha-review:v1
+      required_kinds: [code, security]
+      required_status: PASS
+      exact_sha_required: true
     advisory_only: true
     may_comment: true
     may_request_changes: true
