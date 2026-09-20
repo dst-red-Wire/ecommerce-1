@@ -30,21 +30,37 @@
 - name: Require the explicit restage action for an existing server
   ansible.builtin.assert:
     that:
-      - vm_test_server_active.stdout | trim != 'active' or vm_action == 'restage'
+      - >-
+        vm_test_server_active.stdout | trim in ['inactive', 'failed', 'unknown']
+        or vm_action == 'restage'
     fail_msg: Use vm_action=restage to stop and reconstruct verified transfer bytes safely.
 - name: Stop the existing server before reconstructing transfer inputs
   ansible.builtin.command:
     argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
            sudo, -n, systemctl, stop, rke2-server.service]
-  when: vm_action == 'restage' and vm_test_server_active.stdout | trim == 'active'
+  when: >-
+    vm_action == 'restage'
+    and vm_test_server_active.stdout | trim not in ['inactive', 'failed', 'unknown']
   changed_when: true
 - name: Terminate remaining service cgroup processes before restaging image archives
   ansible.builtin.command:
     argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
            sudo, -n, systemctl, kill, --kill-who=all, rke2-server.service]
-  when: vm_action == 'restage' and vm_test_server_active.stdout | trim == 'active'
+  when: >-
+    vm_action == 'restage'
+    and vm_test_server_active.stdout | trim not in ['inactive', 'failed', 'unknown']
   changed_when: true
   failed_when: false
+- name: Require RKE2 to be fully stopped before deleting reconstructible state
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
+           sudo, -n, systemctl, is-active, rke2-server.service]
+  when: vm_action == 'restage'
+  register: vm_restage_stopped
+  changed_when: false
+  failed_when: >-
+    vm_restage_stopped.rc not in [3, 4]
+    or vm_restage_stopped.stdout | trim not in ['inactive', 'failed', 'unknown']
 - name: Release only reconstructible containerd and image-import state before restaging
   ansible.builtin.command:
     argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n, python3, '-']
