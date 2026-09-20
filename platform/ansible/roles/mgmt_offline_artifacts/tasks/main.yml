@@ -76,7 +76,7 @@
   register: mgmt_offline_validated
   changed_when: false
 
-- name: Verify every local RPM signature after importing approved keys
+- name: Verify every local RPM signature against isolated approved keys
   ansible.builtin.command:
     argv:
       - /usr/bin/python3
