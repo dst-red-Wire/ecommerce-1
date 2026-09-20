@@ -2794,19 +2794,22 @@ def _write_record(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
+def tekton_plan(
+    base: str,
+    head: str,
+    record_dir: str,
+    component_result_path: str,
+    global_result_path: str,
+) -> int:
     exact = _require_clean_exact_checkout("tekton-plan", head)
     if exact is None:
         return 2
-    requested, current = exact
+    requested, _ = exact
     base_sha = git("rev-parse", base).strip()
     components = affected(base, head)
-    gates = _normalized_component_gates(components)
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
     verification: dict = {"mode": "full"}
-    reused: list[dict] = []
-    execute: list[str] = []
 
     if parent_sha and parent_evidence:
         delta_paths = changed_paths(parent_sha, head)
@@ -2818,48 +2821,101 @@ def tekton_plan(base: str, head: str, record_dir: str, result_path: str) -> int:
             "delta_components": sorted(delta_components),
         }
 
-    for gate in gates:
-        delta_hit = gate in delta_components
-        if gate == "frontend:all":
-            delta_hit = bool({"frontend:storefront", "frontend:admin"} & delta_components)
-        if parent_sha and parent_evidence and not delta_hit:
-            if _reuse_gate(gate, parent_sha, parent_evidence, reused):
-                continue
-        execute.append(gate)
+    execution_plan = build_execution_plan(
+        base,
+        head,
+        components,
+        parent_sha=parent_sha,
+        parent_evidence=parent_evidence,
+        delta_components=delta_components,
+    )
+    precomputed: list[dict] = []
+    execute_globals: list[str] = []
+    execute_components: list[str] = []
+
+    for entry in execution_plan:
+        gate = str(entry["gate"])
+        action = str(entry["action"])
+        if action == "reuse":
+            if not parent_sha or not parent_evidence or not _reuse_gate(gate, parent_sha, parent_evidence, precomputed):
+                raise RuntimeError(f"planner marked {gate} reusable but exact parent evidence cannot supply it")
+        elif action == "skip":
+            precomputed.append(
+                {
+                    "gate": gate,
+                    "status": "SKIP",
+                    "reason": entry.get("reason") or "planner skip",
+                    "duration_seconds": 0.0,
+                    "execution": "skipped",
+                    "cache_mode": entry.get("cache_mode"),
+                    "parallel_safe": bool(entry.get("parallel_safe")),
+                }
+            )
+        elif action in {"run", "fresh"}:
+            if entry["scope"] == "global":
+                if entry.get("ci_fanout") is not True:
+                    raise RuntimeError(f"global gate {gate} is not approved for Tekton fan-out")
+                execute_globals.append(gate)
+            else:
+                execute_components.append(gate)
+        else:
+            raise RuntimeError(f"unsupported Tekton plan action {action!r} for {gate}")
 
     directory = Path(record_dir)
     plan = {
-        "schema_version": 1,
+        "schema_version": 2,
         "base_ref": base,
         "base_sha": base_sha,
         "head_ref": head,
         "head_sha": requested,
         "changed_paths": changed_paths(base, head),
         "affected_components": components,
-        "component_gates": gates,
-        "execute_components": execute,
-        "reused_records": reused,
+        "gates": [str(entry["gate"]) for entry in execution_plan],
+        "global_gates": [str(entry["gate"]) for entry in execution_plan if entry["scope"] == "global"],
+        "component_gates": [str(entry["gate"]) for entry in execution_plan if entry["scope"] == "component"],
+        "execute_global_gates": execute_globals,
+        "execute_components": execute_components,
+        "precomputed_records": precomputed,
+        "execution_plan": [
+            {
+                "gate": entry["gate"],
+                "scope": entry["scope"],
+                "action": entry["action"],
+                "cache_mode": entry["cache_mode"],
+                "parallel_safe": entry["parallel_safe"],
+                "ci_fanout": entry["ci_fanout"],
+            }
+            for entry in execution_plan
+        ],
         "verification": verification,
     }
     _write_record(_record_path(directory, "plan"), plan)
-    output_components = execute or ["none"]
-    Path(result_path).write_text(json.dumps(output_components), encoding="utf-8")
+    Path(component_result_path).write_text(json.dumps(execute_components or ["none"]), encoding="utf-8")
+    Path(global_result_path).write_text(json.dumps(execute_globals or ["none"]), encoding="utf-8")
     target = os.environ.get("CI_STATUS_TARGET_URL", "").strip()
     publish_remote_status(requested, "pending", "Tekton affected-only verification running", target)
-    print(f"PASS tekton-plan exact {requested}: execute={len(execute)} reused={len(reused)}")
+    print(
+        f"PASS tekton-plan exact {requested}: globals={len(execute_globals)} "
+        f"components={len(execute_components)} precomputed={len(precomputed)}"
+    )
     return 0
 
 
-def ci_global(base: str, head: str, record_dir: str) -> int:
+def ci_global(gate: str, base: str, head: str, record_dir: str) -> int:
     exact = _require_clean_exact_checkout("ci-global", head)
     if exact is None:
         return 2
     requested, _ = exact
+    if gate not in _policy_gate_names("global", ci_fanout_only=True):
+        return fail(f"ci-global gate is not centrally approved for fan-out: {gate}", 2)
+    command, reason = _gate_command(gate, base, head)
+    if command is None:
+        return fail(f"ci-global gate is not executable: {gate}: {reason}", 2)
     records: list[dict] = []
     env = os.environ.copy()
-    env.update({"BASE": base, "HEAD": head})
-    rc = 0 if _run_gate_batch(_global_gate_commands(base, head), records, env) else 1
-    _write_record(_record_path(Path(record_dir), "global"), {"head_sha": requested, "records": records})
+    env.update({"BASE": base, "HEAD": head, "ECOMMERCE_PARALLEL_GROUP": "tekton-global-matrix"})
+    rc = 0 if _run_gate(gate, command, records, env) else 1
+    _write_record(_record_path(Path(record_dir), f"global-{gate}"), {"head_sha": requested, "records": records})
     return rc
 
 
@@ -2868,14 +2924,24 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
-    command, reason = _component_command(component)
+    command, reason = _gate_command(component, base, head)
     records: list[dict] = []
     if command is None:
-        records.append({"gate": component, "status": "SKIP", "reason": reason, "duration_seconds": 0.0})
+        records.append(
+            {
+                "gate": component,
+                "status": "SKIP",
+                "reason": reason,
+                "duration_seconds": 0.0,
+                "execution": "skipped",
+                "cache_mode": _resolved_gate_policy(component).get("cache_mode"),
+                "parallel_safe": bool(_resolved_gate_policy(component).get("parallel_safe")),
+            }
+        )
         rc = 0
     else:
         env = os.environ.copy()
-        env.update({"BASE": base, "HEAD": head})
+        env.update({"BASE": base, "HEAD": head, "ECOMMERCE_PARALLEL_GROUP": "tekton-component-matrix"})
         rc = 0 if _run_gate(component, command, records, env) else 1
     _write_record(_record_path(Path(record_dir), f"component-{component}"), {"head_sha": requested, "records": records})
     return rc
@@ -2894,22 +2960,21 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
         publish_remote_status(requested, "failure", "Tekton plan evidence is missing", target)
         return fail("Tekton finalizer missing plan record", 1)
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    if plan.get("head_sha") != requested or plan.get("base_sha") != base_sha:
-        publish_remote_status(requested, "failure", "Tekton plan SHA/base mismatch", target)
-        return fail("Tekton plan does not bind the exact head/base", 1)
+    if plan.get("schema_version") != 2 or plan.get("head_sha") != requested or plan.get("base_sha") != base_sha:
+        publish_remote_status(requested, "failure", "Tekton plan schema/SHA/base mismatch", target)
+        return fail("Tekton plan does not bind the exact head/base with schema v2", 1)
 
-    records: list[dict] = []
-    global_path = _record_path(directory, "global")
-    if global_path.is_file():
-        records.extend(json.loads(global_path.read_text(encoding="utf-8")).get("records", []))
-    records.extend(plan.get("reused_records", []))
-    for path in sorted(directory.glob("component-*.json")):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        for record in payload.get("records", []):
-            if record.get("gate") != "none":
-                records.append(record)
+    records: list[dict] = list(plan.get("precomputed_records", []))
+    for pattern in ("global-*.json", "component-*.json"):
+        for path in sorted(directory.glob(pattern)):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("head_sha") != requested:
+                return fail(f"Tekton gate record head mismatch: {path.name}", 1)
+            for record in payload.get("records", []):
+                if record.get("gate") != "none":
+                    records.append(record)
 
-    expected = {name for name, _ in _global_gate_commands(base, head)} | set(plan.get("component_gates", []))
+    expected = set(str(name) for name in plan.get("gates", []))
     by_gate: dict[str, dict] = {}
     duplicates: set[str] = set()
     for record in records:
@@ -2920,21 +2985,27 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
             duplicates.add(gate)
         by_gate[gate] = record
     missing = expected - set(by_gate)
+    unexpected = set(by_gate) - expected
     bad = sorted(
         gate for gate, record in by_gate.items() if gate in expected and record.get("status") not in {"PASS", "SKIP"}
     )
-    if missing or duplicates or bad:
-        description = f"Tekton incomplete/failed: missing={len(missing)} duplicate={len(duplicates)} failed={len(bad)}"
+    if missing or duplicates or unexpected or bad:
+        description = (
+            f"Tekton incomplete/failed: missing={len(missing)} duplicate={len(duplicates)} "
+            f"unexpected={len(unexpected)} failed={len(bad)}"
+        )
         publish_remote_status(requested, "failure", description[:140], target)
         return fail(description, 1)
 
+    verification = dict(plan.get("verification", {"mode": "full"}))
+    verification["execution_plan"] = list(plan.get("execution_plan", []))
     evidence = write_evidence(
         base,
         head,
         list(plan.get("changed_paths", [])),
         list(plan.get("affected_components", [])),
         [by_gate[name] for name in sorted(expected)],
-        dict(plan.get("verification", {"mode": "full"})),
+        verification,
     )
     if os.environ.get("CI_EVIDENCE_REPOSITORY", "").strip():
         published = publish_evidence(ROOT, evidence)
@@ -3775,7 +3846,9 @@ def main() -> int:
     tp.add_argument("--head", required=True)
     tp.add_argument("--record-dir", required=True)
     tp.add_argument("--result-path", required=True)
+    tp.add_argument("--global-result-path", required=True)
     cg = sub.add_parser("ci-global")
+    cg.add_argument("--gate", required=True)
     cg.add_argument("--base", required=True)
     cg.add_argument("--head", required=True)
     cg.add_argument("--record-dir", required=True)
@@ -3911,9 +3984,9 @@ def main() -> int:
         if args.cmd == "tekton-trigger-readiness":
             return tekton_trigger_readiness_command(args.runtime_config, args.evidence)
         if args.cmd == "tekton-plan":
-            return tekton_plan(args.base, args.head, args.record_dir, args.result_path)
+            return tekton_plan(args.base, args.head, args.record_dir, args.result_path, args.global_result_path)
         if args.cmd == "ci-global":
-            return ci_global(args.base, args.head, args.record_dir)
+            return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":
             return ci_component(args.component, args.base, args.head, args.record_dir)
         if args.cmd == "ci-finalize":
