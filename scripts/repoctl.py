@@ -186,6 +186,25 @@ def qualification_execution_policy() -> dict:
         gates = policy.get("gates")
         if not isinstance(gates, dict) or not gates:
             raise RuntimeError("qualification execution policy must declare gates")
+        global_gate_order = execution.get("global_gate_order")
+        executable_globals = {
+            name
+            for name, entry in gates.items()
+            if isinstance(name, str)
+            and not name.endswith("*")
+            and isinstance(entry, dict)
+            and entry.get("scope") == "global"
+            and isinstance(entry.get("command"), dict)
+        }
+        if (
+            not isinstance(global_gate_order, list)
+            or any(not isinstance(name, str) or not name for name in global_gate_order)
+            or len(global_gate_order) != len(set(global_gate_order))
+            or set(global_gate_order) != executable_globals
+        ):
+            raise RuntimeError(
+                "qualification execution policy global_gate_order must list every executable global gate exactly once"
+            )
         _QUALIFICATION_EXECUTION_POLICY = policy
     return copy.deepcopy(_QUALIFICATION_EXECUTION_POLICY)
 
@@ -2698,16 +2717,28 @@ def _normalized_component_gates(components: list[str]) -> list[str]:
 
 
 def _policy_gate_names(scope: str, *, ci_fanout_only: bool = False) -> list[str]:
-    values: list[str] = []
-    for name, entry in qualification_execution_policy().get("gates", {}).items():
+    policy = qualification_execution_policy()
+    gates = policy.get("gates", {})
+    eligible: set[str] = set()
+    for name, entry in gates.items():
         if not isinstance(name, str) or name.endswith("*") or not isinstance(entry, dict):
             continue
         if entry.get("scope") != scope or not isinstance(entry.get("command"), dict):
             continue
         if ci_fanout_only and entry.get("ci_fanout") is not True:
             continue
-        values.append(name)
-    return values
+        eligible.add(name)
+
+    if scope == "global":
+        ordered = [
+            name
+            for name in policy["execution"]["global_gate_order"]
+            if name in eligible
+        ]
+        if set(ordered) != eligible:
+            raise RuntimeError("global gate order does not cover the requested executable global gate set")
+        return ordered
+    return sorted(eligible)
 
 
 def _gate_command(gate: str, base: str = "", head: str = "WORKTREE") -> tuple[list[str] | None, str | None]:
