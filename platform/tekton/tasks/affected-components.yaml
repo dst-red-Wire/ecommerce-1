@@ -22,6 +22,9 @@ spec:
     - name: components
       type: array
       description: Component gates that must execute; "none" is a no-op sentinel.
+    - name: global-gates
+      type: array
+      description: Global gates derived from the canonical execution policy.
   workspaces:
     - name: source
   steps:
@@ -53,6 +56,8 @@ spec:
         - $(params.record-dir)
         - --result-path
         - $(results.components.path)
+        - --global-result-path
+        - $(results.global-gates.path)
   volumes:
     - name: evidence-signing
       secret:
