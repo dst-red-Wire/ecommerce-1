@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -27,6 +31,28 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
             CAMPAIGN._budget_result(3.0, 3.0),
         )
         self.assertEqual("FAIL", CAMPAIGN._budget_result(3.001, 3.0)["status"])
+
+    def test_run_sample_streams_live_and_keeps_identical_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            terminal = io.StringIO()
+            with (
+                mock.patch.object(CAMPAIGN, "ROOT", root),
+                redirect_stdout(terminal),
+            ):
+                result = CAMPAIGN._run_sample(
+                    "live-tee",
+                    [CAMPAIGN.sys.executable, "-c", "print('VISIBLE-LINE')"],
+                    cwd=root,
+                    env=CAMPAIGN.os.environ.copy(),
+                )
+
+            output = terminal.getvalue()
+            log_path = root / result["log"]
+            self.assertIn("=== START live-tee ===", output)
+            self.assertIn("VISIBLE-LINE", output)
+            self.assertIn("=== PASS live-tee", output)
+            self.assertEqual("VISIBLE-LINE\n", log_path.read_text(encoding="utf-8"))
 
     def test_baseline_comparison_reports_savings_and_speedup(self):
         comparison = CAMPAIGN._baseline_comparison(100.0, 25.0)
