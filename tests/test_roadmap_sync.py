@@ -152,6 +152,12 @@ class RoadmapSyncTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing milestone section"):
             ROADMAP.render_document(original, policy, statuses)
 
+    def test_finish_pr_source_fails_closed_on_unknown_remote_branch_state(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
+        self.assertIn("remote_branch.returncode not in {0, 2}", finish)
+        self.assertIn("cannot prove remote branch state", finish)
+
     def test_finish_pr_uses_exact_sha_branch_deletion_helpers(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
