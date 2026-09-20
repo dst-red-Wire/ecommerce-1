@@ -227,7 +227,6 @@ def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_met
             signing_keys.append(name)
             key_fingerprints.add(fingerprint.lower())
         else:
-            require(category in REQUIRED_ARTIFACTS        else:
             require(category in REQUIRED_ARTIFACTS and name == REQUIRED_ARTIFACTS[category], "unexpected artifact category or filename")
             require(category not in categories, "duplicate artifact category")
             categories.add(category)
