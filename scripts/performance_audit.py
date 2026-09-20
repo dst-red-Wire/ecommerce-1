@@ -110,28 +110,54 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Model the canonical affected Pipeline after classification.
+def execution_max_workers(root: Path | None = None) -> int:
+    policy = (root or Path(__file__).resolve().parents[1]) / "config/contracts/qualification-execution-policy.yaml"
+    try:
+        text = policy.read_text(encoding="utf-8")
+    except OSError:
+        return 1
+    match = __import__("re").search(r"(?m)^\s*max_workers:\s*(\d+)\s*$", text)
+    if not match:
+        return 1
+    return max(1, min(16, int(match.group(1))))
 
-    The current Pipeline runs one sequential global-gates Task in parallel with a
-    matrix of independent component TaskRuns, then joins in the finalizer. Classify,
-    pod scheduling and finalizer overhead are not represented in per-gate evidence,
-    so this is an execution-gate estimate rather than observed wall clock.
+
+def _bounded_parallel_schedule(rows: list[tuple[str, float]], workers: int) -> tuple[float, list[str]]:
+    if not rows:
+        return 0.0, []
+    worker_count = max(1, min(int(workers), len(rows)))
+    slots: list[tuple[float, list[str]]] = [(0.0, []) for _ in range(worker_count)]
+    for name, seconds in rows:
+        index = min(range(worker_count), key=lambda item: (slots[item][0], item))
+        elapsed, names = slots[index]
+        slots[index] = (elapsed + seconds, [*names, name])
+    critical_seconds, critical_names = max(slots, key=lambda item: (item[0], item[1]))
+    return critical_seconds, critical_names
+
+
+def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None = None) -> dict[str, Any]:
+    """Model the canonical affected Pipeline with centrally bounded parallel global gates.
+
+    Global gates execute inside the isolated global-gates Task through repoctl's bounded
+    executor. Component TaskRuns still fan out independently. Classification, scheduling
+    and finalization overhead are excluded from gate evidence.
     """
     active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
     globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
     components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
-    global_seconds = sum(_seconds(record.get("duration_seconds")) for record in globals_)
+    workers = int(max_workers or execution_max_workers())
+    global_rows = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in globals_]
+    global_seconds, global_path = _bounded_parallel_schedule(global_rows, workers)
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
-    serial_seconds = global_seconds + sum(seconds for _, seconds in component_durations)
+    serial_seconds = sum(seconds for _, seconds in global_rows) + sum(seconds for _, seconds in component_durations)
     critical_seconds = max(global_seconds, component_parallel_seconds)
 
     if global_seconds >= component_parallel_seconds and globals_:
         branch = "global-gates"
-        gates = [str(record.get("gate")) for record in globals_]
+        gates = global_path
     elif longest_component[0]:
         branch = "component-matrix"
         gates = [longest_component[0]]
@@ -144,8 +170,9 @@ def tekton_critical_path(records: list[dict[str, Any]]) -> dict[str, Any]:
     utilization = (critical_seconds / serial_seconds) if serial_seconds else 0.0
 
     return {
-        "model": "tekton-affected-v1",
-        "assumption": "global gates are serial inside one Task; component gates fan out as a Matrix; both branches start after classify",
+        "model": "tekton-affected-v2",
+        "assumption": "global gates use central bounded parallelism; component gates fan out as a Matrix; both branches start after classify",
+        "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
         "global_branch_seconds": _round(global_seconds),
         "component_matrix_branch_seconds": _round(component_parallel_seconds),
@@ -375,7 +402,7 @@ def recommendations(
 def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
     records = _validate_evidence(evidence)
     inventory = gate_inventory(records)
-    critical = tekton_critical_path(records)
+    critical = tekton_critical_path(records, max_workers=execution_max_workers(root))
     priorities = amdahl_priorities(records)
     caches = cache_layers(root)
     report: dict[str, Any] = {
