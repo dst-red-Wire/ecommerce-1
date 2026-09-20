@@ -151,7 +151,15 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
     globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
     components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
 
-    workers = int(max_workers or execution_max_workers())
+    recorded_budgets = {
+        int(record.get("worker_budget"))
+        for record in active
+        if record.get("worker_budget") is not None
+    }
+    if len(recorded_budgets) > 1:
+        raise ValueError("evidence contains inconsistent worker budgets")
+    recorded_workers = next(iter(recorded_budgets), None)
+    workers = int(max_workers or recorded_workers or execution_max_workers())
     global_rows = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in globals_]
     global_seconds, global_path = _bounded_parallel_schedule(global_rows, workers)
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
@@ -407,7 +415,7 @@ def recommendations(
 def audit(evidence: dict[str, Any], *, root: Path, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
     records = _validate_evidence(evidence)
     inventory = gate_inventory(records)
-    critical = tekton_critical_path(records, max_workers=execution_max_workers(root))
+    critical = tekton_critical_path(records)
     priorities = amdahl_priorities(records)
     caches = cache_layers(root)
     report: dict[str, Any] = {
