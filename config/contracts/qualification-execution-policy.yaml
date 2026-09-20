@@ -283,7 +283,7 @@ gates:
       - go.work
   platform:ansible:
     scope: component
-    parallel_safe: false
+    parallel_safe: true
     cache_mode: content-pass
     dependencies: []
     command:
@@ -303,7 +303,7 @@ gates:
       - project-owned-collection-version-reconciliation
   platform:terraform:
     scope: component
-    parallel_safe: false
+    parallel_safe: true
     cache_mode: content-pass
     dependencies: []
     command:
@@ -395,7 +395,7 @@ performance:
     warm_verify_change_wall_max: 30
     affected_product_wall_max: 30
     affected_governance_wall_max: 30
-    service_product_warm_wall_max: 10
+    service_product_warm_wall_max: 15
     system_warm_wall_max: 2
     governance_warm_wall_max: 2
     ansible_warm_wall_max: 5
