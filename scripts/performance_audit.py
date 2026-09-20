@@ -247,17 +247,26 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
         component_model = "ordered-bounded-local"
 
     serial_seconds = sum(_seconds(record.get("duration_seconds")) for record in active)
-    critical_seconds = max(global_seconds, component_parallel_seconds)
-
-    if global_seconds >= component_parallel_seconds and globals_:
-        branch = "global-gates"
-        gates = global_path
-    elif component_path:
-        branch = "component-matrix" if tekton_component_fanout else "component-gates"
-        gates = component_path
+    true_tekton_fanout = tekton_global_fanout and (not components or tekton_component_fanout)
+    if true_tekton_fanout:
+        critical_seconds = max(global_seconds, component_parallel_seconds)
+        if global_seconds >= component_parallel_seconds and globals_:
+            branch = "global-gates"
+            gates = global_path
+        elif component_path:
+            branch = "component-matrix"
+            gates = component_path
+        else:
+            branch = "none"
+            gates = []
+        scope_model = "parallel-tekton-branches"
     else:
-        branch = "none"
-        gates = []
+        # Local verify-change executes the global scope first, then the component
+        # scope. Parallelism is bounded within each scope, never across them.
+        critical_seconds = global_seconds + component_parallel_seconds
+        gates = [*global_path, *component_path]
+        branch = "local-sequential-scopes" if gates else "none"
+        scope_model = "sequential-local-scopes"
 
     parallel_headroom = max(0.0, serial_seconds - critical_seconds)
     speedup = (serial_seconds / critical_seconds) if critical_seconds else 1.0
@@ -267,7 +276,8 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
         "model": "tekton-affected-v3",
         "global_execution_model": global_model,
         "component_execution_model": component_model,
-        "assumption": "true Tekton global/component matrix fan-out when recorded; ordered bounded local execution otherwise",
+        "scope_execution_model": scope_model,
+        "assumption": "Tekton global/component matrices run in parallel; local verify-change runs global then component scopes sequentially",
         "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
         "global_branch_seconds": _round(global_seconds),
