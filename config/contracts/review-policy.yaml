@@ -17,6 +17,19 @@ pull_request_review:
 
   ai_reviewer:
     enabled: true
+    provider: ChatGPT
+    sole_code_security_authority: true
+    exact_sha_binding: required
+    prior_sha_review: historical-only
+    merge_readiness:
+      code_review_complete: required
+      security_review_complete: required
+      unresolved_blocking_findings: forbidden
+    codex:
+      review_authority: forbidden
+      trigger: forbidden
+      polling: forbidden
+      merge_readiness_dependency: forbidden
     advisory_only: true
     may_comment: true
     may_request_changes: true
