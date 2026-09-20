@@ -985,7 +985,8 @@ def _governance_authority() -> int:
 
 
 def _governance_cache_contract() -> int:
-    run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
+    for pattern in ("test_qualification_cache.py", "test_qualification_execution_policy.py"):
+        run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", pattern])
     return 0
 
 
