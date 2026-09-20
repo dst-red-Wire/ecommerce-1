@@ -49,6 +49,39 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertEqual("BLOCKED by M3", statuses["M4"])
         self.assertEqual("BLOCKED by M2/M4", statuses["M5"])
 
+    def test_completed_tracker_does_not_bypass_unmet_dependencies(self):
+        policy = ROADMAP.policy()
+        states = {}
+        for item in policy["milestones"]:
+            tracker = item.get("tracker")
+            if type(tracker) is int:
+                states[tracker] = {"state": "open", "state_reason": "", "title": str(item["name"])}
+
+        states[13] = {"state": "closed", "state_reason": "completed", "title": "M1"}
+        states[16] = {"state": "closed", "state_reason": "completed", "title": "M3"}
+
+        statuses = ROADMAP.compute_statuses(policy, states)
+
+        self.assertEqual("PROVEN", statuses["M1"])
+        self.assertEqual("READY FOR CODEX", statuses["M2.5"])
+        self.assertEqual(
+            "BLOCKED by M2.5 (tracker #16 completed before prerequisites)",
+            statuses["M3"],
+        )
+        self.assertEqual("BLOCKED by M3", statuses["M4"])
+
+    def test_policy_rejects_non_topological_dependency_order(self):
+        policy = ROADMAP.policy()
+        broken = json.loads(json.dumps(policy))
+        by_id = {item["id"]: item for item in broken["milestones"]}
+        by_id["M2"]["requires"] = ["M4"]
+
+        with (
+            mock.patch.object(ROADMAP, "load_yaml", side_effect=[{"machine_contracts": {"roadmap_policy": "config/contracts/roadmap-policy.yaml"}}, broken]),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "topological order"):
+                ROADMAP.policy()
+
     def test_closed_not_planned_tracker_does_not_become_proven(self):
         policy = ROADMAP.policy()
         states = {}
