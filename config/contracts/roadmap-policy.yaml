@@ -131,7 +131,7 @@ milestones:
     name: PROD A/B Rollout
     owner: Codex execution; release governance authority; Work launch pack
     tracker: 22
-    section_heading: "### M9 — PROD rollout"
+    section_heading: "### M9 — PROD A/B"
     objective: build trusted PROD A/B and progressive rollout
     entry_gate: M8 READY_FOR_PROD
     exit_gate: controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete
