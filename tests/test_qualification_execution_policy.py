@@ -142,6 +142,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertEqual(["service", "product"], product[-2:])
 
+    def test_global_gate_order_is_stable_when_cached_mapping_keys_are_sorted(self):
+        expected = ["governance", "runtime-efficiency", "contracts", "automation", "security"]
+        policy = MOD.qualification_execution_policy()
+        policy["gates"] = dict(sorted(policy["gates"].items()))
+        with mock.patch.object(MOD, "qualification_execution_policy", return_value=policy):
+            self.assertEqual(expected, MOD._policy_gate_names("global"))
+            self.assertEqual(expected, MOD._policy_gate_names("global", ci_fanout_only=True))
+
     def test_execution_plan_emits_run_fresh_reuse_and_is_policy_complete(self):
         parent = {
             "gates": [
