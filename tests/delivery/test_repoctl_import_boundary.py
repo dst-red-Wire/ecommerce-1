@@ -18,6 +18,10 @@ class RepoctlImportBoundaryTest(unittest.TestCase):
             scripts = temp / "scripts"
             scripts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
+            shutil.copy2(
+                ROOT / "scripts/qualification_cache.py",
+                scripts / "qualification_cache.py",
+            )
             contracts = temp / "config" / "contracts"
             contracts.mkdir(parents=True)
             shutil.copy2(

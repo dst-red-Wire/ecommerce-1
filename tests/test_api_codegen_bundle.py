@@ -161,7 +161,19 @@ class ApiCodegenBundleTest(unittest.TestCase):
             root = pathlib.Path(temp_name)
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
+            shutil.copy2(
+                ROOT / "scripts/qualification_cache.py",
+                root / "scripts/qualification_cache.py",
+            )
+            shutil.copy2(
+                ROOT / "architecture.lock.yaml",
+                root / "architecture.lock.yaml",
+            )
             (root / "config/contracts").mkdir(parents=True)
+            shutil.copy2(
+                ROOT / "config/contracts/cache-policy.yaml",
+                root / "config/contracts/cache-policy.yaml",
+            )
             shutil.copy2(
                 ROOT / "config/contracts/toolchain-lock.json",
                 root / "config/contracts/toolchain-lock.json",
