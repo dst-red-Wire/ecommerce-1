@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -190,7 +191,8 @@ class MakeManagedBinTest(unittest.TestCase):
 
     @staticmethod
     def _ansible_version() -> str:
-        for line in (ROOT / "config/toolchain/versions.env").read_text(encoding="utf-8").splitlines():
-            if line.startswith("ANSIBLE_CORE_VERSION="):
-                return line.partition("=")[2]
-        raise AssertionError("ANSIBLE_CORE_VERSION is missing")
+        lock = json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+        version = lock.get("versions", {}).get("ANSIBLE_CORE_VERSION")
+        if not version:
+            raise AssertionError("ANSIBLE_CORE_VERSION is missing from central toolchain lock")
+        return str(version)

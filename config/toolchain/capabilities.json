@@ -169,6 +169,17 @@
       "requirement": "required-static"
     },
     {
+      "name": "templ",
+      "requires": ["go"],
+      "provision_requires": ["ansible-playbook"],
+      "command": "templ",
+      "version_args": ["version"],
+      "version_key": "TEMPL_VERSION",
+      "provision": {"type": "ansible", "tags": "go,templ"},
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
       "name": "sqlc",
       "requires": [],
       "provision_requires": [
@@ -666,6 +677,7 @@
     "ansible-lint": "ansible",
     "node": "ansible",
     "go": "ansible",
+    "templ": "ansible",
     "sqlc": "ansible",
     "yq": "ansible",
     "oasdiff": "ansible",
@@ -795,6 +807,7 @@
       "oxlint",
       "oxfmt"
     ],
+    "frontend": ["python3", "go", "gofmt", "templ", "cc"],
     "security": [
       "python3",
       "git",
@@ -832,7 +845,8 @@
       "rg",
       "fd",
       "nx",
-      "ast-grep"
+      "ast-grep",
+      "bazel"
     ],
     "delivery": [
       "python3",
@@ -849,7 +863,8 @@
     "docker": "docker",
     "terraform": "terraform",
     "tofu": "terraform",
-    "sysctl": "container-network-forwarding"
+    "sysctl": "container-network-forwarding",
+    "bazel": "bazel"
   },
   "gate_sources": [
     "scripts/repoctl.py",

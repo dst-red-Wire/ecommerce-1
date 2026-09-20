@@ -1,10 +1,7 @@
 version: 1
-kind: TerraformProviderLock
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: platform/terraform
-authority_claims:
-  - platform.terraform.providers
 
 terraform_cli:
   required_version: ">= 1.15.0, < 2.0.0"
@@ -15,7 +12,7 @@ providers:
     source: registry.terraform.io/hetznercloud/hcloud
     module_source: hetznercloud/hcloud
     version: "1.68.0"
-    constraints: "= 1.68.0"
+    constraints: "1.68.0"
     hashes:
       - "h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM="
       - "zh:0c3c2eb5bad6e2853da46dd83ed9c93c547b79f2abe977d492da9cf9d7236a62"
@@ -38,6 +35,8 @@ qualification:
     qualification_input: false
   execution_directory: temporary-copy
   canonical_lockfile_materialization: required
+  repository_context_paths:
+    - config/infrastructure
   init_lockfile_mode: readonly
   init_args:
     - init

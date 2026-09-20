@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import configparser
 import ast
 import json
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -17,14 +19,24 @@ from pathlib import Path
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
-CONTRACT = ROOT / "config/contracts/toolchain-lock.yaml"
-VERSIONS = CONTRACT
-STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
-CLASSIFICATIONS = {"managed", "seed-prerequisite", "platform-provided", "conditional"}
-REQUIREMENTS = {"required-static", "optional-runtime"}
+CONTRACT = ROOT / "config/toolchain/capabilities.json"
+TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
+VERSIONS = ROOT / "config/toolchain/versions.env"  # native projection only
+ANSIBLE_COLLECTIONS = ROOT / "platform/ansible/requirements.yml"
 SEED_LOCK = ROOT / "config/python/requirements.lock"
 SEED_VENV = ROOT / ".venv/qualification"
-MANAGED_BIN_DIRS = (Path.home() / ".local" / "bin",)
+
+_RAW_TOOLCHAIN_LOCK = json.loads(TOOLCHAIN_LOCK.read_text(encoding="utf-8"))
+_BOOTSTRAP_TOOLCHAIN_POLICY = _RAW_TOOLCHAIN_LOCK.get("capability_policy", {})
+
+STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
+CLASSIFICATIONS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("classifications", []))
+REQUIREMENTS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("requirements", []))
+MANAGED_PROVISION_TYPES = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_provision_types", []))
+MANAGED_BIN_DIRS = tuple(
+    Path.home() / relative
+    for relative in _BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_bin_subdirectories", [".local/bin"])
+)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
@@ -35,34 +47,139 @@ class Result:
     detail: str = ""
 
 
-def load_versions(path: Path = VERSIONS) -> dict[str, str]:
-    if path.suffix.lower() in {".yaml", ".yml", ".json"}:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        values = data.get("versions")
-        if not isinstance(values, dict) or not values:
-            raise ValueError(f"{path}: canonical toolchain lock must declare versions")
-        return {str(key): str(value) for key, value in values.items()}
-
-    values = {}
+def _parse_versions_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
+            key = key.strip()
             if key in values:
-                raise ValueError(f"duplicate version authority: {key}")
-            values[key] = value
+                raise ValueError(f"duplicate version projection: {key}")
+            values[key] = value.strip()
     return values
 
-def load_contract(path: Path = CONTRACT) -> dict:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if path.resolve() == CONTRACT.resolve():
-        if (
-            data.get("kind") != "ToolchainLock"
-            or data.get("architecture_authority") != "architecture.lock.yaml"
-            or data.get("scope") != "entire-repository"
+
+def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        contract.get("architecture_authority") != "architecture.lock.yaml"
+        or contract.get("scope") != "entire-repository"
+        or contract.get("status") != "exact"
+    ):
+        raise ValueError("toolchain lock must inherit architecture.lock.yaml for the entire repository")
+
+    versions = contract.get("versions")
+    if not isinstance(versions, dict) or not versions:
+        raise ValueError("toolchain lock versions must be a non-empty mapping")
+    if any(
+        not isinstance(key, str)
+        or not isinstance(value, str)
+        or not key
+        or not value
+        for key, value in versions.items()
+    ):
+        raise ValueError("toolchain lock versions must use non-empty string keys and values")
+
+    policy = contract.get("capability_policy")
+    if not isinstance(policy, dict):
+        raise ValueError("toolchain lock must declare capability_policy")
+    if not policy.get("classifications") or not policy.get("requirements"):
+        raise ValueError("toolchain lock capability policy must declare classifications and requirements")
+    return contract
+
+
+def _parse_ansible_collection_projection(path: Path | None = None) -> dict[str, str]:
+    path = path or ANSIBLE_COLLECTIONS
+    result: dict[str, str] = {}
+    name: str | None = None
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        if match := re.match(r"\s*-\s+name:\s*([\w.]+)\s*$", raw):
+            if name is not None:
+                raise ValueError(f"missing version for Ansible collection projection {name}")
+            name = match.group(1)
+        elif match := re.match(r"\s+version:\s*[\"']?([\w.-]+)[\"']?\s*$", raw):
+            if name is None or name in result:
+                raise ValueError("invalid Ansible collection projection")
+            result[name] = match.group(1)
+            name = None
+    if name is not None or not result:
+        raise ValueError("invalid or empty Ansible collection projection")
+    return result
+
+
+def validate_toolchain_projections(contract: dict | None = None) -> None:
+    lock = contract or load_toolchain_lock()
+
+    projected_versions = _parse_versions_env(VERSIONS)
+    if projected_versions != lock["versions"]:
+        raise ValueError("config/toolchain/versions.env drifted from central toolchain lock")
+
+    projected_collections = _parse_ansible_collection_projection()
+    expected_collections = lock.get("ansible_collections", {})
+    if projected_collections != expected_collections:
+        raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
+
+    projected_capabilities = load_contract()
+    expected_command_capabilities = lock.get("capability_policy", {}).get("command_capabilities", {})
+    if projected_capabilities.get("command_capabilities", {}) != expected_command_capabilities:
+        raise ValueError("config/toolchain/capabilities.json command_capabilities drifted from central toolchain lock")
+
+    ansible_config = lock.get("native_tool_configs", {}).get("ansible", {})
+    ansible_projection = ROOT / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
+    parser = configparser.ConfigParser()
+    parser.read(ansible_projection, encoding="utf-8")
+    expected_sections = ansible_config.get("sections", {})
+    actual_sections = {
+        section: {key: value for key, value in parser.items(section)}
+        for section in parser.sections()
+    }
+    normalized_expected_sections = {
+        str(section): {str(key): str(value) for key, value in values.items()}
+        for section, values in expected_sections.items()
+    }
+    if actual_sections != normalized_expected_sections:
+        raise ValueError("platform/ansible/ansible.cfg drifted from central toolchain lock")
+
+    bazel = lock.get("native_tool_configs", {}).get("bazel", {})
+    version_ref = bazel.get("version_ref")
+    expected_bazel = lock["versions"].get(version_ref) if isinstance(version_ref, str) else None
+    if not expected_bazel or (ROOT / ".bazelversion").read_text(encoding="utf-8").strip() != expected_bazel:
+        raise ValueError(".bazelversion drifted from central toolchain lock")
+
+    expected_bazelrc = [str(line) for line in bazel.get("bazelrc_lines", [])]
+    actual_bazelrc = [
+        line.rstrip()
+        for line in (ROOT / ".bazelrc").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if actual_bazelrc != expected_bazelrc:
+        raise ValueError(".bazelrc drifted from central toolchain lock")
+
+    seed = SEED_LOCK.read_text(encoding="utf-8").lower()
+    roots = lock.get("language_contracts", {}).get("python", {}).get("seed_roots", {})
+    for package, version_key in roots.items():
+        expected = lock["versions"].get(version_key)
+        if not expected:
+            raise ValueError(f"seed root {package}: missing version key {version_key}")
+        if not re.search(
+            rf"^{re.escape(package.lower())}=={re.escape(expected.lower())}(?:\s|\\)",
+            seed,
+            re.MULTILINE,
         ):
-            raise ValueError("canonical toolchain contract envelope is invalid")
-    return data
+            raise ValueError(f"{package}: seed lock drifted from central {version_key}={expected}")
+
+
+def load_versions(path: Path | None = None) -> dict[str, str]:
+    if path is not None:
+        return _parse_versions_env(path)
+    contract = load_toolchain_lock()
+    validate_toolchain_projections(contract)
+    return dict(contract["versions"])
+
+
+def load_contract(path: Path = CONTRACT) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def validate_contract(contract: dict, versions: dict[str, str] | None = None) -> None:
@@ -72,7 +189,7 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     subprocesses or shell fragments would create a misleading, incomplete parser.
     Tests and review keep this small authority aligned with executable gate paths.
     """
-    versions = versions or load_versions()
+    versions = versions or dict(load_toolchain_lock()["versions"])
     graph = Graph(contract["capabilities"])
     for name, item in graph.items.items():
         if item.get("requirement") not in REQUIREMENTS:
@@ -269,6 +386,81 @@ def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
+def templ_version_matches(stdout: str, stderr: str, expected: str) -> bool:
+    """templ must report one exact v-prefixed version and no diagnostics."""
+    return bool(expected) and stdout.strip() == f"v{expected}" and not stderr.strip()
+
+
+def seed_path_is_private(path: Path, *, ancestor: bool = False) -> bool:
+    """Reject replaceable seed paths before executing anything from the venv."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return False
+    if os.name == "nt":
+        return True
+    owners = {os.geteuid(), 0} if ancestor else {os.geteuid()}
+    if info.st_uid not in owners:
+        return False
+    if info.st_mode & 0o022:
+        return bool(ancestor and stat.S_ISDIR(info.st_mode) and info.st_mode & stat.S_ISVTX)
+    return not stat.S_ISREG(info.st_mode) or info.st_nlink == 1
+
+
+def require_private_seed_path(path: Path) -> None:
+    existing = []
+    cursor = path
+    while not cursor.exists() and cursor != cursor.parent:
+        cursor = cursor.parent
+    while True:
+        existing.append(cursor)
+        if cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    if not all(seed_path_is_private(item, ancestor=True) for item in existing):
+        raise RuntimeError(f"unsafe seed path ancestry: {path}")
+    if path.exists() and not seed_path_is_private(path):
+        raise RuntimeError(f"unsafe qualification seed directory: {path}")
+
+
+def seed_requirements_with_pip(python: Path, lock_text: str) -> dict[str, str]:
+    """Parse active PEP 508 requirements using pip's vendored packaging parser."""
+    program = r"""
+import json, sys
+from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.utils import canonicalize_name
+expected = {}
+for raw in sys.stdin.read().splitlines():
+    text = raw.strip()
+    if not text or text.startswith("#") or text.startswith("--") or text.startswith("\\"):
+        continue
+    if text.endswith("\\"):
+        text = text[:-1].strip()
+    if text.startswith("--hash="):
+        continue
+    req = Requirement(text)
+    if req.marker and not req.marker.evaluate():
+        continue
+    pins = list(req.specifier)
+    if len(pins) != 1 or pins[0].operator != "==":
+        raise SystemExit(f"non-exact seed requirement: {req.name}")
+    expected[canonicalize_name(req.name)] = pins[0].version
+print(json.dumps(expected, sort_keys=True))
+"""
+    proc = subprocess.run(
+        [str(python), "-I", "-c", program],
+        input=lock_text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode:
+        raise RuntimeError(f"seed lock PEP 508 validation failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return json.loads(proc.stdout)
+
+
 class Auditor:
     def __init__(
         self, contract: dict, *, runner: Runner = default_runner, which: Callable[[str], str | None] = shutil.which
@@ -412,6 +604,8 @@ class Auditor:
             elif item.get("expected_output") is not None and detail != str(item["expected_output"]):
                 state = "BLOCKED" if item.get("external_failure") else "FAIL"
                 last = Result(state, f"expected output {item['expected_output']}; got {detail or 'empty'}")
+            elif command == "templ" and not templ_version_matches(proc.stdout, proc.stderr, expected or ""):
+                last = Result("FAIL", f"wrong templ version: expected exact v{expected}")
             elif expected and self.installed_version(
                 detail, item.get("version_parser", "first_semver")
             ) != expected.removeprefix("v"):
@@ -495,18 +689,33 @@ class Auditor:
 
 def seed_environment() -> int:
     versions = load_versions()
-    lock = SEED_LOCK.read_text(encoding="utf-8").lower()
-    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
-        expected = versions[key]
-        if not re.search(rf"^{re.escape(package)}=={re.escape(expected)}(?:\s|\\)", lock, re.MULTILINE):
-            raise ValueError(f"{package}: lock does not match canonical {key}={expected}")
+    lock_text = SEED_LOCK.read_text(encoding="utf-8")
+    require_private_seed_path(SEED_VENV)
     python = SEED_VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not python.is_file():
+        SEED_VENV.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([sys.executable, "-m", "venv", str(SEED_VENV)], check=True)
+    require_private_seed_path(SEED_VENV)
+    expected = seed_requirements_with_pip(python, lock_text)
+    for package, key in (("ansible-core", "ANSIBLE_CORE_VERSION"), ("pyyaml", "PYYAML_VERSION")):
+        canonical = versions[key]
+        if expected.get(package) != canonical:
+            raise ValueError(f"{package}: lock does not match canonical {key}={canonical}")
     subprocess.run(
         [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--require-hashes", "-r", str(SEED_LOCK)],
         check=True,
     )
+    subprocess.run([str(python), "-m", "pip", "check"], check=True)
+    listed = subprocess.run(
+        [str(python), "-m", "pip", "list", "--format=json", "--disable-pip-version-check"],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    installed = {item["name"].lower().replace("_", "-"): item["version"] for item in json.loads(listed.stdout)}
+    for package, version in expected.items():
+        if installed.get(package) != version:
+            raise RuntimeError(f"seed package drift: {package} expected {version}, got {installed.get(package, 'missing')}")
     ansible = SEED_VENV / ("Scripts/ansible.exe" if os.name == "nt" else "bin/ansible")
     proc = subprocess.run([str(ansible), "--version"], check=True, text=True, capture_output=True)
     if versions["ANSIBLE_CORE_VERSION"] not in proc.stdout.splitlines()[0]:
@@ -515,7 +724,6 @@ def seed_environment() -> int:
         f"PASS qualification seed ansible-core={versions['ANSIBLE_CORE_VERSION']} pyyaml={versions['PYYAML_VERSION']}"
     )
     return 0
-
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()

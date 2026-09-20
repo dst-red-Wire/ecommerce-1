@@ -1,31 +1,40 @@
 version: 1
-kind: SecurityScanPolicy
-status: enforced
+status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
-authority_claims:
-  - repository.security.secret-scanning
-  - repository.security.scan-exceptions
-evidence_authority: architecture.lock.yaml#machine_contracts.ci_evidence
-principles:
-  fail_closed: true
-  local_parallel_policy: forbidden
-  inline_per_file_bypass: forbidden
-engines:
-  secrets:
-    capability: gitleaks
-    use_default_rules: true
-    blocking: true
-allowlist:
-  description: Ignore repository metadata, vendored dependencies and explicit test fixtures
-  paths:
-    - '(^|/)\.git/'
-    - '(^|/)node_modules/'
-    - '(^|/)vendor/'
-    - '(^|/)test-results/'
-    - '(^|/)tests/fixtures/'
-projections:
-  committed_gitleaks_toml: forbidden
-  generated_root: .context/generated/security
-exceptions:
-  authority: architecture.lock.yaml#machine_contracts.policy_exceptions
+
+scanner:
+  name: gitleaks
+  version_authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  version_key: GITLEAKS_VERSION
+  checksum_key: GITLEAKS_SHA256_LINUX_AMD64
+  local_config: forbidden
+  generated_config: required
+
+configuration:
+  use_default_rules: true
+  allowlist:
+    description: Ignore repository metadata, dependencies, generated test outputs and explicit fixtures
+    paths:
+      - '(^|/)\.git/'
+      - '(^|/)node_modules/'
+      - '(^|/)vendor/'
+      - '(^|/)test-results/'
+      - '(^|/)tests/fixtures/'
+
+execution:
+  worktree:
+    mode: materialized-git-tree
+    exact_tree_required: true
+  exact_commit:
+    mode: git-history
+  fallback:
+    mode: directory
+  cache: forbidden
+  redact: true
+  no_banner: true
+
+rules:
+  secret_scan_failure: blocking
+  config_generation_failure: blocking
+  local_policy_override: forbidden

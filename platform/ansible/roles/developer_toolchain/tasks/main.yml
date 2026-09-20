@@ -8,7 +8,7 @@
     - "{{ local_bin }}"
     - "{{ local_share }}"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, node, go, templ, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -118,7 +118,29 @@
     state: link
     force: true
   loop: [go, gofmt]
-  tags: [toolchain, go]
+  tags: [toolchain, go, templ]
+
+- name: Detect pinned templ generator
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/templ", version]
+  register: templ_current
+  failed_when: false
+  changed_when: false
+  tags: [toolchain, templ]
+
+- name: Install pinned templ generator
+  ansible.builtin.command:
+    argv: ["{{ local_share }}/toolchains/go/{{ go_version }}/go/bin/go", install, "github.com/a-h/templ/cmd/templ@v{{ templ_version }}"]
+  environment:
+    GOBIN: "{{ local_bin }}"
+    GOROOT: ""
+    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
+  when: >-
+    templ_current.rc != 0 or
+    (templ_current.stdout | trim) != 'v' ~ templ_version or
+    (templ_current.stderr | trim) != ''
+  changed_when: true
+  tags: [toolchain, templ]
 
 - name: Download pinned sqlc archive
   ansible.builtin.get_url:

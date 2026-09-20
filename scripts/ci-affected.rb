@@ -12,6 +12,13 @@ module AffectedComponents
 
   FRONTENDS = %w[storefront admin].freeze
   PLATFORM_COMPONENTS = %w[platform:terraform platform:ansible].freeze
+  SEMANTIC_CONTRACTS = %w[
+    config/contracts/service-ownership.yaml
+    config/contracts/dependency-map.yaml
+    config/contracts/event-contracts.yaml
+    config/contracts/public-api-contracts.yaml
+  ].freeze
+
   def public_contract_index(public_api)
     public_api.fetch("contracts", {}).each_with_object({}) do |(service, spec), index|
       index[spec.fetch("path")] = {
@@ -28,27 +35,12 @@ module AffectedComponents
     components << "system"
   end
 
-  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {},
-               semantic_contracts: Set.new, canonical_contracts: Set.new, global_only_contracts: Set.new,
-               strict_unknown: false)
+  def classify(paths, services:, public_contracts:, common_openapi: nil, contract_impact: {}, service_consumers: {}, strict_unknown: false)
     components = Set.new(["global"])
 
     paths.each do |raw_path|
       path = raw_path.to_s.sub(%r{\A\./}, "")
       next if path.empty?
-
-      if semantic_contracts.include?(path)
-        impact = contract_impact[path]
-        if impact.nil?
-          services.each { |service| components << "service:#{service}" }
-          components << "system"
-        else
-          Array(impact).each { |component| components << component }
-          components << "system" unless impact.empty?
-        end
-        next
-      end
-      next if global_only_contracts.include?(path)
 
       case path
       when "architecture.lock.yaml", "Makefile", "go.work",
@@ -63,6 +55,7 @@ module AffectedComponents
         raise ArgumentError, "unknown service path changed: #{service}" unless services.include?(service)
 
         components << "service:#{service}"
+        Array(service_consumers[service]).each { |consumer| components << "service:#{consumer}" }
       when %r{\Afrontend/apps/(storefront|admin)/}
         components << "frontend:#{Regexp.last_match(1)}"
       when %r{\Afrontend/(?:internal|static|templates)/},
@@ -76,7 +69,7 @@ module AffectedComponents
       when %r{\Aplatform/ansible/}
         components << "platform:ansible"
       when %r{\Acontracts/openapi/}
-        if path == common_openapi
+        if Array(common_openapi).include?(path)
           FRONTENDS.each { |frontend| components << "frontend:#{frontend}" }
           services.each { |service| components << "service:#{service}" }
         elsif (contract = public_contracts[path])
@@ -92,15 +85,22 @@ module AffectedComponents
         # mapping. Fail closed until they do rather than guessing from filenames.
         services.each { |service| components << "service:#{service}" }
         components << "system"
-      when "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
+      when *SEMANTIC_CONTRACTS
+        impact = contract_impact[path]
+        if impact.nil?
+          # Callers that do not provide a base/head semantic delta are deliberately
+          # conservative. The CLI always provides one.
+          services.each { |service| components << "service:#{service}" }
+          components << "system"
+        else
+          Array(impact).each { |component| components << component }
+          components << "system" unless impact.empty?
+        end
+      when "config/contracts/runtime-efficiency.yaml",
+           "scripts/resource-sizing.rb", "scripts/validate-runtime-efficiency.rb",
            "tests/resource_sizing_test.rb", "tests/runtime_efficiency_test.rb"
         # The runtime-efficiency gate is globally authoritative and always runs on
         # the new SHA, so these inputs do not require the broad system suite.
-      when %r{\Aconfig/contracts/}
-        unless canonical_contracts.include?(path)
-          raise ArgumentError, "unregistered canonical contract changed: #{path}"
-        end
-        force_all!(components, services)
       when %r{\Atests/}, %r{\Ascripts/}
         # Other repository-level tests and native helpers are exercised by system.
         components << "system"
@@ -124,13 +124,13 @@ module AffectedComponents
 
   def changed_paths(root, base, head)
     if head == "WORKTREE"
-      output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, "--") || ""
-      untracked = run_git(root, "ls-files", "--others", "--exclude-standard") || ""
-      return (output.lines + untracked.lines).map(&:strip).reject(&:empty?).uniq.sort
+      output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, "--") || ""
+      untracked = run_git(root, "ls-files", "--others", "--exclude-standard", "-z") || ""
+      return (output.b.split("\0") + untracked.b.split("\0")).reject(&:empty?).uniq.sort
     end
 
-    output = run_git(root, "diff", "--name-only", "--diff-filter=ACMRTUXB", base, head, "--")
-    output.lines.map(&:strip).reject(&:empty?).uniq.sort
+    output = run_git(root, "diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB", base, head, "--")
+    output.b.split("\0").reject(&:empty?).uniq.sort
   end
 
   def yaml_at(root, ref, path)
@@ -256,12 +256,12 @@ module AffectedComponents
     impact.to_a.sort
   end
 
-  def contract_impact_map(root, base, head, paths, services:, semantic_contracts:, frontends: FRONTENDS)
+  def contract_impact_map(root, base, head, paths, services:, frontends: FRONTENDS)
     before_events = yaml_at(root, base, "config/contracts/event-contracts.yaml")
     after_events = yaml_at(root, head, "config/contracts/event-contracts.yaml")
     context = {before_events: before_events, after_events: after_events}
 
-    semantic_contracts.each_with_object({}) do |path, impacts|
+    SEMANTIC_CONTRACTS.each_with_object({}) do |path, impacts|
       next unless paths.include?(path)
 
       impacts[path] = semantic_contract_impact(
@@ -277,33 +277,62 @@ module AffectedComponents
 
   def load_project(root, ref)
     lock = yaml_at(root, ref, "architecture.lock.yaml")
-    machine_contracts = lock.fetch("machine_contracts")
-    ownership = yaml_at(root, ref, machine_contracts.fetch("service_ownership"))
-    public_api = yaml_at(root, ref, machine_contracts.fetch("public_api_contracts"))
-    routing = yaml_at(root, ref, machine_contracts.fetch("change_routing_policy"))
-    routing_rules = routing.fetch("routing")
-    unless routing_rules.fetch("registered_contract_default") == "force-all" &&
-           routing_rules.fetch("unregistered_contract") == "reject"
-      raise "change routing contract must fail closed for generic contracts"
-    end
-
+    ownership = yaml_at(root, ref, "config/contracts/service-ownership.yaml")
+    public_api = yaml_at(root, ref, "config/contracts/public-api-contracts.yaml")
     services = ownership.fetch("services").keys
     canonical = lock.dig("business", "services") || []
     raise "service ownership differs from architecture.lock.yaml" unless services.sort == canonical.sort
 
-    canonical_contracts = Set.new(machine_contracts.values.select { |path| path.start_with?("config/contracts/") })
-    semantic_contracts = Set.new(
-      Array(routing_rules.fetch("semantic_roles")).map { |role| machine_contracts.fetch(role) }
-    )
-    global_only_contracts = Set.new(
-      Array(routing_rules.fetch("global_only_roles")).map { |role| machine_contracts.fetch(role) }
-    )
-    unless semantic_contracts.subset?(canonical_contracts) && global_only_contracts.subset?(canonical_contracts)
-      raise "change routing roles must resolve to registered canonical contracts"
-    end
+    [services, public_contract_index(public_api), public_api["common_components"]]
+  end
 
-    [services, public_contract_index(public_api), public_api["common_components"],
-     canonical_contracts, semantic_contracts, global_only_contracts]
+  def project_for_change(root, base, head)
+    current_services, current_contracts, current_common = load_project(root, head)
+    base_services, base_contracts, base_common = load_project(root, base)
+    [(current_services | base_services).sort, base_contracts.merge(current_contracts), [current_common, base_common].compact.uniq]
+  end
+
+  def service_consumers(root, base, head, services)
+    reverse = Hash.new { |hash, key| hash[key] = Set.new }
+    [base, head].each do |ref|
+      dependencies = yaml_at(root, ref, "config/contracts/dependency-map.yaml")
+      events = yaml_at(root, ref, "config/contracts/event-contracts.yaml")
+      producers = {}
+      events.fetch("events", {}).each do |name, spec|
+        provider = event_producer(name)
+        next unless services.include?(provider)
+
+        producers[name] = provider
+        producers[event_tail(name)] = provider
+        Array(spec && spec["consumers"]).each do |consumer|
+          reverse[provider] << consumer if services.include?(consumer)
+        end
+      end
+      dependencies.fetch("services", {}).each do |consumer, spec|
+        next unless services.include?(consumer)
+
+        Array(spec && spec["events_in"]).each do |event|
+          provider = producers[event]
+          reverse[provider] << consumer if provider
+        end
+        %w[sync sync_external].each do |kind|
+          Array(spec && spec[kind]).each do |provider|
+            reverse[provider] << consumer if services.include?(provider)
+          end
+        end
+      end
+    end
+    services.to_h do |provider|
+      found = Set.new
+      pending = reverse[provider].to_a
+      until pending.empty?
+        consumer = pending.shift
+        next unless found.add?(consumer)
+
+        pending.concat(reverse[consumer].to_a)
+      end
+      [provider, found.to_a.sort]
+    end
   end
 end
 
@@ -322,11 +351,12 @@ if $PROGRAM_NAME == __FILE__
   abort "format must be lines or json" unless %w[lines json].include?(options[:format])
 
   root = File.expand_path("..", __dir__)
-  services, public_contracts, common_openapi, canonical_contracts, semantic_contracts, global_only_contracts =
-    AffectedComponents.load_project(root, options[:head])
+  services, public_contracts, common_openapi_values = AffectedComponents.project_for_change(root, options[:base], options[:head])
+  common_openapi = common_openapi_values
   paths = AffectedComponents.changed_paths(root, options[:base], options[:head])
+  consumers = AffectedComponents.service_consumers(root, options[:base], options[:head], services)
   contract_impact = AffectedComponents.contract_impact_map(
-    root, options[:base], options[:head], paths, services: services, semantic_contracts: semantic_contracts
+    root, options[:base], options[:head], paths, services: services
   )
   affected = AffectedComponents.classify(
     paths,
@@ -334,9 +364,7 @@ if $PROGRAM_NAME == __FILE__
     public_contracts: public_contracts,
     common_openapi: common_openapi,
     contract_impact: contract_impact,
-    semantic_contracts: semantic_contracts,
-    canonical_contracts: canonical_contracts,
-    global_only_contracts: global_only_contracts,
+    service_consumers: consumers,
     strict_unknown: options[:strict_unknown]
   )
   if options[:format] == "json"

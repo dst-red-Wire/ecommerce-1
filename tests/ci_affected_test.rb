@@ -73,17 +73,9 @@ class CIAffectedTest < Minitest::Test
   end
 
   def classify(*paths, contract_impact: {}, strict_unknown: false)
-    _services, _public, _common, canonical_contracts, semantic_contracts, global_only_contracts =
-      AffectedComponents.load_project(ROOT, "WORKTREE")
-    AffectedComponents.classify(
-      paths, services: SERVICES, public_contracts: PUBLIC,
-      common_openapi: "contracts/openapi/common.v1.yaml",
-      contract_impact: contract_impact,
-      semantic_contracts: semantic_contracts,
-      canonical_contracts: canonical_contracts,
-      global_only_contracts: global_only_contracts,
-      strict_unknown: strict_unknown
-    )
+    AffectedComponents.classify(paths, services: SERVICES, public_contracts: PUBLIC,
+                                 common_openapi: "contracts/openapi/common.v1.yaml",
+                                 contract_impact: contract_impact, strict_unknown: strict_unknown)
   end
 
   def test_storefront_change_is_component_scoped
@@ -172,17 +164,6 @@ class CIAffectedTest < Minitest::Test
     end
   end
 
-  def test_registered_generic_contract_fails_closed_to_all_components
-    affected = classify("config/contracts/security-scan-policy.yaml")
-    %w[global system platform:terraform platform:ansible frontend:storefront frontend:admin service:product].each do |component|
-      assert_includes affected, component
-    end
-  end
-
-  def test_unregistered_contract_is_rejected
-    assert_raises(ArgumentError) { classify("config/contracts/not-registered.yaml") }
-  end
-
   def test_other_repository_native_helper_change_routes_to_system
     assert_equal %w[global system], classify("scripts/context-pack.py")
   end
@@ -228,6 +209,36 @@ class CIAffectedTest < Minitest::Test
         base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
         File.write(File.join(dir, "new.txt"), "new\n")
         assert_equal ["new.txt"], AffectedComponents.changed_paths(dir, base, "WORKTREE")
+      end
+    end
+  end
+
+
+  def test_service_change_routes_transitive_consumers
+    affected = AffectedComponents.classify(
+      ["services/product/internal/domain/product.go"],
+      services: SERVICES,
+      public_contracts: PUBLIC,
+      common_openapi: "contracts/openapi/common.v1.yaml",
+      contract_impact: {},
+      service_consumers: {"product" => %w[cart search]}
+    )
+    assert_equal %w[global service:cart service:product service:search], affected
+  end
+
+  def test_changed_paths_includes_deletions
+    Dir.mktmpdir("ci-affected-delete") do |dir|
+      with_isolated_git_environment do
+        initialize_temporary_git_repository(dir)
+        File.write(File.join(dir, "gone.txt"), "one\n")
+        isolated_git("add", "gone.txt", chdir: dir)
+        isolated_git("commit", "-qm", "base", chdir: dir)
+        base = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        File.delete(File.join(dir, "gone.txt"))
+        isolated_git("add", "-A", chdir: dir)
+        isolated_git("commit", "-qm", "delete", chdir: dir)
+        head = isolated_git_output("rev-parse", "HEAD", chdir: dir)
+        assert_equal ["gone.txt"], AffectedComponents.changed_paths(dir, base, head)
       end
     end
   end
