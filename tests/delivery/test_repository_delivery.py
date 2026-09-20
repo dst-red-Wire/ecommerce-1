@@ -34,7 +34,7 @@ class EvidenceMetricsTests(unittest.TestCase):
                 "executed_gates": 1,
                 "reused_gates": 1,
                 "skipped_gates": 1,
-                "execution_counts": {"fresh": 1, "skipped": 1},
+                "execution_counts": {"fresh": 1, "parent-evidence": 1, "skipped": 1},
                 "content_cache_gates": 1,
                 "content_cache_direct_gates": 0,
                 "content_cache_hits": 2,
