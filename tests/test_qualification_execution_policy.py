@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -331,6 +334,33 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "not approved"):
             MOD._gate_cache_key("security", {})
+
+    def test_execute_gate_live_mode_streams_prefixed_output_and_keeps_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = root / ".context"
+            terminal = io.StringIO()
+            policy = {
+                "cache_mode": "fresh",
+                "scope": "global",
+                "parallel_safe": True,
+                "ci_fanout": True,
+            }
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "CONTEXT", context),
+                mock.patch.object(MOD, "_resolved_gate_policy", return_value=policy),
+                redirect_stdout(terminal),
+            ):
+                ok, record = MOD._execute_gate(
+                    "security",
+                    [MOD.sys.executable, "-c", "print('GATE-LIVE')"],
+                    {"ECOMMERCE_LIVE_OUTPUT": "1", "PYTHONUNBUFFERED": "1"},
+                )
+
+            self.assertTrue(ok)
+            self.assertIn("[security] GATE-LIVE", terminal.getvalue())
+            self.assertEqual("GATE-LIVE\n", (root / record["log"]).read_text(encoding="utf-8"))
 
     def test_parallel_batch_preserves_declared_order_and_serial_barrier(self):
         records = []
