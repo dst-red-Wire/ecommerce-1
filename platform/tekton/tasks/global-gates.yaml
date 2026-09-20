@@ -6,6 +6,8 @@ spec:
   params:
     - name: runner-image
       type: string
+    - name: gate
+      type: string
     - name: base
       type: string
       default: origin/main
@@ -58,6 +60,8 @@ spec:
       command: [python3, scripts/repoctl.py]
       args:
         - ci-global
+        - --gate
+        - $(params.gate)
         - --base
         - $(params.base)
         - --head
