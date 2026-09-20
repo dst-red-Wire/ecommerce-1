@@ -20,6 +20,7 @@ execution:
     - automation
     - security
   local_max_workers: 4
+  python_unittest_method_shard_min_tests: 4
   ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
   ci_max_workers_required: true
   global_parallelism: bounded
