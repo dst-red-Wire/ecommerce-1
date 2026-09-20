@@ -8,12 +8,18 @@ spec:
       type: string
     - name: max-workers
       type: string
+    - name: gates
+      type: array
   workspaces:
     - name: source
   tasks:
     - name: global-gates
       taskRef:
         name: ecommerce-global-gates
+      matrix:
+        params:
+          - name: gate
+            value: $(params.gates[*])
       params:
         - name: runner-image
           value: $(params.runner-image)
