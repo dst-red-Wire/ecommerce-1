@@ -4022,9 +4022,12 @@ def roadmap_sync() -> int:
 
 
 def _roadmap_followup_after_merge() -> int:
-    if roadmap_check(quiet=True) == 0:
+    check_rc = roadmap_check(quiet=True)
+    if check_rc == 0:
         print("PASS finish-pr: roadmap already synchronized")
         return 0
+    if check_rc != 1:
+        return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
 
     main_sha = git("rev-parse", "HEAD").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
