@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -92,6 +93,8 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
     equivalent_full_seconds = executed_seconds + reused_seconds
     denominator = len(executed) + len(reused)
     cache_hit_ratio = (len(reused) / denominator) if denominator else 0.0
+    content_cache_records = [r for r in executed if int(r.get("content_cache_hits", 0) or 0) > 0]
+    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in content_cache_records)
 
     return {
         "executed_records": executed,
@@ -102,6 +105,8 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
         "reused_gates": len(reused),
         "skipped_gates": len(skipped),
         "failed_gates": len(failed),
+        "content_cache_gates": len(content_cache_records),
+        "content_cache_hits": content_cache_hits,
         "executed_seconds": _round(executed_seconds),
         "estimated_saved_seconds": _round(reused_seconds),
         "equivalent_full_seconds": _round(equivalent_full_seconds),
@@ -116,7 +121,7 @@ def execution_max_workers(root: Path | None = None) -> int:
         text = policy.read_text(encoding="utf-8")
     except OSError:
         return 1
-    match = __import__("re").search(r"(?m)^\s*max_workers:\s*(\d+)\s*$", text)
+    match = re.search(r"(?m)^\s*max_workers:\s*(\d+)\s*$", text)
     if not match:
         return 1
     return max(1, min(16, int(match.group(1))))
@@ -472,6 +477,7 @@ def _print_summary(report: dict[str, Any], destination: Path) -> None:
     print(f"executed gate time   {inventory['executed_seconds']:.3f}s")
     print(f"reused time saved    {inventory['estimated_saved_seconds']:.3f}s")
     print(f"evidence hit ratio   {inventory['evidence_reuse_hit_percent']:.1f}%")
+    print(f"content cache hits   {inventory.get('content_cache_hits', 0)} across {inventory.get('content_cache_gates', 0)} gates")
     print(f"critical path est.   {critical['critical_path_estimate_seconds']:.3f}s ({critical['critical_branch']})")
     print(f"parallel headroom    {critical['parallelization_headroom_seconds']:.3f}s")
     priorities = report.get("amdahl_priorities", [])
