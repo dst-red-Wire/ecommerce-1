@@ -124,6 +124,31 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
         self.assertNotIn("ignore_errors", handshake)
         self.assertEqual(60, handshake["retries"])
 
+    def test_first_openbao_transition_requires_preserved_bootstrap_key(self):
+        tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
+        names = [task["name"] for task in tasks]
+        guard_name = "Require preserved bootstrap key for first OpenBao authority transition"
+        guard = tasks[names.index(guard_name)]
+        self.assertLess(
+            names.index("Inspect temporary gateway key on wg-01"),
+            names.index(guard_name),
+        )
+        self.assertLess(
+            names.index(guard_name),
+            names.index("Read the existing bootstrap key for mandatory rotation proof"),
+        )
+        self.assertEqual(
+            ["wireguard_bootstrap_key_stat.stat.exists | default(false)"],
+            guard["ansible.builtin.assert"]["that"],
+        )
+        self.assertEqual(
+            [
+                "wireguard_secret_mode == 'runtime-openbao-read'",
+                "not wireguard_authority_state.stat.exists",
+            ],
+            guard["when"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

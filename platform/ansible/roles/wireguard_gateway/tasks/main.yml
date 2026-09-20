@@ -54,6 +54,18 @@
   register: wireguard_bootstrap_key_stat
   no_log: true
 
+- name: Require preserved bootstrap key for first OpenBao authority transition
+  ansible.builtin.assert:
+    that:
+      - wireguard_bootstrap_key_stat.stat.exists | default(false)
+    fail_msg: >-
+      First OpenBao authority transition requires the existing bootstrap key so
+      mandatory replacement-key rotation can be proven before bootstrap cleanup.
+  when:
+    - wireguard_secret_mode == 'runtime-openbao-read'
+    - not wireguard_authority_state.stat.exists
+  no_log: true
+
 - name: Generate the temporary gateway key locally on wg-01
   ansible.builtin.command:
     argv: [wg, genkey]
