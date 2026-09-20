@@ -201,14 +201,14 @@
 - name: Prove the OpenBao key replaces the effective bootstrap credential
   ansible.builtin.assert:
     that:
-      - wireguard_openbao_replacement_public_key.stdout | trim != wireguard_pre_transition_public_key.stdout | trim
+      - (wireguard_openbao_replacement_public_key.stdout | trim) != (wireguard_pre_transition_public_key.stdout | trim)
     fail_msg: "Authority transition requires a distinct effective WireGuard public key before bootstrap cleanup."
   when:
     - wireguard_secret_mode == 'runtime-openbao-read'
     - wireguard_bootstrap_key_stat.stat.exists | default(false)
   no_log: true
 
-- name: Select phase-specific WireGuard material without controller secret authority- name: Select phase-specific WireGuard material without controller secret authority
+- name: Select phase-specific WireGuard material without controller secret authority
   ansible.builtin.set_fact:
     wireguard_private_key: >-
       {{ (wireguard_bootstrap_material.results[0].content | b64decode | trim)
