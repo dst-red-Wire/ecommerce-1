@@ -3315,6 +3315,23 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
                     records.append(record)
 
     expected = set(str(name) for name in plan.get("gates", []))
+    expected_status: dict[str, str] = {}
+    for entry in plan.get("execution_plan", []):
+        if not isinstance(entry, dict):
+            return fail("Tekton plan execution entry is malformed", 1)
+        gate = str(entry.get("gate") or "")
+        action = str(entry.get("action") or "")
+        if not gate or gate not in expected:
+            return fail(f"Tekton plan execution entry has unexpected gate: {gate!r}", 1)
+        if action in {"run", "fresh", "reuse"}:
+            expected_status[gate] = "PASS"
+        elif action == "skip":
+            expected_status[gate] = "SKIP"
+        else:
+            return fail(f"Tekton plan execution entry has unsupported action {action!r} for {gate}", 1)
+    if set(expected_status) != expected:
+        return fail("Tekton plan execution inventory does not match gate inventory", 1)
+
     by_gate: dict[str, dict] = {}
     duplicates: set[str] = set()
     for record in records:
@@ -3327,7 +3344,9 @@ def ci_finalize(base: str, head: str, record_dir: str) -> int:
     missing = expected - set(by_gate)
     unexpected = set(by_gate) - expected
     bad = sorted(
-        gate for gate, record in by_gate.items() if gate in expected and record.get("status") not in {"PASS", "SKIP"}
+        gate
+        for gate, record in by_gate.items()
+        if gate in expected and record.get("status") != expected_status[gate]
     )
     if missing or duplicates or unexpected or bad:
         description = (
