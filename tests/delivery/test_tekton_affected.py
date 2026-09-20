@@ -12,6 +12,7 @@ class TektonAffectedContractTests(unittest.TestCase):
         pipeline = self.read("platform/tekton/pipelines/affected.yaml")
         self.assertIn("name: ecommerce-affected", pipeline)
         self.assertIn("$(tasks.classify.results.components[*])", pipeline)
+        self.assertIn("$(tasks.classify.results.global-gates[*])", pipeline)
         self.assertIn("name: global-gates", pipeline)
         self.assertIn("name: max-workers", pipeline)
         self.assertIn("value: $(params.max-workers)", pipeline)
@@ -21,6 +22,7 @@ class TektonAffectedContractTests(unittest.TestCase):
     def test_tekton_uses_repository_controller_not_shell_wrappers(self):
         paths = [
             "platform/tekton/tasks/affected-components.yaml",
+            "platform/tekton/tasks/global-gates.yaml",
             "platform/tekton/tasks/component-gates.yaml",
             "platform/tekton/tasks/finalize-evidence.yaml",
         ]
@@ -52,6 +54,15 @@ class TektonAffectedContractTests(unittest.TestCase):
         self.assertIn("qualification_max_workers_parameter: max-workers", contract)
         self.assertIn("qualification_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS", contract)
         self.assertIn("bounded-execution-budget-proven", contract)
+
+    def test_classifier_publishes_both_policy_driven_matrices(self):
+        classifier = self.read("platform/tekton/tasks/affected-components.yaml")
+        self.assertIn("name: global-gates", classifier)
+        self.assertIn("$(results.global-gates.path)", classifier)
+        global_task = self.read("platform/tekton/tasks/global-gates.yaml")
+        self.assertIn("name: gate", global_task)
+        self.assertIn("--gate", global_task)
+        self.assertIn("$(params.gate)", global_task)
 
     def test_parallel_gate_taskruns_use_ephemeral_isolated_checkouts(self):
         for path in (
