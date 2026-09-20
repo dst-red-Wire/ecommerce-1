@@ -84,38 +84,47 @@ When the PR is materially behind current `main`:
 
 If governed files are newly introduced under `docs/architecture/`, `config/contracts/`, `config/infrastructure/`, or other registered authority sets, verify that the current root authority registers them exactly once.
 
-## Phase 5 — Qualify incrementally
+## Phase 5 — Qualify and publish with one canonical command
 
-Run the narrowest relevant checks first:
+The normal path is a single command:
 
-1. `git diff --check` / `git diff --cached --check`.
-2. focused validators and unit tests for changed components.
-3. relevant repository gates such as `make terraform`, `make ansible`, `make governance`, `make automation`, `make security`.
-4. `BASE=origin/main make verify-change`.
+`make deliver TITLE="..." MSG="..." BASE=main`
+
+`make deliver` owns the complete happy path:
+
+1. qualify the affected change;
+2. validate and cache exact-SHA evidence;
+3. commit when needed;
+4. push without force;
+5. create or refresh the pull request.
+
+Do not split the normal workflow into `verify-change` + manual evidence JSON inspection + manual `git push`.
+
+Use focused tests, `make verify-change`, evidence-file inspection, or `git push` only as bounded diagnostic/recovery tools when `make deliver` fails or when explicitly required to investigate a defect.
 
 If a failure is unrelated to the recovered PR and already exists on current `main`, isolate it into a separate branch/PR. Do not contaminate the recovered PR scope.
 
 Use `make failure-context GATE=<gate>` when available rather than pasting large raw logs.
 
-## Phase 6 — Evidence contract
+## Phase 6 — Delivery evidence contract
 
-For `.context/evidence/worktree.json`, require:
+A successful `make deliver` must establish:
 
-- `status = PASS`;
-- `non_pass_gates = 0`;
-- a stable `head_tree_sha`;
-- expected affected components.
+- an exact published HEAD SHA;
+- PASS qualification for the required affected gates;
+- exact-SHA evidence under repository policy;
+- a GitHub PR whose head equals that SHA.
 
-Worktree evidence is not final exact-commit evidence. After commit/publication, ensure evidence is promoted or rerun for the exact commit SHA as required by repository policy.
+Do not require the operator to manually open or parse `.context/evidence/*.json` after a successful `make deliver`; ChatGPT may inspect repository evidence directly when review needs it.
 
-## Phase 7 — Publish the final candidate
+## Phase 7 — Final candidate
 
-Only after the current-main worktree passes:
+After successful `make deliver`:
 
-- use the repository's delivery mechanism (`make deliver` or the current canonical equivalent);
 - capture the exact published HEAD SHA;
 - verify the GitHub PR head matches that SHA;
-- keep the worktree clean after delivery.
+- keep the worktree clean;
+- proceed to ChatGPT exact-SHA CODE and SECURITY review.
 
 Do not publish from the stale historical branch when a current-main replacement branch exists.
 
