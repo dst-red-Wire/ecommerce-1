@@ -170,6 +170,7 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
         ("system", _controller("system")),
         ("governance", _controller("governance")),
         ("ansible", _controller("ansible")),
+        ("service-product", _controller("service", "product")),
     ):
         gate_warm[name] = _measure(
             f"warm-{name}",
@@ -213,6 +214,13 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
         ),
         "affected_product_wall": _budget_result(
             product["median_wall_seconds"], float(budgets["affected_product_wall_max"])
+        ),
+        "affected_governance_wall": _budget_result(
+            governance["median_wall_seconds"], float(budgets["affected_governance_wall_max"])
+        ),
+        "service_product_warm_wall": _budget_result(
+            gate_warm["service-product"]["median_wall_seconds"],
+            float(budgets["service_product_warm_wall_max"]),
         ),
         "system_warm_wall": _budget_result(
             gate_warm["system"]["median_wall_seconds"], float(budgets["system_warm_wall_max"])
