@@ -100,6 +100,9 @@ def main():
                 path = Path("/var/lib/rancher/rke2/agent/images") / item["file"]
                 actual = sha256(path)
                 assert actual == item["sha256"], "staged image bytes differ from approved archive"
+                if "--hardlink-images" in sys.argv:
+                    source = manifest_path.parent / item["file"]
+                    assert source.stat().st_ino == path.stat().st_ino, "fixture image is not a hardlink"
                 images[path.name] = actual
         assert len(images) == 2
         services = subprocess.run(

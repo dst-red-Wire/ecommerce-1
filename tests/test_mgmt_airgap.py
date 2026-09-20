@@ -418,6 +418,9 @@ class OfflineAnsibleContractTests(unittest.TestCase):
         self.assertIn("disablerepo: '*'", role)
         self.assertIn('disable_gpg_check: false', role)
         self.assertIn('mgmt_offline_selinux.stdout != \'Enforcing\'', role)
+        defaults = (ROOT / 'platform/ansible/roles/mgmt_offline_artifacts/defaults/main.yml').read_text()
+        self.assertIn('mgmt_offline_image_stage_mode: copy', defaults)
+        self.assertIn("mgmt_offline_image_stage_mode == 'hardlink'", role)
 
     def test_both_rke2_roles_refuse_downloads_and_registry_fallback(self):
         for role in ('rke2_server', 'rke2_agent'):
