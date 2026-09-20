@@ -160,6 +160,44 @@ class IncrementalDeliveryTests(unittest.TestCase):
         self.assertIsNone(parent)
         self.assertIsNone(data)
 
+    def test_force_full_campaign_control_does_not_leak_into_gate_subprocesses(self):
+        captured_envs = []
+
+        def fake_run_gate_batch(items, records, env=None):
+            captured_envs.append(dict(env or {}))
+            for name, _command in items:
+                records.append(
+                    {
+                        "gate": name,
+                        "status": "PASS",
+                        "exit_code": 0,
+                        "duration_seconds": 0.01,
+                    }
+                )
+            return True
+
+        def fake_write(base, head, paths, components, records, verification=None):
+            return Path("/tmp/evidence.json")
+
+        with (
+            mock.patch.dict(
+                REPOCTL.os.environ,
+                {"ECOMMERCE_FORCE_FULL_QUALIFICATION": "1"},
+                clear=False,
+            ),
+            mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+            mock.patch.object(REPOCTL, "changed_paths", return_value=["scripts/resource-sizing.rb"]),
+            mock.patch.object(REPOCTL, "affected", return_value=["global"]),
+            mock.patch.object(REPOCTL, "_incremental_parent_evidence", return_value=(None, None)),
+            mock.patch.object(REPOCTL, "_run_gate_batch", side_effect=fake_run_gate_batch),
+            mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
+        ):
+            self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
+
+        self.assertTrue(captured_envs)
+        for env in captured_envs:
+            self.assertNotIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", env)
+
     def test_dirty_exact_checkout_fails_before_any_gate(self):
         def dirty_git(*args, check=True):
             if args == ("rev-parse", "feature-head"):
