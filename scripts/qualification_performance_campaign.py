@@ -112,12 +112,19 @@ def _synthetic_worktree(kind: str):
                 check=True,
             )
             if kind == "product":
-                candidates = sorted((self.root / "services" / "product").rglob("*.go"))
-                if not candidates:
-                    raise RuntimeError("Product synthetic impact requires at least one Go source")
-                target = next((path for path in candidates if not path.name.endswith("_templ.go")), candidates[0])
+                target = self.root / "services" / "product" / "internal" / "domain" / "product.go"
+                if not target.is_file():
+                    raise RuntimeError(
+                        "Product synthetic impact source is missing: "
+                        "services/product/internal/domain/product.go"
+                    )
+                relative = target.relative_to(self.root).as_posix()
+                if any(token in relative for token in ("/generated/", "/sqlcgen/")) or target.name.endswith("_templ.go"):
+                    raise RuntimeError(f"Product synthetic impact selected generated source: {relative}")
                 with target.open("a", encoding="utf-8") as handle:
-                    handle.write("// qualification-performance-campaign product impact\n")
+                    handle.write(
+                        '\nconst qualificationPerformanceCampaignMarker = "synthetic-product-impact"\n'
+                    )
             elif kind == "governance":
                 target = self.root / "config" / "contracts" / "review-policy.yaml"
                 with target.open("a", encoding="utf-8") as handle:
