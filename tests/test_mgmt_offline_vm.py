@@ -96,18 +96,19 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
     def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            containerd = root / "containerd"
             images = root / "images"
+            containerd = root / "containerd"
             unrelated = root / "server"
             for path in (containerd, images, unrelated):
                 path.mkdir()
             self.assertEqual(
-                RESTAGE.clean((containerd, images), allowed=(containerd, images)),
-                [str(containerd), str(images)],
+                RESTAGE.clean((images,), allowed=(images,)),
+                [str(images)],
             )
+            self.assertTrue(containerd.is_dir())
             self.assertTrue(unrelated.is_dir())
             with self.assertRaisesRegex(ValueError, "non-reconstructible"):
-                RESTAGE.clean((unrelated,), allowed=(containerd, images))
+                RESTAGE.clean((unrelated,), allowed=(images,))
 
 
 if __name__ == "__main__":

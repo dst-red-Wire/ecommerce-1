@@ -8,7 +8,6 @@ import shutil
 from pathlib import Path
 
 ALLOWED = (
-    Path("/var/lib/rancher/rke2/agent/containerd"),
     Path("/var/lib/rancher/rke2/agent/images"),
 )
 

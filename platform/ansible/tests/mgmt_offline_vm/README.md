@@ -112,9 +112,10 @@ installed RPMs, RKE2 binary and containerd content remain. To reconstruct transf
 bytes after cleanup, run `vm_action=restage`; it stops the local server, executes the
 same complete offline validation and staging role, and leaves restart to the next
 `server` action. To remain inside the official box's 10 GiB disk, it removes only the
-stopped fixture's reconstructible containerd store and image-import directory before
-rebuilding them, and hardlinks the validated staging archives into the image-import
-directory instead of storing a second copy. Both paths remain root-only, and the
+stopped fixture's reconstructible image-import directory before rebuilding it, and
+hardlinks the validated staging archives into that directory instead of storing a
+second copy. The containerd store is preserved because an existing etcd member needs
+its imported runtime images during restart. Both paths remain root-only, and the
 postcondition proves identical inodes and approved digests. RKE2 server state and etcd
 remain. A normal `test` action refuses an
 active server so a cold trial cannot be confused with recovery.
