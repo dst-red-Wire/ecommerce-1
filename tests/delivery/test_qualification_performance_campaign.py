@@ -50,6 +50,11 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn("qualification_performance_campaign.py", makefile)
         self.assertIn("performance_audit.py", makefile)
 
+    def test_finish_pr_blocks_without_exact_campaign_proof(self):
+        repoctl = (ROOT / "scripts" / "repoctl.py").read_text(encoding="utf-8")
+        self.assertIn("_valid_performance_campaign(head)", repoctl)
+        self.assertIn("run make qualification-proof on the exact clean head", repoctl)
+
     def test_ci_evidence_requires_campaign_before_merge(self):
         contract = (ROOT / "config" / "contracts" / "ci-evidence.yaml").read_text(encoding="utf-8")
         self.assertIn("performance_campaign:", contract)
