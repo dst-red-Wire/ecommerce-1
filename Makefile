@@ -31,10 +31,10 @@ help: ## Show the available checks
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks
+ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks
 
-ci-global: governance contracts automation security ## Run global gates used by Tekton
-
+ci-global: ## Run canonical global gates through the central execution planner
+	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
 governance: runtime-efficiency ## Validate canonical architecture and all registered governance contracts
 	@$(PYTHON) scripts/repoctl.py governance
 
