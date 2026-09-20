@@ -1461,11 +1461,24 @@ def validate(root):
             errors.append("CODEX_HANDOFFS.md M7 must require >=90% critical-code coverage")
         handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
         handoff = handoff_match.group(0) if handoff_match else ""
+        roadmap = load_yaml(root / lock["machine_contracts"]["roadmap_policy"])
+        roadmap_m25 = next(
+            (
+                item
+                for item in roadmap.get("milestones", [])
+                if isinstance(item, dict) and str(item.get("id")) == "M2.5"
+            ),
+            None,
+        )
+        roadmap_m25_tracker = roadmap_m25.get("tracker") if isinstance(roadmap_m25, dict) else None
+        if type(roadmap_m25_tracker) is not int or roadmap_m25_tracker <= 0:
+            errors.append("roadmap policy must declare a positive M2.5 tracker")
+            roadmap_m25_tracker = -1
         handoff_requirements = (
             "## M2.5 prompt",
             "M2-5-persistent-mgmt-bootstrap",
             "Entry gate: M1 PROVEN",
-            "Tracker: `#15`",
+            f"Tracker: `#{roadmap_m25_tracker}`",
             "Evidence required for M2.5 PROVEN",
             "Exit gate:",
             "That PROVEN state enables M3",
