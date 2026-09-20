@@ -3785,6 +3785,105 @@ def repository_delivery_policy() -> dict:
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
 
 
+def pull_request_review_policy() -> dict:
+    policy = ruby_yaml("config/contracts/review-policy.yaml").get("pull_request_review") or {}
+    ai = policy.get("ai_reviewer") or {}
+    evidence = ai.get("evidence") or {}
+    codex = ai.get("codex") or {}
+    if (
+        ai.get("enabled") is not True
+        or ai.get("provider") != "ChatGPT"
+        or ai.get("sole_code_security_authority") is not True
+        or ai.get("exact_sha_binding") != "required"
+        or evidence.get("transport") != "github-pr-comment"
+        or evidence.get("marker") != "chatgpt-exact-sha-review:v1"
+        or evidence.get("required_kinds") != ["code", "security"]
+        or evidence.get("required_status") != "PASS"
+        or evidence.get("exact_sha_required") is not True
+        or codex.get("review_authority") != "forbidden"
+        or codex.get("trigger") != "forbidden"
+        or codex.get("polling") != "forbidden"
+        or codex.get("merge_readiness_dependency") != "forbidden"
+    ):
+        raise RuntimeError("invalid ChatGPT CODE/SECURITY review authority contract")
+    return policy
+
+
+_CHATGPT_REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*chatgpt-exact-sha-review:v1\s+(\{[^\n]*\})\s*-->"
+)
+
+
+def _chatgpt_review_payloads(body: str) -> list[dict]:
+    payloads: list[dict] = []
+    for raw in _CHATGPT_REVIEW_MARKER_RE.findall(body or ""):
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            payloads.append(value)
+    return payloads
+
+
+def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bool, str]:
+    review_policy = pull_request_review_policy()
+    ai = review_policy["ai_reviewer"]
+    evidence_contract = ai["evidence"]
+    completed: dict[str, dict] = {}
+
+    response = run(
+        [gh, "pr", "view", str(pr_number), "--json", "comments"],
+        check=False,
+        capture=True,
+    )
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        return False, detail or "unable to read PR comments"
+
+    try:
+        payload = json.loads(response.stdout or "{}")
+    except json.JSONDecodeError:
+        return False, "invalid GitHub PR comments JSON"
+
+    comments = payload.get("comments", [])
+    if not isinstance(comments, list):
+        return False, "GitHub PR comments payload is not a list"
+
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
+            kind = str(proof.get("kind") or "")
+            if (
+                proof.get("provider") != "ChatGPT"
+                or proof.get("head_sha") != head_sha
+                or kind not in evidence_contract["required_kinds"]
+            ):
+                continue
+            completed[kind] = proof
+
+    missing = [kind for kind in evidence_contract["required_kinds"] if kind not in completed]
+    if missing:
+        return False, "missing ChatGPT exact-SHA review proof: " + ", ".join(missing)
+
+    required_status = evidence_contract["required_status"]
+    for kind in evidence_contract["required_kinds"]:
+        proof = completed[kind]
+        blockers = proof.get("blocking_findings")
+        if (
+            proof.get("status") != required_status
+            or not isinstance(blockers, int)
+            or blockers != 0
+        ):
+            return False, (
+                f"ChatGPT {kind} review is not PASS for exact head {head_sha}: "
+                f"status={proof.get('status')!r} blocking_findings={blockers!r}"
+            )
+
+    return True, "ChatGPT CODE and SECURITY reviews PASS for exact head"
+
+
 def _remote_ref_sha(ref: str) -> str:
     result = run(["git", "rev-parse", "--verify", ref], check=False, capture=True)
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -4147,6 +4246,11 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr PR #{number} base mismatch: {pr.get('baseRefName')!r}")
     if pr.get("headRefOid") != head:
         return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {pr.get('headRefOid')!r}")
+
+    review_ready, review_reason = chatgpt_review_readiness(gh, number, head)
+    if not review_ready:
+        return fail(f"finish-pr ChatGPT CODE/SECURITY review gate not satisfied: {review_reason}")
+    print(f"PASS finish-pr: {review_reason}")
 
     protection = run(
         [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
