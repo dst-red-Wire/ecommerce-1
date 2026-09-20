@@ -2326,6 +2326,8 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
     with log_path.open("w", encoding="utf-8") as log:
         p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
     duration = round(time.monotonic() - start, 3)
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    content_cache_hits = log_text.count("qualification cache hit")
     record = {
         "gate": name,
         "status": "PASS" if p.returncode == 0 else "FAIL",
@@ -2335,6 +2337,8 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "log": str(log_path.relative_to(ROOT)),
         "execution": "fresh",
     }
+    if content_cache_hits:
+        record["content_cache_hits"] = content_cache_hits
     return p.returncode == 0, record
 
 
