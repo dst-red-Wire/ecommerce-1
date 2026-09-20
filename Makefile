@@ -172,7 +172,7 @@ failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service
 pr-monitor: ## Poll one GitHub PR cheaply; PR/OWNER/REPO required, CODEX_COMMAND optional
 	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(CODEX_COMMAND),--codex-command $(CODEX_COMMAND),)
 
-review-budget: ## Decide whether Codex/Work should run; PR and SNAPSHOT required
+review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
 	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
 	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
