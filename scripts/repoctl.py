@@ -3073,8 +3073,27 @@ def ci_component(component: str, base: str, head: str, record_dir: str) -> int:
     if exact is None:
         return 2
     requested, _ = exact
-    command, reason = _gate_command(component, base, head)
     records: list[dict] = []
+    if component == "none":
+        records.append(
+            {
+                "gate": "none",
+                "status": "SKIP",
+                "reason": "no affected component gate",
+                "duration_seconds": 0.0,
+                "execution": "skipped",
+                "cache_mode": "forbidden",
+                "scope": "component",
+                "parallel_safe": True,
+                "ci_fanout": True,
+                "parallel_group": "tekton-component-matrix",
+                "started_at_monotonic_offset": 0.0,
+            }
+        )
+        _write_record(_record_path(Path(record_dir), "component-none"), {"head_sha": requested, "records": records})
+        return 0
+
+    command, reason = _gate_command(component, base, head)
     if command is None:
         records.append(
             {
