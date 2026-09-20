@@ -82,3 +82,21 @@ repository_delivery:
     merged_pr_state: merged-closed
     remote_branch: delete
     local_branch: delete
+    automatic_branch_cleanup:
+      enabled: true
+      triggers: [git-sync, finish-pr]
+      default_branch_ref: origin/<default-branch>
+      delete_when:
+        - head-is-ancestor-of-default-branch
+        - merged-pr-head-matches-current-branch-head
+      merged_pr_base_must_match_default: true
+      github_merge_proof: exact-head-sha
+      preserve:
+        - default-branch
+        - master
+        - current-branch
+        - active-worktree
+        - branch-with-unabsorbed-head
+        - branch-advanced-after-merged-pr
+      github_cli_optional_for_ancestor_cleanup: true
+      force_local_delete_after_exact_merged_pr_proof: true
