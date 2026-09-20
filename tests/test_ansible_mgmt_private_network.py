@@ -98,7 +98,10 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
         self.assertIn("mgmt_ip", text)
         self.assertIn("mgmt_private_alias_cidrs", text)
         self.assertIn("Hetzner DHCP must configure", text)
-        self.assertIn("+ipv4.addresses", text)
+        self.assertIn("Reconcile the complete canonical static alias set", text)
+        self.assertIn("ipv4.addresses", text)
+        self.assertNotIn("+ipv4.addresses", text)
+        self.assertIn("mgmt_private_configured_alias_cidrs", text)
         self.assertIn("nmcli", text)
         self.assertIn("device\n      - reapply", text)
         self.assertNotIn("ansible.builtin.shell", text)
@@ -110,6 +113,21 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
                 self.assertEqual("ecommerce-offline-default", argv[3])
                 self.assertNotIn("{{ mgmt_private_connection }}", argv)
                 self.assertEqual("203.0.113.254/31", argv[argv.index("ipv4.addresses") + 1])
+
+    def test_alias_reconciliation_replaces_stale_static_addresses(self):
+        tasks = yaml.safe_load(ROLE.read_text())
+        reconcile = next(
+            task for task in tasks
+            if task["name"] == "Reconcile the complete canonical static alias set on the existing private connection"
+        )
+        argv = reconcile["ansible.builtin.command"]["argv"]
+        self.assertIn("ipv4.addresses", argv)
+        self.assertNotIn("+ipv4.addresses", argv)
+        self.assertIn("{{ mgmt_private_alias_cidrs | join(',') }}", argv)
+        self.assertIn(
+            "(mgmt_private_configured_alias_cidrs | sort) != (mgmt_private_alias_cidrs | sort)",
+            reconcile["when"],
+        )
 
     def test_offline_egress_is_owned_default_deny_for_both_families(self):
         env = Environment(undefined=StrictUndefined)
