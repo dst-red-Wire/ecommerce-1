@@ -123,6 +123,8 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
     def test_finish_pr_uses_central_qualification_workflow(self):
         repoctl = (ROOT / "scripts" / "repoctl.py").read_text(encoding="utf-8")
         self.assertIn('qualification_workflow("qualification_proof")', repoctl)
+        self.assertIn("_valid_performance_audit(base_ref, head)", repoctl)
+        self.assertIn("run make qualification-proof on the exact clean head", repoctl)
         self.assertIn('proof_workflow.get("performance_campaign_required") is True', repoctl)
         self.assertIn("run make perf-campaign on the exact clean head", repoctl)
 
@@ -134,6 +136,10 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn("required_before_merge: false", contract)
         self.assertIn("budget_failure_blocks_readiness: false", contract)
         self.assertIn("repetitions_source: workflows.performance_campaign.repetitions", contract)
+        self.assertIn(
+            "performance_audit_output_source: workflows.qualification_proof.performance_audit_output",
+            contract,
+        )
         self.assertIn("conditional_content_cache_fields:", contract)
 
 if __name__ == "__main__":
