@@ -110,6 +110,25 @@ def fail(message: str, code: int = 2) -> int:
     return code
 
 
+def _supports_color() -> bool:
+    return (
+        "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "") != "dumb"
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _paint(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _supports_color() else text
+
+
+def _workflow_status(kind: str, label: str) -> None:
+    styles = {"RUN": ("●", "36"), "PASS": ("✓", "32"), "FAIL": ("✗", "31")}
+    symbol, color = styles[kind]
+    print(_paint(f"{symbol} {kind:<4} {label}", color), flush=True)
+
+
 def require(name: str) -> str:
     path = shutil.which(name)
     if not path:
@@ -3971,6 +3990,7 @@ def qualification_proof(base: str) -> int:
         return fail("qualification-proof workflow must execute exactly one verify-change and one performance audit")
 
     head = git("rev-parse", "HEAD").strip()
+    _workflow_status("RUN", f"qualification-proof {head[:12]}")
     if workflow.get("clean_worktree_required") is True and git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("qualification-proof requires a clean exact-SHA worktree")
     if verify_change(base, head):
@@ -3997,9 +4017,10 @@ def qualification_proof(base: str) -> int:
     if _valid_performance_audit(base, head) is None:
         return fail(f"qualification-proof performance audit missing/invalid for {head}")
 
+    _workflow_status("PASS", f"qualification-proof {head[:12]}")
     print(
-        f"PASS qualification-proof exact={head} "
-        f"evidence={evidence.relative_to(ROOT)} audit={audit_path.relative_to(ROOT)}"
+        f"PROOF evidence={evidence.relative_to(ROOT)} "
+        f"audit={audit_path.relative_to(ROOT)}"
     )
     return 0
 
