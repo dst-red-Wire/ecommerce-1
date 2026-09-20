@@ -43,6 +43,30 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn('["git", "worktree", "add"', source)
         self.assertIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", source)
 
+    def test_final_markdown_report_contains_required_29th_point_sections(self):
+        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
+        for heading in (
+            "BRANCH",
+            "HEAD",
+            "FILES CHANGED",
+            "CENTRAL AUTHORITY",
+            "ARCHITECTURE",
+            "BEFORE",
+            "AFTER COLD",
+            "AFTER WARM",
+            "AFFECTED PRODUCT",
+            "CACHE HIT RATIO",
+            "CRITICAL PATH BEFORE",
+            "CRITICAL PATH AFTER",
+            "QUALIFICATION",
+            "REGRESSION TESTS",
+            "SECURITY / DYNAMIC CHECKS",
+            "EXACT-SHA EVIDENCE",
+            "PR",
+            "VERDICT",
+        ):
+            self.assertIn(f'"{heading}"', source)
+
     def test_make_exposes_complete_campaign_and_final_proof(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("perf-campaign:", makefile)
