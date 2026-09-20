@@ -4759,10 +4759,12 @@ def finish_pr(base: str) -> int:
         capture=True,
     )
     if remote_branch.returncode == 0:
-        deletion = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
-        if deletion.returncode:
-            detail = (deletion.stderr or deletion.stdout or "").strip()
-            return fail(f"finish-pr could not delete remote branch {branch}: {detail}")
+        deleted, detail = _delete_branch_ref("remote", branch, head)
+        if not deleted:
+            return fail(
+                f"finish-pr preserved remote branch {branch} because exact-SHA deletion failed: "
+                f"{detail or 'lease mismatch'}"
+            )
 
     switch = run(["git", "switch", base_name], check=False, capture=True)
     if switch.returncode:
@@ -4771,7 +4773,12 @@ def finish_pr(base: str) -> int:
 
     local_branch = run(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], check=False)
     if local_branch.returncode == 0:
-        run(["git", "branch", "-d", branch])
+        deleted, detail = _delete_branch_ref("local", branch, head)
+        if not deleted:
+            return fail(
+                f"finish-pr preserved local branch {branch} because compare-and-delete failed: "
+                f"{detail or 'head mismatch'}"
+            )
 
     cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
     if cleanup_rc:
