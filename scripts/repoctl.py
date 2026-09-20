@@ -4758,6 +4758,12 @@ def finish_pr(base: str) -> int:
         check=False,
         capture=True,
     )
+    if remote_branch.returncode not in {0, 2}:
+        detail = (remote_branch.stderr or remote_branch.stdout or "").strip()
+        return fail(
+            f"finish-pr cannot prove remote branch state for {branch}: "
+            f"{detail or 'git ls-remote failed'}"
+        )
     if remote_branch.returncode == 0:
         deleted, detail = _delete_branch_ref("remote", branch, head)
         if not deleted:
