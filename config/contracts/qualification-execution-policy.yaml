@@ -13,6 +13,12 @@ principles:
   dynamic_state_must_be_fresh: true
 
 execution:
+  global_gate_order:
+    - governance
+    - runtime-efficiency
+    - contracts
+    - automation
+    - security
   local_max_workers: 4
   ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
   ci_max_workers_required: true
