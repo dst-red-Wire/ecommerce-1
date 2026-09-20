@@ -3831,7 +3831,9 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     review_policy = pull_request_review_policy()
     ai = review_policy["ai_reviewer"]
     evidence_contract = ai["evidence"]
-    completed: dict[str, dict] = {}
+    completed: dict[str, list[dict]] = {
+        kind: [] for kind in evidence_contract["required_kinds"]
+    }
 
     owner_response = run(
         [gh, "repo", "view", "--json", "owner"],
@@ -3881,25 +3883,25 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
                 or kind not in evidence_contract["required_kinds"]
             ):
                 continue
-            completed[kind] = proof
+            completed[kind].append(proof)
 
-    missing = [kind for kind in evidence_contract["required_kinds"] if kind not in completed]
+    missing = [kind for kind in evidence_contract["required_kinds"] if not completed[kind]]
     if missing:
         return False, "missing ChatGPT exact-SHA review proof: " + ", ".join(missing)
 
     required_status = evidence_contract["required_status"]
     for kind in evidence_contract["required_kinds"]:
-        proof = completed[kind]
-        blockers = proof.get("blocking_findings")
-        if (
-            proof.get("status") != required_status
-            or type(blockers) is not int
-            or blockers != 0
-        ):
-            return False, (
-                f"ChatGPT {kind} review is not PASS for exact head {head_sha}: "
-                f"status={proof.get('status')!r} blocking_findings={blockers!r}"
-            )
+        for proof in completed[kind]:
+            blockers = proof.get("blocking_findings")
+            if (
+                proof.get("status") != required_status
+                or type(blockers) is not int
+                or blockers != 0
+            ):
+                return False, (
+                    f"ChatGPT {kind} review is not PASS for exact head {head_sha}: "
+                    f"status={proof.get('status')!r} blocking_findings={blockers!r}"
+                )
 
     return True, "ChatGPT CODE and SECURITY reviews PASS for exact head"
 
