@@ -121,7 +121,7 @@ def execution_max_workers(root: Path | None = None) -> int:
         text = policy.read_text(encoding="utf-8")
     except OSError:
         return 1
-    match = re.search(r"(?m)^\s*max_workers:\s*(\d+)\s*$", text)
+    match = re.search(r"(?m)^\s*local_max_workers:\s*(\d+)\s*$", text)
     if not match:
         return 1
     return max(1, min(16, int(match.group(1))))
