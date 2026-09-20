@@ -54,12 +54,12 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
             [],
             0,
             json.dumps(
-                {
-                    "comments": [
-                        {"body": body, "author": {"login": author}}
+                [
+                    [
+                        {"body": body, "user": {"login": author}}
                         for body in comments
                     ]
-                }
+                ]
             ),
             "",
         )
@@ -67,7 +67,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         def fake_run(command, **_kwargs):
             if command[1:4] == ["repo", "view", "--json"]:
                 return owner
-            if command[1:4] == ["pr", "view", "126"]:
+            if command[1:4] == ["api", "--paginate", "--slurp"]:
                 return comment_response
             raise AssertionError(command)
 
@@ -121,6 +121,46 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
                 ready, reason = self.run_with_comments(comments)
                 self.assertFalse(ready)
                 self.assertIn("ChatGPT code review is not PASS", reason)
+
+    def test_reads_all_paginated_comment_pages(self):
+        owner = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps({"owner": {"login": "dst-red-Wire"}}),
+            "",
+        )
+        pages = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                [
+                    [{"body": self.marker("code"), "user": {"login": "dst-red-Wire"}}],
+                    [
+                        {
+                            "body": self.marker("code", status="BLOCKED", blockers=1),
+                            "user": {"login": "dst-red-Wire"},
+                        },
+                        {"body": self.marker("security"), "user": {"login": "dst-red-Wire"}},
+                    ],
+                ]
+            ),
+            "",
+        )
+
+        def fake_run(command, **_kwargs):
+            if command[1:4] == ["repo", "view", "--json"]:
+                return owner
+            if command[1:4] == ["api", "--paginate", "--slurp"]:
+                return pages
+            raise AssertionError(command)
+
+        with (
+            mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()),
+            mock.patch.object(REPOCTL, "run", side_effect=fake_run),
+        ):
+            ready, reason = REPOCTL.chatgpt_review_readiness("gh", 126, self.HEAD)
+        self.assertFalse(ready)
+        self.assertIn("ChatGPT code review is not PASS", reason)
 
     def test_rejects_markers_from_non_owner_comment_author(self):
         ready, reason = self.run_with_comments(
