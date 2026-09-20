@@ -154,11 +154,11 @@ perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities 
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
 perf-campaign: ## Run the blocking 3x cold/warm/Product/governance performance campaign
-	@$(PYTHON) scripts/qualification_performance_campaign.py --base "${BASE:-origin/main}" --repetitions 3 $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
+	@$(PYTHON) scripts/qualification_performance_campaign.py --base "$${BASE:-origin/main}" --repetitions 3 $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
 
 qualification-proof: ## Final exact-SHA qualification + performance budgets + Product/Testcontainers proof
-	@$(PYTHON) scripts/qualification_performance_campaign.py --base "${BASE:-origin/main}" --repetitions 3
-	@SHA="$(git rev-parse HEAD)"; $(PYTHON) scripts/performance_audit.py --evidence ".context/evidence/$SHA.json"
+	@$(PYTHON) scripts/qualification_performance_campaign.py --base "$${BASE:-origin/main}" --repetitions 3
+	@SHA="$$(git rev-parse HEAD)"; $(PYTHON) scripts/performance_audit.py --evidence ".context/evidence/$$SHA.json"
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
 
 context: ## Build bounded task-aware context pack; use TASK="..."
