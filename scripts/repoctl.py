@@ -3957,7 +3957,7 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
         or payload.get("base_sha") != git("rev-parse", base_ref).strip()
         or payload.get("evidence_status") != "PASS"
         or not isinstance(inventory, dict)
-        or int(inventory.get("failed_gates", 1)) != 0
+        or inventory.get("failed_gates") != 0
         or safety.get("content_cache_authorizes_pass_reuse") is not False
         or safety.get("verdict_reuse_policy") != "exact-direct-parent-only"
     ):
