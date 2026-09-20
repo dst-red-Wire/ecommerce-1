@@ -1223,6 +1223,7 @@ def validate(root):
                 "required_kinds": ["code", "security"],
                 "required_status": "PASS",
                 "exact_sha_required": True,
+                "comment_author": "repository-owner",
             }
         ):
             errors.append(
