@@ -97,6 +97,7 @@ gates:
       - config/contracts/qualification-execution-policy.yaml
       - scripts/qualification_cache.py
       - tests/test_qualification_cache.py
+      - tests/test_qualification_execution_policy.py
   governance:ruby-validators:
     scope: internal
     parallel_safe: true
