@@ -95,27 +95,58 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertNotIn("<target>", gate["inputs"])
 
     def test_system_plan_excludes_dedicated_owned_tests(self):
+        captured = {}
+
+        def capture(regular, internal):
+            captured["regular"] = list(regular)
+            captured["internal"] = list(internal)
+            return 0
+
         with (
             mock.patch.object(MOD, "_git_neutral_test_env", return_value={}),
-            mock.patch.object(MOD, "_run_functions_parallel", return_value=0) as runner,
+            mock.patch.object(MOD, "_run_regular_then_internal_parallel", side_effect=capture),
         ):
             self.assertEqual(0, MOD.system_check())
-        names = [name for name, _producer in runner.call_args.args[0]]
+        names = [name for name, _producer in captured["regular"] + captured["internal"]]
         self.assertNotIn("system:test:tests/test_architecture_authority.py", names)
         self.assertNotIn("system:test:tests/openapi_validator_test.rb", names)
         self.assertIn("system:test:tests/test_m1_qualification_runner.py", names)
         self.assertIn("system:test:tests/delivery/test_performance_audit.py", names)
+        self.assertIn("system:test:tests/test_developer_git_defaults.py", [name for name, _ in captured["internal"]])
 
     def test_governance_plan_shards_validators_and_owned_tests(self):
-        with mock.patch.object(MOD, "_run_functions_parallel", return_value=0) as runner:
+        captured = {}
+
+        def capture(regular, internal):
+            captured["regular"] = list(regular)
+            captured["internal"] = list(internal)
+            return 0
+
+        with mock.patch.object(MOD, "_run_regular_then_internal_parallel", side_effect=capture):
             self.assertEqual(0, MOD.governance())
-        names = [name for name, _producer in runner.call_args.args[0]]
+        names = [name for name, _producer in captured["regular"] + captured["internal"]]
         self.assertIn("governance:authority", names)
         self.assertIn("governance:documentation", names)
         self.assertIn("governance:validator:scripts/validate-architecture.rb", names)
         self.assertIn("governance:test:tests/test_architecture_authority.py", names)
         self.assertIn("governance:test:tests/test_qualification_execution_policy.py", names)
         self.assertEqual(15, len(names))
+        self.assertIn(
+            "governance:test:tests/test_architecture_authority.py",
+            [name for name, _producer in captured["internal"]],
+        )
+
+    def test_python_unittest_method_sharding_is_central_and_deterministic(self):
+        identifiers = MOD._python_unittest_ids("tests/test_architecture_authority.py")
+        self.assertGreaterEqual(len(identifiers), 60)
+        self.assertTrue(
+            all(identifier.startswith("tests.test_architecture_authority.ArchitectureAuthorityTest.test_") for identifier in identifiers)
+        )
+        self.assertEqual(len(identifiers), len(set(identifiers)))
+        self.assertEqual(
+            4,
+            MOD.qualification_execution_policy()["execution"]["python_unittest_method_shard_min_tests"],
+        )
 
     def test_dynamic_service_inputs_are_resolved_without_product_special_case(self):
         product = MOD._resolved_gate_policy("service:product")
