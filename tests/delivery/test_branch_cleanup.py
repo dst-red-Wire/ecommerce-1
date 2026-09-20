@@ -45,6 +45,24 @@ class BranchCleanupTests(unittest.TestCase):
             "cleanup": {
                 "automatic_branch_cleanup": {
                     "enabled": True,
+                    "triggers": ["git-sync", "finish-pr"],
+                    "default_branch_ref": "origin/<default-branch>",
+                    "delete_when": [
+                        "head-is-ancestor-of-default-branch",
+                        "merged-pr-head-matches-current-branch-head",
+                    ],
+                    "merged_pr_base_must_match_default": True,
+                    "github_merge_proof": "exact-head-sha",
+                    "preserve": [
+                        "default-branch",
+                        "master",
+                        "current-branch",
+                        "active-worktree",
+                        "branch-with-unabsorbed-head",
+                        "branch-advanced-after-merged-pr",
+                    ],
+                    "github_cli_optional_for_ancestor_cleanup": True,
+                    "force_local_delete_after_exact_merged_pr_proof": True,
                 }
             },
         }
@@ -54,6 +72,20 @@ class BranchCleanupTests(unittest.TestCase):
 
     def remote_branch_exists(self, root: Path, branch: str) -> bool:
         return bool(self.git(root, "ls-remote", "--heads", "origin", f"refs/heads/{branch}").stdout.strip())
+
+    def test_repository_delivery_policy_rejects_incomplete_cleanup_contract(self):
+        policy = REPOCTL.repository_delivery_policy()
+        broken = {
+            **policy,
+            "cleanup": {
+                **policy["cleanup"],
+                "automatic_branch_cleanup": {
+                    "enabled": True,
+                },
+            },
+        }
+        with self.assertRaisesRegex(RuntimeError, "automatic branch cleanup policy drift"):
+            REPOCTL._validate_repository_delivery_policy(broken)
 
     def test_central_contract_enables_safe_automatic_cleanup(self):
         cleanup = REPOCTL.repository_delivery_policy()["cleanup"]["automatic_branch_cleanup"]
