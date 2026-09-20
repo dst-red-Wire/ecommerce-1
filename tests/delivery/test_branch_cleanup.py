@@ -62,7 +62,8 @@ class BranchCleanupTests(unittest.TestCase):
                         "branch-advanced-after-merged-pr",
                     ],
                     "github_cli_optional_for_ancestor_cleanup": True,
-                    "force_local_delete_after_exact_merged_pr_proof": True,
+                    "remote_delete_requires_exact_lease": True,
+                    "local_delete_requires_compare_and_delete": True,
                 }
             },
         }
@@ -99,6 +100,8 @@ class BranchCleanupTests(unittest.TestCase):
             cleanup["delete_when"],
         )
         self.assertEqual("exact-head-sha", cleanup["github_merge_proof"])
+        self.assertIs(True, cleanup["remote_delete_requires_exact_lease"])
+        self.assertIs(True, cleanup["local_delete_requires_compare_and_delete"])
         self.assertIn("active-worktree", cleanup["preserve"])
         self.assertIn("branch-advanced-after-merged-pr", cleanup["preserve"])
 
@@ -154,6 +157,44 @@ class BranchCleanupTests(unittest.TestCase):
         self.assertEqual("branch-with-unabsorbed-head", by_scope["remote"]["reason"])
         self.assertEqual("keep", by_scope["local"]["action"])
         self.assertEqual("branch-with-unabsorbed-head", by_scope["local"]["reason"])
+
+    def test_remote_delete_uses_exact_sha_lease(self):
+        sha = "a" * 40
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(REPOCTL, "run", return_value=completed) as run:
+            ok, detail = REPOCTL._delete_branch_ref("remote", "feature", sha)
+        self.assertTrue(ok)
+        self.assertEqual("", detail)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            [
+                "git",
+                "push",
+                f"--force-with-lease=refs/heads/feature:{sha}",
+                "origin",
+                ":refs/heads/feature",
+            ],
+            command,
+        )
+
+    def test_local_delete_uses_compare_and_delete_old_sha(self):
+        sha = "b" * 40
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(REPOCTL, "run", return_value=completed) as run:
+            ok, detail = REPOCTL._delete_branch_ref("local", "feature", sha)
+        self.assertTrue(ok)
+        self.assertEqual("", detail)
+        self.assertEqual(
+            ["git", "update-ref", "-d", "refs/heads/feature", sha],
+            run.call_args.args[0],
+        )
+
+    def test_delete_rejects_non_exact_sha_before_git(self):
+        with mock.patch.object(REPOCTL, "run") as run:
+            ok, detail = REPOCTL._delete_branch_ref("remote", "feature", "abc")
+        self.assertFalse(ok)
+        self.assertIn("not exact", detail)
+        run.assert_not_called()
 
     def test_cleanup_deletes_branch_whose_head_is_already_in_main(self):
         with tempfile.TemporaryDirectory() as directory:
