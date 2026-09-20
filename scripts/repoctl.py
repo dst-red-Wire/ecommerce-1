@@ -177,9 +177,12 @@ def qualification_execution_policy() -> dict:
         ):
             raise RuntimeError("qualification execution policy envelope is invalid")
         execution = policy.get("execution", {})
-        workers = execution.get("max_workers")
+        workers = execution.get("local_max_workers")
+        ci_env = execution.get("ci_max_workers_env")
         if not isinstance(workers, int) or workers < 1 or workers > 16:
-            raise RuntimeError("qualification execution policy max_workers must be between 1 and 16")
+            raise RuntimeError("qualification execution policy local_max_workers must be between 1 and 16")
+        if not isinstance(ci_env, str) or not ci_env.strip() or execution.get("ci_max_workers_required") is not True:
+            raise RuntimeError("qualification execution policy must require runtime-provided CI max workers")
         gates = policy.get("gates")
         if not isinstance(gates, dict) or not gates:
             raise RuntimeError("qualification execution policy must declare gates")
@@ -230,7 +233,21 @@ def _resolved_gate_policy(name: str) -> dict:
 
 
 def _execution_workers() -> int:
-    return int(qualification_execution_policy()["execution"]["max_workers"])
+    execution = qualification_execution_policy()["execution"]
+    if os.environ.get("ECOMMERCE_EXECUTION_SCOPE", "").strip().lower() == "ci":
+        env_name = str(execution["ci_max_workers_env"])
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            raise RuntimeError(f"CI execution requires runtime-provided {env_name}")
+        try:
+            workers = int(raw)
+        except ValueError as exc:
+            raise RuntimeError(f"{env_name} must be an integer") from exc
+    else:
+        workers = int(execution["local_max_workers"])
+    if workers < 1 or workers > 16:
+        raise RuntimeError("qualification max workers must be between 1 and 16")
+    return workers
 
 
 def _gate_parallel_safe(name: str) -> bool:
