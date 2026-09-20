@@ -184,7 +184,7 @@ def _budget_result(actual: float, maximum: float) -> dict:
 def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     policy = repoctl.qualification_execution_policy()
     perf = policy["performance"]
-    configured_repetitions = int(perf["campaign"]["repetitions"])
+    configured_repetitions = int(policy["workflows"]["performance_campaign"]["repetitions"])
     if repetitions != configured_repetitions:
         raise RuntimeError(
             f"performance campaign repetitions must match central contract: {configured_repetitions}"
