@@ -307,6 +307,21 @@ gates:
       - frontend/**/*
       - architecture.lock.yaml
       - config/contracts/toolchain-lock.json
+  "service-static:*":
+    scope: internal
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    tools: [go, gofmt, sqlc]
+    validators:
+      - scripts/repoctl.py
+      - scripts/qualification_cache.py
+    inputs:
+      - services/<target>/**/*
+      - go.work
+      - architecture.lock.yaml
+      - config/contracts/toolchain-lock.json
+      - config/contracts/source-quality-policy.yaml
   "service:*":
     scope: component
     parallel_safe: true
