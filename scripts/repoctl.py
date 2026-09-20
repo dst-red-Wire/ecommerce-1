@@ -2507,6 +2507,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "log": str(log_path.relative_to(ROOT)),
         "execution": execution,
         "cache_mode": policy.get("cache_mode"),
+        "scope": policy.get("scope"),
         "parallel_safe": bool(policy.get("parallel_safe")),
         "ci_fanout": bool(policy.get("ci_fanout")),
         "parallel_group": effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial"),
