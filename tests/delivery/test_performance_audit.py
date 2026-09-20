@@ -135,9 +135,9 @@ class PerformanceAuditTests(unittest.TestCase):
             12.0
         )
         critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
-        self.assertEqual(12.0, critical["critical_path_estimate_seconds"])
-        self.assertEqual("component-matrix", critical["critical_branch"])
-        self.assertEqual(["frontend:storefront"], critical["critical_gates"])
+        self.assertEqual(13.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("component-gates", critical["critical_branch"])
+        self.assertEqual(["frontend:storefront", "service:product"], critical["critical_gates"])
 
     def test_local_component_serial_system_barrier_extends_critical_path(self):
         records = [
