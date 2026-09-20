@@ -221,12 +221,13 @@ def qualification_execution_policy() -> dict:
             or proof.get("merge_authoritative") is not True
         ):
             raise RuntimeError("qualification_proof workflow contract is invalid")
-        configured_repetitions = policy.get("performance", {}).get("campaign", {}).get("repetitions")
         if (
             not isinstance(campaign, dict)
             or campaign.get("exact_sha_required") is not True
             or campaign.get("clean_worktree_required") is not True
-            or campaign.get("repetitions") != configured_repetitions
+            or not isinstance(campaign.get("repetitions"), int)
+            or campaign.get("repetitions") < 1
+            or campaign.get("repetitions") > 20
             or campaign.get("merge_authoritative") is not False
             or campaign.get("blocking_for_campaign_result") is not True
         ):
@@ -3980,7 +3981,7 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    repetitions = int(qualification_execution_policy()["performance"]["campaign"]["repetitions"])
+    repetitions = int(qualification_workflow("performance_campaign")["repetitions"])
     expected_tree = git("rev-parse", f"{head_sha}^{{tree}}").strip()
     if (
         payload.get("schema_version") != 1
