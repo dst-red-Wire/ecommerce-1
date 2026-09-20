@@ -68,9 +68,10 @@ Create an ignored `.context/mgmt-vm-inputs.json`:
 Choose an existing host-only adapter and an unused address in its IPv4 `/24`.
 The example addresses are fixture transport values, not actual MGMT DNS/NTP
 services. Use a fresh name and MAC per concurrent test. The `server` action requires
-the contract's 4 vCPU and 4096 MiB profile. The `resize` action can reconcile an
-already owned stopped/running fixture to those values and verifies them from the
-guest after restart.
+at least the contract's 4 vCPU and 4096 MiB profile; higher values remain bounded by
+the same contract and are passed through `vm_cpus` and `vm_memory`. The `resize`
+action can reconcile an already owned stopped/running fixture to those values and
+verifies them from the guest after restart.
 
 Run the lifecycle in order:
 

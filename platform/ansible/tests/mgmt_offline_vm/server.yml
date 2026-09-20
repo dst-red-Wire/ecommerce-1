@@ -24,9 +24,9 @@
       - --mac
       - "{{ vm_mac }}"
       - --cpus
-      - "{{ mgmt_local_vm_contract.resources.rke2_server.cpus }}"
+      - "{{ vm_cpus }}"
       - --memory
-      - "{{ mgmt_local_vm_contract.resources.rke2_server.memory_mib }}"
+      - "{{ vm_memory }}"
       - --running
     stdin: "{{ vm_server_current.stdout }}"
   changed_when: false

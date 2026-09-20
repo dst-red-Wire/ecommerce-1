@@ -36,6 +36,10 @@
           - vm_cpus | int <= mgmt_local_vm_contract.resources.cpu_maximum
           - vm_memory | int >= mgmt_local_vm_contract.resources.memory_minimum_mib
           - vm_memory | int <= mgmt_local_vm_contract.resources.memory_maximum_mib
+          - >-
+            vm_action != 'server'
+            or (vm_cpus | int >= mgmt_local_vm_contract.resources.rke2_server.cpus
+                and vm_memory | int >= mgmt_local_vm_contract.resources.rke2_server.memory_mib)
           - vm_hostonly_adapter | length > 0
           - vm_mac is match('^02[0-9A-Fa-f]{10}$')
           - vm_address is match('^[0-9.]+$')
