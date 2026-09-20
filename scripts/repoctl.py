@@ -215,14 +215,28 @@ def _resolved_gate_policy(name: str) -> dict:
             raise RuntimeError(f"qualification execution policy does not declare gate {name}")
         pattern_name, entry = max(matches, key=lambda item: len(item[0]))
     resolved = copy.deepcopy(entry)
+    replacements: dict[str, str] = {}
+    if pattern_name.endswith("*"):
+        wildcard_value = name[len(pattern_name) - 1 :]
+        if not wildcard_value:
+            raise RuntimeError(f"invalid dynamic gate: {name}")
+        replacements["<target>"] = wildcard_value
     if pattern_name == "service:*":
         service = name.split(":", 1)[1] if ":" in name else ""
         if not service:
             raise RuntimeError(f"invalid dynamic service gate: {name}")
+        replacements["<service>"] = service
+    if replacements:
         for field in ("inputs", "validators"):
             values = resolved.get(field, [])
             if isinstance(values, list):
-                resolved[field] = [str(value).replace("<service>", service) for value in values]
+                projected = []
+                for value in values:
+                    text = str(value)
+                    for token, replacement in replacements.items():
+                        text = text.replace(token, replacement)
+                    projected.append(text)
+                resolved[field] = projected
     resolved["_policy_name"] = pattern_name
     mode = resolved.get("cache_mode")
     if mode not in {"content-pass", "native-only", "fresh", "forbidden", "composed"}:
@@ -1877,40 +1891,77 @@ def _git_neutral_test_env() -> dict[str, str]:
     return env
 
 
+def _dedicated_test_owners() -> dict[str, str]:
+    owners: dict[str, str] = {}
+    for gate, entry in qualification_execution_policy().get("gates", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for relative in entry.get("owned_tests", []):
+            if not isinstance(relative, str) or not relative.strip():
+                raise RuntimeError(f"gate {gate} declares an invalid owned test path")
+            previous = owners.get(relative)
+            if previous is not None:
+                raise RuntimeError(f"test ownership collision: {relative} owned by {previous} and {gate}")
+            if not (ROOT / relative).is_file():
+                raise RuntimeError(f"gate {gate} owns missing test: {relative}")
+            owners[relative] = str(gate)
+    return owners
+
+
 def system_check() -> int:
     test_env = _git_neutral_test_env()
+    owned = set(_dedicated_test_owners())
+    candidates: list[Path] = sorted((ROOT / "tests").glob("*_test.rb"))
+    for suite in (ROOT / "tests", ROOT / "tests" / "delivery", ROOT / "tests" / "context"):
+        if suite.is_dir():
+            candidates.extend(sorted(suite.glob("test_*.py")))
 
-    def ruby_suite() -> int:
-        tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
-        run_ruby_tests(tests)
+    selected = []
+    for path in candidates:
+        relative = path.relative_to(ROOT).as_posix()
+        if relative not in owned:
+            selected.append((relative, path))
+
+    def run_one(relative: str, path: Path) -> int:
+        if path.suffix == ".rb":
+            run_ruby_tests([relative])
+            return 0
+        suite = path.parent.relative_to(ROOT).as_posix()
+        run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                suite,
+                "-p",
+                path.name,
+            ],
+            env=test_env,
+        )
         return 0
 
-    def python_suite(suite: Path) -> int:
-        if suite.is_dir() and any(suite.glob("test_*.py")):
-            run(
-                [sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"],
-                env=test_env,
+    steps = []
+    for relative, path in selected:
+        gate = f"system:test:{relative}"
+        steps.append(
+            (
+                gate,
+                lambda gate=gate, relative=relative, path=path: _run_cached_gate(
+                    gate,
+                    {},
+                    lambda relative=relative, path=path: run_one(relative, path),
+                ),
             )
-        return 0
+        )
 
-    steps = [
-        ("system:ruby", lambda: _run_cached_gate("system:ruby", {}, ruby_suite)),
-        (
-            "system:python-root",
-            lambda: _run_cached_gate("system:python-root", {}, lambda: python_suite(ROOT / "tests")),
-        ),
-        (
-            "system:python-delivery",
-            lambda: _run_cached_gate("system:python-delivery", {}, lambda: python_suite(ROOT / "tests" / "delivery")),
-        ),
-        (
-            "system:python-context",
-            lambda: _run_cached_gate("system:python-context", {}, lambda: python_suite(ROOT / "tests" / "context")),
-        ),
-    ]
     if _run_functions_parallel(steps):
         return 1
-    print("PASS cross-system repository checks completed")
+    print(
+        f"PASS cross-system repository checks completed "
+        f"selected={len(selected)} dedicated-owned={len(owned)}"
+    )
     return 0
 
 
@@ -2353,6 +2404,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "command": command,
         "log": str(log_path.relative_to(ROOT)),
         "execution": "fresh",
+        "parallel_safe": _gate_parallel_safe(name),
     }
     if content_cache_hits:
         record["content_cache_hits"] = content_cache_hits
