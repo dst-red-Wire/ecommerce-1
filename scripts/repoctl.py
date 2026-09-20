@@ -2654,7 +2654,9 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "source_duration_seconds": source_duration,
             "execution": "parent-evidence",
             "cache_mode": _resolved_gate_policy(name).get("cache_mode"),
+            "scope": _resolved_gate_policy(name).get("scope"),
             "parallel_safe": bool(_resolved_gate_policy(name).get("parallel_safe")),
+            "ci_fanout": bool(_resolved_gate_policy(name).get("ci_fanout")),
             "parallel_group": "parent-evidence",
             "started_at_monotonic_offset": 0.0,
             "cache_key": source.get("cache_key"),
@@ -2836,7 +2838,11 @@ def _execute_plan_scope(
                     "duration_seconds": 0.0,
                     "execution": "skipped",
                     "cache_mode": entry.get("cache_mode"),
+                    "scope": entry.get("scope"),
                     "parallel_safe": bool(entry.get("parallel_safe")),
+                    "ci_fanout": bool(entry.get("ci_fanout")),
+                    "parallel_group": "planner-skip",
+                    "started_at_monotonic_offset": 0.0,
                 }
             )
             continue
@@ -2925,7 +2931,11 @@ def tekton_plan(
                     "duration_seconds": 0.0,
                     "execution": "skipped",
                     "cache_mode": entry.get("cache_mode"),
+                    "scope": entry.get("scope"),
                     "parallel_safe": bool(entry.get("parallel_safe")),
+                    "ci_fanout": bool(entry.get("ci_fanout")),
+                    "parallel_group": "planner-skip",
+                    "started_at_monotonic_offset": 0.0,
                 }
             )
         elif action in {"run", "fresh"}:
