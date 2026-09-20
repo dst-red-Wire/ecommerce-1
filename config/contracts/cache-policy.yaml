@@ -86,102 +86,13 @@ invalidation:
   relevant_source_change: miss
 
 consumers:
+  qualification_execution:
+    authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
+    gate_inventory: delegated
+    persistence: l2
   psych_yaml:
     enabled: true
     persistence: l1-l2
-  repoctl_global_static_gates:
-    enabled: true
-    persistence: l2
-    gates:
-      governance:
-        inputs:
-          - architecture.lock.yaml
-          - config/contracts/**/*
-          - config/infrastructure/**/*
-          - config/toolchain/**/*
-          - contracts/**/*
-          - docs/architecture/**/*
-          - platform/ansible/**/*
-          - platform/tekton/**/*
-          - scripts/*.py
-          - scripts/*.rb
-          - tests/**/*.py
-          - tests/**/*.rb
-          - .pre-commit-config.yaml
-          - BUILD.bazel
-          - Makefile
-          - go.work
-          - AGENTS.md
-          - README.md
-          - docs/api/README.md
-          - docs/project/CODEX_HANDOFFS.md
-      runtime-efficiency:
-        inputs:
-          - architecture.lock.yaml
-          - config/contracts/runtime-efficiency.yaml
-          - frontend/go.mod
-          - frontend/apps/storefront/main.go
-          - frontend/apps/admin/main.go
-          - frontend/internal/web/layout.templ
-          - services/*/Containerfile
-          - scripts/validate-runtime-efficiency.rb
-          - scripts/resource-sizing.rb
-          - tests/runtime_efficiency_test.rb
-          - tests/resource_sizing_test.rb
-      contracts:
-        inputs:
-          - architecture.lock.yaml
-          - config/contracts/public-api-contracts.yaml
-          - config/contracts/service-ownership.yaml
-          - config/contracts/dependency-map.yaml
-          - config/contracts/event-contracts.yaml
-          - contracts/openapi/**/*
-          - scripts/validate-openapi.rb
-          - scripts/validate-contract-consistency.rb
-          - scripts/validate-architecture.rb
-          - tests/openapi_validator_test.rb
-          - tests/contract_consistency_test.rb
-      automation:
-        inputs:
-          - .gitignore
-          - BUILD.bazel
-          - "**/*.sh"
-          - platform/tekton/**/*
-          - scripts/repoctl.py
-  repoctl_component_static_gates:
-    enabled: true
-    persistence: l2
-    gates:
-      platform:ansible:
-        inputs:
-          - architecture.lock.yaml
-          - config/contracts/source-quality-policy.yaml
-          - config/contracts/toolchain-lock.json
-          - platform/ansible/**/*
-          - scripts/repoctl.py
-          - scripts/qualification_cache.py
-        fresh_prechecks:
-          - project-owned-collection-version-reconciliation
-        tools:
-          - ansible-lint
-          - ansible-playbook
-          - ansible-galaxy
-      platform:terraform:
-        inputs:
-          - architecture.lock.yaml
-          - config/contracts/source-quality-policy.yaml
-          - config/contracts/terraform-provider-lock.yaml
-          - config/contracts/toolchain-lock.json
-          - platform/terraform/**/*.tf
-          - platform/terraform/**/*.tftpl
-          - scripts/repoctl.py
-          - scripts/qualification_cache.py
-        fresh_prechecks:
-          - approved-terraform-executable-availability
-          - canonical-provider-lock-contract
-        tools:
-          - tofu
-          - terraform
   security_scan:
     persistence: forbidden
     reason: exact Git history and worktree state must be scanned fresh
