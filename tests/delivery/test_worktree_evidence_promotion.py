@@ -35,7 +35,12 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             MAKEFILE,
         )
         self.assertIn(
-            "ci-full: governance contracts automation lint test security terraform ansible ## Run exhaustive portable repository CI checks",
+            "ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks",
+            MAKEFILE,
+        )
+        self.assertIn(
+            'ci-global: ## Run canonical global gates through the central execution planner\n'
+            '\t@$(PYTHON) scripts/repoctl.py global-check --base "'+'${BASE:-origin/main}" --head "${HEAD:-WORKTREE}"'+'',
             MAKEFILE,
         )
 
