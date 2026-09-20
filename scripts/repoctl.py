@@ -2356,6 +2356,11 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
     }
     if content_cache_hits:
         record["content_cache_hits"] = content_cache_hits
+    effective_env = env or os.environ
+    if effective_env.get("ECOMMERCE_EXECUTION_SCOPE", "").strip().lower() == "ci":
+        raw_workers = effective_env.get("ECOMMERCE_QUALIFICATION_MAX_WORKERS", "").strip()
+        if raw_workers:
+            record["worker_budget"] = int(raw_workers)
     return p.returncode == 0, record
 
 
