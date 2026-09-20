@@ -60,10 +60,17 @@ def policy() -> dict[str, Any]:
     if len(ids) != len(milestones) or any(not item for item in ids) or len(ids) != len(set(ids)):
         raise RuntimeError("roadmap milestone ids must be non-empty and unique")
     known = set(ids)
+    seen: set[str] = set()
     for item in milestones:
+        milestone_id = str(item["id"])
         requires = item.get("requires", [])
         if not isinstance(requires, list) or any(dep not in known for dep in requires):
-            raise RuntimeError(f"roadmap milestone {item.get('id')} has invalid dependencies")
+            raise RuntimeError(f"roadmap milestone {milestone_id} has invalid dependencies")
+        if any(str(dep) not in seen for dep in requires):
+            raise RuntimeError(
+                f"roadmap milestone {milestone_id} dependencies must appear earlier in topological order"
+            )
+        seen.add(milestone_id)
         if "fixed_status" not in item:
             tracker = item.get("tracker")
             if type(tracker) is not int or tracker <= 0:
@@ -137,6 +144,18 @@ def compute_statuses(
         if not isinstance(state, dict):
             raise RuntimeError(f"roadmap tracker state missing for #{tracker}")
 
+        unmet = [
+            str(dep)
+            for dep in milestone.get("requires", [])
+            if statuses.get(str(dep)) not in terminal
+        ]
+        if unmet:
+            suffix = ""
+            if state.get("state") == completed_state and state.get("state_reason") == completed_reason:
+                suffix = f" (tracker #{tracker} completed before prerequisites)"
+            statuses[milestone_id] = f"{blocked_prefix} {'/'.join(unmet)}{suffix}"
+            continue
+
         if state.get("state") == completed_state and state.get("state_reason") == completed_reason:
             statuses[milestone_id] = str(milestone.get("completion_status") or "PROVEN")
             continue
@@ -145,12 +164,7 @@ def compute_statuses(
             statuses[milestone_id] = f"{blocked_prefix} tracker #{tracker} closed as {reason}"
             continue
 
-        unmet = [
-            str(dep)
-            for dep in milestone.get("requires", [])
-            if statuses.get(str(dep)) not in terminal
-        ]
-        statuses[milestone_id] = ready if not unmet else f"{blocked_prefix} {'/'.join(unmet)}"
+        statuses[milestone_id] = ready
     return statuses
 
 
