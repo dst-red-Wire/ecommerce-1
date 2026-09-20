@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tarfile
 import tempfile
 import unittest
@@ -24,6 +25,10 @@ class OfflineBundleTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.bundle = Path(self.temp.name)
         self.entries = []
+        self.signer_fingerprint = "0123456789abcdef0123456789abcdefdeadbeef"
+        key_name = "rocky-rpm-signing-key.asc"
+        (self.bundle / key_name).write_text("fixture approved RPM signing key")
+        self.entry("rpm-signing-key", key_name, fingerprint=self.signer_fingerprint)
         for category, name in AIRGAP.REQUIRED_ARTIFACTS.items():
             if category.startswith('images-'):
                 self.archive(name)
@@ -33,7 +38,8 @@ class OfflineBundleTests(unittest.TestCase):
         for package in sorted(AIRGAP.REQUIRED_RPMS):
             name = package + '-1-1.x86_64.rpm'
             (self.bundle / name).write_bytes(b'fixture RPM: ' + package.encode())
-            self.entry('rpm', name, package=package, nevra=package + '-0:1-1.x86_64')
+            self.entry('rpm', name, package=package, nevra=package + '-0:1-1.x86_64',
+                       signer_fingerprint=self.signer_fingerprint)
         image_inventory = {
             category: AIRGAP.validate_image_archive(self.bundle / name)
             for category, name in AIRGAP.REQUIRED_ARTIFACTS.items()
@@ -61,6 +67,45 @@ class OfflineBundleTests(unittest.TestCase):
                 component = tarfile.TarInfo(filename)
                 component.size = 2
                 archive.addfile(component, io.BytesIO(b'{}'))
+
+    def oci_archive(self, filename, corrupt_layer=False):
+        config = b'{"architecture":"amd64"}'
+        good_layer = b"verified-layer"
+        stored_layer = b"tampered-layer" if corrupt_layer else good_layer
+
+        def descriptor(body):
+            return {
+                "mediaType": "application/octet-stream",
+                "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                "size": len(body),
+            }
+
+        config_descriptor = descriptor(config)
+        layer_descriptor = descriptor(good_layer)
+        manifest = json.dumps({
+            "schemaVersion": 2,
+            "config": config_descriptor,
+            "layers": [layer_descriptor],
+        }, sort_keys=True, separators=(",", ":")).encode()
+        manifest_descriptor = {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": "sha256:" + hashlib.sha256(manifest).hexdigest(),
+            "size": len(manifest),
+        }
+        index = json.dumps({"schemaVersion": 2, "manifests": [manifest_descriptor]},
+                           sort_keys=True, separators=(",", ":")).encode()
+        members = {
+            "index.json": index,
+            "blobs/sha256/" + manifest_descriptor["digest"].split(":", 1)[1]: manifest,
+            "blobs/sha256/" + config_descriptor["digest"].split(":", 1)[1]: config,
+            "blobs/sha256/" + layer_descriptor["digest"].split(":", 1)[1]: stored_layer,
+        }
+        with tarfile.open(self.bundle / filename, "w") as archive:
+            for name, body in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+        return manifest_descriptor["digest"]
 
     def entry(self, category, name, **extra):
         self.entries.append(dict(category=category, file=name, sha256=AIRGAP.digest(self.bundle / name), **extra))
@@ -147,7 +192,8 @@ class OfflineBundleTests(unittest.TestCase):
                         continue
                     name = package + '-1-1.x86_64.rpm'
                     (self.bundle / name).write_bytes(b'variant fixture')
-                    self.entry('rpm', name, package=package, nevra=package + '-0:1-1.x86_64')
+                    self.entry('rpm', name, package=package, nevra=package + '-0:1-1.x86_64',
+                       signer_fingerprint=self.signer_fingerprint)
                 with self.assertRaisesRegex(ValueError, 'conflicting minimal and full'):
                     self.validate()
                 for entry in self.entries[len(entries):]:
@@ -204,6 +250,14 @@ class OfflineBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'empty|unpinned'):
                     self.validate()
 
+    def test_oci_descriptor_digest_and_size_are_verified_recursively(self):
+        entry = next(entry for entry in self.entries if entry['category'] == 'images-core')
+        identity = self.oci_archive(entry['file'], corrupt_layer=True)
+        entry['sha256'] = AIRGAP.digest(self.bundle / entry['file'])
+        self.manifest['image_inventory']['archives']['images-core'] = [identity]
+        with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+            self.validate()
+
     def test_manifest_referencing_missing_image_content_fails(self):
         entry = next(entry for entry in self.entries if entry['category'] == 'images-core')
         with tarfile.open(self.bundle / entry['file'], 'w') as archive:
@@ -230,12 +284,31 @@ class OfflineBundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'signature'):
                 AIRGAP.validate_bundle(self.bundle, digest, VERSION, rpm_signatures=True)
 
+    def test_rpm_signature_is_bound_to_manifest_signer_in_isolated_trust(self):
+        digest = self.seal()
+
+        def run(argv, **_kwargs):
+            if '--checksig' in argv:
+                return SimpleNamespace(stdout='Header V4 RSA/SHA256 Signature, key ID badc0ffe: OK')
+            return SimpleNamespace(stdout='')
+
+        with patch.object(AIRGAP.subprocess, 'run', side_effect=run):
+            with self.assertRaisesRegex(ValueError, 'approved fingerprint'):
+                AIRGAP.validate_bundle(self.bundle, digest, VERSION, rpm_signatures=True)
+
     def test_rpm_nevra_must_match_real_metadata_before_install(self):
         digest = self.seal()
         with patch.object(AIRGAP.subprocess, 'run') as command:
             command.return_value.stdout = 'wrong-package-0:1-1.x86_64'
             with self.assertRaisesRegex(ValueError, 'NEVRA'):
                 AIRGAP.validate_bundle(self.bundle, digest, VERSION, rpm_metadata=True)
+
+    def test_rpm_actual_architecture_must_match_amd64_target(self):
+        target = next(entry for entry in self.entries if entry.get('category') == 'rpm')
+        target['nevra'] = target['nevra'].rsplit('.', 1)[0] + '.aarch64'
+        digest = self.seal()
+        with self.assertRaisesRegex(ValueError, 'architecture'):
+            AIRGAP.validate_bundle(self.bundle, digest, VERSION)
 
 
 class OfflineAnsibleContractTests(unittest.TestCase):
