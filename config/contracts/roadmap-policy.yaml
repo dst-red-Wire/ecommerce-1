@@ -1,0 +1,139 @@
+version: 1
+kind: RoadmapPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+document: docs/project/MASTER_EXECUTION_PLAN.md
+
+github:
+  tracker_type: issue
+  completed_state: closed
+  completed_state_reason: completed
+  repository_source: current-origin
+
+rendering:
+  milestone_section_heading: "## 3. Milestone program"
+  next_section_heading: "## 4. Critical path"
+  begin_marker: "<!-- BEGIN GENERATED ROADMAP MILESTONES -->"
+  end_marker: "<!-- END GENERATED ROADMAP MILESTONES -->"
+  ready_status: "READY FOR CODEX"
+  blocked_prefix: "BLOCKED by"
+  terminal_statuses: [DONE, PROVEN]
+
+milestones:
+  - id: M0
+    name: Architecture Sync
+    owner: ChatGPT
+    objective: lock `architecture.lock.yaml` as the canonical V5 authority and remove architecture collisions
+    entry_gate: validated project decisions
+    exit_gate: V5 lock, derived index, agent rules and merged sync PR
+    fixed_status: DONE
+
+  - id: M1
+    name: Monorepo Bootstrap
+    owner: Codex
+    tracker: 13
+    section_heading: "### M1 — Bootstrap"
+    objective: create minimal maintainable monorepo skeleton
+    entry_gate: M0 merged
+    exit_gate: exactly 19 services + 2 frontends represented, repo checks green
+    requires: [M0]
+    completion_status: PROVEN
+
+  - id: M2
+    name: Golden Service Product
+    owner: Codex
+    tracker: 14
+    section_heading: "### M2 — Golden Service"
+    objective: prove one production-grade Go service pattern
+    entry_gate: M1 PROVEN
+    exit_gate: Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN
+    requires: [M1]
+    completion_status: PROVEN
+
+  - id: M2.5
+    name: Persistent MGMT Bootstrap
+    owner: Codex
+    tracker: 32
+    section_heading: "### M2.5 — Persistent MGMT Bootstrap"
+    objective: bootstrap the persistent management plane required before PREPROD
+    entry_gate: M1 PROVEN
+    exit_gate: persistent MGMT bootstrap PROVEN under the canonical architecture contracts
+    requires: [M1]
+    completion_status: PROVEN
+
+  - id: M3
+    name: PREPROD Infrastructure
+    owner: Codex
+    tracker: 16
+    section_heading: "### M3 — PREPROD Infrastructure"
+    objective: provision reproducible JIT infrastructure foundation
+    entry_gate: M2.5 PROVEN; exact infrastructure contracts already merged
+    exit_gate: Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified
+    requires: [M2.5]
+    completion_status: PROVEN
+
+  - id: M4
+    name: Platform Baseline
+    owner: Codex
+    tracker: 17
+    section_heading: "### M4 — Platform Baseline"
+    objective: deploy security, delivery, observability and stateful platform baseline
+    entry_gate: M3 PROVEN
+    exit_gate: platform services healthy, declarative, observable, secured, restore prerequisites present
+    requires: [M3]
+    completion_status: PROVEN
+
+  - id: M5
+    name: Commerce Vertical Slice
+    owner: Codex
+    tracker: 18
+    section_heading: "### M5 — Vertical Slice"
+    objective: deliver first end-to-end commerce path
+    entry_gate: M2 + M4 PROVEN
+    exit_gate: Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance
+    requires: [M2, M4]
+    completion_status: PROVEN
+
+  - id: M6
+    name: Full Application
+    owner: Codex
+    tracker: 19
+    section_heading: "### M6 — Full Application"
+    objective: complete 19 services + Storefront + Admin
+    entry_gate: M5 PROVEN
+    exit_gate: all scoped business capabilities implemented with contracts/tests/ownership
+    requires: [M5]
+    completion_status: PROVEN
+
+  - id: M7
+    name: Qualification
+    owner: Codex
+    tracker: 20
+    section_heading: "### M7 — Qualification"
+    objective: run full QA/security/supply-chain/perf/chaos/DR gates
+    entry_gate: M6 feature complete and platform stable
+    exit_gate: qualification evidence complete; no unresolved release blocker
+    requires: [M6]
+    completion_status: PROVEN
+
+  - id: M8
+    name: PREPROD Certification
+    owner: Codex execution + Work reporting; release governance authority
+    tracker: 21
+    section_heading: "### M8 — Certification"
+    objective: execute three PREPROD campaigns and certify material equivalence
+    entry_gate: M7 PROVEN
+    exit_gate: standard + endurance + PROD-equivalent PASS; evidence archived; test state destroyed; READY_FOR_PROD
+    requires: [M7]
+    completion_status: PROVEN
+
+  - id: M9
+    name: PROD A/B Rollout
+    owner: Codex execution; release governance authority; Work launch pack
+    tracker: 22
+    section_heading: "### M9 — PROD rollout"
+    objective: build trusted PROD A/B and progressive rollout
+    entry_gate: M8 READY_FOR_PROD
+    exit_gate: controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete
+    requires: [M8]
+    completion_status: PROVEN
