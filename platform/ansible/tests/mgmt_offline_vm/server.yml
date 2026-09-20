@@ -71,7 +71,7 @@
       - --rke2-version
       - "{{ (lookup('file', vm_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}"
       - --services-json
-      - "{{ {'dns': vm_dns_fixture, 'ntp': vm_ntp_fixture} | to_json }}"
+      - "{{ {'dns': vm_dns_fixture, 'ntp': vm_ntp_fixture} | to_json(separators=(',', ':')) }}"
   register: vm_server_bundle_validation
   changed_when: false
   when: vm_server_install_required | bool
