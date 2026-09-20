@@ -436,6 +436,17 @@ class OfflineAnsibleContractTests(unittest.TestCase):
         self.assertIn('"*":', registry)
         self.assertIn('https://127.0.0.1:1', registry)
 
+    def test_rke2_server_flushes_handlers_and_bounds_notify_readiness(self):
+        tasks = (ROOT / 'platform/ansible/roles/rke2_server/tasks/main.yml').read_text()
+        enable = tasks.index('- name: Enable RKE2 server')
+        flush = tasks.index('- name: Apply pending RKE2 restart handlers')
+        readiness = tasks.index('- name: Wait boundedly for the native RKE2 service readiness')
+        self.assertLess(enable, flush)
+        self.assertLess(flush, readiness)
+        self.assertIn('no_block: true', tasks[enable:flush])
+        self.assertIn('until:', tasks[readiness:])
+        self.assertIn('retries:', tasks[readiness:])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -118,3 +118,16 @@
     enabled: true
     state: started
     daemon_reload: true
+    no_block: true
+
+- name: Apply pending RKE2 restart handlers before readiness evaluation
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait boundedly for the native RKE2 service readiness notification
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rke2-server.service]
+  register: rke2_server_active
+  changed_when: false
+  until: rke2_server_active.stdout | trim == 'active'
+  retries: 180
+  delay: 5
