@@ -36,6 +36,7 @@ pull_request_review:
       required_kinds: [code, security]
       required_status: PASS
       exact_sha_required: true
+      comment_author: repository-owner
     advisory_only: true
     may_comment: true
     may_request_changes: true
