@@ -1230,6 +1230,12 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        review_budget = load_yaml(root / lock["machine_contracts"]["review_budget"])
+        if review_budget.get("review_authority_source") != (
+            "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"
+        ):
+            errors.append("review budget must inherit the canonical ChatGPT review authority")
+
         management = lock["management_plane"]
         inventory = load_yaml(root / lock["machine_contracts"]["mgmt_inventory"])
         gateways = load_yaml(root / lock["machine_contracts"]["mgmt_access_gateways"])
