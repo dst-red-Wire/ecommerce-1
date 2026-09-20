@@ -38,11 +38,12 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             "ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks",
             MAKEFILE,
         )
-        self.assertIn(
+        expected_ci_global = (
             'ci-global: ## Run canonical global gates through the central execution planner\n'
-            '\t@$(PYTHON) scripts/repoctl.py global-check --base "'+'${BASE:-origin/main}" --head "${HEAD:-WORKTREE}"'+'',
-            MAKEFILE,
+            '\t@$(PYTHON) scripts/repoctl.py global-check --base "${BASE:-origin/main}" '
+            '--head "${HEAD:-WORKTREE}"'
         )
+        self.assertIn(expected_ci_global, MAKEFILE)
 
     def test_worktree_security_scans_materialized_exact_tree_not_checkout_caches(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
