@@ -9,6 +9,7 @@ toolchain reconciliation belongs to platform/ansible/developer.yml.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -1052,6 +1053,76 @@ def canonical_services() -> list[str]:
     return [str(x) for x in ruby_yaml("architecture.lock.yaml").get("business", {}).get("services", [])]
 
 
+def _python_unittest_ids(relative: str) -> list[str]:
+    path = ROOT / relative
+    if path.suffix != ".py" or not path.is_file():
+        return []
+    try:
+        module = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return []
+    module_name = Path(relative).with_suffix("").as_posix().replace("/", ".")
+    identifiers: list[str] = []
+    for node in module.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name.startswith("test_"):
+                identifiers.append(f"{module_name}.{node.name}.{child.name}")
+    return identifiers
+
+
+def _python_method_shard_threshold() -> int:
+    value = qualification_execution_policy()["execution"].get("python_unittest_method_shard_min_tests")
+    if not isinstance(value, int) or value < 2 or value > 1000:
+        raise RuntimeError("python_unittest_method_shard_min_tests must be between 2 and 1000")
+    return value
+
+
+def _run_python_unittest_file(relative: str, env: dict[str, str]) -> int:
+    identifiers = _python_unittest_ids(relative)
+    if len(identifiers) < _python_method_shard_threshold():
+        path = ROOT / relative
+        suite = path.parent.relative_to(ROOT).as_posix()
+        run(
+            [sys.executable, "-m", "unittest", "discover", "-s", suite, "-p", path.name],
+            env=env,
+        )
+        return 0
+
+    def run_identifier(identifier: str) -> int:
+        completed = run(
+            [sys.executable, "-m", "unittest", identifier],
+            env=env,
+            capture=True,
+            check=False,
+        )
+        if completed.returncode:
+            detail = "\n".join(
+                part for part in ((completed.stdout or "").strip(), (completed.stderr or "").strip()) if part
+            )
+            raise RuntimeError(f"unittest shard failed: {identifier}\n{detail}")
+        return 0
+
+    steps = [(identifier, lambda identifier=identifier: run_identifier(identifier)) for identifier in identifiers]
+    if _run_functions_parallel(steps):
+        return 1
+    print(f"PASS unittest method shards file={relative} methods={len(identifiers)}")
+    return 0
+
+
+def _run_regular_then_internal_parallel(
+    regular_steps: list[tuple[str, object]],
+    internally_parallel_steps: list[tuple[str, object]],
+) -> int:
+    if _run_functions_parallel(regular_steps):
+        return 1
+    for _name, producer in internally_parallel_steps:
+        if int(producer()) != 0:
+            return 1
+    return 0
+
+
 def run_ruby_tests(paths: list[str]) -> None:
     require("ruby")
     for path in paths:
@@ -1083,21 +1154,7 @@ def _governance_owned_test(relative: str) -> int:
     if path.suffix == ".rb":
         run_ruby_tests([relative])
         return 0
-    suite = path.parent.relative_to(ROOT).as_posix()
-    run(
-        [
-            sys.executable,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            suite,
-            "-p",
-            path.name,
-        ],
-        env=_git_neutral_test_env(),
-    )
-    return 0
+    return _run_python_unittest_file(relative, _git_neutral_test_env())
 
 
 def _governance_documentation() -> int:
@@ -1133,24 +1190,30 @@ def governance() -> int:
             )
         )
 
+    internally_parallel_steps: list[tuple[str, object]] = []
     for relative, owner in sorted(_dedicated_test_owners().items()):
         if owner != "governance":
             continue
         gate = f"governance:test:{relative}"
-        steps.append(
-            (
+        step = (
+            gate,
+            lambda gate=gate, relative=relative: _run_cached_gate(
                 gate,
-                lambda gate=gate, relative=relative: _run_cached_gate(
-                    gate,
-                    {},
-                    lambda relative=relative: _governance_owned_test(relative),
-                ),
-            )
+                {},
+                lambda relative=relative: _governance_owned_test(relative),
+            ),
         )
+        if len(_python_unittest_ids(relative)) >= _python_method_shard_threshold():
+            internally_parallel_steps.append(step)
+        else:
+            steps.append(step)
 
-    if _run_functions_parallel(steps):
+    if _run_regular_then_internal_parallel(steps, internally_parallel_steps):
         return 1
-    print(f"PASS governance checks completed shards={len(steps)}")
+    print(
+        f"PASS governance checks completed shards={len(steps) + len(internally_parallel_steps)} "
+        f"method-sharded-files={len(internally_parallel_steps)}"
+    )
     return 0
 
 
@@ -2026,41 +2089,31 @@ def system_check() -> int:
         if path.suffix == ".rb":
             run_ruby_tests([relative])
             return 0
-        suite = path.parent.relative_to(ROOT).as_posix()
-        run(
-            [
-                sys.executable,
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                suite,
-                "-p",
-                path.name,
-            ],
-            env=test_env,
-        )
-        return 0
+        return _run_python_unittest_file(relative, test_env)
 
     steps = []
+    internally_parallel_steps: list[tuple[str, object]] = []
     for relative, path in selected:
         gate = f"system:test:{relative}"
-        steps.append(
-            (
+        step = (
+            gate,
+            lambda gate=gate, relative=relative, path=path: _run_cached_gate(
                 gate,
-                lambda gate=gate, relative=relative, path=path: _run_cached_gate(
-                    gate,
-                    {},
-                    lambda relative=relative, path=path: run_one(relative, path),
-                ),
-            )
+                {},
+                lambda relative=relative, path=path: run_one(relative, path),
+            ),
         )
+        if path.suffix == ".py" and len(_python_unittest_ids(relative)) >= _python_method_shard_threshold():
+            internally_parallel_steps.append(step)
+        else:
+            steps.append(step)
 
-    if _run_functions_parallel(steps):
+    if _run_regular_then_internal_parallel(steps, internally_parallel_steps):
         return 1
     print(
         f"PASS cross-system repository checks completed "
-        f"selected={len(selected)} dedicated-owned={len(owned)}"
+        f"selected={len(selected)} dedicated-owned={len(owned)} "
+        f"method-sharded-files={len(internally_parallel_steps)}"
     )
     return 0
 
