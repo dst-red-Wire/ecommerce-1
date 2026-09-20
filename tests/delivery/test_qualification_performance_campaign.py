@@ -111,25 +111,30 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         ):
             self.assertIn(f'"{heading}"', source)
 
-    def test_make_exposes_complete_campaign_and_final_proof(self):
+    def test_make_delegates_workflows_to_repoctl_only(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("perf-campaign:", makefile)
+        self.assertIn("scripts/repoctl.py perf-campaign", makefile)
         self.assertIn("qualification-proof:", makefile)
-        self.assertIn("qualification_performance_campaign.py", makefile)
-        self.assertIn("performance_audit.py", makefile)
+        self.assertIn("scripts/repoctl.py qualification-proof", makefile)
+        self.assertNotIn("qualification_performance_campaign.py", makefile)
+        self.assertNotIn("performance_audit.py --evidence", makefile)
 
-    def test_finish_pr_blocks_without_exact_campaign_proof(self):
+    def test_finish_pr_uses_central_qualification_workflow(self):
         repoctl = (ROOT / "scripts" / "repoctl.py").read_text(encoding="utf-8")
-        self.assertIn("_valid_performance_campaign(head)", repoctl)
-        self.assertIn("run make qualification-proof on the exact clean head", repoctl)
+        self.assertIn('qualification_workflow("qualification_proof")', repoctl)
+        self.assertIn('proof_workflow.get("performance_campaign_required") is True', repoctl)
+        self.assertIn("run make perf-campaign on the exact clean head", repoctl)
 
-    def test_ci_evidence_requires_campaign_before_merge(self):
+    def test_ci_evidence_makes_exact_proof_merge_authoritative_and_campaign_optional(self):
         contract = (ROOT / "config" / "contracts" / "ci-evidence.yaml").read_text(encoding="utf-8")
+        self.assertIn("qualification_proof:", contract)
+        self.assertIn("exact_pass_evidence_required: true", contract)
         self.assertIn("performance_campaign:", contract)
-        self.assertIn("required_before_merge: true", contract)
-        self.assertIn("budget_failure_blocks_readiness: true", contract)
+        self.assertIn("required_before_merge: false", contract)
+        self.assertIn("budget_failure_blocks_readiness: false", contract)
+        self.assertIn("repetitions_source: workflows.performance_campaign.repetitions", contract)
         self.assertIn("conditional_content_cache_fields:", contract)
-
 
 if __name__ == "__main__":
     unittest.main()
