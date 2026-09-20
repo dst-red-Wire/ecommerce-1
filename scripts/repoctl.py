@@ -3947,11 +3947,23 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         if dry_run:
             continue
 
+        expected_sha = str(item["head_sha"])
         if scope == "remote":
-            result = run(["git", "push", "origin", "--delete", branch], check=False, capture=True)
+            remote_ref = f"refs/heads/{branch}"
+            result = run(
+                [
+                    "git",
+                    "push",
+                    f"--force-with-lease={remote_ref}:{expected_sha}",
+                    "origin",
+                    f":{remote_ref}",
+                ],
+                check=False,
+                capture=True,
+            )
             if result.returncode:
                 detail = (result.stderr or result.stdout or "").strip()
-                failures.append(f"remote {branch}: {detail or 'delete failed'}")
+                failures.append(f"remote {branch}: {detail or 'lease-protected delete failed'}")
                 remote_failures.add(branch)
             else:
                 deleted += 1
@@ -3960,12 +3972,15 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         if branch in remote_failures:
             failures.append(f"local {branch}: preserved because remote deletion failed")
             continue
-        force = item["reason"] == "merged-pr-head-matches-current-branch-head"
-        flag = "-D" if force else "-d"
-        result = run(["git", "branch", flag, branch], check=False, capture=True)
+        local_ref = f"refs/heads/{branch}"
+        result = run(
+            ["git", "update-ref", "-d", local_ref, expected_sha],
+            check=False,
+            capture=True,
+        )
         if result.returncode:
             detail = (result.stderr or result.stdout or "").strip()
-            failures.append(f"local {branch}: {detail or 'delete failed'}")
+            failures.append(f"local {branch}: {detail or 'compare-and-delete failed'}")
         else:
             deleted += 1
 
