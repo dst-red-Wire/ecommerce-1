@@ -69,22 +69,31 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(16.0, inventory["equivalent_full_seconds"])
         self.assertEqual(20.0, inventory["evidence_reuse_hit_percent"])
 
-    def test_tekton_critical_path_models_global_serial_vs_component_matrix(self):
-        critical = AUDIT.tekton_critical_path(self.evidence()["gates"])
-        self.assertEqual(5.0, critical["global_branch_seconds"])
+    def test_tekton_critical_path_models_bounded_parallel_global_and_component_matrix(self):
+        critical = AUDIT.tekton_critical_path(self.evidence()["gates"], max_workers=4)
+        self.assertEqual("tekton-affected-v2", critical["model"])
+        self.assertEqual(3.0, critical["global_branch_seconds"])
         self.assertEqual(4.0, critical["component_matrix_branch_seconds"])
-        self.assertEqual(5.0, critical["critical_path_estimate_seconds"])
-        self.assertEqual("global-gates", critical["critical_branch"])
-        self.assertEqual(["governance", "contracts"], critical["critical_gates"])
-        self.assertEqual(5.0, critical["parallelization_headroom_seconds"])
-        self.assertEqual(2.0, critical["theoretical_gate_only_parallel_speedup"])
+        self.assertEqual(4.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("component-matrix", critical["critical_branch"])
+        self.assertEqual(["frontend:storefront"], critical["critical_gates"])
+        self.assertEqual(6.0, critical["parallelization_headroom_seconds"])
+        self.assertEqual(2.5, critical["theoretical_gate_only_parallel_speedup"])
+
+    def test_bounded_parallel_schedule_respects_worker_limit(self):
+        seconds, path = AUDIT._bounded_parallel_schedule(
+            [("a", 4.0), ("b", 3.0), ("c", 2.0), ("d", 1.0), ("e", 5.0)],
+            2,
+        )
+        self.assertEqual(9.0, seconds)
+        self.assertEqual(["a", "d", "e"], path)
 
     def test_component_becomes_critical_when_it_is_longer_than_global_branch(self):
         evidence = self.evidence()
         next(record for record in evidence["gates"] if record["gate"] == "frontend:storefront")["duration_seconds"] = (
             12.0
         )
-        critical = AUDIT.tekton_critical_path(evidence["gates"])
+        critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
         self.assertEqual(12.0, critical["critical_path_estimate_seconds"])
         self.assertEqual("component-matrix", critical["critical_branch"])
         self.assertEqual(["frontend:storefront"], critical["critical_gates"])
