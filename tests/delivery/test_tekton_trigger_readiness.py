@@ -162,6 +162,7 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             "pipeline_service_account": "tekton-pipeline",
             "execution_budget": {
                 "resource_quota_name": "ci-budget",
+                "max_workers": 3,
             },
             "webhook": {
                 "external_secret_name": "gitea-webhook-signing",
@@ -179,6 +180,14 @@ class TektonTriggerReadinessTests(unittest.TestCase):
                 "network_probe_pod": "network-proof",
             },
         }
+
+    def test_invalid_worker_budget_is_rejected(self):
+        for value in (0, 17, "4", True):
+            with self.subTest(value=value):
+                config = self.runtime_config()
+                config["execution_budget"]["max_workers"] = value
+                with self.assertRaisesRegex(ValueError, "max_workers"):
+                    module.validate_runtime_config(config)
 
     def test_mutable_runner_image_is_rejected(self):
         config = self.runtime_config()
@@ -199,6 +208,7 @@ class TektonTriggerReadinessTests(unittest.TestCase):
             self.assertEqual(7, len(data["proofs"]))
             self.assertTrue(all(p["status"] == "PASS" for p in data["proofs"].values()))
             self.assertFalse(data["mutation_performed"])
+            self.assertEqual(3, data["max_workers"])
             self.assertNotIn("SUPERSECRET", evidence.read_text())
 
             contract = (ROOT / "config" / "contracts" / "tekton-trigger-runtime.yaml").read_text(encoding="utf-8")
@@ -261,6 +271,7 @@ class TektonTriggerReadinessTests(unittest.TestCase):
         config = module.validate_runtime_config(self.runtime_config())
         self.assertEqual("mgmt", config["kube_context"])
         self.assertEqual("ecommerce-ci-trigger", config["namespace"])
+        self.assertEqual(3, config["execution_budget"]["max_workers"])
         self.assertNotIn("secret_value", json.dumps(config))
 
     def test_repository_wiring_keeps_readiness_explicit_and_out_of_normal_ci(self):
