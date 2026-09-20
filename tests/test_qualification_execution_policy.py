@@ -64,12 +64,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_required_gate_classes_have_explicit_safety_modes(self):
         expectations = {
-            "governance": ("composed", True),
+            "governance": ("composed", False),
             "runtime-efficiency": ("content-pass", True),
             "contracts": ("content-pass", True),
             "automation": ("content-pass", True),
             "security": ("fresh", True),
-            "system": ("composed", True),
+            "system": ("composed", False),
             "platform:ansible": ("content-pass", False),
             "platform:terraform": ("content-pass", False),
             "frontend:storefront": ("native-only", True),
@@ -80,6 +80,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 policy = MOD._resolved_gate_policy(gate)
                 self.assertEqual(cache_mode, policy["cache_mode"])
                 self.assertIs(parallel_safe, policy["parallel_safe"])
+
+    def test_system_tests_are_owned_once_and_dynamic_cache_targets_exact_file(self):
+        owners = MOD._dedicated_test_owners()
+        self.assertEqual(11, len(owners))
+        self.assertEqual("governance", owners["tests/test_architecture_authority.py"])
+        self.assertEqual("contracts", owners["tests/openapi_validator_test.rb"])
+        self.assertEqual("runtime-efficiency", owners["tests/runtime_efficiency_test.rb"])
+
+        gate = MOD._resolved_gate_policy("system:test:tests/test_m1_qualification_runner.py")
+        self.assertEqual("system:test:*", gate["_policy_name"])
+        self.assertIn("tests/test_m1_qualification_runner.py", gate["inputs"])
+        self.assertIn("tests/test_m1_qualification_runner.py", gate["validators"])
+        self.assertNotIn("<target>", gate["inputs"])
 
     def test_dynamic_service_inputs_are_resolved_without_product_special_case(self):
         product = MOD._resolved_gate_policy("service:product")
