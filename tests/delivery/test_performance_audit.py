@@ -22,18 +22,19 @@ class PerformanceAuditTests(unittest.TestCase):
             "status": "PASS",
             "verification": {"mode": "incremental"},
             "gates": [
-                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0, "parallel_safe": False},
-                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0, "parallel_safe": True},
-                {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 4.0},
-                {"gate": "service:product", "status": "PASS", "duration_seconds": 1.0},
+                {"gate": "governance", "status": "PASS", "duration_seconds": 2.0, "parallel_safe": False, "scope": "global"},
+                {"gate": "contracts", "status": "PASS", "duration_seconds": 3.0, "parallel_safe": True, "scope": "global"},
+                {"gate": "frontend:storefront", "status": "PASS", "duration_seconds": 4.0, "scope": "component"},
+                {"gate": "service:product", "status": "PASS", "duration_seconds": 1.0, "scope": "component"},
                 {
                     "gate": "platform:terraform",
                     "status": "PASS",
                     "duration_seconds": 0.0,
                     "source_duration_seconds": 6.0,
                     "reused_from_sha": "9" * 40,
+                    "scope": "component",
                 },
-                {"gate": "system", "status": "SKIP", "duration_seconds": 0.0},
+                {"gate": "system", "status": "SKIP", "duration_seconds": 0.0, "scope": "component"},
             ],
         }
 
@@ -172,6 +173,12 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(10.0, comparison["current_executed_seconds"])
         self.assertEqual(6.0, comparison["measured_gate_time_saved_seconds"])
         self.assertEqual(37.5, comparison["measured_gate_savings_percent"])
+
+    def test_missing_canonical_scope_fails_closed(self):
+        evidence = self.evidence()
+        evidence["gates"][0].pop("scope")
+        with self.assertRaisesRegex(ValueError, "lacks canonical"):
+            AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
 
     def test_invalid_gate_status_fails_closed(self):
         evidence = self.evidence()
