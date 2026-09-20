@@ -28,6 +28,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
                 "evidence": {
                     "required_kinds": ["code", "security"],
                     "required_status": "PASS",
+                    "comment_author": "repository-owner",
                 },
             }
         }
@@ -42,16 +43,37 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         }
         return "<!-- chatgpt-exact-sha-review:v1 " + json.dumps(payload, separators=(",", ":")) + " -->"
 
-    def run_with_comments(self, comments):
-        completed = subprocess.CompletedProcess(
+    def run_with_comments(self, comments, *, author="dst-red-Wire"):
+        owner = subprocess.CompletedProcess(
             [],
             0,
-            json.dumps({"comments": [{"body": body} for body in comments]}),
+            json.dumps({"owner": {"login": "dst-red-Wire"}}),
             "",
         )
+        comment_response = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    "comments": [
+                        {"body": body, "author": {"login": author}}
+                        for body in comments
+                    ]
+                }
+            ),
+            "",
+        )
+
+        def fake_run(command, **_kwargs):
+            if command[1:4] == ["repo", "view", "--json"]:
+                return owner
+            if command[1:4] == ["pr", "view", "126"]:
+                return comment_response
+            raise AssertionError(command)
+
         with (
             mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()),
-            mock.patch.object(REPOCTL, "run", return_value=completed),
+            mock.patch.object(REPOCTL, "run", side_effect=fake_run),
         ):
             return REPOCTL.chatgpt_review_readiness("gh", 126, self.HEAD)
 
@@ -86,6 +108,33 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         )
         self.assertFalse(ready)
         self.assertIn("ChatGPT code review is not PASS", reason)
+
+    def test_rejects_markers_from_non_owner_comment_author(self):
+        ready, reason = self.run_with_comments(
+            [self.marker("code"), self.marker("security")],
+            author="external-contributor",
+        )
+        self.assertFalse(ready)
+        self.assertIn("missing ChatGPT exact-SHA review proof", reason)
+
+    def test_rejects_boolean_blocking_findings(self):
+        payloads = []
+        for kind in ("code", "security"):
+            payload = {
+                "provider": "ChatGPT",
+                "kind": kind,
+                "head_sha": self.HEAD,
+                "status": "PASS",
+                "blocking_findings": False,
+            }
+            payloads.append(
+                "<!-- chatgpt-exact-sha-review:v1 "
+                + json.dumps(payload, separators=(",", ":"))
+                + " -->"
+            )
+        ready, reason = self.run_with_comments(payloads)
+        self.assertFalse(ready)
+        self.assertIn("blocking_findings=False", reason)
 
     def test_finish_pr_source_enforces_chatgpt_review_gate(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
