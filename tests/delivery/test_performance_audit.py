@@ -71,7 +71,7 @@ class PerformanceAuditTests(unittest.TestCase):
 
     def test_tekton_critical_path_models_bounded_parallel_global_and_component_matrix(self):
         critical = AUDIT.tekton_critical_path(self.evidence()["gates"], max_workers=4)
-        self.assertEqual("tekton-affected-v2", critical["model"])
+        self.assertEqual("tekton-affected-v3", critical["model"])
         self.assertEqual(5.0, critical["global_branch_seconds"])
         self.assertEqual(4.0, critical["component_matrix_branch_seconds"])
         self.assertEqual(5.0, critical["critical_path_estimate_seconds"])
@@ -79,6 +79,19 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(["governance", "contracts"], critical["critical_gates"])
         self.assertEqual(5.0, critical["parallelization_headroom_seconds"])
         self.assertEqual(2.0, critical["theoretical_gate_only_parallel_speedup"])
+
+    def test_true_tekton_global_fanout_uses_longest_global_taskrun(self):
+        evidence = self.evidence()
+        for record in evidence["gates"]:
+            if record["gate"] in {"governance", "contracts"}:
+                record["scope"] = "global"
+                record["ci_fanout"] = True
+                record["parallel_group"] = "tekton-global-matrix"
+        critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
+        self.assertEqual("tekton-matrix", critical["global_execution_model"])
+        self.assertEqual(3.0, critical["global_branch_seconds"])
+        self.assertEqual(4.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("component-matrix", critical["critical_branch"])
 
     def test_ordered_schedule_respects_serial_barriers(self):
         seconds, path = AUDIT._ordered_parallel_schedule(
