@@ -3800,6 +3800,7 @@ def pull_request_review_policy() -> dict:
         or evidence.get("required_kinds") != ["code", "security"]
         or evidence.get("required_status") != "PASS"
         or evidence.get("exact_sha_required") is not True
+        or evidence.get("comment_author") != "repository-owner"
         or codex.get("review_authority") != "forbidden"
         or codex.get("trigger") != "forbidden"
         or codex.get("polling") != "forbidden"
@@ -3832,6 +3833,22 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     evidence_contract = ai["evidence"]
     completed: dict[str, dict] = {}
 
+    owner_response = run(
+        [gh, "repo", "view", "--json", "owner"],
+        check=False,
+        capture=True,
+    )
+    if owner_response.returncode:
+        detail = (owner_response.stderr or owner_response.stdout or "").strip()
+        return False, detail or "unable to resolve repository owner"
+    try:
+        owner_payload = json.loads(owner_response.stdout or "{}")
+    except json.JSONDecodeError:
+        return False, "invalid GitHub repository owner JSON"
+    owner_login = str((owner_payload.get("owner") or {}).get("login") or "")
+    if not owner_login:
+        return False, "repository owner login is missing"
+
     response = run(
         [gh, "pr", "view", str(pr_number), "--json", "comments"],
         check=False,
@@ -3853,6 +3870,9 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     for comment in comments:
         if not isinstance(comment, dict):
             continue
+        author = comment.get("author") or {}
+        if not isinstance(author, dict) or str(author.get("login") or "") != owner_login:
+            continue
         for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
             kind = str(proof.get("kind") or "")
             if (
@@ -3873,7 +3893,7 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
         blockers = proof.get("blocking_findings")
         if (
             proof.get("status") != required_status
-            or not isinstance(blockers, int)
+            or type(blockers) is not int
             or blockers != 0
         ):
             return False, (
