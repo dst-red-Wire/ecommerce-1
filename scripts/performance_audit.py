@@ -94,7 +94,17 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
     denominator = len(executed) + len(reused)
     cache_hit_ratio = (len(reused) / denominator) if denominator else 0.0
     content_cache_records = [r for r in executed if int(r.get("content_cache_hits", 0) or 0) > 0]
-    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in content_cache_records)
+    content_cache_hits = sum(int(r.get("content_cache_hits", 0) or 0) for r in executed)
+    content_cache_misses = sum(int(r.get("content_cache_misses", 0) or 0) for r in executed)
+    execution_counts: dict[str, int] = {}
+    for record in records:
+        if record.get("status") == "SKIP":
+            mode = "skipped"
+        elif _is_reused(record):
+            mode = str(record.get("execution") or "parent-evidence")
+        else:
+            mode = str(record.get("execution") or "fresh")
+        execution_counts[mode] = execution_counts.get(mode, 0) + 1
 
     return {
         "executed_records": executed,
@@ -105,8 +115,11 @@ def gate_inventory(records: list[dict[str, Any]]) -> dict[str, Any]:
         "reused_gates": len(reused),
         "skipped_gates": len(skipped),
         "failed_gates": len(failed),
+        "execution_counts": dict(sorted(execution_counts.items())),
         "content_cache_gates": len(content_cache_records),
+        "content_cache_direct_gates": sum(1 for r in executed if r.get("execution") == "content-cache"),
         "content_cache_hits": content_cache_hits,
+        "content_cache_misses": content_cache_misses,
         "executed_seconds": _round(executed_seconds),
         "estimated_saved_seconds": _round(reused_seconds),
         "equivalent_full_seconds": _round(equivalent_full_seconds),
@@ -541,6 +554,8 @@ def _print_summary(report: dict[str, Any], destination: Path) -> None:
     print(f"reused time saved    {inventory['estimated_saved_seconds']:.3f}s")
     print(f"evidence hit ratio   {inventory['evidence_reuse_hit_percent']:.1f}%")
     print(f"content cache hits   {inventory.get('content_cache_hits', 0)} across {inventory.get('content_cache_gates', 0)} gates")
+    print(f"content cache misses {inventory.get('content_cache_misses', 0)}")
+    print(f"execution modes      {json.dumps(inventory.get('execution_counts', {}), sort_keys=True)}")
     print(f"critical path est.   {critical['critical_path_estimate_seconds']:.3f}s ({critical['critical_branch']})")
     print(f"parallel headroom    {critical['parallelization_headroom_seconds']:.3f}s")
     priorities = report.get("amdahl_priorities", [])
