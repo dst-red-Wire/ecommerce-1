@@ -113,6 +113,21 @@ class QualificationCacheTest(unittest.TestCase):
             third = qualification_cache.digest_globs(["governance/**/*"], root=root)
             self.assertNotEqual(second, third)
 
+    def test_file_bytes_cache_reuses_unchanged_content_and_invalidates_stat_change(self):
+        qualification_cache.clear_file_bytes_cache()
+        with tempfile.TemporaryDirectory(prefix="qualification-file-bytes-") as directory:
+            root = Path(directory)
+            target = root / "one.txt"
+            target.write_text("one\n", encoding="utf-8")
+            first = qualification_cache.digest_globs(["*.txt"], root=root)
+            self.assertEqual(1, qualification_cache.file_bytes_cache_entry_count())
+            second = qualification_cache.digest_globs(["*.txt"], root=root)
+            self.assertEqual(first, second)
+            self.assertEqual(1, qualification_cache.file_bytes_cache_entry_count())
+            target.write_text("two\n", encoding="utf-8")
+            third = qualification_cache.digest_globs(["*.txt"], root=root)
+            self.assertNotEqual(second, third)
+
     def test_corrupt_disk_entry_is_a_cache_miss(self):
         tool_home = self.isolated_tool_home()
         key = qualification_cache.build_key(
