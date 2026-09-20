@@ -168,15 +168,17 @@ def _ordered_parallel_schedule(
 
 
 def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None = None) -> dict[str, Any]:
-    """Model the canonical affected Pipeline with centrally bounded parallel global gates.
-
-    Global gates execute inside the isolated global-gates Task through repoctl's bounded
-    executor. Component TaskRuns still fan out independently. Classification, scheduling
-    and finalization overhead are excluded from gate evidence.
-    """
+    """Model either local bounded execution or true Tekton matrix fan-out from evidence."""
     active = [record for record in records if record.get("status") != "SKIP" and not _is_reused(record)]
-    globals_ = [record for record in active if record.get("gate") in GLOBAL_GATES]
-    components = [record for record in active if record.get("gate") not in GLOBAL_GATES]
+
+    def is_global(record: dict[str, Any]) -> bool:
+        scope = record.get("scope")
+        if scope is not None:
+            return scope == "global"
+        return record.get("gate") in GLOBAL_GATES
+
+    globals_ = [record for record in active if is_global(record)]
+    components = [record for record in active if not is_global(record)]
 
     recorded_budgets = {
         int(record.get("worker_budget"))
@@ -187,19 +189,37 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
         raise ValueError("evidence contains inconsistent worker budgets")
     recorded_workers = next(iter(recorded_budgets), None)
     workers = int(max_workers or recorded_workers or execution_max_workers())
-    global_rows = [
-        (
-            str(record.get("gate")),
-            _seconds(record.get("duration_seconds")),
-            bool(record.get("parallel_safe", False)),
-        )
+
+    tekton_global_fanout = bool(globals_) and all(
+        record.get("parallel_group") == "tekton-global-matrix" and record.get("ci_fanout") is True
         for record in globals_
-    ]
-    global_seconds, global_path = _ordered_parallel_schedule(global_rows, workers)
+    )
+    if tekton_global_fanout:
+        global_durations = [
+            (str(record.get("gate")), _seconds(record.get("duration_seconds")))
+            for record in globals_
+        ]
+        longest_global = max(global_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
+        global_seconds = longest_global[1]
+        global_path = [longest_global[0]] if longest_global[0] else []
+        global_model = "tekton-matrix"
+    else:
+        global_rows = [
+            (
+                str(record.get("gate")),
+                _seconds(record.get("duration_seconds")),
+                bool(record.get("parallel_safe", False)),
+            )
+            for record in globals_
+        ]
+        global_seconds, global_path = _ordered_parallel_schedule(global_rows, workers)
+        global_model = "ordered-bounded-local"
+
     component_durations = [(str(record.get("gate")), _seconds(record.get("duration_seconds"))) for record in components]
     longest_component = max(component_durations, key=lambda row: (row[1], row[0]), default=("", 0.0))
     component_parallel_seconds = longest_component[1]
-    serial_seconds = sum(seconds for _, seconds, _ in global_rows) + sum(seconds for _, seconds in component_durations)
+
+    serial_seconds = sum(_seconds(record.get("duration_seconds")) for record in active)
     critical_seconds = max(global_seconds, component_parallel_seconds)
 
     if global_seconds >= component_parallel_seconds and globals_:
@@ -217,8 +237,9 @@ def tekton_critical_path(records: list[dict[str, Any]], max_workers: int | None 
     utilization = (critical_seconds / serial_seconds) if serial_seconds else 0.0
 
     return {
-        "model": "tekton-affected-v2",
-        "assumption": "global gates use ordered bounded parallelism with serial barriers; component gates fan out as a Matrix; both branches start after classify",
+        "model": "tekton-affected-v3",
+        "global_execution_model": global_model,
+        "assumption": "true Tekton global/component matrix fan-out when recorded; ordered bounded local execution otherwise",
         "max_workers": workers,
         "aggregate_executed_gate_seconds": _round(serial_seconds),
         "global_branch_seconds": _round(global_seconds),
