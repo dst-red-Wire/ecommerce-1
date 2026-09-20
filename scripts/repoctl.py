@@ -2574,8 +2574,36 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         anchor = float(effective_env.get("ECOMMERCE_QUALIFICATION_MONOTONIC_START", start))
     except ValueError:
         anchor = start
+    live_output = effective_env.get("ECOMMERCE_LIVE_OUTPUT", "").strip() == "1"
     with log_path.open("w", encoding="utf-8") as log:
-        p = subprocess.run(command, cwd=ROOT, env=effective_env, text=True, stdout=log, stderr=subprocess.STDOUT)
+        if live_output:
+            process = subprocess.Popen(
+                command,
+                cwd=ROOT,
+                env=effective_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+            if process.stdout is None:
+                process.kill()
+                raise RuntimeError(f"gate {name} could not capture subprocess output")
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                print(f"[{name}] {line}", end="", flush=True)
+            returncode = process.wait()
+        else:
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=effective_env,
+                text=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            returncode = completed.returncode
     duration = round(time.monotonic() - start, 3)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
 
@@ -2600,8 +2628,8 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
 
     record = {
         "gate": name,
-        "status": "PASS" if p.returncode == 0 else "FAIL",
-        "exit_code": p.returncode,
+        "status": "PASS" if returncode == 0 else "FAIL",
+        "exit_code": returncode,
         "duration_seconds": duration,
         "command": command,
         "log": str(log_path.relative_to(ROOT)),
@@ -2625,7 +2653,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         raw_workers = effective_env.get("ECOMMERCE_QUALIFICATION_MAX_WORKERS", "").strip()
         if raw_workers:
             record["worker_budget"] = int(raw_workers)
-    return p.returncode == 0, record
+    return returncode == 0, record
 
 
 def _emit_gate_record(ok: bool, record: dict) -> None:
