@@ -24,11 +24,40 @@ import performance_audit
 import repoctl
 
 
+def _supports_color() -> bool:
+    return (
+        "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "") != "dumb"
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _paint(text: str, code: str) -> str:
+    if not _supports_color():
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _status(kind: str, label: str, wall: float | None = None, log_path: Path | None = None) -> None:
+    styles = {
+        "RUN": ("●", "36"),
+        "PASS": ("✓", "32"),
+        "FAIL": ("✗", "31"),
+    }
+    symbol, color = styles[kind]
+    suffix = f"  {wall:.3f}s" if wall is not None else ""
+    detail = f"  log={log_path.relative_to(ROOT)}" if kind == "FAIL" and log_path is not None else ""
+    print(_paint(f"{symbol} {kind:<4} {label}{suffix}{detail}", color), flush=True)
+
+
 def _run_sample(label: str, command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None) -> dict:
     logs = ROOT / ".context" / "performance" / "campaign-logs"
     logs.mkdir(parents=True, exist_ok=True)
     safe = "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in label)
     log_path = logs / f"{safe}.log"
+
+    _status("RUN", label)
     started = time.monotonic()
     with log_path.open("w", encoding="utf-8") as log:
         completed = subprocess.run(
@@ -41,9 +70,15 @@ def _run_sample(label: str, command: list[str], *, cwd: Path = ROOT, env: dict[s
             check=False,
         )
     wall = round(time.monotonic() - started, 3)
+
     if completed.returncode:
-        tail = "\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:])
-        raise RuntimeError(f"{label} failed ({completed.returncode}) after {wall:.3f}s\n{tail}")
+        _status("FAIL", label, wall, log_path)
+        raise RuntimeError(
+            f"{label} failed ({completed.returncode}) after {wall:.3f}s; "
+            f"log={log_path.relative_to(ROOT)}"
+        )
+
+    _status("PASS", label, wall)
     return {"label": label, "wall_seconds": wall, "log": str(log_path.relative_to(ROOT))}
 
 
