@@ -135,6 +135,8 @@ Exact runtime versions belong in versioned lock/config files, not in this projec
 
 ### M4 — Platform Baseline
 
+Canonical tracker: GitHub issue `#17`.
+
 Delivery order:
 
 `RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> data platform`.
@@ -142,6 +144,8 @@ Delivery order:
 Stateful components follow the locked architecture: CNPG/PostgreSQL, Strimzi Kafka KRaft, RabbitMQ Quorum Queues, Redis Cluster, OpenSearch and SeaweedFS S3. Ceph is conditional only for an explicitly approved block/RWX need.
 
 ### M5 — Vertical Slice
+
+Canonical tracker: GitHub issue `#18`.
 
 Implement in bounded slices:
 
@@ -154,9 +158,13 @@ M5 is complete only when the user-visible path is exercised through actual contr
 
 ### M6 — Full Application
 
+Canonical tracker: GitHub issue `#19`.
+
 Complete all capabilities, admin workflows, localization FR/EN, failure paths, permissions, data minimization, migration paths and service-level documentation. No new microservice may be added without architecture admission review.
 
 ### M7 — Qualification
+
+Canonical tracker: GitHub issue `#20`.
 
 Required gate families:
 
@@ -165,6 +173,8 @@ Required gate families:
 The three PREPROD campaigns are specialized qualification stages; later campaigns may reuse immutable evidence only when digest/configuration equivalence is proven, while required entry gates are replayed after reconstruction.
 
 ### M8 — Certification
+
+Canonical tracker: GitHub issue `#21`.
 
 1. PREPROD standard <=24h.
 2. Endurance 72 useful hours.
@@ -175,6 +185,8 @@ The three PREPROD campaigns are specialized qualification stages; later campaign
 A `FAIL` or `INCOMPLETE` blocks M9.
 
 ### M9 — PROD A/B
+
+Canonical tracker: GitHub issue `#22`.
 
 Use signed immutable release manifests, controlled rollout, explicit fencing/home-site authority, progressive delivery, rollback/quarantine and release ledger evidence. No normal manual production mutation.
 
