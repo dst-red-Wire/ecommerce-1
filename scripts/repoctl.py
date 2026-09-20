@@ -248,6 +248,9 @@ def _resolved_gate_policy(name: str) -> dict:
         raise RuntimeError(f"gate {name} has unsupported cache_mode {mode!r}")
     if not isinstance(resolved.get("parallel_safe"), bool):
         raise RuntimeError(f"gate {name} must declare parallel_safe")
+    dependencies = resolved.get("dependencies", [])
+    if not isinstance(dependencies, list) or any(not isinstance(item, str) or not item for item in dependencies):
+        raise RuntimeError(f"gate {name} has invalid dependencies")
     command = resolved.get("command")
     if command is not None:
         if not isinstance(command, dict) or not isinstance(command.get("action"), str) or not command["action"].strip():
@@ -2816,18 +2819,32 @@ def _execute_plan_scope(
     parent_sha: str | None,
     parent_evidence: dict | None,
 ) -> bool:
-    commands: list[tuple[str, list[str]]] = []
-    for entry in plan:
-        if entry.get("scope") != scope:
-            continue
+    entries = [entry for entry in plan if entry.get("scope") == scope]
+    all_gates = {str(entry["gate"]) for entry in plan}
+    completed = {
+        str(record.get("gate"))
+        for record in records
+        if record.get("status") in {"PASS", "SKIP"}
+    }
+    pending: dict[str, dict] = {}
+
+    for entry in entries:
         gate = str(entry["gate"])
+        for dependency in entry.get("dependencies", []):
+            if dependency not in all_gates:
+                raise RuntimeError(f"gate {gate} depends on unknown gate {dependency}")
+            dependency_entry = next(item for item in plan if item.get("gate") == dependency)
+            if scope == "global" and dependency_entry.get("scope") == "component":
+                raise RuntimeError(f"global gate {gate} cannot depend on component gate {dependency}")
+
         action = str(entry["action"])
         if action == "reuse":
             if not parent_sha or not parent_evidence or not _reuse_gate(gate, parent_sha, parent_evidence, records):
-                command = entry.get("command")
-                if not isinstance(command, list):
-                    return False
-                commands.append((gate, command))
+                entry = dict(entry)
+                entry["action"] = "run"
+                pending[gate] = entry
+            else:
+                completed.add(gate)
             continue
         if action == "skip":
             records.append(
@@ -2845,14 +2862,46 @@ def _execute_plan_scope(
                     "started_at_monotonic_offset": 0.0,
                 }
             )
+            completed.add(gate)
             continue
         if action not in {"run", "fresh"}:
             raise RuntimeError(f"unsupported execution-plan action {action!r} for {gate}")
-        command = entry.get("command")
-        if not isinstance(command, list):
-            raise RuntimeError(f"execution-plan gate {gate} has no command")
-        commands.append((gate, command))
-    return _run_gate_batch(commands, records, env)
+        pending[gate] = entry
+
+    while pending:
+        ready = [
+            entry
+            for gate, entry in pending.items()
+            if set(str(dep) for dep in entry.get("dependencies", [])) <= completed
+        ]
+        if not ready:
+            blocked = {
+                gate: sorted(set(str(dep) for dep in entry.get("dependencies", [])) - completed)
+                for gate, entry in pending.items()
+            }
+            raise RuntimeError(f"execution plan dependency cycle or unsatisfied dependency: {blocked}")
+
+        commands: list[tuple[str, list[str]]] = []
+        for entry in ready:
+            gate = str(entry["gate"])
+            command = entry.get("command")
+            if not isinstance(command, list):
+                raise RuntimeError(f"execution-plan gate {gate} has no command")
+            commands.append((gate, command))
+
+        before = len(records)
+        if not _run_gate_batch(commands, records, env):
+            return False
+        new_records = records[before:]
+        passed = {str(record.get("gate")) for record in new_records if record.get("status") == "PASS"}
+        expected = {str(entry["gate"]) for entry in ready}
+        if passed != expected:
+            raise RuntimeError(f"execution-plan batch did not produce exact PASS inventory: expected={expected} got={passed}")
+        completed.update(passed)
+        for gate in expected:
+            pending.pop(gate, None)
+
+    return True
 
 
 def _record_delivery_wall(evidence_path: Path, evidence: dict, started: float) -> float:
@@ -2939,6 +2988,12 @@ def tekton_plan(
                 }
             )
         elif action in {"run", "fresh"}:
+            dependencies = list(entry.get("dependencies", []))
+            if dependencies:
+                raise RuntimeError(
+                    f"Tekton matrix gate {gate} declares dependencies {dependencies}; "
+                    "dependency-bearing top-level gates require an explicit DAG task edge"
+                )
             if entry["scope"] == "global":
                 if entry.get("ci_fanout") is not True:
                     raise RuntimeError(f"global gate {gate} is not approved for Tekton fan-out")
