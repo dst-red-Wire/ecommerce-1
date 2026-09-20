@@ -151,6 +151,8 @@ For a final candidate SHA:
 6. if the head SHA changes, treat the prior final review as historical and review the new exact SHA;
 7. resolve findings only after the fix exists on a published SHA and its evidence is verified;
 8. require no unresolved blocking finding before merge.
+9. record final CODE and SECURITY results with the `chatgpt-exact-sha-review:v1` markers required by `review-policy.yaml`;
+10. treat Codex comments, reactions, summaries, and review completion as non-authoritative historical input only.
 
 Use `chatgpt-exact-sha-review` as the review authority and duplication-control contract.
 
