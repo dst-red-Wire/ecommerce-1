@@ -45,6 +45,28 @@ class TektonAffectedContractTests(unittest.TestCase):
         self.assertIn("missing_remote_evidence_behavior: full-reexecution", contract)
         self.assertIn("forge_status_binds_exact_commit_sha: true", contract)
 
+    def test_finalizer_assembles_fanned_out_global_records_from_plan_v2(self):
+        repoctl = self.read("scripts/repoctl.py")
+        self.assertIn('for pattern in ("global-*.json", "component-*.json")', repoctl)
+        self.assertIn('"schema_version": 2', repoctl)
+        self.assertIn('"precomputed_records"', repoctl)
+        self.assertIn("unexpected = set(by_gate) - expected", repoctl)
+        self.assertNotIn('_record_path(directory, "global")', repoctl)
+
+    def test_gate_evidence_contract_requires_execution_metadata(self):
+        contract = self.read("config/contracts/ci-evidence.yaml")
+        for field in (
+            "execution",
+            "cache_mode",
+            "scope",
+            "parallel_safe",
+            "parallel_group",
+            "started_at_monotonic_offset",
+        ):
+            self.assertIn(f"- {field}", contract)
+        self.assertIn("- cache_key", contract)
+        self.assertIn("- input_digest", contract)
+
     def test_runtime_requires_measured_bounded_parallelism(self):
         contract = self.read("config/contracts/tekton-trigger-runtime.yaml")
         self.assertIn("bounded_parallelism_required: true", contract)
