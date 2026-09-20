@@ -237,12 +237,26 @@ def _resolved_gate_policy(name: str) -> dict:
                         text = text.replace(token, replacement)
                     projected.append(text)
                 resolved[field] = projected
+        if isinstance(resolved.get("requires_path"), str):
+            value = str(resolved["requires_path"])
+            for token, replacement in replacements.items():
+                value = value.replace(token, replacement)
+            resolved["requires_path"] = value
     resolved["_policy_name"] = pattern_name
     mode = resolved.get("cache_mode")
     if mode not in {"content-pass", "native-only", "fresh", "forbidden", "composed"}:
         raise RuntimeError(f"gate {name} has unsupported cache_mode {mode!r}")
     if not isinstance(resolved.get("parallel_safe"), bool):
         raise RuntimeError(f"gate {name} must declare parallel_safe")
+    command = resolved.get("command")
+    if command is not None:
+        if not isinstance(command, dict) or not isinstance(command.get("action"), str) or not command["action"].strip():
+            raise RuntimeError(f"gate {name} has invalid command contract")
+        if command.get("context_args") not in {None, "base-head"}:
+            raise RuntimeError(f"gate {name} has unsupported command context_args")
+        static_args = command.get("static_args", [])
+        if not isinstance(static_args, list) or any(not isinstance(item, str) for item in static_args):
+            raise RuntimeError(f"gate {name} has invalid static command args")
     return resolved
 
 
@@ -2601,33 +2615,161 @@ def _normalized_component_gates(components: list[str]) -> list[str]:
     return sorted(set(values))
 
 
-def _component_command(component: str) -> tuple[list[str] | None, str | None]:
-    if component == "none":
+def _policy_gate_names(scope: str, *, ci_fanout_only: bool = False) -> list[str]:
+    values: list[str] = []
+    for name, entry in qualification_execution_policy().get("gates", {}).items():
+        if not isinstance(name, str) or name.endswith("*") or not isinstance(entry, dict):
+            continue
+        if entry.get("scope") != scope or not isinstance(entry.get("command"), dict):
+            continue
+        if ci_fanout_only and entry.get("ci_fanout") is not True:
+            continue
+        values.append(name)
+    return values
+
+
+def _gate_command(gate: str, base: str = "", head: str = "WORKTREE") -> tuple[list[str] | None, str | None]:
+    if gate == "none":
         return None, "no affected component gate"
-    if component.startswith("service:"):
-        service = component.split(":", 1)[1]
-        if not (ROOT / "services" / service / "go.mod").is_file():
-            return None, "canonical service not implemented"
-        return _controller_command("service", service), None
-    if component.startswith("frontend:"):
-        return _controller_command("frontend", "check", component.split(":", 1)[1]), None
-    if component == "platform:terraform":
-        return _controller_command("terraform"), None
-    if component == "platform:ansible":
-        return _controller_command("ansible"), None
-    if component == "system":
-        return _controller_command("system"), None
-    raise RuntimeError(f"unsupported affected component: {component}")
+    policy = _resolved_gate_policy(gate)
+    command = policy.get("command")
+    if not isinstance(command, dict):
+        raise RuntimeError(f"gate {gate} is not an executable top-level gate")
+
+    required_path = policy.get("requires_path")
+    if isinstance(required_path, str) and required_path and not (ROOT / required_path).is_file():
+        return None, f"required implementation path missing: {required_path}"
+
+    args = [str(command["action"]), *[str(item) for item in command.get("static_args", [])]]
+    if command.get("suffix_arg") is True:
+        pattern = str(policy.get("_policy_name", ""))
+        if not pattern.endswith("*"):
+            raise RuntimeError(f"gate {gate} requests suffix_arg without a wildcard policy")
+        suffix = gate[len(pattern) - 1 :]
+        if not suffix:
+            raise RuntimeError(f"gate {gate} resolved an empty dynamic suffix")
+        args.append(suffix)
+    if command.get("context_args") == "base-head":
+        args.extend(["--base", base, "--head", head])
+    return _controller_command(*args), None
+
+
+def _component_command(component: str) -> tuple[list[str] | None, str | None]:
+    """Compatibility adapter; execution authority lives in qualification-execution-policy.yaml."""
+    return _gate_command(component)
 
 
 def _global_gate_commands(base: str, head: str) -> list[tuple[str, list[str]]]:
-    return [
-        ("governance", _controller_command("governance")),
-        ("runtime-efficiency", _controller_command("runtime-efficiency")),
-        ("contracts", _controller_command("contracts", "--base", base, "--head", head)),
-        ("automation", _controller_command("automation-policy")),
-        ("security", _controller_command("security")),
-    ]
+    """Compatibility adapter derived entirely from the central execution policy."""
+    commands: list[tuple[str, list[str]]] = []
+    for gate in _policy_gate_names("global"):
+        command, reason = _gate_command(gate, base, head)
+        if command is None:
+            raise RuntimeError(f"global gate {gate} is not executable: {reason}")
+        commands.append((gate, command))
+    return commands
+
+
+def _parent_has_reusable_gate(name: str, parent_evidence: dict | None) -> bool:
+    if not parent_evidence:
+        return False
+    source = next((gate for gate in parent_evidence.get("gates", []) if gate.get("gate") == name), None)
+    return bool(source and source.get("status") == "PASS")
+
+
+def build_execution_plan(
+    base: str,
+    head: str,
+    components: list[str],
+    *,
+    parent_sha: str | None = None,
+    parent_evidence: dict | None = None,
+    delta_components: set[str] | None = None,
+) -> list[dict]:
+    """Build the single RUN/FRESH/REUSE/SKIP plan used locally and by Tekton."""
+    delta = set(delta_components or set())
+    names = [(name, "global") for name in _policy_gate_names("global")]
+    names.extend((name, "component") for name in _normalized_component_gates(components))
+
+    plan: list[dict] = []
+    seen: set[str] = set()
+    for gate, scope in names:
+        if gate in seen:
+            raise RuntimeError(f"execution plan contains duplicate gate {gate}")
+        seen.add(gate)
+        policy = _resolved_gate_policy(gate)
+        command, skip_reason = _gate_command(gate, base, head)
+        action = "fresh" if policy.get("cache_mode") == "fresh" else "run"
+        reason = ""
+
+        if command is None:
+            action = "skip"
+            reason = str(skip_reason or "gate is not executable")
+        elif scope == "component" and parent_sha and parent_evidence:
+            delta_hit = gate in delta
+            if gate == "frontend:all":
+                delta_hit = bool({"frontend:storefront", "frontend:admin"} & delta)
+            if not delta_hit and _parent_has_reusable_gate(gate, parent_evidence):
+                action = "reuse"
+                reason = "direct-parent exact PASS and strict delta does not affect gate"
+
+        plan.append(
+            {
+                "gate": gate,
+                "scope": scope,
+                "action": action,
+                "reason": reason,
+                "command": command,
+                "cache_mode": policy.get("cache_mode"),
+                "parallel_safe": bool(policy.get("parallel_safe")),
+                "dependencies": list(policy.get("dependencies", [])),
+                "ci_fanout": bool(policy.get("ci_fanout")),
+            }
+        )
+    return plan
+
+
+def _execute_plan_scope(
+    plan: list[dict],
+    scope: str,
+    records: list[dict],
+    env: dict[str, str],
+    parent_sha: str | None,
+    parent_evidence: dict | None,
+) -> bool:
+    commands: list[tuple[str, list[str]]] = []
+    for entry in plan:
+        if entry.get("scope") != scope:
+            continue
+        gate = str(entry["gate"])
+        action = str(entry["action"])
+        if action == "reuse":
+            if not parent_sha or not parent_evidence or not _reuse_gate(gate, parent_sha, parent_evidence, records):
+                command = entry.get("command")
+                if not isinstance(command, list):
+                    return False
+                commands.append((gate, command))
+            continue
+        if action == "skip":
+            records.append(
+                {
+                    "gate": gate,
+                    "status": "SKIP",
+                    "reason": entry.get("reason") or "planner skip",
+                    "duration_seconds": 0.0,
+                    "execution": "skipped",
+                    "cache_mode": entry.get("cache_mode"),
+                    "parallel_safe": bool(entry.get("parallel_safe")),
+                }
+            )
+            continue
+        if action not in {"run", "fresh"}:
+            raise RuntimeError(f"unsupported execution-plan action {action!r} for {gate}")
+        command = entry.get("command")
+        if not isinstance(command, list):
+            raise RuntimeError(f"execution-plan gate {gate} has no command")
+        commands.append((gate, command))
+    return _run_gate_batch(commands, records, env)
 
 
 def _record_delivery_wall(evidence_path: Path, evidence: dict, started: float) -> float:
@@ -2929,71 +3071,47 @@ def verify_change(base: str, head: str) -> int:
         }
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
-    global_commands = _global_gate_commands(base, head)
-    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
-    if not _run_gate_batch(global_commands, records, env):
-        write_evidence(base, head, paths, components, records, verification)
-        return 1
-    if head == "WORKTREE":
-        after_global_tree = worktree_tree_sha()
-        if after_global_tree != before_global_tree:
-            records.append(
-                {
-                    "gate": "worktree-stability",
-                    "status": "FAIL",
-                    "exit_code": 1,
-                    "duration_seconds": 0.0,
-                    "reason": "parallel global gate batch mutated worktree",
-                }
-            )
+    plan = build_execution_plan(
+        base,
+        head,
+        components,
+        parent_sha=parent_sha,
+        parent_evidence=parent_evidence,
+        delta_components=delta_components,
+    )
+    verification["execution_plan"] = [
+        {
+            "gate": entry["gate"],
+            "scope": entry["scope"],
+            "action": entry["action"],
+            "cache_mode": entry["cache_mode"],
+            "parallel_safe": entry["parallel_safe"],
+        }
+        for entry in plan
+    ]
+
+    for scope in ("global", "component"):
+        before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+        if not _execute_plan_scope(plan, scope, records, env, parent_sha, parent_evidence):
             write_evidence(base, head, paths, components, records, verification)
-            return fail("parallel global gate batch mutated worktree", 1)
-
-    combined = "frontend:storefront" in components and "frontend:admin" in components
-    component_commands: list[tuple[str, list[str]]] = []
-    if combined:
-        frontend_delta = bool({"frontend:storefront", "frontend:admin"} & delta_components)
-        reused = bool(
-            parent_evidence
-            and parent_sha
-            and not frontend_delta
-            and _reuse_gate("frontend:all", parent_sha, parent_evidence, records)
-        )
-        if not reused:
-            component_commands.append(("frontend:all", _controller_command("frontend", "check", "all")))
-
-    for component in components:
-        if component == "global" or (combined and component.startswith("frontend:")):
-            continue
-        command, skip_reason = _component_command(component)
-        if command is None:
-            records.append({"gate": component, "status": "SKIP", "reason": skip_reason, "duration_seconds": 0.0})
-            continue
-        if parent_evidence and parent_sha and component not in delta_components:
-            if _reuse_gate(component, parent_sha, parent_evidence, records):
-                continue
-        component_commands.append((component, command))
-
-    before_component_tree = worktree_tree_sha() if head == "WORKTREE" else ""
-    if not _run_gate_batch(component_commands, records, env):
-        write_evidence(base, head, paths, components, records, verification)
-        return 1
-    if head == "WORKTREE":
-        after_component_tree = worktree_tree_sha()
-        if after_component_tree != before_component_tree:
-            mutated_paths = git("diff", "--name-only", before_component_tree, after_component_tree).splitlines()
-            records.append(
-                {
-                    "gate": "worktree-stability",
-                    "status": "FAIL",
-                    "exit_code": 1,
-                    "duration_seconds": 0.0,
-                    "reason": "parallel component gate batch mutated worktree",
-                    "mutated_paths": mutated_paths,
-                }
-            )
-            write_evidence(base, head, paths, components, records, verification)
-            return fail(f"parallel component gate batch mutated worktree: {mutated_paths}", 1)
+            return 1
+        if head == "WORKTREE":
+            after_tree = worktree_tree_sha()
+            if after_tree != before_tree:
+                mutated_paths = git("diff", "--name-only", before_tree, after_tree).splitlines()
+                records.append(
+                    {
+                        "gate": "worktree-stability",
+                        "status": "FAIL",
+                        "exit_code": 1,
+                        "duration_seconds": 0.0,
+                        "execution": "fresh",
+                        "reason": f"{scope} execution-plan batch mutated worktree",
+                        "mutated_paths": mutated_paths,
+                    }
+                )
+                write_evidence(base, head, paths, components, records, verification)
+                return fail(f"{scope} execution-plan batch mutated worktree: {mutated_paths}", 1)
 
     if head == "WORKTREE":
         final_tree_sha = worktree_tree_sha()
