@@ -153,12 +153,11 @@ evidence-compare: ## Compare measured full/incremental evidence; FULL_EVIDENCE/I
 perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities from evidence
 	@$(PYTHON) scripts/performance_audit.py $(if $(EVIDENCE),--evidence "$(EVIDENCE)",) $(if $(BASELINE_EVIDENCE),--baseline "$(BASELINE_EVIDENCE)",) $(if $(PERF_OUTPUT),--output "$(PERF_OUTPUT)",)
 
-perf-campaign: ## Run the blocking 3x cold/warm/Product/governance performance campaign
-	@$(PYTHON) scripts/qualification_performance_campaign.py --base "$${BASE:-origin/main}" --repetitions 3 $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
+perf-campaign: ## Run the repository-defined statistical performance campaign
+	@$(PYTHON) scripts/repoctl.py perf-campaign --base "$${BASE:-origin/main}" $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
 
-qualification-proof: ## Final exact-SHA qualification + performance budgets + Product/Testcontainers proof
-	@$(PYTHON) scripts/qualification_performance_campaign.py --base "$${BASE:-origin/main}" --repetitions 3
-	@SHA="$$(git rev-parse HEAD)"; $(PYTHON) scripts/performance_audit.py --evidence ".context/evidence/$$SHA.json"
+qualification-proof: ## Run one exact-SHA qualification plus its performance audit
+	@$(PYTHON) scripts/repoctl.py qualification-proof --base "$${BASE:-origin/main}"
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
 
 context: ## Build bounded task-aware context pack; use TASK="..."
