@@ -70,11 +70,13 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(16.0, inventory["equivalent_full_seconds"])
         self.assertEqual(20.0, inventory["evidence_reuse_hit_percent"])
 
-    def test_tekton_critical_path_models_bounded_parallel_global_and_component_matrix(self):
+    def test_local_critical_path_models_bounded_parallelism_and_serial_barriers(self):
         critical = AUDIT.tekton_critical_path(self.evidence()["gates"], max_workers=4)
         self.assertEqual("tekton-affected-v3", critical["model"])
+        self.assertEqual("ordered-bounded-local", critical["global_execution_model"])
+        self.assertEqual("ordered-bounded-local", critical["component_execution_model"])
         self.assertEqual(5.0, critical["global_branch_seconds"])
-        self.assertEqual(4.0, critical["component_matrix_branch_seconds"])
+        self.assertEqual(5.0, critical["component_matrix_branch_seconds"])
         self.assertEqual(5.0, critical["critical_path_estimate_seconds"])
         self.assertEqual("global-gates", critical["critical_branch"])
         self.assertEqual(["governance", "contracts"], critical["critical_gates"])
@@ -88,8 +90,11 @@ class PerformanceAuditTests(unittest.TestCase):
                 record["scope"] = "global"
                 record["ci_fanout"] = True
                 record["parallel_group"] = "tekton-global-matrix"
+            elif record.get("scope") == "component" and record["status"] != "SKIP" and not record.get("reused_from_sha"):
+                record["parallel_group"] = "tekton-component-matrix"
         critical = AUDIT.tekton_critical_path(evidence["gates"], max_workers=4)
         self.assertEqual("tekton-matrix", critical["global_execution_model"])
+        self.assertEqual("tekton-matrix", critical["component_execution_model"])
         self.assertEqual(3.0, critical["global_branch_seconds"])
         self.assertEqual(4.0, critical["critical_path_estimate_seconds"])
         self.assertEqual("component-matrix", critical["critical_branch"])
@@ -133,6 +138,44 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(12.0, critical["critical_path_estimate_seconds"])
         self.assertEqual("component-matrix", critical["critical_branch"])
         self.assertEqual(["frontend:storefront"], critical["critical_gates"])
+
+    def test_local_component_serial_system_barrier_extends_critical_path(self):
+        records = [
+            {
+                "gate": "governance",
+                "status": "PASS",
+                "duration_seconds": 2.0,
+                "scope": "global",
+                "parallel_safe": False,
+            },
+            {
+                "gate": "service:cart",
+                "status": "PASS",
+                "duration_seconds": 4.0,
+                "scope": "component",
+                "parallel_safe": True,
+            },
+            {
+                "gate": "service:product",
+                "status": "PASS",
+                "duration_seconds": 3.0,
+                "scope": "component",
+                "parallel_safe": True,
+            },
+            {
+                "gate": "system",
+                "status": "PASS",
+                "duration_seconds": 6.0,
+                "scope": "component",
+                "parallel_safe": False,
+            },
+        ]
+        critical = AUDIT.tekton_critical_path(records, max_workers=4)
+        self.assertEqual("ordered-bounded-local", critical["component_execution_model"])
+        self.assertEqual(10.0, critical["component_matrix_branch_seconds"])
+        self.assertEqual(10.0, critical["critical_path_estimate_seconds"])
+        self.assertEqual("component-gates", critical["critical_branch"])
+        self.assertEqual(["service:cart", "system"], critical["critical_gates"])
 
     def test_amdahl_priorities_use_full_equivalent_cost_and_identify_largest_share(self):
         priorities = AUDIT.amdahl_priorities(self.evidence()["gates"])
