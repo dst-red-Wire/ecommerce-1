@@ -85,7 +85,7 @@ class PerformanceAuditTests(unittest.TestCase):
             [("a", 4.0), ("b", 3.0), ("c", 2.0), ("d", 1.0), ("e", 5.0)],
             2,
         )
-        self.assertEqual(9.0, seconds)
+        self.assertEqual(10.0, seconds)
         self.assertEqual(["a", "d", "e"], path)
 
     def test_component_becomes_critical_when_it_is_longer_than_global_branch(self):
