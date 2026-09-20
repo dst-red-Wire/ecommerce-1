@@ -114,6 +114,13 @@ same complete offline validation and staging role, and leaves restart to the nex
 `server` action. A normal `test` action refuses an active server so a cold trial cannot
 be confused with recovery.
 
+The fail-closed mutation proof is a separate recovery sequence. Run `restage`, then
+`tamper`, then `restage` again before `server`. The `tamper` action flips one byte in
+the guest's staged RKE2 binary and passes only when the complete `server` action
+stops at its immediate bundle-revalidation task while RKE2 remains inactive. It
+writes the before/after digests and blocked task to `tamper-result.json`; it never
+modifies the source bundle.
+
 Evidence is written under `.context/mgmt-offline-vm/<name>`: VM identity and adapter
 state, cold preflight, source hashes, role result, resource measurement, logs,
 `server-source.json` and `rke2-result.json`. Secrets and raw logs remain ignored.

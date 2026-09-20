@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def load(name: str):
 
 RKE2 = load("rke2_probe")
 VIRTUALBOX = load("virtualbox_probe")
+TAMPER = load("tamper_artifact")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
@@ -78,6 +80,17 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             adapter=values["hostonlyadapter1"], mac=values["macaddress1"],
             cpus=4, memory=4096, running=True,
         )
+
+    def test_tamper_probe_changes_exactly_the_requested_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "rke2.linux-amd64"
+            artifact.write_bytes(b"approved bytes")
+            before = TAMPER.sha256(artifact)
+            result = TAMPER.mutate(artifact, root)
+            self.assertNotEqual(TAMPER.sha256(artifact), before)
+            self.assertEqual(result["before_sha256"], before)
+            self.assertEqual(result["after_sha256"], TAMPER.sha256(artifact))
 
 
 if __name__ == "__main__":
