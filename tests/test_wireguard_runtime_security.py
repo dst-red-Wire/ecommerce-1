@@ -59,6 +59,16 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
             self.validate(material)
         self.assertNotIn("must-not-reach-audit", str(raised.exception))
 
+    def test_bootstrap_peers_are_sanitized_before_persistent_staging(self):
+        tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
+        names = [task["name"] for task in tasks]
+        sanitize = tasks[names.index("Validate and sanitize bootstrap peers before persistence")]
+        stage = tasks[names.index("Stage non-secret bootstrap peer public records locally")]
+        self.assertLess(names.index(sanitize["name"]), names.index(stage["name"]))
+        self.assertIn("mgmt_wireguard_peers", sanitize["ansible.builtin.set_fact"]["wireguard_bootstrap_validated_peers"])
+        self.assertIn("wireguard_bootstrap_validated_peers", stage["ansible.builtin.copy"]["content"])
+        self.assertNotIn("wireguard_bootstrap_peers_json", stage["ansible.builtin.copy"]["content"])
+
     def test_openbao_reads_require_https_and_certificate_validation(self):
         tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
         auth = next(task for task in tasks if task["name"] == "Require runtime-only OpenBao authentication and canonical paths")
@@ -146,6 +156,31 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
         teardown = tasks[names.index(sequence[3])]
         self.assertEqual(["mgmt_transport_phase == 'steady-state'"], teardown["ansible.builtin.assert"]["that"])
         self.assertIn("not wireguard_authority_state.stat.exists", teardown["when"])
+
+    def test_first_openbao_transition_requires_explicit_human_gate_and_effective_key_rotation(self):
+        tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
+        names = [task["name"] for task in tasks]
+        gate = tasks[names.index("Require explicit human authorization for first OpenBao authority transition")]
+        self.assertEqual(["wireguard_openbao_transition_human_gate | bool"], gate["ansible.builtin.assert"]["that"])
+        self.assertEqual(
+            ["wireguard_secret_mode == 'runtime-openbao-read'", "not wireguard_authority_state.stat.exists"],
+            gate["when"],
+        )
+        self.assertLess(
+            names.index("Derive the bootstrap WireGuard public key for rotation proof"),
+            names.index("Derive the OpenBao replacement WireGuard public key for rotation proof"),
+        )
+        proof = tasks[names.index("Prove the OpenBao key replaces the effective bootstrap credential")]
+        self.assertEqual(
+            ["wireguard_openbao_replacement_public_key.stdout | trim != wireguard_pre_transition_public_key.stdout | trim"],
+            proof["ansible.builtin.assert"]["that"],
+        )
+        defaults = yaml.safe_load((ROLE / "defaults/main.yml").read_text())
+        self.assertIs(defaults["wireguard_openbao_transition_human_gate"], False)
+        self.assertIn(
+            "MGMT_OPENBAO_AUTHORITY_TRANSITION_HUMAN_GATE",
+            (ROOT / "platform/ansible/mgmt.yml").read_text(),
+        )
 
     def test_first_openbao_transition_requires_preserved_bootstrap_key(self):
         tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
