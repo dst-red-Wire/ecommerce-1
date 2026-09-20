@@ -119,6 +119,7 @@ Rules:
 - `head_sha` must be the full current published PR head SHA.
 - `status` is `PASS` only when that review kind has no unresolved blocking finding.
 - `blocking_findings` is the exact unresolved blocking count for that review kind.
+- The PR comment carrying the marker must be authored by the repository-owner account through which ChatGPT is operating.
 - A blocked review must use a non-PASS status such as `BLOCKED` and a positive `blocking_findings`.
 - Never emit PASS markers for an uncommitted worktree or for a different SHA.
 - A later head invalidates earlier markers for merge readiness.
