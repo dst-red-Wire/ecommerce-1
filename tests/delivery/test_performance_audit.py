@@ -80,6 +80,16 @@ class PerformanceAuditTests(unittest.TestCase):
         self.assertEqual(6.0, critical["parallelization_headroom_seconds"])
         self.assertEqual(2.5, critical["theoretical_gate_only_parallel_speedup"])
 
+    def test_recorded_ci_worker_budget_overrides_local_default(self):
+        evidence = self.evidence()
+        for record in evidence["gates"]:
+            if record["status"] != "SKIP" and not record.get("reused_from_sha"):
+                record["worker_budget"] = 1
+        critical = AUDIT.tekton_critical_path(evidence["gates"])
+        self.assertEqual(1, critical["max_workers"])
+        self.assertEqual(5.0, critical["global_branch_seconds"])
+        self.assertEqual("global-gates", critical["critical_branch"])
+
     def test_bounded_parallel_schedule_respects_worker_limit(self):
         seconds, path = AUDIT._bounded_parallel_schedule(
             [("a", 4.0), ("b", 3.0), ("c", 2.0), ("d", 1.0), ("e", 5.0)],
@@ -122,7 +132,7 @@ class PerformanceAuditTests(unittest.TestCase):
             report = AUDIT.audit(self.evidence(), root=self.make_root(temp))
         self.assertFalse(report["safety"]["content_cache_authorizes_pass_reuse"])
         self.assertEqual("exact-direct-parent-only", report["safety"]["verdict_reuse_policy"])
-        self.assertEqual("global-gates", report["critical_path"]["critical_branch"])
+        self.assertEqual("component-matrix", report["critical_path"]["critical_branch"])
         self.assertTrue(report["recommendations"])
 
     def test_baseline_comparison_reports_measured_gate_savings(self):
