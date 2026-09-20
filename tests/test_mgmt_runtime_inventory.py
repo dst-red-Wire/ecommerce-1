@@ -15,7 +15,7 @@ spec.loader.exec_module(module)
 
 class MgmtRuntimeInventoryTests(unittest.TestCase):
     def setUp(self):
-        self.nodes, self.gateway = module.load_canonical(ROOT)
+        self.nodes, self.gateway, self.private = module.load_canonical(ROOT)
 
     def transport(self, phase="bootstrap"):
         return {
@@ -23,17 +23,17 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
             "gateway": {
                 "name": "wg-01",
                 "provider_public": "198.51.100.10",
-                "private_address": "10.243.1.41",
+                "private_address": self.private[self.gateway],
                 "bootstrap_ssh": phase == "bootstrap",
             },
             "nodes": {
-                name: {"provider_public": "", "private_address": f"10.243.1.{61 + i}", "gateway": "wg-01"}
+                name: {"provider_public": "", "private_address": self.private[name], "gateway": "wg-01"}
                 for i, name in enumerate(self.nodes)
             },
         }
 
     def test_bootstrap_overlay_is_complete_and_uses_private_nodes_via_proxyjump(self):
-        value = module.validate_transport(self.nodes, self.gateway, self.transport())
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport())
         self.assertEqual({"wg-01", *self.nodes}, set(value["hosts"]))
         self.assertEqual("198.51.100.10", value["hosts"]["wg-01"]["ansible_host"])
         for name in self.nodes:
@@ -41,13 +41,13 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
             self.assertIn("ProxyJump=198.51.100.10", value["hosts"][name]["ansible_ssh_common_args"])
 
     def test_steady_state_uses_private_addresses_and_forbids_public_ssh(self):
-        value = module.validate_transport(self.nodes, self.gateway, self.transport("steady-state"))
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport("steady-state"))
         self.assertEqual("10.243.1.41", value["hosts"]["wg-01"]["ansible_host"])
         self.assertNotIn("ansible_ssh_common_args", value["hosts"][self.nodes[0]])
         mutated = self.transport("steady-state")
         mutated["gateway"]["bootstrap_ssh"] = True
         with self.assertRaisesRegex(ValueError, "must not retain public SSH"):
-            module.validate_transport(self.nodes, self.gateway, mutated)
+            module.validate_transport(self.nodes, self.gateway, self.private, mutated)
 
     def test_required_transport_mutations_fail_closed(self):
         mutations = []
@@ -66,13 +66,16 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
         no_proxy = self.transport()
         no_proxy["nodes"][self.nodes[0]].pop("gateway")
         mutations.append(no_proxy)
+        wrong_private = self.transport()
+        wrong_private["nodes"][self.nodes[-1]]["private_address"] = "10.243.1.99"
+        mutations.append(wrong_private)
         for mutation in mutations:
             with self.subTest(mutation=mutation):
                 with self.assertRaises(ValueError):
-                    module.validate_transport(self.nodes, self.gateway, mutation)
+                    module.validate_transport(self.nodes, self.gateway, self.private, mutation)
 
     def test_overlay_is_non_secret_root_only(self):
-        value = module.validate_transport(self.nodes, self.gateway, self.transport())
+        value = module.validate_transport(self.nodes, self.gateway, self.private, self.transport())
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "transport.json"
             module.write_overlay(output, value)

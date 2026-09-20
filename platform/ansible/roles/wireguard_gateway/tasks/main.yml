@@ -108,6 +108,7 @@
   ansible.builtin.assert:
     that:
       - wireguard_openbao_addr | length > 0
+      - wireguard_openbao_addr is match('^https://[^\\s]+$')
       - wireguard_openbao_token | length > 0
       - wireguard_openbao_gateway_path == 'mgmt/wireguard/wg-01'
       - wireguard_openbao_peers_path == 'mgmt/wireguard/peers'
@@ -120,6 +121,7 @@
     url: "{{ wireguard_openbao_addr }}/v1/kv/data/{{ wireguard_openbao_gateway_path }}"
     headers: {X-Vault-Token: "{{ wireguard_openbao_token }}"}
     return_content: true
+    validate_certs: true
   register: wireguard_openbao_gateway
   when: wireguard_secret_mode == 'runtime-openbao-read'
   no_log: true
@@ -130,6 +132,7 @@
     method: LIST
     headers: {X-Vault-Token: "{{ wireguard_openbao_token }}"}
     return_content: true
+    validate_certs: true
   register: wireguard_openbao_peer_list
   when: wireguard_secret_mode == 'runtime-openbao-read'
   no_log: true
@@ -139,6 +142,7 @@
     url: "{{ wireguard_openbao_addr }}/v1/kv/data/{{ wireguard_openbao_peers_path }}/{{ item }}"
     headers: {X-Vault-Token: "{{ wireguard_openbao_token }}"}
     return_content: true
+    validate_certs: true
   loop: "{{ wireguard_openbao_peer_list['json']['data']['keys'] }}"
   register: wireguard_openbao_peer_records
   when: wireguard_secret_mode == 'runtime-openbao-read'
@@ -364,6 +368,17 @@
   delay: 5
   when: wireguard_secret_mode == 'runtime-openbao-read'
   no_log: true
+
+- name: Require provider bootstrap SSH teardown before completing transition
+  ansible.builtin.assert:
+    that:
+      - mgmt_transport_phase == 'steady-state'
+    fail_msg: >-
+      OpenBao authority cannot become permanent until Terraform runtime transport
+      proves temporary public bootstrap SSH is disabled.
+  when:
+    - wireguard_secret_mode == 'runtime-openbao-read'
+    - not wireguard_authority_state.stat.exists
 
 - name: Record completed OpenBao authority rotation
   ansible.builtin.copy:

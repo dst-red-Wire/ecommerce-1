@@ -216,9 +216,37 @@ resource "hcloud_firewall" "internal_nodes" {
   rule {
     direction   = "in"
     protocol    = "tcp"
-    port        = "6443-9345"
+    port        = "2379-2381"
     source_ips  = [var.kubernetes_cidr]
-    description = "RKE2 control traffic remains private"
+    description = "RKE2 etcd peer and client traffic remains private"
+  }
+  rule {
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "6443"
+    source_ips  = [var.kubernetes_cidr]
+    description = "RKE2 Kubernetes API traffic remains private"
+  }
+  rule {
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "9345"
+    source_ips  = [var.kubernetes_cidr]
+    description = "RKE2 supervisor traffic remains private"
+  }
+  rule {
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "10250"
+    source_ips  = [var.kubernetes_cidr]
+    description = "RKE2 kubelet traffic remains private"
+  }
+  rule {
+    direction   = "in"
+    protocol    = "udp"
+    port        = "8472"
+    source_ips  = [var.kubernetes_cidr]
+    description = "Cilium VXLAN traffic remains private"
   }
   rule {
     direction   = "in"

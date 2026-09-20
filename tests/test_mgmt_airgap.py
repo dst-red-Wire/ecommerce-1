@@ -34,15 +34,27 @@ class OfflineBundleTests(unittest.TestCase):
             name = package + '-1-1.x86_64.rpm'
             (self.bundle / name).write_bytes(b'fixture RPM: ' + package.encode())
             self.entry('rpm', name, package=package, nevra=package + '-0:1-1.x86_64')
-        self.manifest = dict(schema_version=1, rke2_version=VERSION, os='rocky-9', architecture='amd64',
-                             rpm_dependency_closure='complete', artifacts=self.entries)
+        image_inventory = {
+            category: AIRGAP.validate_image_archive(self.bundle / name)
+            for category, name in AIRGAP.REQUIRED_ARTIFACTS.items()
+            if category.startswith('images-')
+        }
+        self.manifest = dict(
+            schema_version=1,
+            rke2_version=VERSION,
+            os='rocky-9',
+            architecture='amd64',
+            rpm_dependency_closure='complete',
+            image_inventory={'rke2_version': VERSION, 'archives': image_inventory},
+            artifacts=self.entries,
+        )
 
-    def archive(self, filename, member='manifest.json', kind=tarfile.REGTYPE):
+    def archive(self, filename, member='manifest.json', kind=tarfile.REGTYPE, tag='docker.io/test/image:v1.0.0'):
         with tarfile.open(self.bundle / filename, 'w') as archive:
             info = tarfile.TarInfo(member)
             info.type = kind
             info.linkname = '/etc/shadow' if kind == tarfile.SYMTYPE else ''
-            body = b'[{"RepoTags":["docker.io/test/image:v1.0.0"],"Config":"config.json","Layers":["layer.tar"]}]'
+            body = json.dumps([{"RepoTags": [tag], "Config": "config.json", "Layers": ["layer.tar"]}]).encode()
             info.size = len(body) if kind == tarfile.REGTYPE else 0
             archive.addfile(info, io.BytesIO(body) if info.size else None)
             for filename in ('config.json', 'layer.tar'):
@@ -65,6 +77,13 @@ class OfflineBundleTests(unittest.TestCase):
         with patch('socket.socket', side_effect=AssertionError('network forbidden')):
             result = self.validate()
         self.assertEqual(len(result['rpms']), len(AIRGAP.REQUIRED_RPMS))
+
+    def test_archive_identities_must_match_approved_release_inventory(self):
+        entry = next(entry for entry in self.entries if entry['category'] == 'images-core')
+        self.archive(entry['file'], tag='docker.io/test/other:v2.0.0')
+        entry['sha256'] = AIRGAP.digest(self.bundle / entry['file'])
+        with self.assertRaisesRegex(ValueError, 'identit'):
+            self.validate()
 
     def test_manifest_requires_independent_digest_approval(self):
         self.seal()

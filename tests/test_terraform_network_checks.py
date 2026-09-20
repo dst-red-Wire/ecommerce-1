@@ -1,4 +1,5 @@
 import ipaddress
+import re
 from pathlib import Path
 import unittest
 
@@ -102,6 +103,22 @@ class TerraformNetworkChecksTest(unittest.TestCase):
             self.assertIn(f"length(var.{variable}) > 0", text)
             self.assertIn("key_id > 0 && floor(key_id) == key_id", text)
         self.assertNotIn('resource "tls_private_key"', module)
+
+    def test_provider_internal_firewall_matches_rke2_and_cilium_ports(self):
+        module = MODULE_MAIN.read_text()
+        internal = module.split('resource "hcloud_firewall" "internal_nodes"', 1)[1].split(
+            "# Segment 401", 1
+        )[0]
+        self.assertNotIn('port        = "6443-9345"', internal)
+        for protocol, port in (
+            ("tcp", "2379-2381"),
+            ("tcp", "6443"),
+            ("tcp", "9345"),
+            ("tcp", "10250"),
+            ("udp", "8472"),
+        ):
+            pattern = rf'protocol\s*=\s*"{re.escape(protocol)}".*?port\s*=\s*"{re.escape(port)}"'
+            self.assertRegex(internal, re.compile(pattern, re.DOTALL))
 
     def test_provider_api_rule_uses_gateway_host_route(self):
         module = MODULE_MAIN.read_text()

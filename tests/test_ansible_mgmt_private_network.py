@@ -57,17 +57,17 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
 
     def test_transport_overlay_changes_only_ansible_transport_address(self):
         module = load_runtime_module()
-        names, gateway = module.load_canonical(ROOT)
+        names, gateway, private_addresses = module.load_canonical(ROOT)
         raw = {
             "phase": "bootstrap",
             "gateway": {
                 "name": gateway,
                 "provider_public": "198.51.100.10",
-                "private_address": "10.243.1.41",
+                "private_address": private_addresses[gateway],
                 "bootstrap_ssh": True,
             },
             "nodes": {
-                name: {"provider_public": "", "private_address": f"10.243.1.{61 + index}", "gateway": gateway}
+                name: {"provider_public": "", "private_address": private_addresses[name], "gateway": gateway}
                 for index, name in enumerate(names)
             },
         }
@@ -75,7 +75,7 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             "version": 2,
             "source": "test",
             "contains_secrets": False,
-            **module.validate_transport(names, gateway, raw),
+            **module.validate_transport(names, gateway, private_addresses, raw),
         }
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "transport.json"
@@ -83,12 +83,13 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             env = dict(os.environ, MGMT_TRANSPORT_INVENTORY=str(path))
             rendered = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT, env=env))
         self.assertEqual("198.51.100.10", rendered["_meta"]["hostvars"][gateway]["ansible_host"])
+        self.assertEqual("bootstrap", rendered["_meta"]["hostvars"][gateway]["mgmt_transport_phase"])
         for name in names:
             self.assertIn("ProxyJump", rendered["_meta"]["hostvars"][name]["ansible_ssh_common_args"])
 
     def test_runtime_inventory_validates_exact_node_set_and_writes_no_secrets(self):
         module = load_runtime_module()
-        names, gateway = module.load_canonical(ROOT)
+        names, gateway, _private_addresses = module.load_canonical(ROOT)
         self.assertEqual(6, len(names))
         self.assertEqual("wg-01", gateway)
 

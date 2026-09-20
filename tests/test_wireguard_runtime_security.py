@@ -52,6 +52,25 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
                     self.validate(material)
                 self.assertNotIn(bad or "PreUp", str(raised.exception))
 
+    def test_unexpected_peer_fields_are_rejected_before_audit(self):
+        material = copy.deepcopy(self.material)
+        material["peers"][0]["private_key"] = "must-not-reach-audit"
+        with self.assertRaises(AnsibleFilterError) as raised:
+            self.validate(material)
+        self.assertNotIn("must-not-reach-audit", str(raised.exception))
+
+    def test_openbao_reads_require_https_and_certificate_validation(self):
+        tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())
+        auth = next(task for task in tasks if task["name"] == "Require runtime-only OpenBao authentication and canonical paths")
+        self.assertIn("wireguard_openbao_addr is match('^https://[^\\s]+$')", auth["ansible.builtin.assert"]["that"])
+        for name in (
+            "Read the rotated gateway record from OpenBao at runtime",
+            "List authoritative peer identities from OpenBao at runtime",
+            "Read each authoritative peer record from OpenBao at runtime",
+        ):
+            task = next(task for task in tasks if task["name"] == name)
+            self.assertIs(task["ansible.builtin.uri"]["validate_certs"], True)
+
     def test_single_host_pool_assignment_and_uniqueness(self):
         for bad in (
             "0.0.0.0/0",
@@ -116,6 +135,7 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
             "Activate forwarding and rotated WireGuard before authority cleanup",
             "Verify the replacement key is active before cleanup",
             "Require a fresh authenticated peer handshake on the activated tunnel",
+            "Require provider bootstrap SSH teardown before completing transition",
             "Record completed OpenBao authority rotation",
             "Revoke temporary bootstrap authority and peer staging after rotation",
         ]
@@ -123,6 +143,9 @@ class WireGuardRuntimeSecurityTests(unittest.TestCase):
         handshake = tasks[names.index(sequence[2])]
         self.assertNotIn("ignore_errors", handshake)
         self.assertEqual(60, handshake["retries"])
+        teardown = tasks[names.index(sequence[3])]
+        self.assertEqual(["mgmt_transport_phase == 'steady-state'"], teardown["ansible.builtin.assert"]["that"])
+        self.assertIn("not wireguard_authority_state.stat.exists", teardown["when"])
 
     def test_first_openbao_transition_requires_preserved_bootstrap_key(self):
         tasks = yaml.safe_load((ROLE / "tasks/main.yml").read_text())

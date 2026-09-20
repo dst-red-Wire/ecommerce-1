@@ -21,6 +21,7 @@ mgmt_segments = network_plan.fetch("vlans").fetch("mgmt")
 transport_path = ENV.fetch("MGMT_TRANSPORT_INVENTORY", File.join(root, ".context/runtime/mgmt-ansible-transport.json"))
 transport = File.file?(transport_path) ? JSON.parse(File.read(transport_path)) : nil
 transport_hosts = transport ? transport.fetch("hosts") : {}
+transport_phase = transport ? transport.fetch("phase") : "static"
 expected_hosts = (control_planes.keys + workers.keys + access_gateways.keys).sort
 if transport && transport_hosts.keys.sort != expected_hosts
   warn "MGMT transport overlay host set mismatch"
@@ -85,6 +86,7 @@ end
 access_gateways.each do |name, node|
   hostvars[name] = transport_vars(transport_hosts, name, node.fetch("mgmt_ip")).merge({
     "mgmt_ip" => node.fetch("mgmt_ip"),
+    "mgmt_transport_phase" => transport_phase,
     "wireguard_listen_port" => network_plan.dig("wireguard", "mgmt", "endpoint", "listen_port"),
     "wireguard_operator_pool" => network_plan.dig("wireguard", "mgmt", "operator_pool"),
     "wireguard_break_glass_pool" => network_plan.dig("wireguard", "mgmt", "break_glass_pool"),

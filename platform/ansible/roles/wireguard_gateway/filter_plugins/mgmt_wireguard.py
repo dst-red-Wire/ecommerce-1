@@ -28,7 +28,11 @@ def validate_material(material, operator_pool, break_glass_pool, authorize_break
             "break-glass": ipaddress.IPv4Network(break_glass_pool),
         }
         addresses, keys, identities = set(), set(), set()
+        validated_peers = []
+        allowed_peer_fields = {"public_key", "identity", "allowed_ip", "scope"}
         for peer in peers:
+            if not isinstance(peer, dict) or set(peer) - allowed_peer_fields:
+                raise ValueError()
             key(peer["public_key"])
             identity = peer["identity"]
             if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}", identity):
@@ -48,7 +52,11 @@ def validate_material(material, operator_pool, break_glass_pool, authorize_break
             addresses.add(address)
             keys.add(peer["public_key"])
             identities.add(identity)
-        return material
+            validated_peer = {"public_key": peer["public_key"], "identity": identity, "allowed_ip": raw}
+            if "scope" in peer:
+                validated_peer["scope"] = scope
+            validated_peers.append(validated_peer)
+        return {"private_key": material["private_key"], "peers": validated_peers}
     except (ValueError, TypeError, KeyError, binascii.Error):
         raise AnsibleFilterError("Invalid WireGuard key, identity, peer assignment or scope authorization.") from None
 

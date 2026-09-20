@@ -15,14 +15,18 @@ from typing import Any
 import yaml
 
 
-def load_canonical(root: Path) -> tuple[list[str], str]:
+def load_canonical(root: Path) -> tuple[list[str], str, dict[str, str]]:
     inventory = yaml.safe_load((root / "config/infrastructure/mgmt-inventory.yaml").read_text())
     access = yaml.safe_load((root / "config/infrastructure/mgmt-access-gateways.yaml").read_text())
-    nodes = sorted([*inventory["control_planes"], *inventory["workers"]])
+    node_records = {**inventory["control_planes"], **inventory["workers"]}
+    nodes = sorted(node_records)
     gateways = list(access["access_gateways"])
     if len(nodes) != 6 or gateways != ["wg-01"]:
         raise ValueError("canonical MGMT transport requires six RKE2 nodes and wg-01")
-    return nodes, gateways[0]
+    gateway = gateways[0]
+    private_addresses = {name: str(node_records[name]["mgmt_ip"]) for name in nodes}
+    private_addresses[gateway] = str(access["access_gateways"][gateway]["mgmt_ip"])
+    return nodes, gateway, private_addresses
 
 
 def _ipv4(value: Any, label: str, *, public: bool = False) -> str:
@@ -43,7 +47,9 @@ def _ipv4(value: Any, label: str, *, public: bool = False) -> str:
     return str(address)
 
 
-def validate_transport(canonical_nodes: list[str], gateway_name: str, value: Any) -> dict[str, Any]:
+def validate_transport(
+    canonical_nodes: list[str], gateway_name: str, canonical_private: dict[str, str], value: Any
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("Terraform runtime_transport output must be a mapping")
     phase = value.get("phase")
@@ -56,6 +62,12 @@ def validate_transport(canonical_nodes: list[str], gateway_name: str, value: Any
     if not isinstance(nodes, dict) or sorted(nodes) != canonical_nodes:
         raise ValueError("runtime transport node set mismatch")
 
+    expected_hosts = {gateway_name, *canonical_nodes}
+    if set(canonical_private) != expected_hosts:
+        raise ValueError("canonical MGMT private-address map mismatch")
+    gateway_private = _ipv4(gateway.get("private_address"), "wg-01 private_address")
+    if gateway_private != canonical_private[gateway_name]:
+        raise ValueError("wg-01 private_address does not match canonical mgmt_ip")
     gateway_public = gateway.get("provider_public")
     bootstrap_ssh = gateway.get("bootstrap_ssh") is True
     if phase == "bootstrap":
@@ -65,7 +77,7 @@ def validate_transport(canonical_nodes: list[str], gateway_name: str, value: Any
     else:
         if bootstrap_ssh:
             raise ValueError("steady-state transport must not retain public SSH")
-        gateway_host = _ipv4(gateway.get("private_address"), "wg-01 private_address")
+        gateway_host = gateway_private
 
     hosts: dict[str, Any] = {
         gateway_name: {
@@ -80,6 +92,8 @@ def validate_transport(canonical_nodes: list[str], gateway_name: str, value: Any
         if node.get("provider_public") not in {None, ""}:
             raise ValueError(f"{name} must not use a provider public address")
         private = _ipv4(node.get("private_address"), f"{name} private_address")
+        if private != canonical_private[name]:
+            raise ValueError(f"{name} private_address does not match canonical mgmt_ip")
         host = {"ansible_host": private, "transport": "wireguard-private"}
         if phase == "bootstrap":
             host["ansible_ssh_common_args"] = (
@@ -120,13 +134,13 @@ def main() -> int:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     try:
-        nodes, gateway = load_canonical(root)
+        nodes, gateway, private_addresses = load_canonical(root)
         raw = (
             json.loads(Path(args.transport_json).read_text())
             if args.transport_json
             else terraform_transport(root / args.terraform_dir)
         )
-        transport = validate_transport(nodes, gateway, raw)
+        transport = validate_transport(nodes, gateway, private_addresses, raw)
         output = Path(args.output)
         write_overlay(
             output if output.is_absolute() else root / output,

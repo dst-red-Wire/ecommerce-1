@@ -120,6 +120,18 @@ def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_met
             "RKE2 version differs from canonical pin")
     require(manifest.get("os") == "rocky-9" and manifest.get("architecture") == "amd64", "unsupported target")
     require(manifest.get("rpm_dependency_closure") == "complete", "complete RPM dependency inventory required")
+    approved_images = manifest.get("image_inventory")
+    require(isinstance(approved_images, dict) and approved_images.get("rke2_version") == version,
+            "approved image inventory must match the pinned RKE2 release")
+    approved_archives = approved_images.get("archives")
+    required_image_categories = {key for key in REQUIRED_ARTIFACTS if key.startswith("images-")}
+    require(isinstance(approved_archives, dict) and set(approved_archives) == required_image_categories,
+            "approved image inventory must cover every required archive")
+    for identities in approved_archives.values():
+        require(isinstance(identities, list) and identities
+                and all(isinstance(identity, str) and identity for identity in identities)
+                and len(identities) == len(set(identities)),
+                "approved image identities must be a non-empty unique list")
     artifacts = manifest.get("artifacts")
     require(isinstance(artifacts, list) and artifacts, "artifact inventory required")
     names, categories, rpms, packages, signing_keys = set(), set(), [], set(), []
@@ -158,7 +170,10 @@ def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_met
             require(category not in categories, "duplicate artifact category")
             categories.add(category)
             if category.startswith("images-"):
-                image_inventory[category] = validate_image_archive(path)
+                discovered = validate_image_archive(path)
+                require(discovered == sorted(approved_archives[category]),
+                        "image archive identities differ from approved release inventory")
+                image_inventory[category] = discovered
     require(categories == set(REQUIRED_ARTIFACTS), "binary and core/Cilium image archives are all required")
     for variants in RPM_VARIANTS:
         require(len(packages & variants) <= 1, "conflicting minimal and full RPM variants")
