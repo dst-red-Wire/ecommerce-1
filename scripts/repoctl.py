@@ -3897,6 +3897,35 @@ def _plan_branch_cleanup(
     return actions
 
 
+def _delete_branch_ref(scope: str, branch: str, expected_sha: str) -> tuple[bool, str]:
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_sha):
+        return False, "expected branch SHA is not exact"
+    if scope == "remote":
+        remote_ref = f"refs/heads/{branch}"
+        result = run(
+            [
+                "git",
+                "push",
+                f"--force-with-lease={remote_ref}:{expected_sha}",
+                "origin",
+                f":{remote_ref}",
+            ],
+            check=False,
+            capture=True,
+        )
+    elif scope == "local":
+        result = run(
+            ["git", "update-ref", "-d", f"refs/heads/{branch}", expected_sha],
+            check=False,
+            capture=True,
+        )
+    else:
+        return False, f"unsupported branch cleanup scope: {scope}"
+
+    detail = (result.stderr or result.stdout or "").strip()
+    return result.returncode == 0, detail
+
+
 def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     policy = repository_delivery_policy()
     cleanup = policy["cleanup"]["automatic_branch_cleanup"]
@@ -3949,20 +3978,8 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
 
         expected_sha = str(item["head_sha"])
         if scope == "remote":
-            remote_ref = f"refs/heads/{branch}"
-            result = run(
-                [
-                    "git",
-                    "push",
-                    f"--force-with-lease={remote_ref}:{expected_sha}",
-                    "origin",
-                    f":{remote_ref}",
-                ],
-                check=False,
-                capture=True,
-            )
-            if result.returncode:
-                detail = (result.stderr or result.stdout or "").strip()
+            ok, detail = _delete_branch_ref(scope, branch, expected_sha)
+            if not ok:
                 failures.append(f"remote {branch}: {detail or 'lease-protected delete failed'}")
                 remote_failures.add(branch)
             else:
@@ -3972,14 +3989,8 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         if branch in remote_failures:
             failures.append(f"local {branch}: preserved because remote deletion failed")
             continue
-        local_ref = f"refs/heads/{branch}"
-        result = run(
-            ["git", "update-ref", "-d", local_ref, expected_sha],
-            check=False,
-            capture=True,
-        )
-        if result.returncode:
-            detail = (result.stderr or result.stdout or "").strip()
+        ok, detail = _delete_branch_ref(scope, branch, expected_sha)
+        if not ok:
             failures.append(f"local {branch}: {detail or 'compare-and-delete failed'}")
         else:
             deleted += 1
@@ -4050,7 +4061,8 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "branch-advanced-after-merged-pr",
         ],
         "github_cli_optional_for_ancestor_cleanup": True,
-        "force_local_delete_after_exact_merged_pr_proof": True,
+        "remote_delete_requires_exact_lease": True,
+        "local_delete_requires_compare_and_delete": True,
     }
     if automatic_cleanup != expected_automatic_cleanup:
         raise RuntimeError("invalid repository_delivery contract: automatic branch cleanup policy drift")
