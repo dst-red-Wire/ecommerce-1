@@ -5,12 +5,12 @@ import hashlib
 import importlib.util
 import io
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('mgmt_airgap', ROOT / 'scripts/mgmt_airgap.py')
@@ -45,15 +45,15 @@ class OfflineBundleTests(unittest.TestCase):
             for category, name in AIRGAP.REQUIRED_ARTIFACTS.items()
             if category.startswith('images-')
         }
-        self.manifest = dict(
-            schema_version=1,
-            rke2_version=VERSION,
-            os='rocky-9',
-            architecture='amd64',
-            rpm_dependency_closure='complete',
-            image_inventory={'rke2_version': VERSION, 'archives': image_inventory},
-            artifacts=self.entries,
-        )
+        self.manifest = {
+            'schema_version': 1,
+            'rke2_version': VERSION,
+            'os': 'rocky-9',
+            'architecture': 'amd64',
+            'rpm_dependency_closure': 'complete',
+            'image_inventory': {'rke2_version': VERSION, 'archives': image_inventory},
+            'artifacts': self.entries,
+        }
 
     def archive(self, filename, member='manifest.json', kind=tarfile.REGTYPE, tag='docker.io/test/image:v1.0.0'):
         with tarfile.open(self.bundle / filename, 'w') as archive:
@@ -63,8 +63,8 @@ class OfflineBundleTests(unittest.TestCase):
             body = json.dumps([{"RepoTags": [tag], "Config": "config.json", "Layers": ["layer.tar"]}]).encode()
             info.size = len(body) if kind == tarfile.REGTYPE else 0
             archive.addfile(info, io.BytesIO(body) if info.size else None)
-            for filename in ('config.json', 'layer.tar'):
-                component = tarfile.TarInfo(filename)
+            for component_name in ('config.json', 'layer.tar'):
+                component = tarfile.TarInfo(component_name)
                 component.size = 2
                 archive.addfile(component, io.BytesIO(b'{}'))
 
@@ -106,6 +106,62 @@ class OfflineBundleTests(unittest.TestCase):
                 info.size = len(body)
                 archive.addfile(info, io.BytesIO(body))
         return manifest_descriptor["digest"]
+
+    def filtered_multiarch_oci_archive(self, filename, include_target=True):
+        config = b'{"architecture":"amd64","os":"linux"}'
+        layer = b"verified-amd64-layer"
+
+        def descriptor(body, media_type="application/octet-stream", platform=None):
+            result = {
+                "mediaType": media_type,
+                "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                "size": len(body),
+            }
+            if platform is not None:
+                result["platform"] = platform
+            return result
+
+        config_descriptor = descriptor(config)
+        layer_descriptor = descriptor(layer)
+        target_manifest = json.dumps({
+            "schemaVersion": 2,
+            "config": config_descriptor,
+            "layers": [layer_descriptor],
+        }, sort_keys=True, separators=(",", ":")).encode()
+        target_descriptor = descriptor(
+            target_manifest,
+            "application/vnd.oci.image.manifest.v1+json",
+            {"os": "linux", "architecture": "amd64"},
+        )
+        absent_manifest = b'{"schemaVersion":2,"architecture":"arm64"}'
+        absent_descriptor = descriptor(
+            absent_manifest,
+            "application/vnd.oci.image.manifest.v1+json",
+            {"os": "linux", "architecture": "arm64"},
+        )
+        children = [absent_descriptor]
+        if include_target:
+            children.insert(0, target_descriptor)
+        image_index = json.dumps({"schemaVersion": 2, "manifests": children},
+                                 sort_keys=True, separators=(",", ":")).encode()
+        image_descriptor = descriptor(
+            image_index, "application/vnd.oci.image.index.v1+json")
+        index = json.dumps({"schemaVersion": 2, "manifests": [image_descriptor]},
+                           sort_keys=True, separators=(",", ":")).encode()
+        members = {
+            "index.json": index,
+            "blobs/sha256/" + image_descriptor["digest"].split(":", 1)[1]: image_index,
+            "blobs/sha256/" + config_descriptor["digest"].split(":", 1)[1]: config,
+            "blobs/sha256/" + layer_descriptor["digest"].split(":", 1)[1]: layer,
+        }
+        if include_target:
+            members["blobs/sha256/" + target_descriptor["digest"].split(":", 1)[1]] = target_manifest
+        with tarfile.open(self.bundle / filename, "w") as archive:
+            for name, body in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                archive.addfile(info, io.BytesIO(body))
+        return image_descriptor["digest"]
 
     def entry(self, category, name, **extra):
         self.entries.append(dict(category=category, file=name, sha256=AIRGAP.digest(self.bundle / name), **extra))
@@ -259,6 +315,19 @@ class OfflineBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'digest mismatch'):
             self.validate()
 
+    def test_filtered_oci_archive_allows_only_explicit_non_target_blobs_to_be_absent(self):
+        entry = next(entry for entry in self.entries if entry['category'] == 'images-core')
+        identity = self.filtered_multiarch_oci_archive(entry['file'])
+        entry['sha256'] = AIRGAP.digest(self.bundle / entry['file'])
+        self.manifest['image_inventory']['archives']['images-core'] = [identity]
+        self.validate()
+
+        identity = self.filtered_multiarch_oci_archive(entry['file'], include_target=False)
+        entry['sha256'] = AIRGAP.digest(self.bundle / entry['file'])
+        self.manifest['image_inventory']['archives']['images-core'] = [identity]
+        with self.assertRaisesRegex(ValueError, 'target platform'):
+            self.validate()
+
     def test_manifest_referencing_missing_image_content_fails(self):
         entry = next(entry for entry in self.entries if entry['category'] == 'images-core')
         with tarfile.open(self.bundle / entry['file'], 'w') as archive:
@@ -293,9 +362,33 @@ class OfflineBundleTests(unittest.TestCase):
                 return SimpleNamespace(stdout='Header V4 RSA/SHA256 Signature, key ID badc0ffe: OK')
             return SimpleNamespace(stdout='')
 
-        with patch.object(AIRGAP.subprocess, 'run', side_effect=run):
-            with self.assertRaisesRegex(ValueError, 'approved fingerprint'):
+        with (
+            patch.object(AIRGAP.subprocess, 'run', side_effect=run),
+            self.assertRaisesRegex(ValueError, 'approved fingerprint'),
+        ):
+            AIRGAP.validate_bundle(self.bundle, digest, VERSION, rpm_signatures=True)
+
+    def test_root_signature_check_uses_selinux_labeled_isolated_rpm_database(self):
+        digest = self.seal()
+        with tempfile.TemporaryDirectory() as rpmdb:
+            manager = MagicMock()
+            manager.__enter__.return_value = rpmdb
+            manager.__exit__.return_value = False
+
+            def run(argv, **_kwargs):
+                if '--checksig' in argv:
+                    return SimpleNamespace(
+                        stdout='Header V4 RSA/SHA256 Signature, key ID deadbeef: OK')
+                return SimpleNamespace(stdout='')
+
+            with (
+                patch.object(AIRGAP.os, 'geteuid', return_value=0),
+                patch.object(AIRGAP.Path, 'is_dir', return_value=True),
+                patch.object(AIRGAP.tempfile, 'TemporaryDirectory', return_value=manager) as temporary,
+                patch.object(AIRGAP.subprocess, 'run', side_effect=run),
+            ):
                 AIRGAP.validate_bundle(self.bundle, digest, VERSION, rpm_signatures=True)
+        temporary.assert_called_once_with(prefix='ecommerce-rpmdb-', dir='/var/lib/rpm')
 
     def test_rpm_nevra_must_match_real_metadata_before_install(self):
         digest = self.seal()

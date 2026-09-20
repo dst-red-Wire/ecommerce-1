@@ -1,0 +1,89 @@
+---
+- name: Read only the owned Vagrant machine UUID
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_resize_id
+
+- name: Preserve the requested owned UUID
+  ansible.builtin.set_fact:
+    vm_resize_uuid: "{{ vm_resize_id.content | b64decode | trim }}"
+
+- name: Require a canonical owned VM identity
+  ansible.builtin.assert:
+    that:
+      - vm_resize_uuid is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+
+- name: Inspect only the requested owned VM
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_resize_uuid }}", --machinereadable]
+  register: vm_resize_before
+  changed_when: false
+
+- name: Refuse resizing a renamed or differently networked machine
+  ansible.builtin.assert:
+    that:
+      - "'name=\"' ~ vm_name ~ '\"' in vm_resize_before.stdout"
+      - "'nic1=\"hostonly\"' in vm_resize_before.stdout"
+      - "'hostonlyadapter1=\"' ~ vm_hostonly_adapter ~ '\"' in vm_resize_before.stdout"
+      - "'macaddress1=\"' ~ (vm_mac | lower) ~ '\"' in (vm_resize_before.stdout | lower)"
+      - "'nic2=\"none\"' in vm_resize_before.stdout"
+
+- name: Request graceful shutdown before changing resources
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", controlvm, "{{ vm_resize_uuid }}", acpipowerbutton]
+  when: "'VMState=\"running\"' in vm_resize_before.stdout"
+  changed_when: true
+
+- name: Wait for the exact owned VM to stop
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_resize_uuid }}", --machinereadable]
+  register: vm_resize_stopped
+  changed_when: false
+  until: vm_resize_stopped.stdout is search('VMState="poweroff"')
+  retries: 20
+  delay: 3
+
+- name: Apply requested bounded CPU and memory allocation
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_vbox }}"
+      - modifyvm
+      - "{{ vm_resize_uuid }}"
+      - --cpus
+      - "{{ vm_cpus | int }}"
+      - --memory
+      - "{{ vm_memory | int }}"
+  changed_when: true
+
+- name: Start only the resized owned VM
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", startvm, "{{ vm_resize_uuid }}", --type, headless]
+  changed_when: true
+
+- name: Wait for enforcing Rocky after the resource restart
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - python3
+      - '-'
+    stdin: "{{ lookup('file', playbook_dir ~ '/resource_probe.py') }}"
+  register: vm_resize_probe
+  changed_when: false
+  until: vm_resize_probe.rc == 0
+  retries: 30
+  delay: 5
+
+- name: Require requested CPUs and at least 90 percent of guest memory
+  ansible.builtin.assert:
+    that:
+      - (vm_resize_probe.stdout | from_json).online_cpus == vm_cpus | int
+      - (vm_resize_probe.stdout | from_json).memory_kib >= ((vm_memory | int) * 1024 * 9 // 10)
+
+- name: Preserve measured resized guest resources
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/resize.json"
+    content: "{{ vm_resize_probe.stdout }}\n"
+    mode: '0600'

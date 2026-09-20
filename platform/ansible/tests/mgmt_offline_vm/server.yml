@@ -1,0 +1,276 @@
+---
+- name: Read and verify the exact owned VM identity
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_server_id
+
+- name: Inspect only the requested owned VM
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_server_id.content | b64decode | trim }}", --machinereadable]
+  register: vm_server_current
+  changed_when: false
+
+- name: Require running host-only RKE2-sized fixture
+  ansible.builtin.assert:
+    that:
+      - "'name=\"' ~ vm_name ~ '\"' in vm_server_current.stdout"
+      - "'VMState=\"running\"' in vm_server_current.stdout"
+      - "'nic1=\"hostonly\"' in vm_server_current.stdout"
+      - "'nic2=\"none\"' in vm_server_current.stdout"
+      - "'cpus=' ~ (mgmt_local_vm_contract.resources.rke2_server.cpus | string) in vm_server_current.stdout_lines"
+      - "'memory=' ~ (mgmt_local_vm_contract.resources.rke2_server.memory_mib | string) in vm_server_current.stdout_lines"
+
+- name: Require the exact verified bundle is already staged
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - sudo
+      - -n
+      - test
+      - -f
+      - "/var/lib/ecommerce/bootstrap/{{ mgmt_offline_manifest_sha256 }}/rke2.linux-amd64"
+  changed_when: false
+
+- name: Generate an invocation-local RKE2 token when absent
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import pathlib,secrets,sys;
+        path=pathlib.Path(sys.argv[1]);
+        path.write_text(secrets.token_urlsafe(48)+'\n',encoding='utf-8');
+        path.chmod(0o600)
+      - "{{ vm_state }}/rke2-token"
+    creates: "{{ vm_state }}/rke2-token"
+  no_log: true
+
+- name: Write single-target runtime inventory
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server-inventory.json"
+    mode: '0600'
+    content: >-
+      {{ {
+          'all': {'hosts': {vm_name: {
+            'ansible_user': 'vagrant',
+            'ansible_become': true,
+            'ansible_python_interpreter': '/usr/bin/python3',
+            'ansible_ssh_common_args': '-F ' ~ (vm_state ~ '/ssh_config') | quote}}},
+          'access_gateways': {'hosts': {
+            'fixture-gateway': {'mgmt_ip': vm_host_address}}}
+          } | to_nice_json }}
+
+- name: Configure single-target RKE2 controller
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server-ansible.cfg"
+    mode: '0600'
+    content: |
+      [defaults]
+      forks = 1
+      retry_files_enabled = False
+      [ssh_connection]
+      pipelining = True
+
+- name: Render actual canonical RKE2 server invocation
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server.yml"
+    mode: '0600'
+    content: |
+      ---
+      - name: Start the canonical RKE2 server in the isolated Rocky fixture
+        hosts: {{ vm_name | to_json }}
+        become: true
+        gather_facts: false
+        vars:
+          rke2_version: {{ (lookup('file', vm_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version | to_json }}
+          rke2_token: {{ lookup('file', vm_state ~ '/rke2-token') | trim | to_json }}
+          k8s_ip: {{ vm_address | to_json }}
+          rke2_server_url: ''
+          rke2_cluster_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.pod_cidr | to_json }}
+          rke2_service_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.service_cidr | to_json }}
+          mgmt_private_interface: eth0
+          mgmt_private_dhcp_server: {{ vm_host_address | to_json }}
+          mgmt_private_block: {{ (vm_host_address | regex_replace('\.[0-9]+$', '.0/24')) | to_json }}
+          mgmt_pod_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.pod_cidr | to_json }}
+          mgmt_service_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.service_cidr | to_json }}
+          mgmt_firewall_role: control-plane
+          mgmt_firewall_cidrs:
+            '401': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[401].cidr | to_json }}
+            '402': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[402].cidr | to_json }}
+            '403': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[403].cidr | to_json }}
+            '404': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[404].cidr | to_json }}
+            '405': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[405].cidr | to_json }}
+            '406': {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).vlans.mgmt[406].cidr | to_json }}
+          mgmt_internal_dns: {{ vm_dns_fixture | to_json }}
+          mgmt_internal_ntp: {{ vm_ntp_fixture | to_json }}
+          mgmt_offline_artifacts_verified: true
+          rke2_offline_binary: {{ ('/var/lib/ecommerce/bootstrap/' ~ mgmt_offline_manifest_sha256 ~ '/rke2.linux-amd64') | to_json }}
+        tasks:
+          - name: Render canonical complete private firewall zone
+            ansible.builtin.template:
+              src: {{ (vm_repo ~ '/platform/ansible/roles/mgmt_private_network/templates/mgmt-private.xml.j2') | to_json }}
+              dest: /etc/firewalld/zones/mgmt-private.xml
+              owner: root
+              group: root
+              mode: '0600'
+          - name: Activate canonical private firewall zone
+            ansible.builtin.command:
+              argv: [firewall-cmd, --reload]
+            changed_when: true
+          - name: Create canonical egress policy directory
+            ansible.builtin.file:
+              path: /etc/ecommerce
+              state: directory
+              owner: root
+              group: root
+              mode: '0755'
+          - name: Render canonical egress transaction from its sole template
+            ansible.builtin.template:
+              src: {{ (vm_repo ~ '/platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2') | to_json }}
+              dest: /etc/ecommerce/mgmt-egress.nft
+              owner: root
+              group: root
+              mode: '0600'
+          - name: Check canonical egress transaction
+            ansible.builtin.command:
+              argv: [nft, --check, --file, /etc/ecommerce/mgmt-egress.nft]
+            changed_when: false
+          - name: Install canonical egress service from its sole template
+            ansible.builtin.template:
+              src: {{ (vm_repo ~ '/platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.service.j2') | to_json }}
+              dest: /etc/systemd/system/ecommerce-mgmt-egress.service
+              owner: root
+              group: root
+              mode: '0644'
+          - name: Activate canonical default-deny boundary before transition
+            ansible.builtin.systemd_service:
+              name: ecommerce-mgmt-egress.service
+              enabled: true
+              daemon_reload: true
+              state: restarted
+          - name: Disable disposable pre-RKE2 boundary after canonical activation
+            ansible.builtin.systemd_service:
+              name: ecommerce-test-offline.service
+              enabled: false
+              state: stopped
+          - name: Inspect disposable pre-RKE2 nftables table
+            ansible.builtin.command:
+              argv: [nft, list, table, inet, ecommerce_test_offline]
+            register: disposable_table
+            changed_when: false
+            failed_when: disposable_table.rc not in [0, 1]
+          - name: Remove only the superseded disposable nftables table
+            ansible.builtin.command:
+              argv: [nft, delete, table, inet, ecommerce_test_offline]
+            changed_when: true
+            when: disposable_table.rc == 0
+          - name: Inspect persistent offline default-route connection
+            ansible.builtin.command:
+              argv: [nmcli, --get-values, connection.id, connection, show, ecommerce-offline-default]
+            register: offline_default
+            changed_when: false
+            failed_when: offline_default.rc not in [0, 10]
+          - name: Create isolated dummy connection for offline RKE2
+            ansible.builtin.command:
+              argv: [nmcli, connection, add, type, dummy, ifname, mgmt-dummy0, con-name, ecommerce-offline-default]
+            when: offline_default.rc == 10
+            changed_when: true
+          - name: Reconcile non-forwarding persistent default route
+            ansible.builtin.command:
+              argv: [nmcli, connection, modify, ecommerce-offline-default,
+                     ipv4.method, manual, ipv4.addresses, 203.0.113.254/31,
+                     ipv4.gateway, 203.0.113.255, ipv4.route-metric, '32760',
+                     ipv4.ignore-auto-dns, 'yes', ipv6.method, disabled,
+                     connection.autoconnect, 'yes']
+            changed_when: true
+          - name: Activate offline default route
+            ansible.builtin.command:
+              argv: [nmcli, connection, up, ecommerce-offline-default]
+            changed_when: true
+          - name: Invoke the actual RKE2 server role
+            ansible.builtin.include_role:
+              name: {{ (vm_repo ~ '/platform/ansible/roles/rke2_server') | to_json }}
+          - name: Release local controller transfer staging after verified installation
+            ansible.builtin.file:
+              path: {{ ('/var/lib/ecommerce/bootstrap/' ~ mgmt_offline_manifest_sha256) | to_json }}
+              state: absent
+          - name: Release local image import archives after the first successful start
+            ansible.builtin.file:
+              path: /var/lib/rancher/rke2/agent/images/{{ "{{ item }}" }}
+              state: absent
+            loop:
+              - rke2-images-core.linux-amd64.tar
+              - rke2-images-cilium.linux-amd64.tar
+          - name: Wait for local node readiness
+            ansible.builtin.command:
+              argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig,
+                     /etc/rancher/rke2/rke2.yaml, wait, node, --all,
+                     --for=condition=Ready, --timeout=600s]
+            changed_when: false
+          - name: Execute bounded functional RKE2 assertions
+            ansible.builtin.command:
+              argv: [python3, '-']
+              stdin: {{ lookup('file', playbook_dir ~ '/rke2_probe.py') | to_json }}
+            register: rke2_probe
+            changed_when: false
+            until: rke2_probe.rc == 0
+            retries: 120
+            delay: 5
+          - name: Preserve bounded RKE2 proof on controller
+            ansible.builtin.copy:
+              dest: {{ (vm_state ~ '/rke2-result.json') | to_json }}
+              content: '{{ "{{ rke2_probe.stdout }}\n" }}'
+              mode: '0600'
+            delegate_to: localhost
+            become: false
+
+- name: Resolve canonical verified collection generation
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import sys; sys.path.insert(0,sys.argv[1]+'/scripts');
+        import ansible,repoctl;
+        assert ansible.__version__==repoctl.pinned_versions()['ANSIBLE_CORE_VERSION'];
+        assert repoctl.ansible_collections_ready();
+        print(repoctl.ansible_collections_root())
+      - "{{ vm_repo }}"
+  register: vm_server_collections
+  changed_when: false
+
+- name: Execute canonical RKE2 server role through native Ansible SSH
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import os,subprocess,sys;
+        env={k:v for k,v in os.environ.items() if not k.startswith('ANSIBLE_')};
+        env.update(ANSIBLE_CONFIG=sys.argv[1],ANSIBLE_COLLECTIONS_PATH=sys.argv[2],ANSIBLE_FORKS='1');
+        sys.exit(subprocess.call(sys.argv[3:],env=env))
+      - "{{ vm_state }}/server-ansible.cfg"
+      - "{{ vm_server_collections.stdout | trim }}"
+      - "{{ vm_python | dirname }}/ansible-playbook"
+      - -i
+      - "{{ vm_state }}/server-inventory.json"
+      - "{{ vm_state }}/server.yml"
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  register: vm_server_role
+  failed_when: false
+  changed_when: true
+
+- name: Preserve RKE2 role output before evaluating it
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/rke2-server.log"
+    content: "{{ vm_server_role.stdout }}\n{{ vm_server_role.stderr }}\n"
+    mode: '0600'
+
+- name: Require complete canonical RKE2 server success
+  ansible.builtin.assert:
+    that: [vm_server_role.rc == 0]
+    fail_msg: Inspect the ignored rke2-server.log; no network or SELinux gate was bypassed.
