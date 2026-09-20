@@ -120,6 +120,45 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertIn(f"Canonical tracker: GitHub issue {tick}#32{tick}.", rendered)
         self.assertNotIn(f"Canonical tracker: GitHub issue {tick}#15{tick}.", rendered)
 
+    def test_projection_missing_tracker_line_fails_closed(self):
+        policy = ROADMAP.policy()
+        states = {}
+        for item in policy["milestones"]:
+            tracker = item.get("tracker")
+            if type(tracker) is int:
+                states[tracker] = {"state": "open", "state_reason": "", "title": str(item["name"])}
+        states[13] = {"state": "closed", "state_reason": "completed", "title": "M1"}
+        statuses = ROADMAP.compute_statuses(policy, states)
+
+        original = (ROOT / "docs/project/MASTER_EXECUTION_PLAN.md").read_text(encoding="utf-8")
+        original = original.replace("Canonical tracker: GitHub issue `#32`.", "tracker removed", 1)
+
+        with self.assertRaisesRegex(RuntimeError, "missing its canonical tracker projection"):
+            ROADMAP.render_document(original, policy, statuses)
+
+    def test_projection_missing_milestone_heading_fails_closed(self):
+        policy = ROADMAP.policy()
+        states = {}
+        for item in policy["milestones"]:
+            tracker = item.get("tracker")
+            if type(tracker) is int:
+                states[tracker] = {"state": "open", "state_reason": "", "title": str(item["name"])}
+        states[13] = {"state": "closed", "state_reason": "completed", "title": "M1"}
+        statuses = ROADMAP.compute_statuses(policy, states)
+
+        original = (ROOT / "docs/project/MASTER_EXECUTION_PLAN.md").read_text(encoding="utf-8")
+        original = original.replace("### M2.5 — Persistent MGMT Bootstrap", "### renamed M2.5", 1)
+
+        with self.assertRaisesRegex(RuntimeError, "missing milestone section"):
+            ROADMAP.render_document(original, policy, statuses)
+
+    def test_finish_pr_uses_exact_sha_branch_deletion_helpers(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
+        self.assertIn('_delete_branch_ref("remote", branch, head)', finish)
+        self.assertIn('_delete_branch_ref("local", branch, head)', finish)
+        self.assertNotIn('["git", "push", "origin", "--delete", branch]', finish)
+
     def test_tracker_reader_rejects_pull_request_tracker(self):
         policy = {"milestones": [{"id": "M2.5", "name": "MGMT", "tracker": 32}]}
         repo = subprocess.CompletedProcess([], 0, json.dumps({"nameWithOwner": "dst-red-Wire/ecommerce-1"}), "")
