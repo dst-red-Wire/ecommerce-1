@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -156,41 +157,129 @@ def ruby_yaml(path: str) -> dict:
     return qualification_cache.psych_load(source)
 
 
-_STATIC_GATE_TOOLS = {
-    "governance": (sys.executable, "ruby", "git"),
-    "runtime-efficiency": (sys.executable, "ruby"),
-    "contracts": (sys.executable, "ruby", "git", "go", "oasdiff", "oapi-codegen"),
-    "automation": (sys.executable, "git"),
-}
+_QUALIFICATION_EXECUTION_POLICY: dict | None = None
 
 
-def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
-    consumers = qualification_cache.contract().get("consumers", {})
-    global_contracts = consumers.get("repoctl_global_static_gates", {}).get("gates", {})
-    gate_contract = global_contracts.get(name) if isinstance(global_contracts, dict) else None
-    tool_names = list(_STATIC_GATE_TOOLS.get(name, ()))
-    patterns = gate_contract.get("inputs", []) if isinstance(gate_contract, dict) else []
-    if not patterns or not tool_names:
-        raise RuntimeError(f"static qualification cache is not approved for gate {name}")
-    input_digest = qualification_cache.digest_globs(patterns, root=ROOT)
-    validator_digest = qualification_cache.digest_paths(
-        [SCRIPT_DIR / "repoctl.py", SCRIPT_DIR / "qualification_cache.py"],
-        root=ROOT,
-    )
-    tool_identity = {tool: qualification_cache.executable_identity(tool) for tool in tool_names}
+def qualification_execution_policy() -> dict:
+    """Load the single repository-wide execution/cache/parallelism contract."""
+    global _QUALIFICATION_EXECUTION_POLICY
+    if _QUALIFICATION_EXECUTION_POLICY is None:
+        lock = ruby_yaml("architecture.lock.yaml")
+        relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
+        if not isinstance(relative, str) or not relative.strip():
+            raise RuntimeError("architecture.lock.yaml must register machine_contracts.qualification_execution_policy")
+        policy = ruby_yaml(relative)
+        if (
+            policy.get("kind") != "QualificationExecutionPolicy"
+            or policy.get("architecture_authority") != "architecture.lock.yaml"
+            or policy.get("scope") != "entire-repository"
+            or policy.get("status") != "enforced"
+        ):
+            raise RuntimeError("qualification execution policy envelope is invalid")
+        execution = policy.get("execution", {})
+        workers = execution.get("max_workers")
+        if not isinstance(workers, int) or workers < 1 or workers > 16:
+            raise RuntimeError("qualification execution policy max_workers must be between 1 and 16")
+        gates = policy.get("gates")
+        if not isinstance(gates, dict) or not gates:
+            raise RuntimeError("qualification execution policy must declare gates")
+        _QUALIFICATION_EXECUTION_POLICY = policy
+    return copy.deepcopy(_QUALIFICATION_EXECUTION_POLICY)
+
+
+def _execution_policy_path() -> Path:
+    lock = ruby_yaml("architecture.lock.yaml")
+    relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError("qualification execution policy is not registered")
+    return ROOT / relative
+
+
+def _resolved_gate_policy(name: str) -> dict:
+    gates = qualification_execution_policy().get("gates", {})
+    entry = gates.get(name)
+    pattern_name = name
+    if not isinstance(entry, dict):
+        matches = [
+            (pattern, candidate)
+            for pattern, candidate in gates.items()
+            if isinstance(pattern, str)
+            and pattern.endswith("*")
+            and name.startswith(pattern[:-1])
+            and isinstance(candidate, dict)
+        ]
+        if not matches:
+            raise RuntimeError(f"qualification execution policy does not declare gate {name}")
+        pattern_name, entry = max(matches, key=lambda item: len(item[0]))
+    resolved = copy.deepcopy(entry)
+    if pattern_name == "service:*":
+        service = name.split(":", 1)[1] if ":" in name else ""
+        if not service:
+            raise RuntimeError(f"invalid dynamic service gate: {name}")
+        for field in ("inputs", "validators"):
+            values = resolved.get(field, [])
+            if isinstance(values, list):
+                resolved[field] = [str(value).replace("<service>", service) for value in values]
+    resolved["_policy_name"] = pattern_name
+    mode = resolved.get("cache_mode")
+    if mode not in {"content-pass", "native-only", "fresh", "forbidden", "composed"}:
+        raise RuntimeError(f"gate {name} has unsupported cache_mode {mode!r}")
+    if not isinstance(resolved.get("parallel_safe"), bool):
+        raise RuntimeError(f"gate {name} must declare parallel_safe")
+    return resolved
+
+
+def _execution_workers() -> int:
+    return int(qualification_execution_policy()["execution"]["max_workers"])
+
+
+def _gate_parallel_safe(name: str) -> bool:
+    return bool(_resolved_gate_policy(name).get("parallel_safe"))
+
+
+def _gate_cache_key(name: str, options: dict) -> tuple[str, str]:
+    gate_contract = _resolved_gate_policy(name)
+    if gate_contract.get("cache_mode") != "content-pass":
+        raise RuntimeError(f"content qualification cache is not approved for gate {name}")
+    patterns = gate_contract.get("inputs", [])
+    validators = gate_contract.get("validators", [])
+    tool_names = gate_contract.get("tools", [])
+    if (
+        not isinstance(patterns, list)
+        or not patterns
+        or not isinstance(validators, list)
+        or not validators
+        or not isinstance(tool_names, list)
+    ):
+        raise RuntimeError(f"gate {name} has incomplete cache identity inputs")
+    input_digest = qualification_cache.digest_globs([str(item) for item in patterns], root=ROOT)
+    validator_paths = [ROOT / str(item) for item in validators]
+    validator_paths.extend([_execution_policy_path(), SCRIPT_DIR / "qualification_cache.py"])
+    validator_digest = qualification_cache.digest_paths(validator_paths, root=ROOT)
+    tool_identity = {}
+    for tool in tool_names:
+        executable = sys.executable if str(tool) == "python3" else str(tool)
+        tool_identity[str(tool)] = qualification_cache.executable_identity(executable)
     key = qualification_cache.build_key(
-        f"static-gate:{name}",
+        f"gate:{name}",
         input_content_digest=input_digest,
         validator_content_digest=validator_digest,
         tool_identity=tool_identity,
-        options={"gate_inputs": list(patterns), "gate_options": options},
+        options={
+            "policy_name": gate_contract.get("_policy_name"),
+            "gate_inputs": [str(item) for item in patterns],
+            "gate_options": options,
+        },
     )
     return key, input_digest
 
 
-def _run_cached_static_gate(name: str, options: dict, producer) -> int:
-    key, input_digest = _static_gate_cache_key(name, options)
-    namespace = f"static-gate:{name}"
+def _run_cached_gate(name: str, options: dict, producer) -> int:
+    policy = _resolved_gate_policy(name)
+    if policy.get("cache_mode") != "content-pass":
+        return producer()
+    key, input_digest = _gate_cache_key(name, options)
+    namespace = f"gate:{name}"
     cached = qualification_cache.load_success(namespace, key)
     if cached is not None:
         saved = float(cached.get("duration_seconds", 0.0) or 0.0)
@@ -206,6 +295,33 @@ def _run_cached_static_gate(name: str, options: dict, producer) -> int:
             {"input_digest": input_digest, "duration_seconds": duration, "options": options},
         )
     return result
+
+
+# Compatibility names retained for existing tests/adapters; policy now comes from
+# qualification-execution-policy.yaml rather than cache-policy gate inventories.
+def _static_gate_cache_key(name: str, options: dict) -> tuple[str, str]:
+    return _gate_cache_key(name, options)
+
+
+def _run_cached_static_gate(name: str, options: dict, producer) -> int:
+    return _run_cached_gate(name, options, producer)
+
+
+def _run_functions_parallel(steps: list[tuple[str, object]]) -> int:
+    if not steps:
+        return 0
+    workers = min(_execution_workers(), len(steps))
+    if workers <= 1:
+        for _name, producer in steps:
+            if int(producer()) != 0:
+                return 1
+        return 0
+    results: dict[str, int] = {}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="qualification") as executor:
+        futures = {executor.submit(producer): name for name, producer in steps}
+        for future, name in [(future, futures[future]) for future in futures]:
+            results[name] = int(future.result())
+    return 1 if any(results.get(name, 1) != 0 for name, _producer in steps) else 0
 
 
 _SOURCE_QUALITY_POLICY: dict | None = None
@@ -861,11 +977,19 @@ def runtime_efficiency_check() -> int:
     return 0
 
 
-def governance() -> int:
+def _governance_authority() -> int:
     repository_authority_check()
     run([sys.executable, "scripts/architecture_authority.py"])
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_architecture_authority.py"])
+    return 0
+
+
+def _governance_cache_contract() -> int:
     run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_qualification_cache.py"])
+    return 0
+
+
+def _governance_ruby_validators() -> int:
     require("ruby")
     for validator in (
         "scripts/validate-architecture.rb",
@@ -876,6 +1000,10 @@ def governance() -> int:
         "scripts/validate-observability.rb",
     ):
         run(["ruby", validator])
+    return 0
+
+
+def _governance_ruby_tests() -> int:
     run_ruby_tests(
         [
             "tests/architecture_validator_test.rb",
@@ -884,7 +1012,31 @@ def governance() -> int:
             "tests/ci_affected_test.rb",
         ]
     )
-    if documentation_policy():
+    return 0
+
+
+def _governance_documentation() -> int:
+    return documentation_policy()
+
+
+def governance() -> int:
+    steps = [
+        ("governance:authority", lambda: _run_cached_gate("governance:authority", {}, _governance_authority)),
+        (
+            "governance:cache-contract",
+            lambda: _run_cached_gate("governance:cache-contract", {}, _governance_cache_contract),
+        ),
+        (
+            "governance:ruby-validators",
+            lambda: _run_cached_gate("governance:ruby-validators", {}, _governance_ruby_validators),
+        ),
+        ("governance:ruby-tests", lambda: _run_cached_gate("governance:ruby-tests", {}, _governance_ruby_tests)),
+        (
+            "governance:documentation",
+            lambda: _run_cached_gate("governance:documentation", {}, _governance_documentation),
+        ),
+    ]
+    if _run_functions_parallel(steps):
         return 1
     print("PASS governance checks completed")
     return 0
@@ -1645,9 +1797,9 @@ def terraform_check() -> int:
     print(f"PASS terraform provider lock {providers}")
     print("PASS terraform checks completed")
     return 0
-def ansible_check() -> int:
-    reconcile_ansible_collections()
+def _ansible_static_check() -> int:
     require("ansible-lint")
+    require("ansible-playbook")
     files = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yml"))
     files += sorted(str(p.relative_to(ROOT)) for p in (ROOT / "platform" / "ansible").rglob("*.yaml"))
     if not files:
@@ -1656,32 +1808,46 @@ def ansible_check() -> int:
 
     lint_policy = source_quality_adapter("ansible")["lint"]
     advisory_rules = [str(rule) for rule in lint_policy["advisory_rules"]]
-    with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
-        config = Path(temp_dir) / "ansible-lint.yml"
-        config.write_text(
-            "---\nwarn_list:\n"
-            + "".join(f"  - {rule}\n" for rule in advisory_rules),
-            encoding="utf-8",
-        )
-        run(["ansible-lint", "--config-file", str(config), *files])
 
-    run(
-        [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "-c",
-            "local",
-            "platform/ansible/developer.yml",
-            "--syntax-check",
-            "-e",
-            f"repo_root={ROOT}",
-        ]
-    )
+    def lint_step() -> int:
+        with tempfile.TemporaryDirectory(prefix="ecommerce-ansible-lint-policy-") as temp_dir:
+            config = Path(temp_dir) / "ansible-lint.yml"
+            config.write_text(
+                "---\nwarn_list:\n" + "".join(f"  - {rule}\n" for rule in advisory_rules),
+                encoding="utf-8",
+            )
+            run(["ansible-lint", "--config-file", str(config), *files])
+        return 0
+
+    def syntax_step() -> int:
+        run(
+            [
+                "ansible-playbook",
+                "-i",
+                "localhost,",
+                "-c",
+                "local",
+                "platform/ansible/developer.yml",
+                "--syntax-check",
+                "-e",
+                f"repo_root={ROOT}",
+            ]
+        )
+        return 0
+
+    if _run_functions_parallel([("ansible:lint", lint_step), ("ansible:syntax", syntax_step)]):
+        return 1
+    print("PASS ansible static checks completed")
+    return 0
+
+
+def ansible_check() -> int:
+    # Dynamic/local capability state is deliberately checked fresh before consulting
+    # the deterministic content cache.
+    reconcile_ansible_collections()
     if ansible_collections_check():
         return 1
-    print("PASS ansible checks completed")
-    return 0
+    return _run_cached_gate("platform:ansible", {}, _ansible_static_check)
 
 
 def _git_neutral_test_env() -> dict[str, str]:
@@ -1695,14 +1861,37 @@ def _git_neutral_test_env() -> dict[str, str]:
 
 def system_check() -> int:
     test_env = _git_neutral_test_env()
-    tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
-    run_ruby_tests(tests)
-    for suite in [ROOT / "tests", ROOT / "tests" / "delivery", ROOT / "tests" / "context"]:
+
+    def ruby_suite() -> int:
+        tests = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "tests").glob("*_test.rb"))
+        run_ruby_tests(tests)
+        return 0
+
+    def python_suite(suite: Path) -> int:
         if suite.is_dir() and any(suite.glob("test_*.py")):
             run(
                 [sys.executable, "-m", "unittest", "discover", "-s", str(suite.relative_to(ROOT)), "-p", "test_*.py"],
                 env=test_env,
             )
+        return 0
+
+    steps = [
+        ("system:ruby", lambda: _run_cached_gate("system:ruby", {}, ruby_suite)),
+        (
+            "system:python-root",
+            lambda: _run_cached_gate("system:python-root", {}, lambda: python_suite(ROOT / "tests")),
+        ),
+        (
+            "system:python-delivery",
+            lambda: _run_cached_gate("system:python-delivery", {}, lambda: python_suite(ROOT / "tests" / "delivery")),
+        ),
+        (
+            "system:python-context",
+            lambda: _run_cached_gate("system:python-context", {}, lambda: python_suite(ROOT / "tests" / "context")),
+        ),
+    ]
+    if _run_functions_parallel(steps):
+        return 1
     print("PASS cross-system repository checks completed")
     return 0
 
@@ -2128,7 +2317,7 @@ def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]
     return json.loads(p.stdout)
 
 
-def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str, str] | None = None) -> bool:
+def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = None) -> tuple[bool, dict]:
     logs = CONTEXT / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{name.replace(':', '-').replace('/', '-')}.log"
@@ -2136,20 +2325,73 @@ def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str,
     with log_path.open("w", encoding="utf-8") as log:
         p = subprocess.run(command, cwd=ROOT, env=env, text=True, stdout=log, stderr=subprocess.STDOUT)
     duration = round(time.monotonic() - start, 3)
-    records.append(
-        {
-            "gate": name,
-            "status": "PASS" if p.returncode == 0 else "FAIL",
-            "exit_code": p.returncode,
-            "duration_seconds": duration,
-            "command": command,
-            "log": str(log_path.relative_to(ROOT)),
-        }
-    )
-    print(f"{'PASS' if p.returncode == 0 else 'FAIL'} {name} ({duration:.3f}s)")
-    if p.returncode:
+    record = {
+        "gate": name,
+        "status": "PASS" if p.returncode == 0 else "FAIL",
+        "exit_code": p.returncode,
+        "duration_seconds": duration,
+        "command": command,
+        "log": str(log_path.relative_to(ROOT)),
+        "execution": "fresh",
+    }
+    return p.returncode == 0, record
+
+
+def _emit_gate_record(ok: bool, record: dict) -> None:
+    name = str(record["gate"])
+    duration = float(record.get("duration_seconds", 0.0))
+    print(f"{'PASS' if ok else 'FAIL'} {name} ({duration:.3f}s)")
+    if not ok:
+        log_path = ROOT / str(record["log"])
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
-    return p.returncode == 0
+
+
+def _run_gate(name: str, command: list[str], records: list[dict], env: dict[str, str] | None = None) -> bool:
+    ok, record = _execute_gate(name, command, env)
+    records.append(record)
+    _emit_gate_record(ok, record)
+    return ok
+
+
+def _run_gate_batch(
+    items: list[tuple[str, list[str]]],
+    records: list[dict],
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Run parallel-safe gates concurrently while preserving deterministic evidence order."""
+    if not items:
+        return True
+
+    def flush(batch: list[tuple[str, list[str]]]) -> bool:
+        if not batch:
+            return True
+        workers = min(_execution_workers(), len(batch))
+        if workers <= 1:
+            return all(_run_gate(name, command, records, env) for name, command in batch)
+        results: dict[str, tuple[bool, dict]] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gate") as executor:
+            futures = {name: executor.submit(_execute_gate, name, command, env) for name, command in batch}
+            for name, _command in batch:
+                results[name] = futures[name].result()
+        ok_all = True
+        for name, _command in batch:
+            ok, record = results[name]
+            records.append(record)
+            _emit_gate_record(ok, record)
+            ok_all = ok_all and ok
+        return ok_all
+
+    pending: list[tuple[str, list[str]]] = []
+    for name, command in items:
+        if _gate_parallel_safe(name):
+            pending.append((name, command))
+            continue
+        if not flush(pending):
+            return False
+        pending = []
+        if not _run_gate(name, command, records, env):
+            return False
+    return flush(pending)
 
 
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
@@ -2353,11 +2595,7 @@ def ci_global(base: str, head: str, record_dir: str) -> int:
     records: list[dict] = []
     env = os.environ.copy()
     env.update({"BASE": base, "HEAD": head})
-    rc = 0
-    for name, command in _global_gate_commands(base, head):
-        if not _run_gate(name, command, records, env):
-            rc = 1
-            break
+    rc = 0 if _run_gate_batch(_global_gate_commands(base, head), records, env) else 1
     _write_record(_record_path(Path(record_dir), "global"), {"head_sha": requested, "records": records})
     return rc
 
@@ -2588,10 +2826,24 @@ def verify_change(base: str, head: str) -> int:
         print(f"INFO incremental verification from exact parent {parent_sha[:12]}")
 
     global_commands = _global_gate_commands(base, head)
-    for name, command in global_commands:
-        if not run_stable_gate(name, command):
+    before_global_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+    if not _run_gate_batch(global_commands, records, env):
+        write_evidence(base, head, paths, components, records, verification)
+        return 1
+    if head == "WORKTREE":
+        after_global_tree = worktree_tree_sha()
+        if after_global_tree != before_global_tree:
+            records.append(
+                {
+                    "gate": "worktree-stability",
+                    "status": "FAIL",
+                    "exit_code": 1,
+                    "duration_seconds": 0.0,
+                    "reason": "parallel global gate batch mutated worktree",
+                }
+            )
             write_evidence(base, head, paths, components, records, verification)
-            return 1
+            return fail("parallel global gate batch mutated worktree", 1)
 
     combined = "frontend:storefront" in components and "frontend:admin" in components
     if combined:
@@ -3305,7 +3557,7 @@ def main() -> int:
     args = p.parse_args()
     try:
         if args.cmd == "governance":
-            return _run_cached_static_gate("governance", {}, governance)
+            return governance()
         if args.cmd == "runtime-efficiency":
             return _run_cached_static_gate("runtime-efficiency", {}, runtime_efficiency_check)
         if args.cmd == "contracts":
@@ -3330,7 +3582,20 @@ def main() -> int:
         if args.cmd == "security":
             return security()
         if args.cmd == "terraform":
-            return terraform_check()
+            # Availability/provider identity must be checked fresh; deterministic
+            # validation work may then be reused by content identity.
+            terraform_root = ROOT / "platform" / "terraform"
+            tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
+            if tf_files:
+                formatter = source_quality_adapter("terraform")["formatter"]
+                approved = next(
+                    (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
+                    None,
+                )
+                if not approved:
+                    return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+                validate_terraform_lockfile_projections(terraform_provider_lock_contract())
+            return _run_cached_gate("platform:terraform", {}, terraform_check)
         if args.cmd == "ansible":
             return ansible_check()
         if args.cmd == "system":
