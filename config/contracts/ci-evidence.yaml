@@ -46,7 +46,7 @@ qualification_proof:
 
 performance_campaign:
   authority: architecture.lock.yaml#machine_contracts.qualification_execution_policy
-  repetitions: 3
+  repetitions_source: workflows.performance_campaign.repetitions
   bind_fields:
     - head_sha
     - head_tree_sha
