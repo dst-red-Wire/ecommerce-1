@@ -193,7 +193,7 @@ def replace_tracker_line(document: str, heading: str, tracker: int) -> str:
     ends = [value for value in (next_h3, next_h2) if value >= 0]
     end = min(ends) if ends else len(document)
     section = document[start:end]
-    pattern = r"Canonical tracker: GitHub issue .#\d+..\."
+    pattern = r"Canonical tracker: GitHub issue \\x60#\\d+\\x60\\."
     if re.search(pattern, section):
         tick = chr(96)
         replacement = f"Canonical tracker: GitHub issue {tick}#{tracker}{tick}."
