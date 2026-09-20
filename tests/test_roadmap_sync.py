@@ -13,6 +13,11 @@ assert SPEC and SPEC.loader
 ROADMAP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ROADMAP)
 
+REPOCTL_SPEC = importlib.util.spec_from_file_location("repoctl_roadmap_test", ROOT / "scripts" / "repoctl.py")
+assert REPOCTL_SPEC and REPOCTL_SPEC.loader
+REPOCTL = importlib.util.module_from_spec(REPOCTL_SPEC)
+REPOCTL_SPEC.loader.exec_module(REPOCTL)
+
 
 class RoadmapSyncTests(unittest.TestCase):
     def test_central_policy_uses_issue_32_for_m2_5(self):
@@ -68,6 +73,11 @@ class RoadmapSyncTests(unittest.TestCase):
         statuses = ROADMAP.compute_statuses(policy, states)
 
         original = (ROOT / "docs/project/MASTER_EXECUTION_PLAN.md").read_text(encoding="utf-8")
+        original = original.replace(
+            "Canonical tracker: GitHub issue `#32`.",
+            "Canonical tracker: GitHub issue `#15`.",
+            1,
+        )
         rendered = ROADMAP.render_document(original, policy, statuses)
         tick = chr(96)
 
@@ -105,6 +115,14 @@ class RoadmapSyncTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "must be a GitHub issue"):
                 ROADMAP.tracker_states("gh", policy)
 
+
+    def test_post_merge_does_not_treat_check_error_as_drift(self):
+        with (
+            mock.patch.object(REPOCTL, "roadmap_check", return_value=2),
+            mock.patch.object(REPOCTL, "git") as git,
+        ):
+            self.assertNotEqual(0, REPOCTL._roadmap_followup_after_merge())
+        git.assert_not_called()
 
     def test_finish_pr_source_runs_post_merge_roadmap_reconciliation(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
