@@ -164,7 +164,7 @@ def digest_globs(patterns: list[str] | tuple[str, ...], *, root: Path = ROOT) ->
     for relative, path in sorted(selected.items()):
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(_stable_file_bytes(path))
         digest.update(b"\0")
     return digest.hexdigest()
 
