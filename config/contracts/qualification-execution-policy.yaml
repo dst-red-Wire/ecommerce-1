@@ -13,7 +13,9 @@ principles:
   dynamic_state_must_be_fresh: true
 
 execution:
-  max_workers: 4
+  local_max_workers: 4
+  ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
+  ci_max_workers_required: true
   global_parallelism: bounded
   component_parallelism: bounded
   stable_output_order: true
