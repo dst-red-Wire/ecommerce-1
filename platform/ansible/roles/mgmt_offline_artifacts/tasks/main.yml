@@ -76,12 +76,6 @@
   register: mgmt_offline_validated
   changed_when: false
 
-- name: Import only manifest-approved offline RPM signing keys
-  ansible.builtin.rpm_key:
-    key: "{{ mgmt_offline_target_dir }}/{{ item }}"
-    state: present
-  loop: "{{ (mgmt_offline_validated.stdout | from_json).signing_keys }}"
-
 - name: Verify every local RPM signature after importing approved keys
   ansible.builtin.command:
     argv:
@@ -99,6 +93,12 @@
       - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
   register: mgmt_offline_signed
   changed_when: false
+
+- name: Import only manifest-approved offline RPM signing keys
+  ansible.builtin.rpm_key:
+    key: "{{ mgmt_offline_target_dir }}/{{ item }}"
+    state: present
+  loop: "{{ (mgmt_offline_validated.stdout | from_json).signing_keys }}"
 
 - name: Install complete local RPM set with all repositories disabled
   ansible.builtin.dnf:
