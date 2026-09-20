@@ -59,6 +59,7 @@ routing:
   dependency_contract: config/contracts/dependency-map.yaml
   ownership_contract: config/contracts/service-ownership.yaml
   public_api_contract: config/contracts/public-api-contracts.yaml
+  execution_policy: config/contracts/qualification-execution-policy.yaml
 
 pipelines:
   global: platform/tekton/pipelines/global.yaml
