@@ -206,6 +206,31 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError(
                 "qualification execution policy global_gate_order must list every executable global gate exactly once"
             )
+        workflows = policy.get("workflows")
+        if not isinstance(workflows, dict):
+            raise RuntimeError("qualification execution policy must declare workflows")
+        proof = workflows.get("qualification_proof")
+        campaign = workflows.get("performance_campaign")
+        if (
+            not isinstance(proof, dict)
+            or proof.get("exact_sha_required") is not True
+            or proof.get("clean_worktree_required") is not True
+            or proof.get("verify_change_runs") != 1
+            or proof.get("performance_audit_runs") != 1
+            or proof.get("performance_campaign_required") is not False
+            or proof.get("merge_authoritative") is not True
+        ):
+            raise RuntimeError("qualification_proof workflow contract is invalid")
+        configured_repetitions = policy.get("performance", {}).get("campaign", {}).get("repetitions")
+        if (
+            not isinstance(campaign, dict)
+            or campaign.get("exact_sha_required") is not True
+            or campaign.get("clean_worktree_required") is not True
+            or campaign.get("repetitions") != configured_repetitions
+            or campaign.get("merge_authoritative") is not False
+            or campaign.get("blocking_for_campaign_result") is not True
+        ):
+            raise RuntimeError("performance_campaign workflow contract is invalid")
         _QUALIFICATION_EXECUTION_POLICY = policy
     return copy.deepcopy(_QUALIFICATION_EXECUTION_POLICY)
 
@@ -3896,10 +3921,58 @@ def deliver(base: str, title: str, message: str) -> int:
     return 0
 
 
+def qualification_workflow(name: str) -> dict:
+    workflows = qualification_execution_policy().get("workflows", {})
+    workflow = workflows.get(name)
+    if not isinstance(workflow, dict):
+        raise RuntimeError(f"qualification workflow is not declared: {name}")
+    return copy.deepcopy(workflow)
+
+
+def qualification_proof(base: str) -> int:
+    workflow = qualification_workflow("qualification_proof")
+    if workflow.get("verify_change_runs") != 1 or workflow.get("performance_audit_runs") != 1:
+        return fail("qualification-proof workflow must execute exactly one verify-change and one performance audit")
+
+    head = git("rev-parse", "HEAD").strip()
+    if workflow.get("clean_worktree_required") is True and git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("qualification-proof requires a clean exact-SHA worktree")
+    if verify_change(base, head):
+        return 1
+
+    evidence = _valid_exact_evidence(base, head)
+    if evidence is None:
+        return fail(f"qualification-proof exact PASS evidence missing/invalid for {head}")
+
+    audit = run(
+        [sys.executable, "scripts/performance_audit.py", "--evidence", str(evidence)],
+        check=False,
+    )
+    if audit.returncode:
+        return audit.returncode
+
+    print(f"PASS qualification-proof exact={head} evidence={evidence.relative_to(ROOT)}")
+    return 0
+
+
+def performance_campaign(base: str, output_path: str = "") -> int:
+    workflow = qualification_workflow("performance_campaign")
+    repetitions = int(workflow["repetitions"])
+    command = [
+        sys.executable,
+        "scripts/qualification_performance_campaign.py",
+        "--base",
+        base,
+        "--repetitions",
+        str(repetitions),
+    ]
+    if output_path.strip():
+        command.extend(["--output", output_path])
+    return run(command, check=False).returncode
+
+
 def _valid_performance_campaign(head_sha: str) -> Path | None:
     campaign_contract = ruby_yaml("config/contracts/ci-evidence.yaml").get("performance_campaign", {})
-    if campaign_contract.get("required_before_merge") is not True:
-        return None
     path = CONTEXT / "performance" / f"campaign-{head_sha}.json"
     if not path.is_file():
         return None
@@ -3961,12 +4034,16 @@ def finish_pr(base: str) -> int:
     if evidence is None:
         return fail(f"finish-pr exact PASS evidence missing for {head}")
 
-    campaign = _valid_performance_campaign(head)
-    if campaign is None:
-        return fail(
-            f"finish-pr performance campaign PASS proof missing/invalid for {head}; "
-            "run make qualification-proof on the exact clean head"
-        )
+    proof_workflow = qualification_workflow("qualification_proof")
+    if proof_workflow.get("merge_authoritative") is not True:
+        return fail("finish-pr requires qualification_proof to remain merge-authoritative")
+    if proof_workflow.get("performance_campaign_required") is True:
+        campaign = _valid_performance_campaign(head)
+        if campaign is None:
+            return fail(
+                f"finish-pr performance campaign PASS proof missing/invalid for {head}; "
+                "run make perf-campaign on the exact clean head"
+            )
 
     raw_prs = output(
         [
@@ -4155,6 +4232,11 @@ def main() -> int:
     gl = sub.add_parser("global-check")
     gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    qp = sub.add_parser("qualification-proof")
+    qp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pcamp = sub.add_parser("perf-campaign")
+    pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
     d = sub.add_parser("diff-context")
     d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     fc = sub.add_parser("failure-context")
@@ -4303,6 +4385,10 @@ def main() -> int:
             return verify_change(args.base, args.head)
         if args.cmd == "global-check":
             return global_check(args.base, args.head)
+        if args.cmd == "qualification-proof":
+            return qualification_proof(args.base)
+        if args.cmd == "perf-campaign":
+            return performance_campaign(args.base, args.output)
         if args.cmd == "diff-context":
             return diff_context(args.base)
         if args.cmd == "failure-context":
