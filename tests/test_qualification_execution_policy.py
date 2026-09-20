@@ -335,7 +335,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not approved"):
             MOD._gate_cache_key("security", {})
 
-    def test_execute_gate_live_mode_streams_prefixed_output_and_keeps_log(self):
+    def test_execute_gate_keeps_child_output_out_of_terminal_and_in_log(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             context = root / ".context"
@@ -354,13 +354,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ):
                 ok, record = MOD._execute_gate(
                     "security",
-                    [MOD.sys.executable, "-c", "print('GATE-LIVE')"],
-                    {"ECOMMERCE_LIVE_OUTPUT": "1", "PYTHONUNBUFFERED": "1"},
+                    [MOD.sys.executable, "-c", "print('GATE-LOG-ONLY')"],
+                    {},
                 )
 
             self.assertTrue(ok)
-            self.assertIn("[security] GATE-LIVE", terminal.getvalue())
-            self.assertEqual("GATE-LIVE\n", (root / record["log"]).read_text(encoding="utf-8"))
+            self.assertEqual("", terminal.getvalue())
+            self.assertEqual("GATE-LOG-ONLY\n", (root / record["log"]).read_text(encoding="utf-8"))
 
     def test_parallel_batch_preserves_declared_order_and_serial_barrier(self):
         records = []
