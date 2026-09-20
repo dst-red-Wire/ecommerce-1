@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Deterministic guardrail for repeated Codex/Work pull-request review.
+"""Deterministic guardrail for repeated ChatGPT exact-SHA pull-request review.
 
-This controller never calls an AI model. It decides whether a model invocation is
+This controller never calls an AI model. It decides whether a ChatGPT review invocation is
 justified from material state changes, persists ephemeral state under .context,
 and records exact-SHA review cache markers.
 """
