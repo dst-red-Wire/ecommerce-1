@@ -46,6 +46,9 @@ spec:
     - name: global-gates
       image: $(params.runner-image)
       workingDir: /var/ecommerce-run/repository
+      env:
+        - name: ECOMMERCE_TOOL_HOME
+          value: $(workspaces.source.path)/.context/cache/tool-home
       command: [python3, scripts/repoctl.py]
       args:
         - ci-global
