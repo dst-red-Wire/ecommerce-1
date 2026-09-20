@@ -1217,6 +1217,13 @@ def validate(root):
                 "polling": "forbidden",
                 "merge_readiness_dependency": "forbidden",
             }
+            or ai_reviewer.get("evidence") != {
+                "transport": "github-pr-comment",
+                "marker": "chatgpt-exact-sha-review:v1",
+                "required_kinds": ["code", "security"],
+                "required_status": "PASS",
+                "exact_sha_required": True,
+            }
         ):
             errors.append(
                 "review policy must make ChatGPT the sole exact-SHA CODE/SECURITY AI authority "
