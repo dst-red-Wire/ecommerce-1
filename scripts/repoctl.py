@@ -3883,7 +3883,7 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         return fail("branch-cleanup requires a clean current worktree")
 
     default_branch = str(policy["default_branch"])
-    base_ref = f"origin/{default_branch}"
+    base_ref = str(cleanup["default_branch_ref"]).replace("<default-branch>", default_branch)
     if fetch_remote:
         run(["git", "fetch", "origin", "--prune"])
     if run(["git", "rev-parse", "--verify", base_ref], check=False, capture=True).returncode:
