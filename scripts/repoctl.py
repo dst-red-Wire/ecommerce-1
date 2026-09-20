@@ -217,6 +217,9 @@ def qualification_execution_policy() -> dict:
             or proof.get("clean_worktree_required") is not True
             or proof.get("verify_change_runs") != 1
             or proof.get("performance_audit_runs") != 1
+            or not isinstance(proof.get("performance_audit_output"), str)
+            or not proof.get("performance_audit_output", "").startswith(".context/performance/")
+            or "<sha>" not in proof.get("performance_audit_output", "")
             or proof.get("performance_campaign_required") is not False
             or proof.get("merge_authoritative") is not True
         ):
@@ -3930,6 +3933,38 @@ def qualification_workflow(name: str) -> dict:
     return copy.deepcopy(workflow)
 
 
+def _qualification_audit_path(head_sha: str) -> Path:
+    template = str(qualification_workflow("qualification_proof")["performance_audit_output"])
+    relative = Path(template.replace("<sha>", head_sha))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError("qualification performance audit output must remain repository-relative")
+    return ROOT / relative
+
+
+def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
+    path = _qualification_audit_path(head_sha)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    inventory = payload.get("inventory", {})
+    safety = payload.get("safety", {})
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("head_sha") != head_sha
+        or payload.get("base_sha") != git("rev-parse", base_ref).strip()
+        or payload.get("evidence_status") != "PASS"
+        or not isinstance(inventory, dict)
+        or int(inventory.get("failed_gates", 1)) != 0
+        or safety.get("content_cache_authorizes_pass_reuse") is not False
+        or safety.get("verdict_reuse_policy") != "exact-direct-parent-only"
+    ):
+        return None
+    return path
+
+
 def qualification_proof(base: str) -> int:
     workflow = qualification_workflow("qualification_proof")
     if workflow.get("verify_change_runs") != 1 or workflow.get("performance_audit_runs") != 1:
@@ -3945,14 +3980,27 @@ def qualification_proof(base: str) -> int:
     if evidence is None:
         return fail(f"qualification-proof exact PASS evidence missing/invalid for {head}")
 
+    audit_path = _qualification_audit_path(head)
     audit = run(
-        [sys.executable, "scripts/performance_audit.py", "--evidence", str(evidence)],
+        [
+            sys.executable,
+            "scripts/performance_audit.py",
+            "--evidence",
+            str(evidence),
+            "--output",
+            str(audit_path),
+        ],
         check=False,
     )
     if audit.returncode:
         return audit.returncode
+    if _valid_performance_audit(base, head) is None:
+        return fail(f"qualification-proof performance audit missing/invalid for {head}")
 
-    print(f"PASS qualification-proof exact={head} evidence={evidence.relative_to(ROOT)}")
+    print(
+        f"PASS qualification-proof exact={head} "
+        f"evidence={evidence.relative_to(ROOT)} audit={audit_path.relative_to(ROOT)}"
+    )
     return 0
 
 
@@ -3973,7 +4021,6 @@ def performance_campaign(base: str, output_path: str = "") -> int:
 
 
 def _valid_performance_campaign(head_sha: str) -> Path | None:
-    campaign_contract = ruby_yaml("config/contracts/ci-evidence.yaml").get("performance_campaign", {})
     path = CONTEXT / "performance" / f"campaign-{head_sha}.json"
     if not path.is_file():
         return None
@@ -4038,6 +4085,11 @@ def finish_pr(base: str) -> int:
     proof_workflow = qualification_workflow("qualification_proof")
     if proof_workflow.get("merge_authoritative") is not True:
         return fail("finish-pr requires qualification_proof to remain merge-authoritative")
+    if proof_workflow.get("performance_audit_runs") == 1 and _valid_performance_audit(base_ref, head) is None:
+        return fail(
+            f"finish-pr exact performance audit missing/invalid for {head}; "
+            "run make qualification-proof on the exact clean head"
+        )
     if proof_workflow.get("performance_campaign_required") is True:
         campaign = _valid_performance_campaign(head)
         if campaign is None:
