@@ -69,6 +69,14 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn('["git", "worktree", "add"', source)
         self.assertIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", source)
 
+    def test_synthetic_product_impact_targets_handwritten_source_only(self):
+        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
+        self.assertIn('services" / "product" / "internal" / "domain" / "product.go', source)
+        self.assertIn("qualificationPerformanceCampaignMarker", source)
+        self.assertIn('"/generated/"', source)
+        self.assertIn('"/sqlcgen/"', source)
+        self.assertNotIn('rglob("*.go")', source)
+
     def test_final_markdown_report_contains_required_29th_point_sections(self):
         source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
         for heading in (
