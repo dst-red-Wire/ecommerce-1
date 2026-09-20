@@ -213,11 +213,12 @@ class OfflineBundleTests(unittest.TestCase):
                 self.validate()
 
     def test_filename_traversal_and_duplicate_records_fail(self):
-        self.entries[0]['file'] = '../rke2.linux-amd64'
+        target = next(entry for entry in self.entries if entry['category'] == 'binary')
+        target['file'] = '../rke2.linux-amd64'
         with self.assertRaisesRegex(ValueError, 'unsafe or duplicate'):
             self.validate()
-        self.entries[0]['file'] = 'rke2.linux-amd64'
-        self.entries.append(dict(self.entries[0]))
+        target['file'] = 'rke2.linux-amd64'
+        self.entries.append(dict(target))
         with self.assertRaisesRegex(ValueError, 'unsafe or duplicate'):
             self.validate()
 
