@@ -109,6 +109,19 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("ChatGPT code review is not PASS", reason)
 
+    def test_conflicting_exact_sha_markers_fail_closed_regardless_of_order(self):
+        pass_code = self.marker("code")
+        blocked_code = self.marker("code", status="BLOCKED", blockers=1)
+        security = self.marker("security")
+        for comments in (
+            [pass_code, blocked_code, security],
+            [blocked_code, pass_code, security],
+        ):
+            with self.subTest(order=[comments.index(pass_code), comments.index(blocked_code)]):
+                ready, reason = self.run_with_comments(comments)
+                self.assertFalse(ready)
+                self.assertIn("ChatGPT code review is not PASS", reason)
+
     def test_rejects_markers_from_non_owner_comment_author(self):
         ready, reason = self.run_with_comments(
             [self.marker("code"), self.marker("security")],
