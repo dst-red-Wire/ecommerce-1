@@ -2599,6 +2599,8 @@ def _run_gate_batch(
 
 def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict | None]:
     """Return direct-parent evidence only when every exactness invariant holds."""
+    if os.environ.get("ECOMMERCE_FORCE_FULL_QUALIFICATION", "").strip() == "1":
+        return None, None
     if head == "WORKTREE":
         return None, None
     head_sha = git("rev-parse", head).strip()
