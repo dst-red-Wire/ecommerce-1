@@ -1248,6 +1248,27 @@ def validate(root):
                 )
                 break
 
+        execution_fallback = review_policy.get("pull_request_review", {}).get(
+            "agent_execution_fallback", {}
+        )
+        if execution_fallback != {
+            "primary_agent": "ChatGPT",
+            "fallback_agent": "Codex",
+            "codex_allowed_when": "chatgpt-capability-unavailable",
+            "codex_scope": "execution-only",
+            "minimal_task_scope_required": True,
+            "fallback_reason_must_be_recorded": True,
+            "codex_output_role": "evidence-for-chatgpt",
+            "code_security_review_authority": "ChatGPT-only",
+            "merge_readiness_authority": "ChatGPT-only",
+            "merge_decision_authority": "repository-owner",
+            "codex_review_markers": "forbidden",
+            "codex_merge_decision": "forbidden",
+        }:
+            errors.append(
+                "Codex must be limited to execution fallback when ChatGPT lacks the required capability"
+            )
+
         review_budget = load_yaml(root / lock["machine_contracts"]["review_budget"])
         if review_budget.get("review_authority_source") != (
             "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"
