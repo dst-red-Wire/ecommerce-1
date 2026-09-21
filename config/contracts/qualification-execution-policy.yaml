@@ -586,6 +586,38 @@ workflows:
           load_versions: 3ad32578d24fb441918454143af4edb1cb8ac96c88b3019fea34d5adc5c6083a
           load_toolchain_lock: 1ce78af5c9b778c0b82f7e55b83d04f9ca923c5fbfe1f9bb2f81f0cab75fac58
           validate_toolchain_projections: 5420a2af60d51661cab495fa445911c5b6dce4c30d452e339a3db7941a8e8f33
+  rke2_local_ha:
+    owner: platform / M2.5 persistent MGMT bootstrap
+    purpose: prove six simultaneous local Rocky nodes with three RKE2 control planes, three workers, HAProxy registration/API endpoint, embedded-etcd quorum, snapshot, one-control-plane loss/recovery, Cilium multinode, and simulated internal DNS/NTP without claiming production capacity
+    entrypoint: scripts/repoctl.py rke2-local-ha-qualification
+    preparation: scripts/repoctl.py rke2-local-ha-prepare
+    exit_criteria:
+      - six-rocky-vms-simultaneously-running
+      - three-control-planes-ready
+      - three-workers-ready
+      - three-etcd-members
+      - etcd-quorum-survives-one-control-plane-loss
+      - ha-endpoint-registration-pass
+      - ha-endpoint-api-read-write-pass
+      - etcd-snapshot-pass
+      - failed-control-plane-recovery-pass
+      - cilium-six-node-ready
+      - worker-join-through-ha-pass
+      - simulated-internal-dns-pass
+      - simulated-internal-ntp-pass
+      - public-egress-denied
+      - selinux-enforcing
+      - exact-sha-evidence-pass
+    evidence:
+      authoritative: .context/mgmt-ha/<sha>/result.json
+      source: .context/mgmt-ha/<sha>/source.sha256
+      runtime_log: .context/mgmt-ha/<sha>/cluster.log
+    merge_authoritative: true
+    state_changing: true
+    local_only: true
+    capacity_production_claim: false
+    real_provider_network_claim: false
+    physical_failure_claim: false
   tekton_proof:
     owner: cloud-platform
     purpose: state-changing management-plane proof of exact Tekton execution, signed Harbor evidence round-trip, and direct-parent reuse

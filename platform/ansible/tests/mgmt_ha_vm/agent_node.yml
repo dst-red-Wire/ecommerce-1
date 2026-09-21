@@ -1,0 +1,57 @@
+---
+- name: Invoke canonical RKE2 agent role with verified offline bytes
+  ansible.builtin.include_role:
+    name: rke2_agent
+  vars:
+    rke2_version: "{{ ha_rke2_version }}"
+    rke2_token: "{{ lookup('file', ha_token_file) | trim }}"
+    rke2_server_url: "{{ ha_join_url }}"
+    k8s_ip: "{{ ha_node_ip }}"
+    mgmt_offline_artifacts_verified: "{{ ha_bundle_verified | bool }}"
+    rke2_offline_binary: "/var/lib/ecommerce/bootstrap/{{ ha_manifest_sha256 }}/rke2.linux-amd64"
+
+- name: Render explicit HA RKE2 agent configuration
+  ansible.builtin.copy:
+    dest: /etc/rancher/rke2/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      server: "{{ ha_join_url }}"
+      token: "{{ lookup('file', ha_token_file) | trim }}"
+      node-name: "{{ inventory_hostname }}"
+      node-ip: "{{ ha_node_ip }}"
+      disable-default-registry-endpoint: true
+      selinux: true
+  no_log: true
+  register: ha_agent_config
+
+- name: Restart agent after HA endpoint reconciliation
+  ansible.builtin.systemd_service:
+    name: rke2-agent
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  when: ha_agent_config is changed
+
+- name: Wait boundedly for RKE2 agent active state
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rke2-agent.service]
+  register: ha_agent_active
+  changed_when: false
+  until: ha_agent_active.stdout | trim == 'active'
+  retries: 180
+  delay: 5
+
+- name: Release controller transfer staging after successful agent start
+  ansible.builtin.file:
+    path: "/var/lib/ecommerce/bootstrap/{{ ha_manifest_sha256 }}"
+    state: absent
+
+- name: Release imported RKE2 image archives after successful agent start
+  ansible.builtin.file:
+    path: "/var/lib/rancher/rke2/agent/images/{{ item }}"
+    state: absent
+  loop:
+    - rke2-images-core.linux-amd64.tar
+    - rke2-images-cilium.linux-amd64.tar

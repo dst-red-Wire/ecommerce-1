@@ -70,7 +70,13 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory
+.PHONY: mgmt-runtime-inventory rke2-local-ha-prepare rke2-local-ha-qualification
+
+rke2-local-ha-prepare: ## Prepare digest-pinned HAProxy bytes before the memory-constrained HA run
+	@$(PYTHON) scripts/repoctl.py rke2-local-ha-prepare
+
+rke2-local-ha-qualification: ## Prove six-node local Rocky/RKE2 HA without production capacity claims
+	@$(PYTHON) scripts/repoctl.py rke2-local-ha-qualification
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from Terraform MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"

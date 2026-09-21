@@ -1,0 +1,465 @@
+---
+- name: Qualify six-node local Rocky RKE2 HA
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    ha_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
+    ha_head_sha: "{{ lookup('pipe', 'git -C ' ~ (ha_repo | quote) ~ ' rev-parse HEAD') | trim }}"
+    ha_state: "{{ ha_repo }}/.context/mgmt-ha/{{ ha_head_sha }}"
+    ha_token_file: "{{ ha_state }}/rke2-token"
+    ha_haproxy_tar: "{{ ha_repo }}/{{ mgmt_local_ha_contract.ha_endpoint.image.cache_tar }}"
+    ha_haproxy_evidence: "{{ ha_repo }}/{{ mgmt_local_ha_contract.ha_endpoint.image.cache_evidence }}"
+    ha_inventory: "{{ ha_state }}/inventory.yml"
+    ha_cluster_log: "{{ ha_state }}/cluster.log"
+    ha_sources: "{{ mgmt_local_ha_contract.canonical_sources }}"
+    ha_single_contract_path: "{{ ha_repo }}/{{ ha_sources.local_vm_contract }}"
+    ha_single_contract: "{{ (lookup('file', ha_single_contract_path) | from_yaml).mgmt_local_vm_contract }}"
+    ha_bootstrap_path: "{{ ha_repo }}/{{ ha_sources.mgmt_bootstrap }}"
+    ha_network_plan_path: "{{ ha_repo }}/{{ ha_sources.network_plan }}"
+    ha_bundle_lock_path: "{{ ha_repo }}/{{ ha_single_contract.bundle_lock }}"
+    ha_rke2_version: "{{ (lookup('file', ha_bootstrap_path) | from_yaml).rke2.version }}"
+    ha_bundle_version: "{{ ha_rke2_version | regex_replace('[+.]', '-') }}"
+    ha_bundle_dir: "{{ ha_repo }}/.context/rke2-offline-bundle-{{ ha_bundle_version }}"
+    ha_manifest_sha256: "{{ (lookup('file', ha_bundle_lock_path) | from_json).approved_manifest_sha256 }}"
+    ha_single_fixture: "{{ ha_repo }}/{{ ha_sources.local_vm_entrypoint }}"
+    ha_ansible_playbook: "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+    ha_nodes: "{{ mgmt_local_ha_contract.nodes | dict2items }}"
+  tasks:
+    - name: Require exact SHA input from registered launcher
+      ansible.builtin.assert:
+        that:
+          - ha_head_sha is match('^[0-9a-f]{40}$')
+          - ha_repo is match('^/')
+          - ha_repo == ((playbook_dir ~ '/../../../..') | realpath)
+          - ha_head_sha == (lookup('pipe', 'git -C ' ~ (ha_repo | quote) ~ ' rev-parse HEAD') | trim)
+          - mgmt_local_ha_contract.nodes | length == 6
+          - mgmt_local_ha_contract.capacity_production_claim is false
+
+    - name: Create bounded HA evidence directory
+      ansible.builtin.file:
+        path: "{{ ha_state }}"
+        state: directory
+        mode: "0700"
+
+    - name: Require existing PR 128 offline bundle
+      ansible.builtin.stat:
+        path: "{{ ha_bundle_dir }}"
+      register: ha_bundle_stat
+
+    - name: Refuse to rebuild or download the PR 128 bundle implicitly
+      ansible.builtin.assert:
+        that:
+          - ha_bundle_stat.stat.isdir | default(false)
+        fail_msg: >-
+          Missing {{ ha_bundle_dir }}. Rebuild the already-qualified PR 128 bundle explicitly
+          before HA qualification; this workflow never widens PR 128 by downloading implicitly.
+
+    - name: Verify exact Windows VirtualBox version
+      ansible.builtin.command:
+        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", --version]
+      register: ha_vbox_version
+      changed_when: false
+      failed_when: >-
+        ha_vbox_version.rc != 0
+        or ha_vbox_version.stdout | trim != mgmt_local_ha_contract.controller.virtualbox_version
+
+    - name: Require pre-prepared digest-pinned HAProxy archive
+      ansible.builtin.stat:
+        path: "{{ ha_haproxy_tar }}"
+      register: ha_haproxy_tar_stat
+
+    - name: Require bounded HAProxy preparation evidence
+      ansible.builtin.stat:
+        path: "{{ ha_haproxy_evidence }}"
+      register: ha_haproxy_evidence_stat
+
+    - name: Refuse implicit HAProxy download during qualification
+      ansible.builtin.assert:
+        that:
+          - ha_haproxy_tar_stat.stat.isreg | default(false)
+          - ha_haproxy_evidence_stat.stat.isreg | default(false)
+        fail_msg: >-
+          Run 'make rke2-local-ha-prepare' while Docker Desktop is available,
+          then Docker Desktop may be closed before the six-VM qualification.
+
+    - name: Read HAProxy preparation evidence
+      ansible.builtin.slurp:
+        src: "{{ ha_haproxy_evidence }}"
+      register: ha_haproxy_preparation
+
+    - name: Hash cached HAProxy archive before use
+      ansible.builtin.command:
+        argv: [sha256sum, "{{ ha_haproxy_tar }}"]
+      register: ha_haproxy_archive_hash
+      changed_when: false
+
+    - name: Require cached HAProxy bytes to match digest-bound preparation evidence
+      ansible.builtin.assert:
+        that:
+          - (ha_haproxy_preparation.content | b64decode | from_json).status == 'PASS'
+          - >-
+            (ha_haproxy_preparation.content | b64decode | from_json).source_reference
+            == mgmt_local_ha_contract.ha_endpoint.image.reference
+          - >-
+            (ha_haproxy_preparation.content | b64decode | from_json).archive_sha256
+            == (ha_haproxy_archive_hash.stdout | trim).split()[0]
+
+    - name: Validate selected host-only adapter and address
+      ansible.builtin.command:
+        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, hostonlyifs]
+      register: ha_hostonly
+      changed_when: false
+
+    - name: Require exact existing host-only network without modifying host networking
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - >-
+            import re,sys;
+            blocks=[dict(line.split(':',1) for line in block.splitlines() if ':' in line)
+            for block in re.split(r'\n\s*\n',sys.stdin.read())];
+            blocks=[{k.strip():v.strip() for k,v in block.items()} for block in blocks];
+            selected=[b for b in blocks if b.get('Name')==sys.argv[1]];
+            assert len(selected)==1;
+            assert selected[0].get('IPAddress')==sys.argv[2];
+            assert selected[0].get('NetworkMask')=='255.255.255.0';
+            assert selected[0].get('DHCP')=='Disabled'
+          - "{{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+          - "{{ mgmt_local_ha_contract.controller.host_address }}"
+        stdin: "{{ ha_hostonly.stdout }}"
+      changed_when: false
+
+    - name: Require all fixed fixture addresses to be unique
+      ansible.builtin.assert:
+        that:
+          - >-
+            (mgmt_local_ha_contract.nodes | dict2items
+             | map(attribute='value.address') | list | unique | length) == 6
+          - >-
+            mgmt_local_ha_contract.ha_endpoint.host in mgmt_local_ha_contract.nodes
+
+    - name: List registered VirtualBox machines before HA creation
+      ansible.builtin.command:
+        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, vms]
+      register: ha_registered_vms
+      changed_when: false
+
+    - name: Refuse collisions with owned HA VM names
+      ansible.builtin.assert:
+        that:
+          - item.value.vm_name not in ha_registered_vms.stdout
+        fail_msg: "VirtualBox already contains {{ item.value.vm_name }}; cleanup is required before HA qualification."
+      loop: "{{ ha_nodes }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Probe fixed HA addresses before VM creation
+      ansible.builtin.command:
+        argv: [ping, -c, "1", -W, "1", "{{ item.value.address }}"]
+      loop: "{{ ha_nodes }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value.address }}"
+      register: ha_address_probes
+      changed_when: false
+      failed_when: false
+
+    - name: Require fixed HA addresses not to answer before creation
+      ansible.builtin.assert:
+        that:
+          - item.rc != 0
+        fail_msg: "Address {{ item.item.value.address }} already responds; refusing a local network collision."
+      loop: "{{ ha_address_probes.results }}"
+      loop_control:
+        label: "{{ item.item.key }}={{ item.item.value.address }}"
+
+    - name: Require a clean frozen worktree immediately before VM creation
+      ansible.builtin.command:
+        argv: [git, -C, "{{ ha_repo }}", status, --porcelain, --untracked-files=all]
+      register: ha_frozen_status
+      changed_when: false
+      failed_when: ha_frozen_status.stdout | trim | length > 0
+
+    - name: Fingerprint exact HA sources before creating machines
+      ansible.builtin.command:
+        argv:
+          - sha256sum
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/contract.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/main.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cluster.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/server_node.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/agent_node.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/lab_services.py"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/service_probe.py"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/ha_probe.py"
+          - "{{ ha_repo }}/platform/ansible/roles/rke2_server/tasks/main.yml"
+          - "{{ ha_repo }}/platform/ansible/roles/rke2_agent/tasks/main.yml"
+          - "{{ ha_repo }}/{{ ha_sources.private_firewall_template }}"
+          - "{{ ha_repo }}/{{ ha_sources.egress_template }}"
+          - "{{ ha_repo }}/{{ ha_sources.egress_service_template }}"
+          - "{{ ha_repo }}/scripts/repoctl.py"
+          - "{{ ha_bundle_lock_path }}"
+          - "{{ ha_bootstrap_path }}"
+          - "{{ ha_network_plan_path }}"
+          - "{{ ha_repo }}/{{ ha_sources.qualification_policy }}"
+          - "{{ ha_repo }}/config/contracts/toolchain-lock.json"
+          - "{{ ha_repo }}/config/toolchain/versions.env"
+          - "{{ ha_repo }}/platform/ansible/requirements.yml"
+      register: ha_source_hashes
+      changed_when: false
+
+    - name: Preserve exact HA source fingerprints
+      ansible.builtin.copy:
+        dest: "{{ ha_state }}/source.sha256"
+        content: "{{ ha_source_hashes.stdout }}\n"
+        mode: "0600"
+
+    - name: Create and cold-stage all six Rocky VMs from the PR 128 fixture
+      block:
+        - name: Generate invocation-local shared RKE2 token
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_playbook_python }}"
+              - -c
+              - >-
+                import pathlib,secrets,sys;
+                p=pathlib.Path(sys.argv[1]);
+                p.write_text(secrets.token_urlsafe(48)+'\n',encoding='utf-8');
+                p.chmod(0o600)
+              - "{{ ha_token_file }}"
+          changed_when: true
+          no_log: true
+
+        - name: Create isolated Rocky VM
+          ansible.builtin.command:
+            argv:
+              - "{{ ha_ansible_playbook }}"
+              - -i
+              - localhost,
+              - "{{ ha_single_fixture }}"
+              - -e
+              - "vm_action=create"
+              - -e
+              - "vm_name={{ item.value.vm_name }}"
+              - -e
+              - "vm_address={{ item.value.address }}"
+              - -e
+              - "vm_mac={{ item.value.mac }}"
+              - -e
+              - >-
+                vm_cpus={{ mgmt_local_ha_contract.resources.control_plane.cpus
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.cpus }}
+              - -e
+              - >-
+                vm_memory={{ mgmt_local_ha_contract.resources.control_plane.memory_mib
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.memory_mib }}
+              - -e
+              - "vm_hostonly_adapter={{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+              - -e
+              - "vm_host_address={{ mgmt_local_ha_contract.controller.host_address }}"
+              - -e
+              - "vm_repo={{ ha_repo }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+          loop: "{{ ha_nodes }}"
+          loop_control:
+            label: "{{ item.key }}"
+          register: ha_create_results
+          changed_when: true
+
+        - name: Cold-stage independently approved PR 128 bundle on every VM
+          ansible.builtin.command:
+            argv:
+              - "{{ ha_ansible_playbook }}"
+              - -i
+              - localhost,
+              - "{{ ha_single_fixture }}"
+              - -e
+              - "vm_action=test"
+              - -e
+              - "vm_name={{ item.value.vm_name }}"
+              - -e
+              - "vm_address={{ item.value.address }}"
+              - -e
+              - "vm_mac={{ item.value.mac }}"
+              - -e
+              - >-
+                vm_cpus={{ mgmt_local_ha_contract.resources.control_plane.cpus
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.cpus }}
+              - -e
+              - >-
+                vm_memory={{ mgmt_local_ha_contract.resources.control_plane.memory_mib
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.memory_mib }}
+              - -e
+              - "vm_hostonly_adapter={{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+              - -e
+              - "vm_host_address={{ mgmt_local_ha_contract.controller.host_address }}"
+              - -e
+              - "vm_repo={{ ha_repo }}"
+              - -e
+              - "mgmt_offline_bundle_dir={{ ha_bundle_dir }}"
+              - -e
+              - "mgmt_offline_manifest_sha256={{ ha_manifest_sha256 }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+          loop: "{{ ha_nodes }}"
+          loop_control:
+            label: "{{ item.key }}"
+          changed_when: true
+
+        - name: Render six-node Ansible inventory using pinned per-VM SSH identities
+          ansible.builtin.copy:
+            dest: "{{ ha_inventory }}"
+            mode: "0600"
+            content: |
+              all:
+                children:
+                  control_planes:
+                    hosts:
+              {% for item in ha_nodes if item.value.role == 'control-plane' %}
+                      {{ item.value.hostname }}:
+                        ha_node_ip: {{ item.value.address }}
+                        mgmt_ip: {{ item.value.address }}
+                        ansible_host: {{ item.value.address }}
+                        ansible_user: vagrant
+                        ansible_become: true
+                        ansible_python_interpreter: /usr/bin/python3
+                        ansible_ssh_common_args: "-F {{ ha_repo }}/.context/mgmt-offline-vm/{{ item.value.vm_name }}/ssh_config"
+              {% endfor %}
+                  workers:
+                    hosts:
+              {% for item in ha_nodes if item.value.role == 'worker' %}
+                      {{ item.value.hostname }}:
+                        ha_node_ip: {{ item.value.address }}
+                        mgmt_ip: {{ item.value.address }}
+                        ansible_host: {{ item.value.address }}
+                        ansible_user: vagrant
+                        ansible_become: true
+                        ansible_python_interpreter: /usr/bin/python3
+                        ansible_ssh_common_args: "-F {{ ha_repo }}/.context/mgmt-offline-vm/{{ item.value.vm_name }}/ssh_config"
+              {% endfor %}
+                  access_gateways:
+                    hosts:
+                      ha-worker-03:
+
+        - name: Execute complete six-node HA campaign
+          ansible.builtin.command:
+            argv:
+              - "{{ ha_ansible_playbook }}"
+              - -i
+              - "{{ ha_inventory }}"
+              - "{{ playbook_dir }}/cluster.yml"
+              - -e
+              - "ha_repo={{ ha_repo }}"
+              - -e
+              - "ha_head_sha={{ ha_head_sha }}"
+              - -e
+              - "ha_state={{ ha_state }}"
+              - -e
+              - "ha_token_file={{ ha_token_file }}"
+              - -e
+              - "ha_haproxy_tar={{ ha_haproxy_tar }}"
+              - -e
+              - "ha_manifest_sha256={{ ha_manifest_sha256 }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+            ANSIBLE_ROLES_PATH: "{{ ha_repo }}/platform/ansible/roles"
+          register: ha_cluster
+          failed_when: false
+          changed_when: true
+
+        - name: Preserve bounded cluster log
+          ansible.builtin.copy:
+            dest: "{{ ha_cluster_log }}"
+            content: "{{ ha_cluster.stdout }}\n{{ ha_cluster.stderr }}\n"
+            mode: "0600"
+
+        - name: Require complete HA campaign success
+          ansible.builtin.assert:
+            that:
+              - ha_cluster.rc == 0
+            fail_msg: "Inspect {{ ha_cluster_log }}; HA evidence is not accepted on partial success."
+
+        - name: Read authoritative HA result
+          ansible.builtin.slurp:
+            src: "{{ ha_state }}/result.json"
+          register: ha_result
+
+        - name: Require exact-SHA PASS evidence
+          ansible.builtin.assert:
+            that:
+              - (ha_result.content | b64decode | from_json).status == 'PASS'
+              - (ha_result.content | b64decode | from_json).head_sha == ha_head_sha
+              - (ha_result.content | b64decode | from_json).six_machines_simultaneously_running | bool
+              - (ha_result.content | b64decode | from_json).control_planes == 3
+              - (ha_result.content | b64decode | from_json).workers == 3
+              - (ha_result.content | b64decode | from_json).etcd_members == 3
+              - (ha_result.content | b64decode | from_json).etcd_healthy_members == 3
+              - (ha_result.content | b64decode | from_json).etcd_alarms | length == 0
+              - (ha_result.content | b64decode | from_json).quorum_write_pass | bool
+              - (ha_result.content | b64decode | from_json).control_plane_recovered | bool
+              - (ha_result.content | b64decode | from_json).snapshot_nonempty | bool
+              - (ha_result.content | b64decode | from_json).ha_registration_pass | bool
+              - (ha_result.content | b64decode | from_json).ha_api_read_write_pass | bool
+              - (ha_result.content | b64decode | from_json).public_egress_denied | bool
+              - (ha_result.content | b64decode | from_json).selinux_enforcing | bool
+              - (ha_result.content | b64decode | from_json).capacity_production is false
+              - (ha_result.content | b64decode | from_json).real_hetzner_network is false
+              - (ha_result.content | b64decode | from_json).physical_failure is false
+
+        - name: Require sources unchanged throughout HA campaign
+          ansible.builtin.command:
+            argv: [sha256sum, --check, "{{ ha_state }}/source.sha256"]
+          changed_when: false
+
+      always:
+        - name: Destroy every VM owned by this HA invocation
+          ansible.builtin.command:
+            argv:
+              - "{{ ha_ansible_playbook }}"
+              - -i
+              - localhost,
+              - "{{ ha_single_fixture }}"
+              - -e
+              - "vm_action=destroy"
+              - -e
+              - "vm_name={{ item.value.vm_name }}"
+              - -e
+              - "vm_address={{ item.value.address }}"
+              - -e
+              - "vm_mac={{ item.value.mac }}"
+              - -e
+              - >-
+                vm_cpus={{ mgmt_local_ha_contract.resources.control_plane.cpus
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.cpus }}
+              - -e
+              - >-
+                vm_memory={{ mgmt_local_ha_contract.resources.control_plane.memory_mib
+                if item.value.role == 'control-plane'
+                else mgmt_local_ha_contract.resources.worker.memory_mib }}
+              - -e
+              - "vm_hostonly_adapter={{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+              - -e
+              - "vm_host_address={{ mgmt_local_ha_contract.controller.host_address }}"
+              - -e
+              - "vm_repo={{ ha_repo }}"
+          environment:
+            PYTHONDONTWRITEBYTECODE: "1"
+          loop: "{{ ha_nodes }}"
+          loop_control:
+            label: "{{ item.key }}"
+          failed_when: false
+          changed_when: true
+
+        - name: Remove invocation-local cluster token
+          ansible.builtin.file:
+            path: "{{ ha_token_file }}"
+            state: absent

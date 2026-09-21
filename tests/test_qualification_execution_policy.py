@@ -49,6 +49,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         defaults = lifecycle["workflow_defaults"]
         proof = policy["workflows"]["qualification_proof"]
         rke2 = policy["workflows"]["rke2_local_virtualbox"]
+        rke2_ha = policy["workflows"]["rke2_local_ha"]
         tekton = policy["workflows"]["tekton_proof"]
         campaign = policy["workflows"]["performance_campaign"]
 
@@ -114,6 +115,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         resolved_proof = MOD.qualification_workflow("qualification_proof")
         resolved_rke2 = MOD.qualification_workflow("rke2_local_virtualbox")
+        resolved_rke2_ha = MOD.qualification_workflow("rke2_local_ha")
         resolved_tekton = MOD.qualification_workflow("tekton_proof")
         resolved_campaign = MOD.qualification_workflow("performance_campaign")
         self.assertIs(True, resolved_proof["exact_sha_required"])
@@ -122,6 +124,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_rke2["exact_sha_required"])
         self.assertIs(True, resolved_rke2["clean_worktree_required"])
         self.assertIs(True, resolved_rke2["stop_when_exit_criteria_pass"])
+        self.assertEqual(
+            "scripts/repoctl.py rke2-local-ha-prepare",
+            resolved_rke2_ha["preparation"],
+        )
         self.assertEqual(
             "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
             resolved_rke2["entrypoint"],
@@ -225,6 +231,44 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         )
         self.assertIn("exact-sha-code-review-pass", rke2["exit_criteria"])
         self.assertIn("exact-sha-security-review-pass", rke2["exit_criteria"])
+
+        self.assertEqual(
+            "scripts/repoctl.py rke2-local-ha-qualification",
+            resolved_rke2_ha["entrypoint"],
+        )
+        self.assertIs(True, resolved_rke2_ha["exact_sha_required"])
+        self.assertIs(True, resolved_rke2_ha["clean_worktree_required"])
+        self.assertIs(True, resolved_rke2_ha["merge_authoritative"])
+        self.assertIs(False, rke2_ha["capacity_production_claim"])
+        self.assertIs(False, rke2_ha["real_provider_network_claim"])
+        self.assertIs(False, rke2_ha["physical_failure_claim"])
+        self.assertEqual(
+            {
+                "six-rocky-vms-simultaneously-running",
+                "three-control-planes-ready",
+                "three-workers-ready",
+                "three-etcd-members",
+                "etcd-quorum-survives-one-control-plane-loss",
+                "ha-endpoint-registration-pass",
+                "ha-endpoint-api-read-write-pass",
+                "etcd-snapshot-pass",
+                "failed-control-plane-recovery-pass",
+                "cilium-six-node-ready",
+                "worker-join-through-ha-pass",
+                "simulated-internal-dns-pass",
+                "simulated-internal-ntp-pass",
+                "public-egress-denied",
+                "selinux-enforcing",
+                "exact-sha-evidence-pass",
+            },
+            set(rke2_ha["exit_criteria"]),
+        )
+        self.assertNotIn("exact-sha-chatgpt-code-review-pass", rke2_ha["exit_criteria"])
+        self.assertNotIn("exact-sha-chatgpt-security-review-pass", rke2_ha["exit_criteria"])
+        self.assertEqual(
+            ".context/mgmt-ha/<sha>/result.json",
+            rke2_ha["evidence"]["authoritative"],
+        )
 
         self.assertEqual(1, proof["verify_change_runs"])
         self.assertEqual(1, proof["performance_audit_runs"])
@@ -1019,6 +1063,163 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
         self.assertEqual("vm_action=destroy", run.call_args_list[-1].args[0][-1])
+
+    def test_rke2_local_ha_launcher_requires_exact_clean_source_and_pass_evidence(self):
+        head = "9" * 40
+        ha_contract = MOD.ruby_yaml(
+            "platform/ansible/tests/mgmt_ha_vm/contract.yml"
+        )["mgmt_local_ha_contract"]
+        node_names = [node["hostname"] for node in ha_contract["nodes"].values()]
+        workflow = {
+            "entrypoint": "scripts/repoctl.py rke2-local-ha-qualification",
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "capacity_production_claim": False,
+            "evidence": {"authoritative": ".context/mgmt-ha/<sha>/result.json"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / ".context" / "mgmt-ha" / head / "result.json"
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            def fake_run(command, **kwargs):
+                evidence.parent.mkdir(parents=True, exist_ok=True)
+                evidence.write_text(
+                    __import__("json").dumps(
+                        {
+                            "schema_version": 1,
+                            "status": "PASS",
+                            "head_sha": head,
+                            "six_machines_simultaneously_running": True,
+                            "control_planes": 3,
+                            "workers": 3,
+                            "etcd_members": 3,
+                            "etcd_healthy_members": 3,
+                            "etcd_alarms": [],
+                            "quorum_required": 2,
+                            "quorum_write_pass": True,
+                            "control_plane_recovered": True,
+                            "snapshot_nonempty": True,
+                            "ha_registration_pass": True,
+                            "ha_api_read_write_pass": True,
+                            "cilium_multinode": True,
+                            "simulated_internal_dns": True,
+                            "simulated_internal_ntp": True,
+                            "simulated_service_proofs": [
+                                {
+                                    "node": node,
+                                    "services": {"dns": {}, "ntp": {}},
+                                    "selinux": "Enforcing",
+                                    "public_egress_denied": True,
+                                }
+                                for node in node_names
+                            ],
+                            "public_egress_denied": True,
+                            "selinux_enforcing": True,
+                            "capacity_production": False,
+                            "real_hetzner_network": False,
+                            "physical_failure": False,
+                            "rocky_linux_real": True,
+                            "offline_installation_reused_from_pr128": True,
+                            "snapshot_files": [{"size": 1, "checksum": "a" * 64}],
+                            "etcd_baseline": [
+                                {
+                                    "member_count": 3,
+                                    "local_endpoint_healthy": True,
+                                    "alarms": [],
+                                }
+                                for _ in range(3)
+                            ],
+                            "etcd_degraded_survivors": [
+                                {
+                                    "member_count": 3,
+                                    "local_endpoint_healthy": True,
+                                    "alarms": [],
+                                }
+                                for _ in range(2)
+                            ],
+                            "etcd_recovered": [
+                                {
+                                    "member_count": 3,
+                                    "local_endpoint_healthy": True,
+                                    "alarms": [],
+                                }
+                                for _ in range(3)
+                            ],
+                            "baseline": {
+                                "api_ready": True,
+                                "ready_count": 6,
+                                "cilium_ready": 6,
+                            },
+                            "degraded": {
+                                "api_ready": True,
+                                "quorum_write": {"head_sha": head},
+                            },
+                            "recovered": {
+                                "api_ready": True,
+                                "ready_count": 6,
+                                "cilium_ready": 6,
+                            },
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                return MOD.subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_rke2_local_ha_contract", return_value=ha_contract),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+            ):
+                self.assertEqual(0, MOD.rke2_local_ha_qualification())
+                command = run.call_args.args[0]
+                self.assertIn("platform/ansible/tests/mgmt_ha_vm/main.yml", command)
+                self.assertIn(f"ha_repo={root}", command)
+                self.assertIn(f"ha_head_sha={head}", command)
+                self.assertNotIn("--repo", command)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_rke2_local_ha_contract", return_value=ha_contract),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run") as run,
+            ):
+                self.assertEqual(0, MOD.rke2_local_ha_qualification())
+                run.assert_not_called()
+
+    def test_rke2_local_ha_launcher_rejects_dirty_worktree(self):
+        workflow = {
+            "entrypoint": "scripts/repoctl.py rke2-local-ha-qualification",
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "capacity_production_claim": False,
+            "evidence": {"authoritative": ".context/mgmt-ha/<sha>/result.json"},
+        }
+        with (
+            mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+            mock.patch.object(
+                MOD,
+                "git",
+                return_value=" M platform/ansible/tests/mgmt_ha_vm/main.yml\n",
+            ),
+            mock.patch.object(MOD, "run") as run,
+        ):
+            self.assertEqual(2, MOD.rke2_local_ha_qualification())
+            run.assert_not_called()
 
     def test_tekton_proof_launcher_consumes_registry_and_records_remote_readback(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
