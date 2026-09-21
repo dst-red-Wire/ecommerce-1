@@ -509,7 +509,8 @@
       changed_when: false
 
     - name: Require SELinux Enforcing
-      ansible.builtin.command: getenforce
+      ansible.builtin.command:
+        argv: [getenforce]
       register: ha_selinux
       changed_when: false
       failed_when: ha_selinux.stdout | trim != 'Enforcing'
