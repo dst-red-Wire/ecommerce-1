@@ -88,8 +88,8 @@ mgmt_local_ha_contract:
     dns_name: rke2-ha.internal.test
     registration_port: 9345
     kubernetes_api_port: 6443
-    run_as_user: 65534
-    run_as_group: 65534
+    run_as_user: 99
+    run_as_group: 99
     image:
       reference: docker.io/library/haproxy@sha256:37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2
       version: 3.2.23
