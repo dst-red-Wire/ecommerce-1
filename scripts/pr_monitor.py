@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""Low-cost GitHub PR watcher that wakes Codex only for meaningful deltas."""
+"""Low-cost GitHub PR watcher that emits bounded ChatGPT review handoffs for meaningful deltas."""
 
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import copy
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
-import tempfile
 import time
 from typing import Any
 import urllib.error
@@ -298,82 +295,27 @@ def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTE
     return encoded
 
 
-def codex_prompt(
+def chatgpt_review_handoff(
     number: int,
     previous: dict[str, Any],
     current: dict[str, Any],
     changes: dict[str, Any],
     files: list[str],
 ) -> str:
-    prior_verdict = previous.get("validated_verdict") or ""
-    reuse = (
-        "Reuse the previous validated verdict below and adjust only what the delta invalidates."
-        if prior_verdict
-        else "No previous validated verdict is available; evaluate only this bounded delta."
-    )
     instruction = (
-        "Incremental PR review only. Do not reload PR history or repeat the full audit. "
-        f"{reuse} Read only changed_files plus the finding paths in delta and run only related validations. "
-        "Return exactly five lines: PR #<number>; HEAD : <old> → <new or unchanged>; "
-        "CHANGEMENT : <delta>; VERDICT : READY | BLOCKED | WAITING; ACTION : <one next action>.\n"
+        "ChatGPT incremental exact-SHA PR review handoff. "
+        "Do not reload PR history or repeat proven gates. "
+        "Review only changed_files plus finding paths in delta, then issue CODE/SECURITY findings "
+        "bound to current_head. No other AI reviewer is authorized.\n"
     )
     payload = {
         "pr": number,
-        "previous_validated_verdict": prior_verdict,
         "delta": changes,
         "current_head": current.get("head_sha"),
         "changed_files": files,
     }
     encoded = bounded_payload(payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode()))
     return instruction + encoded
-
-
-def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        cwd=cwd,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-
-@contextmanager
-def exact_head_worktree(head_sha: str):
-    repo_root = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(prefix="pr-monitor-") as directory:
-        worktree = Path(directory) / "repo"
-        try:
-            _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=repo_root)
-        except subprocess.CalledProcessError as exc:
-            raise TransientGitHubError(f"git fetch failed transiently for {head_sha}") from exc
-        fetched = _run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo_root).stdout.strip()
-        if fetched != head_sha:
-            raise RuntimeError(f"fetched head mismatch: expected {head_sha}, got {fetched}")
-        _run(["git", "worktree", "add", "--detach", str(worktree), head_sha], cwd=repo_root)
-        try:
-            yield worktree
-        finally:
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
-                cwd=repo_root,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-
-
-def invoke_codex(command: list[str], prompt: str, *, head_sha: str) -> str:
-    if not command:
-        print("CHANGE_DETECTED", flush=True)
-        return ""
-    with exact_head_worktree(head_sha) as worktree:
-        completed = _run(command, cwd=worktree, input_text=prompt)
-    output = completed.stdout.strip()
-    if not output:
-        raise RuntimeError("configured Codex command produced no validated verdict")
-    return output
 
 
 def next_interval(unchanged: int, minimum: int, maximum: int) -> int:
@@ -424,7 +366,6 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
     changes = delta(previous, current) if previous else {}
     unchanged = 0 if changes else int(previous.get("unchanged_polls", 0)) + 1
     current["unchanged_polls"] = unchanged
-    current["validated_verdict"] = previous.get("validated_verdict", "")
 
     if previous and changes:
         files = changed_files(
@@ -434,14 +375,10 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
             current.get("head_sha", ""),
             token,
         )
-        prompt = codex_prompt(args.pr, previous, current, changes, files)
-        verdict = invoke_codex(
-            args.codex_command,
-            prompt,
-            head_sha=current.get("head_sha") or "",
-        )
-        if verdict:
-            current["validated_verdict"] = verdict
+        handoff = chatgpt_review_handoff(args.pr, previous, current, changes, files)
+        current["chatgpt_review_handoff"] = handoff
+        print("CHATGPT_REVIEW_REQUIRED", flush=True)
+        print(handoff, flush=True)
     else:
         print("NO_CHANGE", flush=True)
 
@@ -471,12 +408,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--abandoned", action="store_true")
-    parser.add_argument("--codex-command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.interval < 1 or args.max_interval < args.interval:
         parser.error("intervals must satisfy 1 <= --interval <= --max-interval")
-    if args.codex_command is None:
-        args.codex_command = shlex.split(os.environ.get("PR_MONITOR_CODEX_COMMAND", ""))
     return args
 
 
