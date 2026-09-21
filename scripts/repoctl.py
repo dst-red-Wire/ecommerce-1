@@ -4631,35 +4631,44 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
 def qualification_proof(base: str) -> int:
     workflow = qualification_workflow("qualification_proof")
     if workflow.get("verify_change_runs") != 1 or workflow.get("performance_audit_runs") != 1:
-        return fail("qualification-proof workflow must execute exactly one verify-change and one performance audit")
+        return fail("qualification-proof workflow may execute each authoritative step at most once when evidence is missing")
 
     head = git("rev-parse", "HEAD").strip()
     _workflow_status("RUN", f"qualification-proof {head[:12]}")
     if workflow.get("clean_worktree_required") is True and git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("qualification-proof requires a clean exact-SHA worktree")
-    if verify_change(base, head):
-        return 1
 
     evidence = _valid_exact_evidence(base, head)
     if evidence is None:
-        return fail(f"qualification-proof exact PASS evidence missing/invalid for {head}")
+        if verify_change(base, head):
+            return 1
+        evidence = _valid_exact_evidence(base, head)
+        if evidence is None:
+            return fail(f"qualification-proof exact PASS evidence missing/invalid for {head}")
+    else:
+        print(f"PASS qualification-proof: reusing exact evidence {evidence.relative_to(ROOT)}")
 
-    audit_path = _qualification_audit_path(head)
-    audit = run(
-        [
-            sys.executable,
-            "scripts/performance_audit.py",
-            "--evidence",
-            str(evidence),
-            "--output",
-            str(audit_path),
-        ],
-        check=False,
-    )
-    if audit.returncode:
-        return audit.returncode
-    if _valid_performance_audit(base, head) is None:
-        return fail(f"qualification-proof performance audit missing/invalid for {head}")
+    audit_path = _valid_performance_audit(base, head)
+    if audit_path is None:
+        requested_audit_path = _qualification_audit_path(head)
+        audit = run(
+            [
+                sys.executable,
+                "scripts/performance_audit.py",
+                "--evidence",
+                str(evidence),
+                "--output",
+                str(requested_audit_path),
+            ],
+            check=False,
+        )
+        if audit.returncode:
+            return audit.returncode
+        audit_path = _valid_performance_audit(base, head)
+        if audit_path is None:
+            return fail(f"qualification-proof performance audit missing/invalid for {head}")
+    else:
+        print(f"PASS qualification-proof: reusing performance audit {audit_path.relative_to(ROOT)}")
 
     _workflow_status("PASS", f"qualification-proof {head[:12]}")
     print(
