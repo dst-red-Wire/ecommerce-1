@@ -282,6 +282,7 @@
 
 - name: Bootstrap first RKE2 control plane
   hosts: ha-cp-01
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -302,6 +303,7 @@
 
 - name: Join second RKE2 control plane directly to the bootstrap member
   hosts: ha-cp-02
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -318,6 +320,7 @@
 
 - name: Wait for the first two control planes
   hosts: ha-cp-01
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   tasks:
@@ -381,6 +384,7 @@
 
 - name: Deploy HAProxy in front of the control planes
   hosts: ha-cp-01
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -501,6 +505,7 @@
 
 - name: Join third control plane through HAProxy
   hosts: ha-cp-03
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -616,6 +621,7 @@
 
 - name: Prove six-node HA, quorum, snapshot and recovery
   hosts: ha-cp-01
+  serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
