@@ -30,10 +30,10 @@ mgmt_local_ha_contract:
     vendor_minimum_capacity_profile: false
     control_plane:
       cpus: 2
-      memory_mib: 2048
+      memory_mib: 2560
     worker:
       cpus: 2
-      memory_mib: 1280
+      memory_mib: 1024
 
   nodes:
     cp-01:
