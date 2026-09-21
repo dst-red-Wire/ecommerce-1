@@ -2875,7 +2875,15 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     saved = float(payload["metrics"].get("estimated_saved_seconds", 0.0) or 0.0)
-    print(f"PASS | promoted worktree evidence | {requested} | tree {commit_tree} | saved~{saved:.3f}s")
+    source_written_bytes = sum(
+        int(record.get("written_bytes", 0) or 0)
+        for record in source.get("gates", [])
+        if isinstance(record, dict)
+    )
+    print(
+        f"PASS | promoted worktree evidence | {requested} | tree {commit_tree}"
+        f" | saved~{saved:.3f}s | source~{_format_written_bytes(source_written_bytes)} octets écrits"
+    )
     return destination
 
 
@@ -3550,10 +3558,19 @@ def _execute_plan_scope(
 def _record_delivery_wall(evidence_path: Path, evidence: dict, started: float) -> float:
     wall = round(time.monotonic() - started, 3)
     metrics = evidence.setdefault("metrics", evidence_metrics(evidence.get("gates", [])))
+    written_bytes = sum(
+        int(record.get("written_bytes", 0) or 0)
+        for record in evidence.get("gates", [])
+        if isinstance(record, dict)
+    )
     metrics["deliver_wall_seconds"] = wall
+    metrics["deliver_written_bytes"] = written_bytes
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
-        f"DELIVER_METRICS wall={wall:.3f}s executed={metrics.get('executed_gates', 0)} reused={metrics.get('reused_gates', 0)}"
+        f"DELIVER_METRICS wall={wall:.3f}s"
+        f" written_bytes={written_bytes}"
+        f" written_bytes_human='{_format_written_bytes(written_bytes)}'"
+        f" executed={metrics.get('executed_gates', 0)} reused={metrics.get('reused_gates', 0)}"
     )
     return wall
 
@@ -4902,10 +4919,19 @@ def deliver(base: str, title: str, message: str) -> int:
         return "executed"
 
     rows = "\n".join(
-        f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds', 0)} | {gate_source(g)} |" for g in ev["gates"]
+        (
+            f"| `{g['gate']}` | {g['status']} | {g.get('duration_seconds', 0)}"
+            f" | {_format_written_bytes(int(g.get('written_bytes', 0) or 0))} | {gate_source(g)} |"
+        )
+        for g in ev["gates"]
+    )
+    total_written_bytes = sum(
+        int(g.get("written_bytes", 0) or 0)
+        for g in ev["gates"]
+        if isinstance(g, dict)
     )
     body.write_text(
-        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Source |\n| --- | --- | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
     existing = output(
