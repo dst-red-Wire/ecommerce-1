@@ -253,7 +253,7 @@
     - name: Require fixed HA addresses not to answer before creation
       ansible.builtin.assert:
         that:
-          - item.rc != 0
+          - item.rc == 1
         fail_msg: >-
           Address {{ item.item.value.address }} responds from the selected VirtualBox
           host-only source {{ mgmt_local_ha_contract.controller.host_address }};

@@ -203,6 +203,23 @@ class MgmtHaVmTests(unittest.TestCase):
             run.assert_called_once()
             sleep.assert_not_called()
 
+        with (
+            mock.patch.object(GUARD.subprocess, "run", return_value=transient) as run,
+            mock.patch.object(GUARD.time, "sleep") as sleep,
+        ):
+            self.assertEqual(
+                GUARD.WINDOWS_INTEROP_EXHAUSTED_RC,
+                GUARD.run_windows_command(["vbox", "list"]).returncode,
+            )
+            self.assertEqual(GUARD.WINDOWS_INTEROP_ATTEMPTS, run.call_count)
+            self.assertEqual(GUARD.WINDOWS_INTEROP_ATTEMPTS - 1, sleep.call_count)
+
+        localized = GUARD.subprocess.CompletedProcess([], 1, b"r\x82ponse", b"")
+        with mock.patch.object(GUARD.subprocess, "run", return_value=localized):
+            result = GUARD.run_windows_command(["ping"])
+            self.assertEqual(1, result.returncode)
+            self.assertIn("�", result.stdout)
+
     def test_nested_vm_phases_are_bounded_parallel_and_json_safe(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         create_helper = (FIXTURE / "single_vm_action.yml").read_text(encoding="utf-8")

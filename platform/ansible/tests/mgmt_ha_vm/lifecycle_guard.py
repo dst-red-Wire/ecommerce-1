@@ -51,6 +51,7 @@ POSTCONDITION_TASK_RE = re.compile(
 
 WINDOWS_INTEROP_ATTEMPTS = 3
 WINDOWS_INTEROP_DELAY_SECONDS = 2
+WINDOWS_INTEROP_EXHAUSTED_RC = 75
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -152,13 +153,29 @@ def run_windows_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         raise ValueError("Windows command is required")
     result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(WINDOWS_INTEROP_ATTEMPTS):
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        raw = subprocess.run(command, capture_output=True, check=False)
+        stdout = (
+            raw.stdout.decode("utf-8", errors="replace")
+            if isinstance(raw.stdout, bytes)
+            else raw.stdout
+        )
+        stderr = (
+            raw.stderr.decode("utf-8", errors="replace")
+            if isinstance(raw.stderr, bytes)
+            else raw.stderr
+        )
+        result = subprocess.CompletedProcess(raw.args, raw.returncode, stdout, stderr)
         if result.returncode == 0 or WSL_INTEROP_RE.search(result.stderr) is None:
             return result
         if attempt + 1 < WINDOWS_INTEROP_ATTEMPTS:
             time.sleep(WINDOWS_INTEROP_DELAY_SECONDS)
     assert result is not None
-    return result
+    return subprocess.CompletedProcess(
+        result.args,
+        WINDOWS_INTEROP_EXHAUSTED_RC,
+        result.stdout,
+        result.stderr,
+    )
 
 
 def probe_ownership(vbox: str, identity: Path, vm_name: str) -> dict[str, Any]:
