@@ -44,6 +44,20 @@
   changed_when: true
   when: ha_single_vm_action == 'create'
 
+- name: Fail closed when fresh creation failed for anything except the bounded console wait
+  ansible.builtin.assert:
+    that:
+      - >-
+        ha_single_vm_create_initial.rc == 0
+        or
+        'Timed out waiting for isolated VM console'
+        in ((ha_single_vm_create_initial.stdout | default(''))
+            ~ (ha_single_vm_create_initial.stderr | default('')))
+    fail_msg: >-
+      Fresh VM creation failed before the recognized bounded console timeout;
+      refusing to resume a possibly unrelated or unsafe failure.
+  when: ha_single_vm_action == 'create'
+
 - name: Resume the exact owned VM once when console bootstrap exceeded the first bounded attempt
   ansible.builtin.command:
     argv:
@@ -64,6 +78,10 @@
   when:
     - ha_single_vm_action == 'create'
     - ha_single_vm_create_initial.rc != 0
+    - >-
+      'Timed out waiting for isolated VM console'
+      in ((ha_single_vm_create_initial.stdout | default(''))
+          ~ (ha_single_vm_create_initial.stderr | default('')))
 
 - name: Cold-stage independently approved PR 128 bundle on exact owned VM
   ansible.builtin.command:
