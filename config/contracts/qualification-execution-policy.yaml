@@ -47,7 +47,6 @@ qualification_lifecycle:
     every_wait_must_be_bounded: true
     indefinite_wait: forbidden
   reruns:
-    final_candidate_runs: 1
     additional_final_run_requires:
       - source-change-new-sha
       - blocking-failure
@@ -55,8 +54,6 @@ qualification_lifecycle:
     non_blocking_improvement_creates_follow_up: true
   duplication:
     precommit_is_development_gate: true
-    final_authoritative_qualification_runs: 1
-    fresh_exact_sha_evidence_must_be_reused: true
     duplicate_full_gate_run_same_sha: forbidden
 
 execution:
