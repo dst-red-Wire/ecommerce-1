@@ -4894,6 +4894,21 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             return fail("RKE2 local qualification source changed during execution")
     return 0
 
+def rke2_local_ha_prepare() -> int:
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA preparation requires a clean worktree")
+    require("ansible-playbook")
+    return run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "platform/ansible/tests/mgmt_ha_vm/prepare_haproxy.yml",
+        ],
+        check=False,
+    ).returncode
+
+
 def rke2_local_ha_qualification() -> int:
     workflow = qualification_workflow("rke2_local_ha")
     expected_entrypoint = "scripts/repoctl.py rke2-local-ha-qualification"
@@ -5372,6 +5387,7 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    rke2prep = sub.add_parser("rke2-local-ha-prepare")
     rke2ha = sub.add_parser("rke2-local-ha-qualification")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
@@ -5528,6 +5544,8 @@ def main() -> int:
             return qualification_proof(args.base)
         if args.cmd == "rke2-local-virtualbox-qualification":
             return rke2_local_virtualbox_qualification(args.inputs)
+        if args.cmd == "rke2-local-ha-prepare":
+            return rke2_local_ha_prepare()
         if args.cmd == "rke2-local-ha-qualification":
             return rke2_local_ha_qualification()
         if args.cmd == "perf-campaign":
