@@ -1231,6 +1231,23 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        active_review_automation = {
+            "Makefile": ("CODEX_COMMAND", "--codex-command"),
+            "scripts/pr_monitor.py": (
+                "PR_MONITOR_CODEX_COMMAND",
+                "--codex-command",
+                "invoke_codex",
+                "codex_prompt",
+            ),
+        }
+        for relative, forbidden_tokens in active_review_automation.items():
+            source = (root / relative).read_text(encoding="utf-8")
+            if any(token.lower() in source.lower() for token in forbidden_tokens):
+                errors.append(
+                    "review automation must not expose Codex trigger, polling, or invocation controls"
+                )
+                break
+
         review_budget = load_yaml(root / lock["machine_contracts"]["review_budget"])
         if review_budget.get("review_authority_source") != (
             "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"
