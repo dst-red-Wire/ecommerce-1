@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import copy
 import json
 import os
@@ -11,13 +12,14 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 import urllib.error
 import urllib.request
 
 PROMPT_BUDGET_BYTES = 16 * 1024
-GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
+GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){owner{login} pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid comments(last:100){nodes{id createdAt body author{login}}} reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
 THREADS_QUERY = """query PRMonitorThreads($owner:String!,$repo:String!,$number:Int!,$threadCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}}}}}"""
 
 
@@ -82,7 +84,9 @@ def _graphql_pr(payload: dict[str, Any], number: int) -> dict[str, Any]:
     pr = repository.get("pullRequest")
     if pr is None:
         raise RuntimeError(f"pull request #{number} not found")
-    return pr
+    result = dict(pr)
+    result["_repository_owner_login"] = ((repository.get("owner") or {}).get("login") or "")
+    return result
 
 
 def paginate_review_threads(
@@ -112,6 +116,52 @@ def paginate_review_threads(
     result = dict(pr)
     result["reviewThreads"] = {"nodes": nodes, "pageInfo": page_info}
     return result
+
+
+CHATGPT_REVIEW_MARKER_RE = re.compile(
+    r"<!--\\s*chatgpt-exact-sha-review:v1\\s+(\\{[^\\n]*\\})\\s*-->"
+)
+
+
+def _latest_chatgpt_review(pr: dict[str, Any]) -> dict[str, Any]:
+    head_sha = str(pr.get("headRefOid") or "")
+    owner_login = str(pr.get("_repository_owner_login") or "")
+    latest: dict[str, dict[str, Any]] = {}
+    comments = list(((pr.get("comments") or {}).get("nodes") or []))
+    comments.sort(key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
+    for comment in comments:
+        if owner_login and str((comment.get("author") or {}).get("login") or "") != owner_login:
+            continue
+        for raw in CHATGPT_REVIEW_MARKER_RE.findall(str(comment.get("body") or "")):
+            try:
+                proof = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = str(proof.get("kind") or "")
+            if (
+                proof.get("provider") == "ChatGPT"
+                and proof.get("head_sha") == head_sha
+                and kind in {"code", "security"}
+            ):
+                latest[kind] = proof
+    code = latest.get("code")
+    security = latest.get("security")
+    if not code and not security:
+        return {}
+    ready = bool(
+        code
+        and security
+        and code.get("status") == "PASS"
+        and security.get("status") == "PASS"
+        and code.get("blocking_findings") == 0
+        and security.get("blocking_findings") == 0
+    )
+    return {
+        "head_sha": head_sha,
+        "verdict": "READY" if ready else "BLOCKED",
+        "code": code or {},
+        "security": security or {},
+    }
 
 
 def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]:
@@ -151,6 +201,8 @@ def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]
         "reviews": reviews,
         "open_findings_count": len(findings),
         "open_findings": findings,
+        "chatgpt_review": _latest_chatgpt_review(pr),
+        "validated_verdict": (_latest_chatgpt_review(pr).get("verdict") or ""),
         "mergeable": pr.get("mergeable"),
         "merge_state_status": pr.get("mergeStateStatus"),
         "is_draft": bool(pr.get("isDraft")),
@@ -169,6 +221,7 @@ MEANINGFUL = (
     "reviews",
     "open_findings_count",
     "open_findings",
+    "chatgpt_review",
     "mergeable",
     "merge_state_status",
     "is_draft",
