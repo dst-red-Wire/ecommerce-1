@@ -109,6 +109,8 @@ ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
 - Deterministic gates and tests are evidence for the review; they do not replace ChatGPT CODE or SECURITY review.
 - Final ChatGPT review results are recorded on the PR with `chatgpt-exact-sha-review:v1` machine markers for `code` and `security`; both must bind the current full head SHA and be PASS with zero blocking findings.
 - `finish-pr` consumes only those ChatGPT markers. Codex comments, reactions, summaries, statuses, and completed reviews are ignored for merge readiness.
+- Codex may be used only as a narrowly scoped execution fallback when a required task cannot be performed with ChatGPT's available capabilities. The reason must be explicit, the scope must be minimal, and Codex output is evidence returned to ChatGPT.
+- Codex must never become CODE/SECURITY review authority, emit merge-readiness markers, decide merge readiness, or make merge decisions. ChatGPT performs the final exact-SHA CODE/SECURITY review; the repository owner retains merge decision authority.
 
 ## Automated delivery
 
