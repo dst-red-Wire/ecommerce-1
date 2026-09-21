@@ -1,0 +1,109 @@
+---
+mgmt_local_ha_contract:
+  schema_version: 1
+  purpose: six-node-functional-ha-qualification
+  capacity_production_claim: false
+  real_hetzner_network_claim: false
+  physical_failure_claim: false
+
+  controller:
+    os: wsl2
+    vagrant_windows: 'C:\Program Files\Vagrant\bin\vagrant.exe'
+    vagrant_version: 2.4.9
+    virtualbox_windows: '/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe'
+    virtualbox_version: 7.2.18r175117
+    hostonly_adapter: VirtualBox Host-Only Ethernet Adapter
+    host_address: 192.168.22.1
+    subnet: 192.168.22.0/24
+
+  rocky_box:
+    name: ecommerce/rocky-9.8-20260525.0
+    url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-Vagrant-Vbox-9.8-20260525.0.x86_64.vagrant.virtualbox.box
+    sha256: beace4853d89f5d1def29fca6eec8893564882d7db85841d3d9c287ac84fb9e4
+
+  resources:
+    mode: constrained-functional-lab
+    vendor_minimum_capacity_profile: false
+    simultaneous_nodes_required: 6
+    control_plane:
+      cpus: 2
+      memory_mib: 2048
+    worker:
+      cpus: 2
+      memory_mib: 1280
+    aggregate_vm_memory_mib: 9984
+    aggregate_vcpus: 12
+
+  nodes:
+    cp-01:
+      vm_name: ecommerce-mgmt-test-ha-cp-01
+      hostname: ha-cp-01
+      role: control-plane
+      address: 192.168.22.61
+      mac: 02EECC00A061
+    cp-02:
+      vm_name: ecommerce-mgmt-test-ha-cp-02
+      hostname: ha-cp-02
+      role: control-plane
+      address: 192.168.22.62
+      mac: 02EECC00A062
+    cp-03:
+      vm_name: ecommerce-mgmt-test-ha-cp-03
+      hostname: ha-cp-03
+      role: control-plane
+      address: 192.168.22.63
+      mac: 02EECC00A063
+    worker-01:
+      vm_name: ecommerce-mgmt-test-ha-worker-01
+      hostname: ha-worker-01
+      role: worker
+      address: 192.168.22.71
+      mac: 02EECC00A071
+    worker-02:
+      vm_name: ecommerce-mgmt-test-ha-worker-02
+      hostname: ha-worker-02
+      role: worker
+      address: 192.168.22.72
+      mac: 02EECC00A072
+    worker-03:
+      vm_name: ecommerce-mgmt-test-ha-worker-03
+      hostname: ha-worker-03
+      role: worker
+      address: 192.168.22.73
+      mac: 02EECC00A073
+
+  services:
+    dns:
+      host: worker-02
+      address: 192.168.22.72
+      port: 53
+      record_name: rke2-ha.internal.test
+      record_address: 192.168.22.73
+    ntp:
+      host: worker-03
+      address: 192.168.22.73
+      port: 123
+      maximum_offset_seconds: 5
+
+  ha_endpoint:
+    implementation: haproxy
+    host: worker-03
+    address: 192.168.22.73
+    dns_name: rke2-ha.internal.test
+    registration_port: 9345
+    kubernetes_api_port: 6443
+    image:
+      reference: docker.io/library/haproxy@sha256:37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2
+      version: 3.2.23
+      platform: linux/amd64
+      pull_policy: Never
+
+  offline:
+    approved_manifest_sha256: 738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad
+    bundle_path_template: .context/rke2-offline-bundle-<rke2-version-filename>
+
+  failure_test:
+    stop_control_plane: cp-02
+    surviving_control_planes: [cp-01, cp-03]
+    required_quorum: 2
+    restore_control_plane: cp-02
