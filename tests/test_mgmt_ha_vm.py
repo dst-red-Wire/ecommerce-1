@@ -230,17 +230,20 @@ class MgmtHaVmTests(unittest.TestCase):
             '- "{{ mgmt_local_ha_contract.execution.max_forks }}"',
             source,
         )
+        self.assertIn("hosts: ha-worker-01,ha-worker-02", cluster)
+        self.assertIn("strategy: free", cluster)
         self.assertIn(
+            'throttle: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
+            cluster,
+        )
+        self.assertNotIn(
+            'serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"',
+            cluster,
+        )
+        self.assertNotIn(
             'serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
             cluster,
         )
-        self.assertGreaterEqual(
-            cluster.count(
-                'serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"'
-            ),
-            6,
-        )
-        self.assertIn("strategy: free", cluster)
         self.assertGreaterEqual(
             cluster.count(
                 'throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"'
@@ -257,9 +260,9 @@ class MgmtHaVmTests(unittest.TestCase):
         ):
             self.assertIn(f"- name: {play}", cluster)
 
-        self.assertIn("hosts: ha-cp-01", cluster)
-        self.assertIn("hosts: ha-cp-02", cluster)
-        self.assertIn("hosts: ha-cp-03", cluster)
+        self.assertGreaterEqual(cluster.count("hosts: ha-cp-01"), 4)
+        self.assertEqual(1, cluster.count("hosts: ha-cp-02"))
+        self.assertEqual(1, cluster.count("hosts: ha-cp-03"))
         self.assertNotIn("serial: 6", cluster)
 
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
