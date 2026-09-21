@@ -31,9 +31,6 @@ qualification_lifecycle:
     post_pass_scope_expansion: forbidden
     non_blocking_findings: follow-up-work-item
     blocking_findings: return-to-development
-    same_sha_pass_replay: reuse-valid-evidence
-    same_sha_failed_replay: requires-explicit-blocking-reason
-    final_candidate_runs: 1
   required_per_workflow:
     - purpose
     - exit_criteria
@@ -43,6 +40,11 @@ qualification_lifecycle:
     tracked: false
     exact_sha_binding_required: true
     source_mutation_for_evidence: forbidden
+  authoritative_completion:
+    applies_when: merge_authoritative=true
+    same_sha_pass_replay: reuse-valid-evidence
+    same_sha_failed_replay: requires-explicit-blocking-reason
+    final_candidate_runs: 1
   waits:
     every_wait_must_be_bounded: true
     indefinite_wait: forbidden
