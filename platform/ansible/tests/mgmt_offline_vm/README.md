@@ -9,10 +9,11 @@ by `architecture.lock.yaml`, `config/infrastructure/mgmt-bootstrap.yaml` and
 The supported controller is WSL2 with Windows VirtualBox and native Windows Vagrant.
 The fixture contract in `contract.yml` pins Vagrant 2.4.9, the official Rocky 9.8
 box and its SHA256, and the accepted local resource bounds. The validated host used
-VirtualBox 7.2.18. Vagrant 2.4.8 does not support VirtualBox 7.2; pass an isolated
-2.4.9 executable with `vm_vagrant_windows` when the global installation is older.
-The repository's qualified Python/Ansible environment and locked collections must
-already be prepared.
+VirtualBox 7.2.18. The authoritative launcher requires the canonical Windows Vagrant
+installation at `C:\\Program Files\\Vagrant\\bin\\vagrant.exe` and verifies that
+it reports exactly Vagrant 2.4.9 before the lifecycle starts. Caller-controlled
+Vagrant executable overrides are rejected. The repository's qualified Python/Ansible
+environment and locked collections must already be prepared.
 
 ## Rebuild the offline bundle
 
@@ -59,7 +60,6 @@ Create an ignored `.context/mgmt-vm-inputs.json`:
   "vm_mac": "02EECC009801",
   "vm_cpus": 4,
   "vm_memory": 4096,
-  "vm_vagrant_windows": "C:\\absolute\\path\\to\\vagrant.exe",
   "mgmt_offline_bundle_dir": "/absolute/path/to/rke2-offline-bundle",
   "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
 }
@@ -73,16 +73,15 @@ the same contract and are passed through `vm_cpus` and `vm_memory`. The `resize`
 action can reconcile an already owned stopped/running fixture to those values and
 verifies them from the guest after restart.
 
-Run the lifecycle in order:
+Run the authoritative lifecycle through the single registered entrypoint:
 
 ```console
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=validate
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=create
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=test
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=server
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=server
-PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml -e @.context/mgmt-vm-inputs.json -e vm_action=destroy
+.venv/qualification/bin/python scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json
 ```
+
+Direct `ansible-playbook` invocations are diagnostic-only. They do not create
+merge-authoritative RKE2 qualification evidence and must not replace the registered
+`repoctl` lifecycle.
 
 `create` boots with every network adapter disconnected. Through the private serial
 pipe, it installs a fresh SSH key and a persistent output/forward default-deny nftables
