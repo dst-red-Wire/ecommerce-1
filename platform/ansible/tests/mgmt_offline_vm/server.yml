@@ -301,7 +301,7 @@
           - name: Preserve bounded RKE2 proof on controller
             ansible.builtin.copy:
               dest: {{ (vm_state ~ '/rke2-result.json') | to_json }}
-              content: '{{ "{{ rke2_probe.stdout }}\n" }}'
+              content: '{{ "{{ rke2_probe.stdout }}" }}'
               mode: '0600'
             delegate_to: localhost
             become: false

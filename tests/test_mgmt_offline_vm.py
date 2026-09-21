@@ -93,6 +93,11 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             self.assertEqual(result["before_sha256"], before)
             self.assertEqual(result["after_sha256"], TAMPER.sha256(artifact))
 
+    def test_server_writes_strict_json_without_literal_escape_suffix(self):
+        server = (FIXTURE / "server.yml").read_text()
+        self.assertIn('content: \'{{ "{{ rke2_probe.stdout }}" }}\'', server)
+        self.assertNotIn(r"rke2_probe.stdout }}\n", server)
+
     def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
