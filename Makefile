@@ -178,8 +178,8 @@ diff-context: ## Build compact diff-only context pack
 failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
 
-pr-monitor: ## Poll one GitHub PR cheaply; PR/OWNER/REPO required, CODEX_COMMAND optional
-	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(CODEX_COMMAND),--codex-command $(CODEX_COMMAND),)
+pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handoffs; PR/OWNER/REPO required
+	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
 
 review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
