@@ -470,6 +470,27 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with mock.patch.object(MOD, "_supports_color", return_value=True):
             self.assertIn("\033[32m56262884\033[0m", MOD._paint("56262884", "32"))
 
+    def test_dynamic_written_bytes_updates_only_numeric_field_like_stopwatch(self):
+        import io
+
+        stream = io.StringIO()
+        with (
+            mock.patch.object(MOD, "_supports_color", return_value=True),
+            mock.patch.object(MOD, "_context_written_bytes", side_effect=[1_652_089, 1_652_190]),
+            mock.patch("sys.stdout", stream),
+        ):
+            MOD._DYNAMIC_WRITE_BYTES_VISIBLE = False
+            MOD._DYNAMIC_WRITE_BYTES_WIDTH = 0
+            MOD._DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
+            MOD._emit_dynamic_write_bytes(force=True)
+            MOD._emit_dynamic_write_bytes(force=True)
+
+        rendered = stream.getvalue()
+        self.assertEqual(1, rendered.count("Nombre d'octets écrits:"))
+        self.assertIn("1652089", rendered)
+        self.assertIn("1652190", rendered)
+        self.assertIn("\r\033[", rendered)
+
     def test_semantic_region_snapshot_detects_module_binding_mutation(self):
         source = "BINDING = 'one'\n\nclass Stop:\n    pass\n"
         projection = "BINDING = 'one'\n"
