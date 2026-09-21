@@ -83,6 +83,7 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotRegex(source, r"\bcurl\b|\bwget\b")
         self.assertIn("docker, pull", source)
         self.assertIn("sha256sum, --check", source)
+        self.assertNotIn("docker\n          - image\n          - save\n          - --platform", source)
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
 
