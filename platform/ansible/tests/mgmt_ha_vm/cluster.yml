@@ -518,7 +518,8 @@
 
 - name: Join remaining workers through HAProxy
   hosts: ha-worker-01,ha-worker-02
-  serial: 1
+  serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"
+  strategy: free
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -532,6 +533,7 @@
 
 - name: Verify DNS, NTP, SELinux and denied public egress on all six nodes
   hosts: all
+  strategy: free
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -561,6 +563,7 @@
           - "{{ mgmt_local_ha_contract.services.ntp.maximum_offset_seconds }}"
       register: ha_service_probe
       changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
     - name: Require SELinux Enforcing
       ansible.builtin.command:
@@ -568,12 +571,14 @@
       register: ha_selinux
       changed_when: false
       failed_when: ha_selinux.stdout | trim != 'Enforcing'
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
     - name: Inspect active canonical HA egress boundary
       ansible.builtin.command:
         argv: [nft, -j, list, table, inet, ecommerce_mgmt_bootstrap]
       register: ha_egress_policy
       changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
     - name: Require output and forwarding default deny on every node
       ansible.builtin.assert:
@@ -590,6 +595,7 @@
             | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'forward')
             | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop')
             | list | length == 1
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
     - name: Require public TCP egress to remain denied
       ansible.builtin.command:
@@ -606,6 +612,7 @@
             assert ok
       register: ha_public_egress
       changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
 - name: Prove six-node HA, quorum, snapshot and recovery
   hosts: ha-cp-01
