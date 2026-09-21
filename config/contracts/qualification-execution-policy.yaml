@@ -490,6 +490,9 @@ workflows:
         - config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json
         - config/infrastructure/mgmt-bootstrap.yaml
         - config/infrastructure/network-plan.yaml
+        - config/contracts/toolchain-lock.json
+        - config/toolchain/versions.env
+        - platform/ansible/requirements.yml
         - platform/ansible/roles/mgmt_offline_artifacts
         - platform/ansible/roles/mgmt_private_network
         - platform/ansible/roles/rke2_server
