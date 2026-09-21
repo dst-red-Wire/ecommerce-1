@@ -580,7 +580,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ],
             actions,
         )
-        for call in run.call_args_list:
+        ansible_calls = [
+            call
+            for call in run.call_args_list
+            if call.args and call.args[0] and call.args[0][0] == "ansible-playbook"
+        ]
+        self.assertEqual(10, len(ansible_calls))
+        for call in ansible_calls:
             command = call.args[0]
             self.assertIn(f"vm_repo={root}", command)
             self.assertIn(f"vm_state={state}", command)
