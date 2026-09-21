@@ -112,6 +112,12 @@
           - >-
             (ha_haproxy_preparation.content | b64decode | from_json).archive_sha256
             == (ha_haproxy_archive_hash.stdout | trim).split()[0]
+          - >-
+            (ha_haproxy_preparation.content | b64decode | from_json).run_as_user
+            == mgmt_local_ha_contract.ha_endpoint.run_as_user
+          - >-
+            (ha_haproxy_preparation.content | b64decode | from_json).run_as_group
+            == mgmt_local_ha_contract.ha_endpoint.run_as_group
 
     - name: Validate selected host-only adapter and address
       ansible.builtin.command:
