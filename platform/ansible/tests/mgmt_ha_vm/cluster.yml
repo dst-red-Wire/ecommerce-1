@@ -1,6 +1,7 @@
 ---
 - name: Prepare all six isolated Rocky nodes for local HA traffic
   hosts: all
+  serial: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
   become: true
   gather_facts: false
   vars_files:
@@ -537,6 +538,7 @@
 
 - name: Verify DNS, NTP, SELinux and denied public egress on all six nodes
   hosts: all
+  serial: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
   strategy: free
   become: true
   gather_facts: false

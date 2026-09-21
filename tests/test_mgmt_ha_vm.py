@@ -110,6 +110,12 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("etcd_degraded_survivors", source)
         self.assertIn("simulated_service_proofs", source)
         self.assertIn("Server kubernetes_api/' ~ ha_failed_backend ~ ' is DOWN", source)
+        self.assertEqual(
+            2,
+            source.count(
+                'serial: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"'
+            ),
+        )
 
     def test_fixture_references_existing_authorities_without_copying_values(self):
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
