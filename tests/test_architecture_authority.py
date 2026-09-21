@@ -498,6 +498,41 @@ graph LR
             monitor.write_text(original_monitor)
             self.assertEqual([], authority.validate(root))
 
+    def test_codex_is_execution_fallback_only_when_chatgpt_cannot_execute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text()
+            mutations = (
+                (
+                    "    codex_allowed_when: chatgpt-capability-unavailable",
+                    "    codex_allowed_when: always",
+                ),
+                ("    codex_scope: execution-only", "    codex_scope: review-and-execution"),
+                (
+                    "    code_security_review_authority: ChatGPT-only",
+                    "    code_security_review_authority: shared",
+                ),
+                (
+                    "    merge_readiness_authority: ChatGPT-only",
+                    "    merge_readiness_authority: shared",
+                ),
+                (
+                    "    codex_merge_decision: forbidden",
+                    "    codex_merge_decision: allowed",
+                ),
+            )
+            for before, after in mutations:
+                with self.subTest(mutation=f"{before} -> {after}"):
+                    self.assertIn(before, original)
+                    policy.write_text(original.replace(before, after, 1))
+                    self.assertIn(
+                        "Codex must be limited to execution fallback when ChatGPT lacks the required capability",
+                        authority.validate(root),
+                    )
+                    policy.write_text(original)
+            self.assertEqual([], authority.validate(root))
+
     def test_review_budget_inherits_chatgpt_review_authority(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
