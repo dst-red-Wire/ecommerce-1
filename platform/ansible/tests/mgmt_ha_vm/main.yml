@@ -214,6 +214,7 @@
           - sha256sum
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/contract.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/main.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cluster.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/server_node.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/agent_node.yml"
@@ -258,82 +259,23 @@
           changed_when: true
           no_log: true
 
-        - name: Create isolated Rocky VM
-          ansible.builtin.command:
-            argv:
-              - "{{ ha_ansible_playbook }}"
-              - -i
-              - localhost,
-              - "{{ ha_single_fixture }}"
-              - -e
-              - >-
-                {{
-                  {
-                    'vm_action': 'create',
-                    'vm_name': item.value.vm_name,
-                    'vm_address': item.value.address,
-                    'vm_mac': item.value.mac,
-                    'vm_cpus': (
-                      mgmt_local_ha_contract.resources.control_plane.cpus
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.cpus
-                    ),
-                    'vm_memory': (
-                      mgmt_local_ha_contract.resources.control_plane.memory_mib
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.memory_mib
-                    ),
-                    'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
-                    'vm_host_address': mgmt_local_ha_contract.controller.host_address,
-                    'vm_repo': ha_repo
-                  } | to_json
-                }}
-          environment:
-            PYTHONDONTWRITEBYTECODE: "1"
+        - name: Create each Rocky VM sequentially and fail fast before the next node
+          ansible.builtin.include_tasks: single_vm_action.yml
           loop: "{{ ha_nodes }}"
           loop_control:
-            label: "{{ item.key }}"
-          register: ha_create_results
-          changed_when: true
+            loop_var: ha_node
+            label: "{{ ha_node.key }}"
+          vars:
+            ha_single_vm_action: create
 
-        - name: Cold-stage independently approved PR 128 bundle on every VM
-          ansible.builtin.command:
-            argv:
-              - "{{ ha_ansible_playbook }}"
-              - -i
-              - localhost,
-              - "{{ ha_single_fixture }}"
-              - -e
-              - >-
-                {{
-                  {
-                    'vm_action': 'test',
-                    'vm_name': item.value.vm_name,
-                    'vm_address': item.value.address,
-                    'vm_mac': item.value.mac,
-                    'vm_cpus': (
-                      mgmt_local_ha_contract.resources.control_plane.cpus
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.cpus
-                    ),
-                    'vm_memory': (
-                      mgmt_local_ha_contract.resources.control_plane.memory_mib
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.memory_mib
-                    ),
-                    'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
-                    'vm_host_address': mgmt_local_ha_contract.controller.host_address,
-                    'vm_repo': ha_repo,
-                    'mgmt_offline_bundle_dir': ha_bundle_dir,
-                    'mgmt_offline_manifest_sha256': ha_manifest_sha256
-                  } | to_json
-                }}
-          environment:
-            PYTHONDONTWRITEBYTECODE: "1"
+        - name: Cold-stage the approved PR 128 bundle sequentially on each ready VM
+          ansible.builtin.include_tasks: single_vm_action.yml
           loop: "{{ ha_nodes }}"
           loop_control:
-            label: "{{ item.key }}"
-          changed_when: true
+            loop_var: ha_node
+            label: "{{ ha_node.key }}"
+          vars:
+            ha_single_vm_action: test
 
         - name: Render six-node Ansible inventory using pinned per-VM SSH identities
           ansible.builtin.copy:
