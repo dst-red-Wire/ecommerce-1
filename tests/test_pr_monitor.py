@@ -155,8 +155,11 @@ class PRMonitorTest(unittest.TestCase):
             with (
                 mock.patch.object(pr_monitor, "github_request", return_value=(200, payload, "newtag")),
                 mock.patch.object(pr_monitor, "changed_files", return_value=["x.py"]),
+                mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
                 mock.patch("builtins.print") as output,
             ):
+                checkout.return_value.__enter__.return_value = Path("/exact")
+                checkout.return_value.__exit__.return_value = False
                 terminal, unchanged = pr_monitor.poll_once(args(), state, "token")
             self.assertFalse(terminal)
             self.assertEqual(unchanged, 0)
@@ -164,6 +167,8 @@ class PRMonitorTest(unittest.TestCase):
             self.assertEqual("new", stored["head_sha"])
             self.assertIn("chatgpt_review_handoff", stored)
             self.assertIn("current_head", stored["chatgpt_review_handoff"])
+            self.assertTrue(stored["exact_head_verified"])
+            checkout.assert_called_once_with("new")
             output.assert_any_call("CHATGPT_REVIEW_REQUIRED", flush=True)
 
     def test_chatgpt_review_handoff_is_bounded_and_exact_sha_oriented(self):
@@ -172,6 +177,7 @@ class PRMonitorTest(unittest.TestCase):
             "checks": {},
             "reviews": {},
             "open_findings": {},
+            "validated_verdict": "READY",
         }
         current = dict(previous, head_sha="new")
         handoff = pr_monitor.chatgpt_review_handoff(
@@ -182,9 +188,77 @@ class PRMonitorTest(unittest.TestCase):
             ["x.py"],
         )
         self.assertIn("ChatGPT incremental exact-SHA PR review handoff", handoff)
+        self.assertIn("Return the compact UX summary as five lines", handoff)
         self.assertIn('"current_head":"new"', handoff)
-        self.assertNotIn("validated_verdict", handoff)
+        self.assertIn('"previous_validated_verdict":"READY"', handoff)
         self.assertLessEqual(len(handoff.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
+
+        lines = pr_monitor.compact_status_lines(
+            7,
+            previous,
+            {**current, "validated_verdict": "WAITING"},
+            {"head_sha": {"before": "old", "after": "new"}},
+        )
+        self.assertEqual(5, len(lines))
+        self.assertTrue(lines[0].startswith("PR #7"))
+        self.assertTrue(lines[1].startswith("HEAD :"))
+        self.assertTrue(lines[2].startswith("CHANGEMENT :"))
+        self.assertTrue(lines[3].startswith("VERDICT :"))
+        self.assertTrue(lines[4].startswith("ACTION :"))
+
+    def test_snapshot_reuses_latest_chatgpt_exact_sha_verdict(self):
+        head = "a" * 40
+        def marker(kind, status, blockers):
+            return (
+                '<!-- chatgpt-exact-sha-review:v1 '
+                + json.dumps(
+                    {
+                        "provider": "ChatGPT",
+                        "kind": kind,
+                        "head_sha": head,
+                        "status": status,
+                        "blocking_findings": blockers,
+                    },
+                    separators=(",", ":"),
+                )
+                + " -->"
+            )
+
+        pr = {
+            "headRefOid": head,
+            "_repository_owner_login": "owner",
+            "comments": {
+                "nodes": [
+                    {
+                        "id": "1",
+                        "createdAt": "2026-09-21T08:00:00Z",
+                        "body": marker("code", "BLOCKED", 1),
+                        "author": {"login": "owner"},
+                    },
+                    {
+                        "id": "2",
+                        "createdAt": "2026-09-21T08:01:00Z",
+                        "body": marker("code", "PASS", 0),
+                        "author": {"login": "owner"},
+                    },
+                    {
+                        "id": "3",
+                        "createdAt": "2026-09-21T08:02:00Z",
+                        "body": marker("security", "PASS", 0),
+                        "author": {"login": "owner"},
+                    },
+                ]
+            },
+            "reviews": {"nodes": []},
+            "commits": {"nodes": []},
+            "reviewThreads": {"nodes": []},
+            "state": "OPEN",
+            "merged": False,
+        }
+        result = pr_monitor.snapshot(pr, etag="tag", timestamp=1)
+        self.assertEqual("READY", result["validated_verdict"])
+        self.assertEqual("PASS", result["chatgpt_review"]["code"]["status"])
+        self.assertEqual("PASS", result["chatgpt_review"]["security"]["status"])
 
     def test_bounded_prompt_stays_within_budget(self):
         findings = {
