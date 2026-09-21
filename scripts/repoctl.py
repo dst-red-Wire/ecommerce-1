@@ -123,8 +123,12 @@ def _paint(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _supports_color() else text
 
 
+def _format_written_bytes(value: int) -> str:
+    return f"{max(0, int(value)):,}".replace(",", " ")
+
+
 class _GateByteProgress:
-    """TTY-only stopwatch display for one serial gate."""
+    """TTY-only odometer display for one serial gate."""
 
     LABEL = "Nombre d'octets écrits:"
 
@@ -132,28 +136,63 @@ class _GateByteProgress:
         self.gate = gate
         self.enabled = enabled
         self.visible = False
-        self.width = 0
+        self.previous = ""
+        self.color = ""
         self.prefix = f"RUN {gate} | {self.LABEL}"
 
     def update(self, value: int) -> None:
         if not self.enabled:
             return
-        raw = str(max(0, int(value)))
-        width = max(self.width, len(raw))
-        number = _paint(raw.ljust(width), _write_bytes_color(value))
+        formatted = _format_written_bytes(value)
+        color = _write_bytes_color(value)
+
         if not self.visible:
-            print(f"{_paint(self.prefix, '36')} {number}", end="", flush=True)
+            print(
+                f"{_paint(self.prefix, '36')} {_paint(formatted, color)}",
+                end="",
+                flush=True,
+            )
             self.visible = True
+            self.previous = formatted
+            self.color = color
+            return
+
+        if formatted == self.previous and color == self.color:
+            return
+
+        # Odometer UX: preserve every unchanged leading digit/group on screen.
+        # Rewrite the entire numeric field only when grouping width or color changes.
+        if len(formatted) != len(self.previous) or color != self.color:
+            first_changed = 0
+            suffix = formatted.ljust(max(len(formatted), len(self.previous)))
         else:
-            numeric_column = len(self.prefix) + 1
-            print(f"\r\033[{numeric_column}C{number}", end="", flush=True)
-        self.width = width
+            first_changed = next(
+                (
+                    index
+                    for index, (before, after) in enumerate(zip(self.previous, formatted))
+                    if before != after
+                ),
+                len(formatted),
+            )
+            if first_changed == len(formatted):
+                return
+            suffix = formatted[first_changed:]
+
+        numeric_column = len(self.prefix) + 1 + first_changed
+        print(
+            f"\r\033[{numeric_column}C{_paint(suffix, color)}",
+            end="",
+            flush=True,
+        )
+        self.previous = formatted
+        self.color = color
 
     def finish(self) -> None:
         if self.visible:
             print("", flush=True)
         self.visible = False
-        self.width = 0
+        self.previous = ""
+        self.color = ""
 
 
 def _write_bytes_color(value: int) -> str:
@@ -3119,7 +3158,7 @@ def _emit_gate_record(ok: bool, record: dict) -> None:
     name = str(record["gate"])
     duration = float(record.get("duration_seconds", 0.0))
     written_bytes = int(record.get("written_bytes", 0) or 0)
-    number = _paint(str(written_bytes), _write_bytes_color(written_bytes))
+    number = _paint(_format_written_bytes(written_bytes), _write_bytes_color(written_bytes))
     print(f"{'PASS' if ok else 'FAIL'} {name} ({duration:.3f}s, {number} octets écrits)")
     if not ok:
         log_path = ROOT / str(record["log"])
@@ -3258,7 +3297,7 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
     source_written_bytes = int(source.get("written_bytes", 0) or 0)
     print(
         f"PASS | reused {parent_sha} | {name} | saved~{source_duration:.3f}s"
-        f" | source~{source_written_bytes} octets écrits"
+        f" | source~{_format_written_bytes(source_written_bytes)} octets écrits"
     )
     return True
 
