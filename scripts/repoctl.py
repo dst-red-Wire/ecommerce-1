@@ -100,12 +100,13 @@ os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(toolchain_projection_path("ansible_config"))
 CONTEXT = ROOT / ".context"
 
-_DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
-_DYNAMIC_WRITE_BYTES_VISIBLE = False
-
 
 class MissingRunnerPrerequisite(RuntimeError):
     """A runner-owned primitive is absent; repository code must not install it."""
+
+
+_DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
+_DYNAMIC_WRITE_BYTES_VISIBLE = False
 
 
 def fail(message: str, code: int = 2) -> int:
@@ -167,7 +168,7 @@ def _emit_dynamic_write_bytes(*, force: bool = False) -> int | None:
     if not force and now - _DYNAMIC_WRITE_BYTES_LAST_EMIT < 0.25:
         return None
     value = _context_written_bytes()
-    label = _paint("Nombre d'octets écrits dynamique:", "35")
+    label = _paint("Nombre d'octets écrits:", "35")
     number = _paint(str(value), _write_bytes_color(value))
     print(f"\r{label} {number}", end="", flush=True)
     _DYNAMIC_WRITE_BYTES_LAST_EMIT = now
@@ -180,7 +181,7 @@ def _print_dynamic_write_bytes_snapshot() -> int | None:
         return None
     _clear_dynamic_write_bytes()
     value = _context_written_bytes()
-    label = _paint("Nombre d'octets écrits dynamique:", "35")
+    label = _paint("Nombre d'octets écrits:", "35")
     number = _paint(str(value), _write_bytes_color(value))
     print(f"{label} {number}", flush=True)
     return value
