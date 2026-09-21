@@ -263,17 +263,9 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     "--inputs .context/mgmt-vm-inputs.json"
                 )
             }
-            def fake_git(*args, check=True):
-                if args == ("status", "--porcelain", "--untracked-files=all"):
-                    return ""
-                if args == ("rev-parse", "HEAD"):
-                    return head + "\n"
-                raise AssertionError(args)
-
             with (
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
-                mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", return_value=completed) as run,
             ):
@@ -314,9 +306,18 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 "evidence": {"runtime": ".context/runtime/tekton-proof/<sha>.json"},
             }
             head = "c" * 40
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
             with (
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", return_value=completed) as run,
             ):
