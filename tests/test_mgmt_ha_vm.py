@@ -324,6 +324,12 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("nic1=\\\"null\\\"", repair)
         self.assertIn("MGMT_CONSOLE_RESULT:0", repair)
         self.assertIn("guest_probe.py", repair)
+        self.assertIn(
+            "Restart only the exact recovered VM to realize the delayed host-only attachment",
+            repair,
+        )
+        self.assertIn("ha_create_repair_ownership.uuid", repair)
+        self.assertIn("restart_rc", repair)
         self.assertIn("console-proof", create_helper)
         self.assertIn("ha_single_vm_console_completed", create_helper)
 

@@ -79,6 +79,16 @@
   delay: 2
   changed_when: true
 
+- name: Restart only the exact recovered VM to realize the delayed host-only attachment
+  ansible.builtin.command:
+    argv:
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - controlvm
+      - "{{ ha_create_repair_ownership.uuid }}"
+      - reset
+  register: ha_create_repair_restart
+  changed_when: true
+
 - name: Render isolated SSH transport after exact host-only attach repair
   ansible.builtin.copy:
     dest: "{{ ha_create_repair_state }}/ssh_config"
@@ -146,7 +156,11 @@
           'rc': ha_create_repair_attach.rc,
           'stdout': ha_create_repair_attach.stdout | default(''),
           'stderr': ha_create_repair_attach.stderr | default(''),
-          'cmd': ha_create_repair_attach.cmd | default([])
+          'cmd': ha_create_repair_attach.cmd | default([]),
+          'restart_rc': ha_create_repair_restart.rc,
+          'restart_stdout': ha_create_repair_restart.stdout | default(''),
+          'restart_stderr': ha_create_repair_restart.stderr | default(''),
+          'restart_cmd': ha_create_repair_restart.cmd | default([])
         } | to_nice_json
       }}
     mode: "0600"
