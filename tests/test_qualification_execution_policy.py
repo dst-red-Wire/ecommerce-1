@@ -451,18 +451,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
 
-    def test_dynamic_written_bytes_reports_context_footprint_and_color(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            context = root / ".context"
-            context.mkdir()
-            (context / "a.bin").write_bytes(b"a" * 5)
-            nested = context / "nested"
-            nested.mkdir()
-            (nested / "b.bin").write_bytes(b"b" * 7)
-            with mock.patch.object(MOD, "ROOT", root):
-                self.assertEqual(12, MOD._context_written_bytes())
-
+    def test_gate_written_bytes_color_thresholds(self):
         self.assertEqual("36", MOD._write_bytes_color(0))
         self.assertEqual("32", MOD._write_bytes_color(56_262_884))
         self.assertEqual("33", MOD._write_bytes_color(128 * 1024 * 1024))
@@ -470,23 +459,21 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with mock.patch.object(MOD, "_supports_color", return_value=True):
             self.assertIn("\033[32m56262884\033[0m", MOD._paint("56262884", "32"))
 
-    def test_dynamic_written_bytes_updates_only_numeric_field_like_stopwatch(self):
+    def test_gate_written_bytes_updates_only_numeric_field_like_stopwatch(self):
         import io
 
         stream = io.StringIO()
         with (
             mock.patch.object(MOD, "_supports_color", return_value=True),
-            mock.patch.object(MOD, "_context_written_bytes", side_effect=[1_652_089, 1_652_190]),
             mock.patch("sys.stdout", stream),
         ):
-            MOD._DYNAMIC_WRITE_BYTES_VISIBLE = False
-            MOD._DYNAMIC_WRITE_BYTES_WIDTH = 0
-            MOD._DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
-            MOD._emit_dynamic_write_bytes(force=True)
-            MOD._emit_dynamic_write_bytes(force=True)
+            progress = MOD._GateByteProgress("governance", enabled=True)
+            progress.update(1_652_089)
+            progress.update(1_652_190)
+            progress.finish()
 
         rendered = stream.getvalue()
-        self.assertEqual(1, rendered.count("Nombre d'octets écrits:"))
+        self.assertEqual(1, rendered.count("RUN governance | Nombre d'octets écrits:"))
         self.assertIn("1652089", rendered)
         self.assertIn("1652190", rendered)
         self.assertIn("\r\033[", rendered)
@@ -1499,7 +1486,20 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertEqual("", terminal.getvalue())
-            self.assertEqual("GATE-LOG-ONLY\n", (root / record["log"]).read_text(encoding="utf-8"))
+            log_text = (root / record["log"]).read_text(encoding="utf-8")
+            self.assertEqual("GATE-LOG-ONLY\n", log_text)
+            self.assertEqual(len(log_text.encode("utf-8")), record["written_bytes"])
+
+            emitted = io.StringIO()
+            with (
+                mock.patch.object(MOD, "_supports_color", return_value=False),
+                redirect_stdout(emitted),
+            ):
+                MOD._emit_gate_record(ok, record)
+            self.assertIn(
+                f"PASS security ({record['duration_seconds']:.3f}s, {record['written_bytes']} octets écrits)",
+                emitted.getvalue(),
+            )
 
     def test_parallel_batch_preserves_declared_order_and_serial_barrier(self):
         records = []
@@ -1510,6 +1510,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 "status": "PASS",
                 "exit_code": 0,
                 "duration_seconds": 0.001,
+                "written_bytes": 0,
                 "command": command,
                 "log": ".context/logs/test.log",
                 "execution": "fresh",
