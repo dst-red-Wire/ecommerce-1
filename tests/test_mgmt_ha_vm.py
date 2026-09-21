@@ -155,6 +155,22 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn('argv: [ping, -c, "1", -W, "1"', source)
         self.assertNotIn("MODULE_STRICT_UTF8_RESPONSE", source)
 
+    def test_nested_single_vm_calls_use_json_extra_vars_for_spaced_adapter_name(self):
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("'vm_action': 'create'", source)
+        self.assertIn("'vm_action': 'test'", source)
+        self.assertGreaterEqual(source.count("| to_json"), 2)
+        self.assertIn(
+            "'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter",
+            source,
+        )
+        self.assertNotIn(
+            '"vm_hostonly_adapter={{ mgmt_local_ha_contract.controller.hostonly_adapter }}"',
+            source,
+        )
+        self.assertNotIn('"vm_action=create"', source)
+        self.assertNotIn('"vm_action=test"', source)
+
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         self.assertEqual(2, source.count("ansible_host: {{ item.value.vm_name }}"))
