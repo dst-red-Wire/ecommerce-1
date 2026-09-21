@@ -12,6 +12,53 @@ principles:
   exact_sha_evidence_remains_authoritative: true
   dynamic_state_must_be_fresh: true
 
+qualification_lifecycle:
+  applies_to: every-qualification-workflow
+  single_authority: config/contracts/qualification-execution-policy.yaml
+  per_workflow_policy_duplication: forbidden
+  phases:
+    - development
+    - freeze
+    - qualification
+    - complete
+  workflow_defaults:
+    exact_sha_required: true
+    clean_worktree_required: true
+    freeze_before_authoritative_run: true
+    source_change_after_freeze_invalidates_evidence: true
+    evidence_must_not_modify_tracked_files: true
+    stop_when_exit_criteria_pass: true
+    post_pass_scope_expansion: forbidden
+    non_blocking_findings: follow-up-work-item
+    blocking_findings: return-to-development
+    same_sha_pass_replay: reuse-valid-evidence
+    same_sha_failed_replay: requires-explicit-blocking-reason
+    final_candidate_runs: 1
+  required_per_workflow:
+    - purpose
+    - exit_criteria
+    - evidence
+  evidence:
+    root: .context
+    tracked: false
+    exact_sha_binding_required: true
+    source_mutation_for_evidence: forbidden
+  waits:
+    every_wait_must_be_bounded: true
+    indefinite_wait: forbidden
+  reruns:
+    final_candidate_runs: 1
+    additional_final_run_requires:
+      - source-change-new-sha
+      - blocking-failure
+      - evidence-expired-or-invalid
+    non_blocking_improvement_creates_follow_up: true
+  duplication:
+    precommit_is_development_gate: true
+    final_authoritative_qualification_runs: 1
+    fresh_exact_sha_evidence_must_be_reused: true
+    duplicate_full_gate_run_same_sha: forbidden
+
 execution:
   global_gate_order:
     - governance
@@ -378,16 +425,26 @@ gates:
 
 workflows:
   qualification_proof:
-    exact_sha_required: true
-    clean_worktree_required: true
+    purpose: merge-authoritative exact-SHA repository qualification
+    exit_criteria:
+      - verify-change-pass
+      - exact-sha-evidence-valid
+      - performance-audit-pass
+    evidence:
+      authoritative: .context/evidence/<sha>.json
+      supplementary: .context/performance/<sha>.json
     verify_change_runs: 1
     performance_audit_runs: 1
     performance_audit_output: .context/performance/<sha>.json
     performance_campaign_required: false
     merge_authoritative: true
   performance_campaign:
-    exact_sha_required: true
-    clean_worktree_required: true
+    purpose: non-merge-authoritative performance characterization
+    exit_criteria:
+      - configured-repetitions-complete
+      - all-performance-budgets-pass
+    evidence:
+      authoritative: .context/performance/campaign-<sha>.json
     repetitions: 3
     merge_authoritative: false
     blocking_for_campaign_result: true
