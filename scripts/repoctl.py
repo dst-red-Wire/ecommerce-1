@@ -291,6 +291,17 @@ def qualification_execution_policy() -> dict:
         ):
             raise RuntimeError("qualification lifecycle stop/rerun/evidence policy is invalid")
 
+        completed_registration = lifecycle.get("completed_proof_registration")
+        if (
+            not isinstance(completed_registration, dict)
+            or completed_registration.get("registration_is_execution") is not False
+            or completed_registration.get("execute_entrypoint_on_registration") != "forbidden"
+            or completed_registration.get("proof_binding") != "qualified-source-sha-and-invalidation-inputs"
+            or completed_registration.get("metadata_only_registry_change_invalidates_runtime_proof") is not False
+            or completed_registration.get("reuse_until_invalidation_input_changes") is not True
+        ):
+            raise RuntimeError("qualification lifecycle completed-proof registration policy is invalid")
+
         workflows = policy.get("workflows")
         if not isinstance(workflows, dict) or not workflows:
             raise RuntimeError("qualification execution policy must declare workflows")
@@ -342,6 +353,46 @@ def qualification_execution_policy() -> dict:
                     raise RuntimeError(
                         f"qualification workflow {workflow_name} evidence path escapes repository context"
                     )
+
+            completion = workflow.get("completion")
+            if completion is not None:
+                if not isinstance(completion, dict):
+                    raise RuntimeError(f"qualification workflow {workflow_name} completion record is invalid")
+                source_sha = completion.get("qualified_source_sha")
+                provenance = completion.get("provenance")
+                invalidation_inputs = completion.get("invalidation_inputs")
+                if (
+                    completion.get("status") != "complete"
+                    or completion.get("criteria_status") != "PASS"
+                    or completion.get("proof_registration") != "existing-proof-no-rerun"
+                    or not isinstance(source_sha, str)
+                    or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+                    or not isinstance(provenance, dict)
+                    or not provenance
+                    or any(
+                        not isinstance(key, str)
+                        or not key
+                        or not isinstance(value, str)
+                        or not value.strip()
+                        for key, value in provenance.items()
+                    )
+                    or not isinstance(invalidation_inputs, list)
+                    or not invalidation_inputs
+                    or any(
+                        not isinstance(path, str) or not path.strip()
+                        for path in invalidation_inputs
+                    )
+                    or len(invalidation_inputs) != len(set(invalidation_inputs))
+                ):
+                    raise RuntimeError(
+                        f"qualification workflow {workflow_name} completed proof record is invalid"
+                    )
+                for invalidation_path in invalidation_inputs:
+                    normalized = Path(invalidation_path)
+                    if normalized.is_absolute() or ".." in normalized.parts:
+                        raise RuntimeError(
+                            f"qualification workflow {workflow_name} invalidation input escapes repository"
+                        )
             effective = copy.deepcopy(defaults)
             effective.update(copy.deepcopy(workflow))
             effective_workflows[workflow_name] = effective
