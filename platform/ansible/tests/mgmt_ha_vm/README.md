@@ -48,13 +48,17 @@ selected host-only adapter still fails closed.
 
 The six-VM profile is intentionally a constrained functional laboratory profile:
 
-- each control plane: 2 vCPU / 2048 MiB;
-- each worker: 2 vCPU / 1280 MiB;
-- aggregate guest allocation: 9984 MiB.
+- each control plane: 2 vCPU / 2560 MiB;
+- each worker: 2 vCPU / 1024 MiB;
+- aggregate guest allocation: 10752 MiB (10.5 GiB).
 
-This is below the vendor-recommended RKE2 memory profile and therefore cannot be used
-as capacity evidence. The campaign is allowed to fail closed under host memory
-pressure; increasing the host RAM is preferable to weakening functional assertions.
+This deliberately favors the three control planes/etcd while keeping the workers at
+the fixture minimum. It remains below the vendor-recommended RKE2 memory profile and
+therefore cannot be used as capacity evidence. VM creation is sequential and fail-fast:
+the next node is not started until the current node has completed its console bootstrap.
+If the already-qualified #128 console transport hits its bounded 180-second wait, the
+wrapper may resume that exact owned VM once; unrelated creation failures are never
+retried. The campaign is still allowed to fail closed under host memory pressure.
 
 ## Existing offline bundle
 
