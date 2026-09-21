@@ -13,6 +13,10 @@
       - "{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}"
       - --output
       - "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-ownership.json"
+  register: ha_cleanup_ownership_probe
+  until: ha_cleanup_ownership_probe.rc == 0
+  retries: 3
+  delay: 2
   changed_when: false
 
 - name: Classify failed cleanup without masking its original return code

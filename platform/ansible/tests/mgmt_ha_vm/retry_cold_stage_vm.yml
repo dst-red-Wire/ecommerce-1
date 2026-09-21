@@ -1,0 +1,111 @@
+---
+- name: Probe ownership after failed parallel cold-stage
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - probe
+      - --vbox
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - --identity
+      - "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
+      - --vm-name
+      - "{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}"
+      - --output
+      - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-ownership.json"
+  register: ha_cold_stage_ownership_probe
+  until: ha_cold_stage_ownership_probe.rc == 0
+  retries: 3
+  delay: 2
+  changed_when: false
+
+- name: Classify failed cold-stage without replaying the artifact role
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - classify-cold-stage
+      - --result
+      - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-initial.json"
+      - --ownership
+      - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-ownership.json"
+      - --output
+      - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-decision.json"
+  changed_when: false
+
+- name: Read bounded cold-stage reconciliation inputs
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-decision.json"
+    - "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-ownership.json"
+    - "{{ ha_repo }}/.context/mgmt-offline-vm/{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}/role-result.json"
+  register: ha_cold_stage_reconciliation_inputs
+
+- name: Select bounded cold-stage reconciliation facts
+  ansible.builtin.set_fact:
+    ha_cold_stage_decision: "{{ ha_cold_stage_reconciliation_inputs.results[0].content | b64decode | from_json }}"
+    ha_cold_stage_ownership: "{{ ha_cold_stage_reconciliation_inputs.results[1].content | b64decode | from_json }}"
+    ha_cold_stage_role_result: "{{ ha_cold_stage_reconciliation_inputs.results[2].content | b64decode | from_json }}"
+  changed_when: false
+
+- name: Require successful original cold role evidence before retrying only its postcondition
+  ansible.builtin.assert:
+    that:
+      - ha_cold_stage_decision.resolution == 'retry-postcondition'
+      - ha_cold_stage_ownership.state == 'owned'
+      - ha_cold_stage_role_result.exit_code == 0
+      - ha_cold_stage_role_result.vm_uuid == ha_cold_stage_ownership.uuid
+      - ha_cold_stage_role_result.trial.cold_trial | bool
+    fail_msg: >-
+      Refusing to replay or reinterpret a failed cold-stage role; only the demonstrated
+      final WSL transport postcondition may be retried once.
+
+- name: Retry only the failed cold-stage postcondition once and sequentially
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ ha_repo }}/.context/mgmt-offline-vm/{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}/ssh_config"
+      - "{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}"
+      - sudo
+      - -n
+      - python3
+      - '-'
+      - "{{ ha_manifest_sha256 }}"
+      - --hardlink-images
+    stdin: "{{ lookup('file', ha_repo ~ '/platform/ansible/tests/mgmt_offline_vm/guest_probe.py') }}"
+  register: ha_cold_stage_retry
+  failed_when: false
+  changed_when: false
+
+- name: Preserve the single cold-stage postcondition retry
+  ansible.builtin.copy:
+    dest: "{{ ha_state }}/cold-stage-{{ ha_failed_cold_stage.node }}-retry.json"
+    content: >-
+      {{
+        {
+          'node': ha_failed_cold_stage.node,
+          'initial_ansible_job_id': ha_failed_cold_stage.ansible_job_id,
+          'classification': ha_cold_stage_decision.classification,
+          'finished': true,
+          'rc': ha_cold_stage_retry.rc,
+          'stdout': ha_cold_stage_retry.stdout | default(''),
+          'stderr': ha_cold_stage_retry.stderr | default(''),
+          'cmd': ha_cold_stage_retry.cmd | default([])
+        } | to_nice_json
+      }}
+    mode: "0600"
+
+- name: Accumulate the single final cold-stage reconciliation result
+  ansible.builtin.set_fact:
+    ha_cold_stage_retry_results: >-
+      {{
+        ha_cold_stage_retry_results
+        + [{
+          'node': ha_failed_cold_stage.node,
+          'rc': ha_cold_stage_retry.rc,
+          'finished': true
+        }]
+      }}
+  changed_when: false

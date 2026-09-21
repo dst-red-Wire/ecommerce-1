@@ -74,6 +74,10 @@
       - "{{ ha_node.value.vm_name }}"
       - --output
       - "{{ ha_state }}/create-{{ ha_node.key }}-ownership.json"
+  register: ha_create_ownership_probe
+  until: ha_create_ownership_probe.rc == 0
+  retries: 3
+  delay: 2
   changed_when: false
   when:
     - ha_single_vm_action == 'create'

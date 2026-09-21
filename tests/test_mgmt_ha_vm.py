@@ -278,6 +278,13 @@ class MgmtHaVmTests(unittest.TestCase):
             )["resolution"],
         )
         self.assertEqual(
+            "retry",
+            GUARD.cleanup_decision(
+                result(1, "WSL ERROR: UtilAcceptVsock:273: accept4 failed 110"),
+                {"state": "owned"},
+            )["resolution"],
+        )
+        self.assertEqual(
             "fail",
             GUARD.cleanup_decision(result(1, "permission denied"), {"state": "owned"})[
                 "resolution"
@@ -297,6 +304,34 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("async:", retry)
         self.assertIn("ha_cleanup_decision.resolution == 'retry'", retry)
         self.assertIn("already-absent", retry)
+
+    def test_cold_stage_retries_only_owned_final_wsl_postcondition(self):
+        failure = {
+            "rc": 2,
+            "stdout": (
+                "TASK [Verify native SELinux, egress denial, exact RPMs and staged image hashes]\n"
+                "Connection timed out during banner exchange\n"
+                "WSL ERROR: UtilAcceptVsock:273: accept4 failed 110"
+            ),
+            "stderr": "",
+            "cmd": ["ansible-playbook"],
+        }
+        self.assertEqual(
+            "retry-postcondition",
+            GUARD.cold_stage_decision(failure, {"state": "owned"})["resolution"],
+        )
+        for result, ownership in (
+            ({**failure, "stdout": "network unreachable"}, {"state": "owned"}),
+            (failure, {"state": "mismatch"}),
+        ):
+            self.assertEqual("fail", GUARD.cold_stage_decision(result, ownership)["resolution"])
+
+        cold = (FIXTURE / "cold_stage_batch.yml").read_text(encoding="utf-8")
+        retry = (FIXTURE / "retry_cold_stage_vm.yml").read_text(encoding="utf-8")
+        self.assertIn("async: 1800", cold)
+        self.assertIn("classify-cold-stage", retry)
+        self.assertIn("ha_cold_stage_role_result.trial.cold_trial | bool", retry)
+        self.assertNotIn("vm_action", retry)
 
     def test_ownership_probe_distinguishes_owned_absent_stale_and_mismatch(self):
         vm_name = "ecommerce-mgmt-test-ha-cp-01"

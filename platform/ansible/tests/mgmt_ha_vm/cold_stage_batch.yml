@@ -1,4 +1,10 @@
 ---
+- name: Initialize bounded cold-stage reconciliation for this pair
+  ansible.builtin.set_fact:
+    ha_cold_stage_results: []
+    ha_cold_stage_retry_results: []
+  changed_when: false
+
 - name: Launch bounded parallel PR 128 cold-stage jobs
   ansible.builtin.command:
     argv:
@@ -54,20 +60,59 @@
   delay: 10
   failed_when: false
 
-- name: Require every cold-stage job in the bounded batch to pass
+- name: Normalize and preserve every cold-stage result in this pair
+  ansible.builtin.set_fact:
+    ha_cold_stage_results: >-
+      {{
+        ha_cold_stage_results
+        + [{
+          'node': item.item.ha_batch_node.key,
+          'ansible_job_id': item.ansible_job_id | default(item.item.ansible_job_id),
+          'finished': item.finished | default(false),
+          'rc': item.rc | default(-1),
+          'stdout': item.stdout | default(''),
+          'stderr': item.stderr | default(''),
+          'cmd': item.cmd | default([])
+        }]
+      }}
+  loop: "{{ ha_cold_stage_poll.results }}"
+  loop_control:
+    label: "{{ item.item.ha_batch_node.key }}"
+  changed_when: false
+
+- name: Preserve bounded initial cold-stage diagnostics
+  ansible.builtin.copy:
+    dest: "{{ ha_state }}/cold-stage-{{ item.node }}-initial.json"
+    content: "{{ item | to_nice_json }}"
+    mode: "0600"
+  loop: "{{ ha_cold_stage_results }}"
+  loop_control:
+    label: "{{ item.node }}"
+
+- name: Reconcile only failed final cold-stage postconditions sequentially once
+  ansible.builtin.include_tasks: retry_cold_stage_vm.yml
+  loop: "{{ ha_cold_stage_results | selectattr('rc', 'ne', 0) | list }}"
+  loop_control:
+    loop_var: ha_failed_cold_stage
+    label: "{{ ha_failed_cold_stage.node }}"
+
+- name: Require every cold-stage job in the bounded batch to pass or reconcile safely
   ansible.builtin.assert:
     that:
-      - ha_cold_stage_poll.results | length == ha_vm_batch | length
+      - ha_cold_stage_results | length == ha_vm_batch | length
       - >-
-        ha_cold_stage_poll.results
+        ha_cold_stage_results
         | selectattr('finished', 'defined')
         | selectattr('finished', 'equalto', true)
         | list | length == ha_vm_batch | length
       - >-
-        ha_cold_stage_poll.results
-        | selectattr('rc', 'defined')
-        | selectattr('rc', 'ne', 0)
-        | list | length == 0
+        (ha_cold_stage_results | selectattr('rc', 'equalto', 0) | list | length)
+        +
+        (ha_cold_stage_retry_results | selectattr('rc', 'equalto', 0) | list | length)
+        == ha_vm_batch | length
+      - >-
+        ha_cold_stage_retry_results | length
+        == ha_cold_stage_results | selectattr('rc', 'ne', 0) | list | length
     fail_msg: >-
       At least one PR 128 cold-stage job failed in the bounded parallel batch;
       stop before starting the next pair.

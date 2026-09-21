@@ -251,6 +251,7 @@
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/main.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cold_stage_batch.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/retry_cold_stage_vm.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/retry_destroy_vm.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/lifecycle_guard.py"
@@ -478,6 +479,9 @@
           ansible.builtin.command:
             argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, vms]
           register: ha_registered_vms_after_cleanup
+          until: ha_registered_vms_after_cleanup.rc == 0
+          retries: 3
+          delay: 2
           changed_when: false
 
         - name: Preserve final VirtualBox cleanup postcondition

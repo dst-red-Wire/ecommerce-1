@@ -29,8 +29,13 @@ TRANSIENT_CLEANUP_RE = re.compile(
     r"verr_resource_busy|"
     r"failed\s+to\s+acquire\s+the\s+virtualbox\s+com\s+object|"
     r"another\s+process\s+is\s+using|"
-    r"being\s+used\s+by\s+another\s+process"
+    r"being\s+used\s+by\s+another\s+process|"
+    r"utilacceptvsock:\d+:\s*accept4\s+failed\s+110"
     r")",
+    re.IGNORECASE,
+)
+POSTCONDITION_TASK_RE = re.compile(
+    r"verify\s+native\s+selinux,\s+egress\s+denial,\s+exact\s+rpms\s+and\s+staged\s+image\s+hashes",
     re.IGNORECASE,
 )
 
@@ -102,6 +107,25 @@ def cleanup_decision(result: dict[str, Any], ownership: dict[str, Any]) -> dict[
     return {"classification": "unsafe-or-non-transient-cleanup-failure", "resolution": "fail"}
 
 
+def cold_stage_decision(result: dict[str, Any], ownership: dict[str, Any]) -> dict[str, Any]:
+    """Retry only the final postcondition after a demonstrated WSL transport failure."""
+    if not _valid_result(result):
+        return {"classification": "invalid-result", "resolution": "fail"}
+    if result["rc"] == 0:
+        return {"classification": "cold-stage-complete", "resolution": "pass"}
+    text = _result_text(result)
+    if (
+        ownership.get("state") == "owned"
+        and POSTCONDITION_TASK_RE.search(text)
+        and re.search(r"utilacceptvsock:\d+:\s*accept4\s+failed\s+110", text, re.IGNORECASE)
+    ):
+        return {
+            "classification": "wsl-interop-final-postcondition-timeout",
+            "resolution": "retry-postcondition",
+        }
+    return {"classification": "unsafe-or-non-transient-cold-stage-failure", "resolution": "fail"}
+
+
 def probe_ownership(vbox: str, identity: Path, vm_name: str) -> dict[str, Any]:
     """Classify only the expected Vagrant identity against live VirtualBox registration."""
     if VM_NAME_RE.fullmatch(vm_name) is None:
@@ -159,7 +183,7 @@ def main() -> int:
     probe.add_argument("--identity", type=Path, required=True)
     probe.add_argument("--vm-name", required=True)
     probe.add_argument("--output", type=Path, required=True)
-    for action in ("classify-create", "classify-cleanup"):
+    for action in ("classify-create", "classify-cleanup", "classify-cold-stage"):
         command = subparsers.add_parser(action)
         command.add_argument("--result", type=Path, required=True)
         command.add_argument("--ownership", type=Path, required=True)
@@ -171,11 +195,12 @@ def main() -> int:
     else:
         result = _read_json(args.result)
         ownership = _read_json(args.ownership)
-        payload = (
-            create_decision(result, ownership)
-            if args.action == "classify-create"
-            else cleanup_decision(result, ownership)
-        )
+        if args.action == "classify-create":
+            payload = create_decision(result, ownership)
+        elif args.action == "classify-cleanup":
+            payload = cleanup_decision(result, ownership)
+        else:
+            payload = cold_stage_decision(result, ownership)
     _write_json(args.output, payload)
     return 0
 
