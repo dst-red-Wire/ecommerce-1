@@ -71,10 +71,12 @@ phase concurrent:
 - worker-01 and worker-02 join through HAProxy in parallel;
 - DNS/NTP/SELinux/egress validation: at most 4 hosts at a time;
 - cleanup: 2 owned VMs at a time while still attempting all six;
-- CP-01, CP-02, CP-03, etcd/quorum and HAProxy dependency phases: serial 1.
+- CP-01, CP-02, CP-03, etcd/quorum and HAProxy dependency phases: structurally
+  single-host, therefore concurrency 1 without a play-level templated `serial`.
 
 These values live only in `mgmt_local_ha_contract.execution`; playbooks consume the
-contract and do not define independent parallelism policy.
+contract where runtime throttling is needed, while single-host dependency plays enforce
+their concurrency structurally.
 
 ## Existing offline bundle
 
