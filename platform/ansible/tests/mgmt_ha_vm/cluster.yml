@@ -526,10 +526,14 @@
     ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
     ha_join_url: >-
       https://{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}
+  pre_tasks:
+    - name: Require worker join host-set to match bounded parallelism contract
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == mgmt_local_ha_contract.execution.worker_join_parallelism
   tasks:
     - name: Join worker through canonical agent tasks
       ansible.builtin.include_tasks: agent_node.yml
-      throttle: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"
 
 - name: Verify DNS, NTP, SELinux and denied public egress on all six nodes
   hosts: all
