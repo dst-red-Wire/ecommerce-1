@@ -5503,19 +5503,23 @@ def rke2_local_ha_restore_bundle(source_value: str) -> int:
         )
 
     require("ansible-playbook")
-    restore = run(
-        [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "platform/ansible/tests/mgmt_offline_vm/build_bundle.yml",
-            "-e",
-            f"bundle_source={source}",
-            "-e",
-            "bundle_offline=true",
-        ],
-        check=False,
-    )
+    CONTEXT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="rke2-ha-restore-cache-", dir=CONTEXT) as cache_dir:
+        restore = run(
+            [
+                "ansible-playbook",
+                "-i",
+                "localhost,",
+                "platform/ansible/tests/mgmt_offline_vm/build_bundle.yml",
+                "-e",
+                f"bundle_source={source}",
+                "-e",
+                f"bundle_cache={cache_dir}",
+                "-e",
+                "bundle_offline=true",
+            ],
+            check=False,
+        )
     if restore.returncode:
         return restore.returncode
 
