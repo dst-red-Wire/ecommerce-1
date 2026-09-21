@@ -145,10 +145,15 @@ class MgmtHaVmTests(unittest.TestCase):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         self.assertEqual("/mnt/c/Windows/System32/ping.exe", contract["controller"]["windows_ping"])
         self.assertIn("mgmt_local_ha_contract.controller.windows_ping", source)
-        self.assertIn('          - -S\n          - "{{ mgmt_local_ha_contract.controller.host_address }}"', source)
+        self.assertIn("ansible_playbook_python", source)
+        self.assertIn("subprocess.run(", source)
+        self.assertIn("stdout=subprocess.DEVNULL", source)
+        self.assertIn("stderr=subprocess.DEVNULL", source)
+        self.assertIn("'-S',sys.argv[2],sys.argv[3]", source)
         self.assertIn("selected VirtualBox", source)
         self.assertIn("host-only source", source)
         self.assertNotIn('argv: [ping, -c, "1", -W, "1"', source)
+        self.assertNotIn("MODULE_STRICT_UTF8_RESPONSE", source)
 
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
