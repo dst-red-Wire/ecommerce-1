@@ -105,15 +105,8 @@ class MissingRunnerPrerequisite(RuntimeError):
     """A runner-owned primitive is absent; repository code must not install it."""
 
 
-_DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
-_DYNAMIC_WRITE_BYTES_VISIBLE = False
-_DYNAMIC_WRITE_BYTES_WIDTH = 0
-
-
 def fail(message: str, code: int = 2) -> int:
-    _clear_dynamic_write_bytes()
     print(f"FAIL {message}", file=sys.stderr)
-    _print_dynamic_write_bytes_snapshot()
     return code
 
 
@@ -130,18 +123,37 @@ def _paint(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _supports_color() else text
 
 
-def _context_written_bytes() -> int:
-    context_root = ROOT / ".context"
-    if not context_root.is_dir():
-        return 0
-    total = 0
-    for path in context_root.rglob("*"):
-        try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
-        except OSError:
-            continue
-    return total
+class _GateByteProgress:
+    """TTY-only stopwatch display for one serial gate."""
+
+    LABEL = "Nombre d'octets écrits:"
+
+    def __init__(self, gate: str, *, enabled: bool) -> None:
+        self.gate = gate
+        self.enabled = enabled
+        self.visible = False
+        self.width = 0
+        self.prefix = f"RUN {gate} | {self.LABEL}"
+
+    def update(self, value: int) -> None:
+        if not self.enabled:
+            return
+        raw = str(max(0, int(value)))
+        width = max(self.width, len(raw))
+        number = _paint(raw.ljust(width), _write_bytes_color(value))
+        if not self.visible:
+            print(f"{_paint(self.prefix, '36')} {number}", end="", flush=True)
+            self.visible = True
+        else:
+            numeric_column = len(self.prefix) + 1
+            print(f"\r\033[{numeric_column}C{number}", end="", flush=True)
+        self.width = width
+
+    def finish(self) -> None:
+        if self.visible:
+            print("", flush=True)
+        self.visible = False
+        self.width = 0
 
 
 def _write_bytes_color(value: int) -> str:
@@ -154,74 +166,10 @@ def _write_bytes_color(value: int) -> str:
     return "35"
 
 
-_WRITE_BYTES_LABEL = "Nombre d'octets écrits:"
-
-
-def _clear_dynamic_write_bytes() -> None:
-    global _DYNAMIC_WRITE_BYTES_VISIBLE, _DYNAMIC_WRITE_BYTES_WIDTH
-    if _DYNAMIC_WRITE_BYTES_VISIBLE and _supports_color():
-        # Finalize the stopwatch-like status line without erasing/repainting it.
-        print("", flush=True)
-    _DYNAMIC_WRITE_BYTES_VISIBLE = False
-    _DYNAMIC_WRITE_BYTES_WIDTH = 0
-
-
-def _emit_dynamic_write_bytes(*, force: bool = False) -> int | None:
-    global _DYNAMIC_WRITE_BYTES_LAST_EMIT, _DYNAMIC_WRITE_BYTES_VISIBLE
-    global _DYNAMIC_WRITE_BYTES_WIDTH
-    if not _supports_color():
-        return None
-    now = time.monotonic()
-    if not force and now - _DYNAMIC_WRITE_BYTES_LAST_EMIT < 0.25:
-        return None
-
-    value = _context_written_bytes()
-    raw_number = str(value)
-    width = max(_DYNAMIC_WRITE_BYTES_WIDTH, len(raw_number))
-    number = _paint(raw_number.ljust(width), _write_bytes_color(value))
-
-    if not _DYNAMIC_WRITE_BYTES_VISIBLE:
-        # Stopwatch UX: paint the label once, then only replace the numeric field.
-        label = _paint(_WRITE_BYTES_LABEL, "35")
-        print(f"{label} {number}", end="", flush=True)
-        _DYNAMIC_WRITE_BYTES_VISIBLE = True
-    else:
-        # Return to column 1, move to the numeric field and update digits only.
-        numeric_column = len(_WRITE_BYTES_LABEL) + 1
-        print(
-            f"\r\033[{numeric_column}C{number}",
-            end="",
-            flush=True,
-        )
-
-    _DYNAMIC_WRITE_BYTES_WIDTH = width
-    _DYNAMIC_WRITE_BYTES_LAST_EMIT = now
-    return value
-
-
-def _print_dynamic_write_bytes_snapshot() -> int | None:
-    if not _supports_color():
-        return None
-    if _DYNAMIC_WRITE_BYTES_VISIBLE:
-        value = _context_written_bytes()
-        _emit_dynamic_write_bytes(force=True)
-        _clear_dynamic_write_bytes()
-        return value
-
-    value = _context_written_bytes()
-    label = _paint(_WRITE_BYTES_LABEL, "35")
-    number = _paint(str(value), _write_bytes_color(value))
-    print(f"{label} {number}", flush=True)
-    return value
-
-
 def _workflow_status(kind: str, label: str) -> None:
-    _clear_dynamic_write_bytes()
     styles = {"RUN": ("●", "36"), "PASS": ("✓", "32"), "FAIL": ("✗", "31")}
     symbol, color = styles[kind]
     print(_paint(f"{symbol} {kind:<4} {label}", color), flush=True)
-    if kind in {"PASS", "FAIL"}:
-        _print_dynamic_write_bytes_snapshot()
 
 
 def require(name: str) -> str:
@@ -241,7 +189,6 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    _clear_dynamic_write_bytes()
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -250,9 +197,7 @@ def run(
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
-    _emit_dynamic_write_bytes()
     if check and p.returncode:
-        _clear_dynamic_write_bytes()
         detail = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
     return p
@@ -3089,8 +3034,13 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         anchor = float(effective_env.get("ECOMMERCE_QUALIFICATION_MONOTONIC_START", start))
     except ValueError:
         anchor = start
+    parallel_group = effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial")
+    progress = _GateByteProgress(
+        name,
+        enabled=_supports_color() and str(parallel_group).startswith("local-serial-"),
+    )
     with log_path.open("w", encoding="utf-8") as log:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=ROOT,
             env=effective_env,
@@ -3098,7 +3048,20 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        returncode = completed.returncode
+        progress.update(0)
+        while True:
+            try:
+                returncode = process.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    progress.update(log_path.stat().st_size)
+                except OSError:
+                    progress.update(0)
+        log.flush()
+    written_bytes = log_path.stat().st_size if log_path.is_file() else 0
+    progress.update(written_bytes)
+    progress.finish()
     duration = round(time.monotonic() - start, 3)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
 
@@ -3126,6 +3089,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "status": "PASS" if returncode == 0 else "FAIL",
         "exit_code": returncode,
         "duration_seconds": duration,
+        "written_bytes": written_bytes,
         "command": command,
         "log": str(log_path.relative_to(ROOT)),
         "execution": execution,
@@ -3133,7 +3097,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
         "scope": policy.get("scope"),
         "parallel_safe": bool(policy.get("parallel_safe")),
         "ci_fanout": bool(policy.get("ci_fanout")),
-        "parallel_group": effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial"),
+        "parallel_group": parallel_group,
         "started_at_monotonic_offset": round(max(0.0, start - anchor), 6),
     }
     if cache_entries:
@@ -3154,7 +3118,9 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
 def _emit_gate_record(ok: bool, record: dict) -> None:
     name = str(record["gate"])
     duration = float(record.get("duration_seconds", 0.0))
-    print(f"{'PASS' if ok else 'FAIL'} {name} ({duration:.3f}s)")
+    written_bytes = int(record.get("written_bytes", 0) or 0)
+    number = _paint(str(written_bytes), _write_bytes_color(written_bytes))
+    print(f"{'PASS' if ok else 'FAIL'} {name} ({duration:.3f}s, {number} octets écrits)")
     if not ok:
         log_path = ROOT / str(record["log"])
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
@@ -3275,6 +3241,8 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "reused_from_sha": parent_sha,
             "original_execution_sha": original_execution_sha,
             "source_duration_seconds": source_duration,
+            "written_bytes": 0,
+            "source_written_bytes": int(source.get("written_bytes", 0) or 0),
             "execution": "parent-evidence",
             "cache_mode": _resolved_gate_policy(name).get("cache_mode"),
             "scope": _resolved_gate_policy(name).get("scope"),
@@ -3287,7 +3255,11 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
             "reuse_reason": "direct-parent exact PASS; strict delta has no affected inputs for this gate",
         }
     )
-    print(f"PASS | reused {parent_sha} | {name} | saved~{source_duration:.3f}s")
+    source_written_bytes = int(source.get("written_bytes", 0) or 0)
+    print(
+        f"PASS | reused {parent_sha} | {name} | saved~{source_duration:.3f}s"
+        f" | source~{source_written_bytes} octets écrits"
+    )
     return True
 
 
