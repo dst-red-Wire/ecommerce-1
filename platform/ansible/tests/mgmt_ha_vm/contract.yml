@@ -35,6 +35,15 @@ mgmt_local_ha_contract:
       cpus: 2
       memory_mib: 1024
 
+  execution:
+    max_forks: 6
+    vm_create_parallelism: 1
+    cold_stage_parallelism: 2
+    node_validation_parallelism: 4
+    worker_join_parallelism: 2
+    cleanup_parallelism: 2
+    control_plane_parallelism: 1
+
   nodes:
     cp-01:
       vm_name: ecommerce-mgmt-test-ha-cp-01
