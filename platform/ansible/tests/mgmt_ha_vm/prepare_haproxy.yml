@@ -35,6 +35,30 @@
       register: ha_haproxy_image_id
       changed_when: false
 
+    - name: Resolve pinned HAProxy runtime UID and GID without network access
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - none
+          - --entrypoint
+          - /bin/sh
+          - "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"
+          - -c
+          - 'printf "%s:%s\\n" "$(id -u haproxy)" "$(id -g haproxy)"'
+      register: ha_haproxy_runtime_identity
+      changed_when: false
+
+    - name: Require pinned HAProxy image runtime identity to match the contract
+      ansible.builtin.assert:
+        that:
+          - >-
+            ha_haproxy_runtime_identity.stdout | trim
+            == ((mgmt_local_ha_contract.ha_endpoint.run_as_user | string)
+                ~ ':' ~ (mgmt_local_ha_contract.ha_endpoint.run_as_group | string))
+
     - name: Export exact HAProxy image without mutable runtime tag
       ansible.builtin.command:
         argv:
@@ -63,6 +87,8 @@
             'source_reference': mgmt_local_ha_contract.ha_endpoint.image.reference,
             'platform': mgmt_local_ha_contract.ha_endpoint.image.platform,
             'image_id': ha_haproxy_image_id.stdout | trim,
+            'run_as_user': mgmt_local_ha_contract.ha_endpoint.run_as_user,
+            'run_as_group': mgmt_local_ha_contract.ha_endpoint.run_as_group,
             'archive_sha256': (ha_haproxy_tar_hash.stdout | trim).split()[0],
             'docker_version': ha_docker_version.stdout | trim
           } | to_nice_json }}
