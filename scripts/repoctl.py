@@ -5403,6 +5403,38 @@ def _sha256_path(path: Path) -> str | None:
         return None
 
 
+def _sha256_manifest_matches(manifest: Path) -> bool:
+    """Verify a sha256sum-style source manifest without adding a host-tool dependency."""
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        root = ROOT.resolve()
+    except OSError:
+        return False
+    if not lines:
+        return False
+
+    seen: set[Path] = set()
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match is None:
+            return False
+        expected, raw_path = match.groups()
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return False
+        if candidate.is_symlink() or not resolved.is_file() or resolved in seen:
+            return False
+        seen.add(resolved)
+        if _sha256_path(resolved) != expected:
+            return False
+    return True
+
+
 def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str) -> bool:
     completion = state / "completion.json"
     source_manifest = state / "source.sha256"
@@ -5425,13 +5457,7 @@ def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str
         or payload.get("source_manifest_sha256") != source_manifest_sha256
     ):
         return False
-    source_check = run(
-        ["sha256sum", "--check", str(source_manifest)],
-        cwd=ROOT,
-        check=False,
-        capture=True,
-    )
-    return source_check.returncode == 0
+    return _sha256_manifest_matches(source_manifest)
 
 
 def rke2_local_ha_restore_bundle(source_value: str) -> int:
