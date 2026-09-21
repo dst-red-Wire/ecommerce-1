@@ -159,7 +159,8 @@ class MgmtHaVmTests(unittest.TestCase):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         self.assertIn("'vm_action': 'create'", source)
         self.assertIn("'vm_action': 'test'", source)
-        self.assertGreaterEqual(source.count("| to_json"), 2)
+        self.assertIn("'vm_action': 'destroy'", source)
+        self.assertGreaterEqual(source.count("| to_json"), 3)
         self.assertIn(
             "'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter",
             source,
@@ -170,6 +171,8 @@ class MgmtHaVmTests(unittest.TestCase):
         )
         self.assertNotIn('"vm_action=create"', source)
         self.assertNotIn('"vm_action=test"', source)
+        self.assertNotIn('"vm_action=destroy"', source)
+        self.assertNotIn("vm_hostonly_adapter=", source)
 
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
