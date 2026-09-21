@@ -72,6 +72,26 @@ The approved manifest remains:
 738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad
 ```
 
+If the current worktree does not contain that ignored bundle but the completed #128
+worktree still does, restore it explicitly and offline instead of rebuilding or
+downloading it:
+
+```console
+make rke2-local-ha-restore-bundle \
+  SOURCE=/absolute/path/to/pr128/.context/rke2-offline-bundle-v1-37-0-rke2r1
+```
+
+The restore command refuses a dirty checkout, a relative or missing source, an
+existing destination, or a source whose `manifest.json` does not hash to the
+approved value above. It then reuses the #128 bundle assembler with
+`bundle_offline=true`: every locked byte is revalidated and the destination is
+published only after the independent manifest and image/RPM validation succeeds.
+No network fallback is permitted. The destination remains:
+
+```text
+.context/rke2-offline-bundle-v1-37-0-rke2r1
+```
+
 ## HA endpoint
 
 The local fixed endpoint is `192.168.22.73` / `rke2-ha.internal.test`.
