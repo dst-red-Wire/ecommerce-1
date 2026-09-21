@@ -271,7 +271,8 @@
     ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
     ha_join_url: ""
   tasks:
-    - ansible.builtin.include_tasks: server_node.yml
+    - name: Start first control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
     - name: Wait for first control plane Ready
       ansible.builtin.command:
         argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-cp-01, --for=condition=Ready, --timeout=600s]
@@ -290,7 +291,8 @@
     ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
     ha_join_url: "https://{{ hostvars['ha-cp-01'].ha_node_ip }}:9345"
   tasks:
-    - ansible.builtin.include_tasks: server_node.yml
+    - name: Join second control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
 
 - name: Wait for the first two control planes
   hosts: ha-cp-01
@@ -311,7 +313,8 @@
     ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}"
     ha_join_url: "https://{{ hostvars['ha-cp-01'].ha_node_ip }}:9345"
   tasks:
-    - ansible.builtin.include_tasks: agent_node.yml
+    - name: Join HAProxy host worker through canonical agent tasks
+      ansible.builtin.include_tasks: agent_node.yml
     - name: Copy pinned HAProxy image archive into worker-03
       ansible.builtin.copy:
         src: "{{ ha_haproxy_tar }}"
@@ -443,7 +446,8 @@
     ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
     ha_join_url: "https://{{ mgmt_local_ha_contract.ha_endpoint.address }}:9345"
   tasks:
-    - ansible.builtin.include_tasks: server_node.yml
+    - name: Join third control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
 
 - name: Join remaining workers through HAProxy
   hosts: ha-worker-01,ha-worker-02
@@ -455,7 +459,8 @@
     ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}"
     ha_join_url: "https://{{ mgmt_local_ha_contract.ha_endpoint.address }}:9345"
   tasks:
-    - ansible.builtin.include_tasks: agent_node.yml
+    - name: Join worker through canonical agent tasks
+      ansible.builtin.include_tasks: agent_node.yml
 
 - name: Verify DNS, NTP, SELinux and denied public egress on all six nodes
   hosts: all
