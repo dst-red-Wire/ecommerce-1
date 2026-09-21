@@ -5484,6 +5484,24 @@ def rke2_local_ha_restore_bundle(source_value: str) -> int:
     if source == destination:
         return fail("RKE2 local HA bundle restore source and destination must differ")
 
+    preparer_image = lock.get("preparer_image")
+    if (
+        not isinstance(preparer_image, str)
+        or re.fullmatch(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", preparer_image) is None
+    ):
+        return fail("RKE2 local HA pinned preparer image reference is invalid")
+    require("docker")
+    cached_preparer = run(
+        ["docker", "image", "inspect", preparer_image],
+        check=False,
+        capture=True,
+    )
+    if cached_preparer.returncode:
+        return fail(
+            "RKE2 local HA restore requires the digest-pinned PR 128 preparer image "
+            "already cached locally; restore never pulls it"
+        )
+
     require("ansible-playbook")
     restore = run(
         [
