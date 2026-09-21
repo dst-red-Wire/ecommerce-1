@@ -25,6 +25,12 @@ qualification_lifecycle:
     registry: workflows
     unregistered_authoritative_qualification: forbidden
     local_lifecycle_override: forbidden
+  completed_proof_registration:
+    registration_is_execution: false
+    execute_entrypoint_on_registration: forbidden
+    proof_binding: qualified-source-sha-and-invalidation-inputs
+    metadata_only_registry_change_invalidates_runtime_proof: false
+    reuse_until_invalidation_input_changes: true
   workflow_defaults:
     exact_sha_required: true
     clean_worktree_required: true
@@ -445,6 +451,54 @@ workflows:
     performance_audit_output: .context/performance/<sha>.json
     performance_campaign_required: false
     merge_authoritative: true
+  rke2_local_virtualbox:
+    owner: platform / M2.5 persistent MGMT bootstrap
+    purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary
+    entrypoint: PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml
+    exit_criteria:
+      - fresh-rocky-own-kernel-systemd-selinux-enforcing
+      - cold-offline-artifact-install-pass
+      - rke2-node-ready-and-cilium-ready
+      - nftables-output-and-forward-drop
+      - public-egress-denied
+      - tampered-artifact-rejected-before-install
+      - symlink-safe-cleanup-pass
+      - idempotent-server-replay-pass
+      - make-ci-pass
+      - exact-sha-code-review-pass
+      - exact-sha-security-review-pass
+    evidence:
+      source: .context/mgmt-offline-vm/<name>/server-source.json
+      runtime: .context/mgmt-offline-vm/<name>/rke2-result.json
+      artifact: .context/mgmt-offline-vm/<name>/role-result.json
+      tamper: .context/mgmt-offline-vm/<name>/tamper-result.json
+    merge_authoritative: true
+    completion:
+      status: complete
+      criteria_status: PASS
+      proof_registration: existing-proof-no-rerun
+      qualified_source_sha: 84cf01601aa336f0cdd2d1899d764437294fbfe6
+      merged_by_pr: 128
+      merge_commit_sha: 088b576dac43cb17e304967e3e58433499760fa9
+      provenance:
+        pull_request: https://github.com/dst-red-Wire/ecommerce-1/pull/128
+        code_review: https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746
+        security_review: https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831
+        approved_manifest_sha256: 738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad
+      invalidation_inputs:
+        - config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json
+        - config/infrastructure/mgmt-bootstrap.yaml
+        - config/infrastructure/network-plan.yaml
+        - platform/ansible/roles/mgmt_offline_artifacts/**/*
+        - platform/ansible/roles/mgmt_private_network/**/*
+        - platform/ansible/roles/rke2_server/**/*
+        - platform/ansible/tests/mgmt_offline_vm/**/*
+        - scripts/build_mgmt_airgap_bundle.py
+        - scripts/mgmt_airgap.py
+        - tests/test_ansible_mgmt_private_network.py
+        - tests/test_mgmt_airgap.py
+        - tests/test_mgmt_airgap_bundle.py
+        - tests/test_mgmt_offline_vm.py
   performance_campaign:
     owner: quality-engineering
     purpose: non-merge-authoritative performance characterization
