@@ -1,7 +1,7 @@
 ---
 - name: Invoke canonical RKE2 agent role with verified offline bytes
   ansible.builtin.include_role:
-    name: "{{ ha_repo }}/platform/ansible/roles/rke2_agent"
+    name: rke2_agent
   vars:
     rke2_version: "{{ ha_rke2_version }}"
     rke2_token: "{{ lookup('file', ha_token_file) | trim }}"
