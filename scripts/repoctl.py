@@ -5395,6 +5395,45 @@ def _rke2_local_ha_evidence_matches(payload: object, head_sha: str) -> bool:
     return True
 
 
+def _sha256_path(path: Path) -> str | None:
+    try:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str) -> bool:
+    completion = state / "completion.json"
+    source_manifest = state / "source.sha256"
+    try:
+        payload = json.loads(completion.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    evidence_sha256 = _sha256_path(evidence)
+    source_manifest_sha256 = _sha256_path(source_manifest)
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("status") != "PASS"
+        or payload.get("head_sha") != head_sha
+        or payload.get("cleanup_complete") is not True
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("evidence_sha256", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("source_manifest_sha256", ""))) is None
+        or payload.get("evidence_sha256") != evidence_sha256
+        or payload.get("source_manifest_sha256") != source_manifest_sha256
+    ):
+        return False
+    source_check = run(
+        ["sha256sum", "--check", str(source_manifest)],
+        cwd=ROOT,
+        check=False,
+        capture=True,
+    )
+    return source_check.returncode == 0
+
+
 def rke2_local_ha_prepare() -> int:
     workflow = qualification_workflow("rke2_local_ha")
     if workflow.get("preparation") != "scripts/repoctl.py rke2-local-ha-prepare":
@@ -5442,9 +5481,14 @@ def rke2_local_ha_qualification() -> int:
         existing_payload = json.loads(evidence.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         existing_payload = None
-    if _rke2_local_ha_evidence_matches(existing_payload, head_sha):
+    if (
+        _rke2_local_ha_evidence_matches(existing_payload, head_sha)
+        and _rke2_local_ha_completion_matches(state, evidence, head_sha)
+    ):
         print(f"REUSE rke2-local-ha {head_sha[:12]} evidence={relative}")
         return 0
+
+    (state / "completion.json").unlink(missing_ok=True)
 
     if not _canonical_rke2_vagrant_ready():
         return fail(
@@ -5479,6 +5523,11 @@ def rke2_local_ha_qualification() -> int:
         return fail(f"RKE2 local HA evidence missing or invalid: {exc}")
     if not _rke2_local_ha_evidence_matches(payload, head_sha):
         return fail("RKE2 local HA evidence does not satisfy the registered exit criteria")
+    if not _rke2_local_ha_completion_matches(state, evidence, head_sha):
+        return fail(
+            "RKE2 local HA completion marker is missing, stale, source-unbound, "
+            "or cleanup was incomplete"
+        )
     print(f"PASS rke2-local-ha {head_sha[:12]} evidence={relative}")
     return 0
 
