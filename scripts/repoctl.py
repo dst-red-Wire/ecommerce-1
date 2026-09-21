@@ -139,7 +139,7 @@ class _GateProgress:
         self.previous_duration = ""
         self.previous_bytes = ""
         self.bytes_color = ""
-        self.prefix = f"RUN {gate} |"
+        self.prefix = f"{'RUN':<5}{gate} |"
 
     def _duration(self, elapsed: float) -> str:
         return f"{max(0.0, elapsed):{self.DURATION_WIDTH}.3f}s"
@@ -214,9 +214,9 @@ class _GateProgress:
         if not self.visible:
             return False
         style = {"PASS": "32", "FAIL": "31"}.get(status, "36")
-        # Initial prefix starts with "RUN ". Replacing exactly these four cells
-        # keeps the gate name, separators, duration and byte field physically fixed.
-        replacement = status[:4].ljust(4)
+        # Status occupies a fixed five-cell field, including its separator.
+        # RUN/PASS/FAIL therefore transition without moving the gate name.
+        replacement = status[:5].ljust(5)
         print(f"\r{_paint(replacement, style)}", end="", flush=True)
         print("", flush=True)
         self.visible = False
@@ -239,12 +239,12 @@ def _emit_compact_gate_status(
         "SKIP": "33",
         "REUSE": "35",
     }
-    status_text = _paint(status, styles.get(status, "36"))
+    status_text = _paint(f"{status:<5}", styles.get(status, "36"))
     number = _paint(
         _format_written_bytes(written_bytes),
         _write_bytes_color(written_bytes),
     )
-    print(f"{status_text} {name} | {duration:.3f}s | {number}", flush=True)
+    print(f"{status_text}{name} | {duration:.3f}s | {number}", flush=True)
 
 
 def _write_bytes_color(value: int) -> str:
