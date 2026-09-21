@@ -46,6 +46,20 @@ pull_request_review:
     may_promote: false
     may_push: false
 
+  agent_execution_fallback:
+    primary_agent: ChatGPT
+    fallback_agent: Codex
+    codex_allowed_when: chatgpt-capability-unavailable
+    codex_scope: execution-only
+    minimal_task_scope_required: true
+    fallback_reason_must_be_recorded: true
+    codex_output_role: evidence-for-chatgpt
+    code_security_review_authority: ChatGPT-only
+    merge_readiness_authority: ChatGPT-only
+    merge_decision_authority: repository-owner
+    codex_review_markers: forbidden
+    codex_merge_decision: forbidden
+
   human_gate:
     required_for:
       - architecture_changes
