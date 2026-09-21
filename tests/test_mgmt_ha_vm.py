@@ -140,6 +140,16 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
 
+    def test_address_collision_probe_is_bound_to_windows_host_only_source(self):
+        contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        self.assertEqual("/mnt/c/Windows/System32/ping.exe", contract["controller"]["windows_ping"])
+        self.assertIn("mgmt_local_ha_contract.controller.windows_ping", source)
+        self.assertIn('          - -S\n          - "{{ mgmt_local_ha_contract.controller.host_address }}"', source)
+        self.assertIn("selected VirtualBox", source)
+        self.assertIn("host-only source", source)
+        self.assertNotIn('argv: [ping, -c, "1", -W, "1"', source)
+
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         self.assertEqual(2, source.count("ansible_host: {{ item.value.vm_name }}"))
