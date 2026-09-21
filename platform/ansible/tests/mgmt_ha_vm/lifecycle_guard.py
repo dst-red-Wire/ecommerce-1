@@ -6,6 +6,8 @@ import argparse
 import json
 import re
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,9 @@ POSTCONDITION_TASK_RE = re.compile(
     r"verify\s+native\s+selinux,\s+egress\s+denial,\s+exact\s+rpms\s+and\s+staged\s+image\s+hashes",
     re.IGNORECASE,
 )
+
+WINDOWS_INTEROP_ATTEMPTS = 3
+WINDOWS_INTEROP_DELAY_SECONDS = 2
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -141,11 +146,26 @@ def cold_stage_decision(result: dict[str, Any], ownership: dict[str, Any]) -> di
     return {"classification": "unsafe-or-non-transient-cold-stage-failure", "resolution": "fail"}
 
 
+def run_windows_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Retry only the demonstrated transient WSL interop launch failure."""
+    if not command:
+        raise ValueError("Windows command is required")
+    result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(WINDOWS_INTEROP_ATTEMPTS):
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode == 0 or WSL_INTEROP_RE.search(result.stderr) is None:
+            return result
+        if attempt + 1 < WINDOWS_INTEROP_ATTEMPTS:
+            time.sleep(WINDOWS_INTEROP_DELAY_SECONDS)
+    assert result is not None
+    return result
+
+
 def probe_ownership(vbox: str, identity: Path, vm_name: str) -> dict[str, Any]:
     """Classify only the expected Vagrant identity against live VirtualBox registration."""
     if VM_NAME_RE.fullmatch(vm_name) is None:
         raise ValueError("invalid HA fixture VM name")
-    listed = subprocess.run([vbox, "list", "vms"], capture_output=True, text=True, check=False)
+    listed = run_windows_command([vbox, "list", "vms"])
     if listed.returncode != 0:
         raise RuntimeError("VirtualBox registration query failed")
 
@@ -174,12 +194,7 @@ def probe_ownership(vbox: str, identity: Path, vm_name: str) -> dict[str, Any]:
     if registrations.get(uuid) != vm_name or names.get(vm_name) != uuid:
         return {"state": "mismatch", "vm_name": vm_name, "uuid": uuid}
 
-    inspected = subprocess.run(
-        [vbox, "showvminfo", uuid, "--machinereadable"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    inspected = run_windows_command([vbox, "showvminfo", uuid, "--machinereadable"])
     if inspected.returncode != 0:
         return {"state": "mismatch", "vm_name": vm_name, "uuid": uuid}
     properties = dict(
@@ -198,6 +213,8 @@ def main() -> int:
     probe.add_argument("--identity", type=Path, required=True)
     probe.add_argument("--vm-name", required=True)
     probe.add_argument("--output", type=Path, required=True)
+    windows = subparsers.add_parser("run-windows")
+    windows.add_argument("command", nargs=argparse.REMAINDER)
     for action in ("classify-create", "classify-cleanup", "classify-cold-stage"):
         command = subparsers.add_parser(action)
         command.add_argument("--result", type=Path, required=True)
@@ -205,6 +222,12 @@ def main() -> int:
         command.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
+    if args.action == "run-windows":
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        result = run_windows_command(command)
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
     if args.action == "probe":
         payload = probe_ownership(args.vbox, args.identity, args.vm_name)
     else:

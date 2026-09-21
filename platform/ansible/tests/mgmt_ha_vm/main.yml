@@ -78,7 +78,13 @@
 
     - name: Verify exact Windows VirtualBox version
       ansible.builtin.command:
-        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", --version]
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_lifecycle_guard }}"
+          - run-windows
+          - --
+          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+          - --version
       register: ha_vbox_version
       changed_when: false
       failed_when: >-
@@ -88,6 +94,10 @@
     - name: Discover Windows fixture state root without changing host settings
       ansible.builtin.command:
         argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_lifecycle_guard }}"
+          - run-windows
+          - --
           - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
           - -NoProfile
           - -NonInteractive
@@ -156,7 +166,14 @@
 
     - name: Validate selected host-only adapter and address
       ansible.builtin.command:
-        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, hostonlyifs]
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_lifecycle_guard }}"
+          - run-windows
+          - --
+          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+          - list
+          - hostonlyifs
       register: ha_hostonly
       changed_when: false
 
@@ -191,7 +208,14 @@
 
     - name: List registered VirtualBox machines before HA creation
       ansible.builtin.command:
-        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, vms]
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_lifecycle_guard }}"
+          - run-windows
+          - --
+          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+          - list
+          - vms
       register: ha_registered_vms
       changed_when: false
 
@@ -208,13 +232,15 @@
       ansible.builtin.command:
         argv:
           - "{{ ansible_playbook_python }}"
-          - -c
-          - >-
-            import subprocess,sys;
-            raise SystemExit(subprocess.run(
-            [sys.argv[1],'-n','1','-w','1000','-S',sys.argv[2],sys.argv[3]],
-            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode)
+          - "{{ ha_lifecycle_guard }}"
+          - run-windows
+          - --
           - "{{ mgmt_local_ha_contract.controller.windows_ping }}"
+          - -n
+          - "1"
+          - -w
+          - "1000"
+          - -S
           - "{{ mgmt_local_ha_contract.controller.host_address }}"
           - "{{ item.value.address }}"
       loop: "{{ ha_nodes }}"

@@ -170,14 +170,38 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual("/mnt/c/Windows/System32/ping.exe", contract["controller"]["windows_ping"])
         self.assertIn("mgmt_local_ha_contract.controller.windows_ping", source)
         self.assertIn("ansible_playbook_python", source)
-        self.assertIn("subprocess.run(", source)
-        self.assertIn("stdout=subprocess.DEVNULL", source)
-        self.assertIn("stderr=subprocess.DEVNULL", source)
-        self.assertIn("'-S',sys.argv[2],sys.argv[3]", source)
+        self.assertGreaterEqual(source.count("run-windows"), 5)
+        self.assertIn("ha_lifecycle_guard", source)
+        self.assertIn("-S", source)
         self.assertIn("selected VirtualBox", source)
         self.assertIn("host-only source", source)
         self.assertNotIn('argv: [ping, -c, "1", -W, "1"', source)
         self.assertNotIn("MODULE_STRICT_UTF8_RESPONSE", source)
+
+    def test_windows_runner_retries_only_exact_wsl_interop_failure(self):
+        transient = GUARD.subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            "WSL ERROR: UtilAcceptVsock:273: accept4 failed 110",
+        )
+        success = GUARD.subprocess.CompletedProcess([], 0, "ok", "")
+        with (
+            mock.patch.object(GUARD.subprocess, "run", side_effect=[transient, success]) as run,
+            mock.patch.object(GUARD.time, "sleep") as sleep,
+        ):
+            self.assertEqual(0, GUARD.run_windows_command(["vbox", "list"]).returncode)
+            self.assertEqual(2, run.call_count)
+            sleep.assert_called_once_with(GUARD.WINDOWS_INTEROP_DELAY_SECONDS)
+
+        permanent = GUARD.subprocess.CompletedProcess([], 1, "", "permission denied")
+        with (
+            mock.patch.object(GUARD.subprocess, "run", return_value=permanent) as run,
+            mock.patch.object(GUARD.time, "sleep") as sleep,
+        ):
+            self.assertEqual(1, GUARD.run_windows_command(["vbox", "list"]).returncode)
+            run.assert_called_once()
+            sleep.assert_not_called()
 
     def test_nested_vm_phases_are_bounded_parallel_and_json_safe(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
