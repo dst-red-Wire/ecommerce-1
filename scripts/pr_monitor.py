@@ -119,7 +119,7 @@ def paginate_review_threads(
 
 
 CHATGPT_REVIEW_MARKER_RE = re.compile(
-    r"<!--\\s*chatgpt-exact-sha-review:v1\\s+(\\{[^\\n]*\\})\\s*-->"
+    r"<!--\s*chatgpt-exact-sha-review:v1\s+(\{[^\n]*\})\s*-->"
 )
 
 
@@ -165,6 +165,7 @@ def _latest_chatgpt_review(pr: dict[str, Any]) -> dict[str, Any]:
 
 
 def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]:
+    chatgpt_review = _latest_chatgpt_review(pr)
     nodes = (pr.get("commits") or {}).get("nodes") or []
     rollup = ((nodes[-1].get("commit") or {}).get("statusCheckRollup") or {}) if nodes else {}
     checks = {}
@@ -201,8 +202,8 @@ def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]
         "reviews": reviews,
         "open_findings_count": len(findings),
         "open_findings": findings,
-        "chatgpt_review": _latest_chatgpt_review(pr),
-        "validated_verdict": (_latest_chatgpt_review(pr).get("verdict") or ""),
+        "chatgpt_review": chatgpt_review,
+        "validated_verdict": (chatgpt_review.get("verdict") or ""),
         "mergeable": pr.get("mergeable"),
         "merge_state_status": pr.get("mergeStateStatus"),
         "is_draft": bool(pr.get("isDraft")),
