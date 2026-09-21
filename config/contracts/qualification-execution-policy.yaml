@@ -68,7 +68,8 @@ qualification_lifecycle:
     non_blocking_improvement_creates_follow_up: true
   duplication:
     precommit_is_development_gate: true
-    duplicate_full_gate_run_same_sha: forbidden
+    merge_authoritative_duplicate_full_gate_run_same_sha: forbidden
+    non_merge_authoritative_measurement_repetitions: allowed-when-centrally-declared
 
 execution:
   global_gate_order:
@@ -454,7 +455,7 @@ workflows:
   rke2_local_virtualbox:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary
-    entrypoint: PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost, platform/ansible/tests/mgmt_offline_vm/main.yml
+    entrypoint: scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json
     exit_criteria:
       - fresh-rocky-own-kernel-systemd-selinux-enforcing
       - cold-offline-artifact-install-pass
@@ -489,16 +490,31 @@ workflows:
         - config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json
         - config/infrastructure/mgmt-bootstrap.yaml
         - config/infrastructure/network-plan.yaml
-        - platform/ansible/roles/mgmt_offline_artifacts/**/*
-        - platform/ansible/roles/mgmt_private_network/**/*
-        - platform/ansible/roles/rke2_server/**/*
-        - platform/ansible/tests/mgmt_offline_vm/**/*
+        - platform/ansible/roles/mgmt_offline_artifacts
+        - platform/ansible/roles/mgmt_private_network
+        - platform/ansible/roles/rke2_server
+        - platform/ansible/tests/mgmt_offline_vm
         - scripts/build_mgmt_airgap_bundle.py
         - scripts/mgmt_airgap.py
         - tests/test_ansible_mgmt_private_network.py
         - tests/test_mgmt_airgap.py
         - tests/test_mgmt_airgap_bundle.py
         - tests/test_mgmt_offline_vm.py
+  tekton_proof:
+    owner: cloud-platform
+    purpose: state-changing management-plane proof of exact Tekton execution, signed Harbor evidence round-trip, and direct-parent reuse
+    entrypoint: scripts/repoctl.py tekton-proof --runtime-config <path> --base-sha <sha> --parent-sha <sha> --head-sha <sha>
+    exit_criteria:
+      - parent-pipelinerun-pass
+      - child-pipelinerun-pass
+      - signed-harbor-evidence-authenticated
+      - exact-head-evidence-pass
+      - direct-parent-product-reuse-proven
+    evidence:
+      runtime: .context/runtime/tekton-proof/<sha>.json
+    merge_authoritative: false
+    state_changing: true
+    completion_requires_remote_readback: true
   performance_campaign:
     owner: quality-engineering
     purpose: non-merge-authoritative performance characterization
