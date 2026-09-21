@@ -200,6 +200,34 @@ def _completed_proof_inputs_unchanged(
     return True
 
 
+def _semantic_function_snapshot_unchanged(
+    semantic_functions: dict[str, dict[str, str]],
+) -> bool:
+    """Validate only the exact helper functions consumed by a completed runtime proof."""
+    for relative, functions in semantic_functions.items():
+        source_path = ROOT / relative
+        try:
+            lines = source_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        for name, expected in functions.items():
+            prefix = f"def {name}("
+            try:
+                start = next(index for index, line in enumerate(lines) if line.startswith(prefix))
+            except StopIteration:
+                return False
+            end = len(lines)
+            for index in range(start + 1, len(lines)):
+                if lines[index].startswith("def ") or lines[index].startswith("class "):
+                    end = index
+                    break
+            projection = "\n".join(lines[start:end]).strip() + "\n"
+            actual = hashlib.sha256(projection.encode("utf-8")).hexdigest()
+            if actual != expected:
+                return False
+    return True
+
+
 def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
     global _QUALIFICATION_EXECUTION_POLICY
@@ -384,6 +412,9 @@ def qualification_execution_policy() -> dict:
                 provenance = completion.get("provenance")
                 invalidation_inputs = completion.get("invalidation_inputs")
                 invalidation_object_ids = completion.get("invalidation_object_ids")
+                invalidation_semantic_functions = completion.get(
+                    "invalidation_semantic_functions", {}
+                )
                 if (
                     completion.get("status") != "complete"
                     or completion.get("criteria_status") != "PASS"
@@ -413,6 +444,24 @@ def qualification_execution_policy() -> dict:
                         or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
                         for object_id in invalidation_object_ids.values()
                     )
+                    or not isinstance(invalidation_semantic_functions, dict)
+                    or not invalidation_semantic_functions
+                    or any(
+                        not isinstance(relative, str)
+                        or not relative
+                        or Path(relative).is_absolute()
+                        or ".." in Path(relative).parts
+                        or not isinstance(functions, dict)
+                        or not functions
+                        or any(
+                            not isinstance(name, str)
+                            or not name
+                            or not isinstance(digest, str)
+                            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                            for name, digest in functions.items()
+                        )
+                        for relative, functions in invalidation_semantic_functions.items()
+                    )
                 ):
                     raise RuntimeError(
                         f"qualification workflow {workflow_name} completed proof record is invalid"
@@ -430,6 +479,12 @@ def qualification_execution_policy() -> dict:
                 ):
                     raise RuntimeError(
                         f"qualification workflow {workflow_name} completed proof is invalidated by registered input changes"
+                    )
+                if not _semantic_function_snapshot_unchanged(
+                    invalidation_semantic_functions
+                ):
+                    raise RuntimeError(
+                        f"qualification workflow {workflow_name} completed proof is invalidated by helper semantic changes"
                     )
             effective = copy.deepcopy(defaults)
             effective.update(copy.deepcopy(workflow))
@@ -4829,6 +4884,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         )
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
     frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
+    controller_identity = vm_state / "identity"
+    identity_existed_before_create = controller_identity.exists()
 
     def source_is_frozen() -> bool:
         return (
@@ -4870,14 +4927,23 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "destroy",
     ]
     vm_created = False
+
+    def cleanup_is_owned() -> bool:
+        if vm_created:
+            return True
+        return (
+            not identity_existed_before_create
+            and controller_identity.is_file()
+        )
+
     for action in actions:
         if not source_is_frozen():
-            if vm_created:
+            if cleanup_is_owned():
                 run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source changed after freeze")
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
-            if action not in {"validate", "destroy"}:
+            if action not in {"validate", "destroy"} and cleanup_is_owned():
                 run([*command, "-e", "vm_action=destroy"], check=False)
             return result.returncode
         if action == "create":
@@ -4971,6 +5037,13 @@ def qualification_proof(base: str) -> int:
             return fail(f"qualification-proof performance audit missing/invalid for {head}")
     else:
         print(f"PASS qualification-proof: reusing performance audit {audit_path.relative_to(ROOT)}")
+
+    if workflow.get("exact_sha_required") is True and git("rev-parse", "HEAD").strip() != head:
+        return fail("qualification-proof HEAD changed during qualification")
+    if workflow.get("clean_worktree_required") is True and git(
+        "status", "--porcelain", "--untracked-files=all"
+    ).strip():
+        return fail("qualification-proof worktree changed during qualification")
 
     _workflow_status("PASS", f"qualification-proof {head[:12]}")
     print(
