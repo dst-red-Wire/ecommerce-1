@@ -214,6 +214,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             mock.patch.object(MOD, "_valid_exact_evidence", side_effect=[None, evidence]) as valid_evidence,
             mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
             mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path) as valid_audit,
+            mock.patch.object(MOD, "_completed_proof_inputs_unchanged", return_value=True),
             mock.patch.object(MOD, "run", return_value=completed) as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
@@ -246,6 +247,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
             mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path),
             mock.patch.object(MOD, "_qualification_audit_path") as requested_audit,
+            mock.patch.object(MOD, "_completed_proof_inputs_unchanged", return_value=True),
             mock.patch.object(MOD, "run") as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
