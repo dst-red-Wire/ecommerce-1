@@ -478,16 +478,20 @@ graph LR
                     self.assertEqual([], authority.validate(root))
 
             makefile = root / "Makefile"
-            original_makefile = makefile.read_text()
+            original_makefile = makefile.read_text() if makefile.is_file() else ""
             makefile.write_text(original_makefile + "\n# CODEX_COMMAND forbidden regression\n")
             self.assertIn(
                 "review automation must not expose Codex trigger, polling, or invocation controls",
                 authority.validate(root),
             )
-            makefile.write_text(original_makefile)
+            if original_makefile:
+                makefile.write_text(original_makefile)
+            else:
+                makefile.unlink()
 
             monitor = root / "scripts/pr_monitor.py"
-            original_monitor = monitor.read_text()
+            monitor.parent.mkdir(parents=True, exist_ok=True)
+            original_monitor = monitor.read_text() if monitor.is_file() else ""
             monitor.write_text(
                 original_monitor + "\n# PR_MONITOR_CODEX_COMMAND forbidden regression\n"
             )
@@ -495,7 +499,10 @@ graph LR
                 "review automation must not expose Codex trigger, polling, or invocation controls",
                 authority.validate(root),
             )
-            monitor.write_text(original_monitor)
+            if original_monitor:
+                monitor.write_text(original_monitor)
+            else:
+                monitor.unlink()
             self.assertEqual([], authority.validate(root))
 
     def test_codex_is_execution_fallback_only_when_chatgpt_cannot_execute(self):
