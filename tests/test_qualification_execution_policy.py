@@ -270,6 +270,86 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(1, command.count("--output"))
         self.assertEqual(str(audit_path), command[command.index("--output") + 1])
 
+    def test_chatgpt_review_readiness_uses_latest_exact_sha_verdict_per_kind(self):
+        head = "a" * 40
+        policy = {
+            "ai_reviewer": {
+                "evidence": {
+                    "required_kinds": ["code", "security"],
+                    "required_status": "PASS",
+                }
+            }
+        }
+
+        def proof(kind, status, blockers):
+            return (
+                '<!-- chatgpt-exact-sha-review:v1 '
+                + __import__("json").dumps(
+                    {
+                        "provider": "ChatGPT",
+                        "kind": kind,
+                        "head_sha": head,
+                        "status": status,
+                        "blocking_findings": blockers,
+                    },
+                    separators=(",", ":"),
+                )
+                + " -->"
+            )
+
+        cases = (
+            (
+                "blocked-then-pass",
+                [
+                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
+                    {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
+                ],
+                True,
+            ),
+            (
+                "pass-then-blocked",
+                [
+                    {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
+                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
+                ],
+                False,
+            ),
+        )
+
+        for name, comments, expected_ready in cases:
+            with self.subTest(case=name):
+                owner = MOD.subprocess.CompletedProcess(
+                    [],
+                    0,
+                    __import__("json").dumps(
+                        {"owner": {"login": "owner"}, "nameWithOwner": "owner/repo"}
+                    ),
+                    "",
+                )
+                history = MOD.subprocess.CompletedProcess(
+                    [], 0, __import__("json").dumps([comments]), ""
+                )
+
+                def fake_run(command, **kwargs):
+                    if command[1:3] == ["repo", "view"]:
+                        return owner
+                    if command[1:3] == ["api", "--paginate"]:
+                        return history
+                    raise AssertionError(command)
+
+                with (
+                    mock.patch.object(MOD, "pull_request_review_policy", return_value=policy),
+                    mock.patch.object(MOD, "run", side_effect=fake_run),
+                ):
+                    ready, reason = MOD.chatgpt_review_readiness("gh", 129, head)
+                self.assertIs(expected_ready, ready)
+                if expected_ready:
+                    self.assertIn("PASS", reason)
+                else:
+                    self.assertIn("not PASS", reason)
+
     def test_qualification_proof_reuses_fresh_exact_sha_pass_without_replay(self):
         head = "a" * 40
         evidence = ROOT / ".context" / "evidence" / f"{head}.json"
