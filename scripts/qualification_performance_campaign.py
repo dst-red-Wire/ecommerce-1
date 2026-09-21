@@ -181,6 +181,18 @@ def _budget_result(actual: float, maximum: float) -> dict:
     }
 
 
+def _assert_frozen_checkout(expected_head: str | None = None) -> str:
+    clean = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True
+    ).strip()
+    if clean:
+        raise RuntimeError("performance campaign worktree changed during execution")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if expected_head is not None and head != expected_head:
+        raise RuntimeError("performance campaign HEAD changed during execution")
+    return head
+
+
 def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     policy = repoctl.qualification_execution_policy()
     perf = policy["performance"]
@@ -192,13 +204,7 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     budgets = perf["budgets_seconds"]
     baselines = perf["baselines_seconds"]
 
-    clean = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True
-    ).strip()
-    if clean:
-        raise RuntimeError("performance campaign requires a clean worktree")
-
-    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    head = _assert_frozen_checkout()
     head_tree = subprocess.check_output(["git", "rev-parse", f"{head}^{{tree}}"], cwd=ROOT, text=True).strip()
     identity = repoctl.qualification_identity()
     base_env = os.environ.copy()
@@ -263,14 +269,7 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     final_product = _run_sample("final-product-exact", _controller("service", "product"), env=base_env)
     final_verify = _run_sample("final-verify-exact", verify, env=full_env)
 
-    final_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    final_clean = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True
-    ).strip()
-    if final_head != head:
-        raise RuntimeError("performance campaign HEAD changed during execution")
-    if final_clean:
-        raise RuntimeError("performance campaign worktree changed during execution")
+    _assert_frozen_checkout(head)
 
     checks = {
         "cold_verify_change_wall": _budget_result(
