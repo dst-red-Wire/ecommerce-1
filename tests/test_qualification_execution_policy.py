@@ -300,6 +300,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workflow = {
+                "exact_sha_required": True,
+                "clean_worktree_required": True,
                 "merge_authoritative": False,
                 "state_changing": True,
                 "completion_requires_remote_readback": True,
