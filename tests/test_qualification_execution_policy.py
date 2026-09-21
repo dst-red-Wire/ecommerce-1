@@ -90,7 +90,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(False, campaign["merge_authoritative"])
         self.assertNotIn("repetitions", policy["performance"]["campaign"])
 
-    def test_qualification_proof_runs_exact_verify_once_then_audit_once(self):
+    def test_qualification_proof_runs_missing_exact_steps_once(self):
         head = "a" * 40
         evidence = ROOT / ".context" / "evidence" / f"{head}.json"
 
@@ -106,21 +106,48 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with (
             mock.patch.object(MOD, "git", side_effect=fake_git),
             mock.patch.object(MOD, "verify_change", return_value=0) as verify,
-            mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "_valid_exact_evidence", side_effect=[None, evidence]) as valid_evidence,
             mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
-            mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path) as valid_audit,
+            mock.patch.object(MOD, "_valid_performance_audit", side_effect=[None, audit_path]) as valid_audit,
             mock.patch.object(MOD, "run", return_value=completed) as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
 
         verify.assert_called_once_with("origin/main", head)
-        valid_audit.assert_called_once_with("origin/main", head)
+        self.assertEqual(2, valid_evidence.call_count)
+        self.assertEqual(2, valid_audit.call_count)
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertIn("scripts/performance_audit.py", command)
         self.assertEqual(1, command.count("--evidence"))
         self.assertEqual(1, command.count("--output"))
         self.assertEqual(str(audit_path), command[command.index("--output") + 1])
+
+    def test_qualification_proof_reuses_fresh_exact_sha_pass_without_replay(self):
+        head = "a" * 40
+        evidence = ROOT / ".context" / "evidence" / f"{head}.json"
+        audit_path = ROOT / ".context" / "performance" / f"{head}.json"
+
+        def fake_git(*args, check=True):
+            if args == ("rev-parse", "HEAD"):
+                return head + "\n"
+            if args == ("status", "--porcelain", "--untracked-files=all"):
+                return ""
+            raise AssertionError(args)
+
+        with (
+            mock.patch.object(MOD, "git", side_effect=fake_git),
+            mock.patch.object(MOD, "verify_change") as verify,
+            mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path),
+            mock.patch.object(MOD, "_qualification_audit_path") as requested_audit,
+            mock.patch.object(MOD, "run") as run,
+        ):
+            self.assertEqual(0, MOD.qualification_proof("origin/main"))
+
+        verify.assert_not_called()
+        requested_audit.assert_not_called()
+        run.assert_not_called()
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
