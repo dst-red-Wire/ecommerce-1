@@ -252,11 +252,11 @@ class MgmtHaVmTests(unittest.TestCase):
             'serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
             cluster,
         )
-        self.assertGreaterEqual(
+        self.assertEqual(
+            4,
             cluster.count(
                 'throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"'
             ),
-            5,
         )
 
         for play in (
