@@ -86,9 +86,11 @@ existing destination, or a source whose `manifest.json` does not hash to the
 approved value above. The digest-pinned #128 Rocky preparer image must already be
 present in the local Docker cache; the restore command verifies it with
 `docker image inspect` and never pulls it. It then reuses the #128 bundle assembler
-with `bundle_offline=true`: every locked byte is revalidated and the destination is
-published only after the independent manifest and image/RPM validation succeeds.
-No network fallback is permitted. The destination remains:
+with `bundle_offline=true` and a fresh empty invocation-local cache: every locked
+byte must therefore come from the selected #128 source bundle, is revalidated, and
+the destination is published only after the independent manifest and image/RPM
+validation succeeds. No network or ambient-cache fallback is permitted. The
+destination remains:
 
 ```text
 .context/rke2-offline-bundle-v1-37-0-rke2r1
