@@ -192,6 +192,15 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                             {path: expected},
                         )
                     )
+        semantic = completion["invalidation_semantic_functions"]
+        self.assertIn("scripts/repoctl.py", semantic)
+        self.assertIn("scripts/capability_bootstrap.py", semantic)
+        self.assertIn("ansible_collections_ready", semantic["scripts/repoctl.py"])
+        self.assertIn(
+            "validate_toolchain_projections",
+            semantic["scripts/capability_bootstrap.py"],
+        )
+        self.assertTrue(MOD._semantic_function_snapshot_unchanged(semantic))
         self.assertEqual(
             ".context/mgmt-offline-vm/<name>/rke2-result.json",
             rke2["evidence"]["runtime"],
@@ -292,6 +301,47 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         requested_audit.assert_not_called()
         run.assert_not_called()
 
+    def test_qualification_proof_rechecks_frozen_source_after_audit(self):
+        head = "a" * 40
+        evidence = ROOT / ".context" / "evidence" / f"{head}.json"
+        audit_path = ROOT / ".context" / "performance" / f"{head}.json"
+        workflow = {
+            "verify_change_runs": 1,
+            "performance_audit_runs": 1,
+            "clean_worktree_required": True,
+            "exact_sha_required": True,
+        }
+
+        for mutation in ("dirty", "head-moved"):
+            with self.subTest(mutation=mutation):
+                calls = {"status": 0, "head": 0}
+
+                def fake_git(*args, check=True):
+                    if args == ("rev-parse", "HEAD"):
+                        calls["head"] += 1
+                        if mutation == "head-moved" and calls["head"] >= 2:
+                            return "b" * 40 + "\n"
+                        return head + "\n"
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        calls["status"] += 1
+                        if mutation == "dirty" and calls["status"] >= 2:
+                            return " M scripts/repoctl.py\n"
+                        return ""
+                    raise AssertionError(args)
+
+                with (
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "git", side_effect=fake_git),
+                    mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+                    mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path),
+                    mock.patch.object(MOD, "_qualification_audit_path"),
+                    mock.patch.object(MOD, "verify_change") as verify,
+                    mock.patch.object(MOD, "run") as run,
+                ):
+                    self.assertEqual(2, MOD.qualification_proof("origin/main"))
+                verify.assert_not_called()
+                run.assert_not_called()
+
     def test_completed_proof_inputs_use_stored_object_ids_without_historical_commit(self):
         source = "a" * 40
         expected = {
@@ -324,6 +374,20 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     {"config/a.yaml": "1" * 40},
                 )
             )
+
+    def test_semantic_function_snapshot_detects_consumed_helper_mutation(self):
+        source = "def helper():\n    return 1\n"
+        digest = MOD.hashlib.sha256(source.encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "scripts" / "helper.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(source, encoding="utf-8")
+            snapshot = {"scripts/helper.py": {"helper": digest}}
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertTrue(MOD._semantic_function_snapshot_unchanged(snapshot))
+                script.write_text("def helper():\n    return 2\n", encoding="utf-8")
+                self.assertFalse(MOD._semantic_function_snapshot_unchanged(snapshot))
 
     def test_rke2_registered_entrypoint_executes_complete_existing_fixture_sequence(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
@@ -491,6 +555,81 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
                 run.assert_not_called()
+
+    def test_rke2_create_failure_cleans_only_after_new_identity_ownership(self):
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
+
+        for acquired in (False, True):
+            with self.subTest(acquired=acquired), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                vm_name = "ecommerce-mgmt-test-policy"
+                state = root / ".context" / "mgmt-offline-vm" / vm_name
+                inputs = root / ".context" / "mgmt-vm-inputs.json"
+                inputs.parent.mkdir(parents=True)
+                inputs.write_text(
+                    __import__("json").dumps(
+                        {
+                            "vm_name": vm_name,
+                            "mgmt_offline_manifest_sha256": approved,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                def clean_git(*args, check=True):
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        return ""
+                    if args == ("rev-parse", "HEAD"):
+                        return head + "\n"
+                    raise AssertionError(args)
+
+                completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+                failed = MOD.subprocess.CompletedProcess([], 1, "", "")
+
+                def fake_run(command, **kwargs):
+                    action = command[-1]
+                    if action == "vm_action=create":
+                        if acquired:
+                            state.mkdir(parents=True, exist_ok=True)
+                            (state / "identity").write_text("owned\n", encoding="utf-8")
+                        return failed
+                    return completed
+
+                with (
+                    mock.patch.object(MOD, "ROOT", root),
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value=approved),
+                    mock.patch.object(MOD, "git", side_effect=clean_git),
+                    mock.patch.object(MOD, "require"),
+                    mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+                ):
+                    self.assertEqual(
+                        1,
+                        MOD.rke2_local_virtualbox_qualification(
+                            ".context/mgmt-vm-inputs.json"
+                        ),
+                    )
+
+                actions = [
+                    call.args[0][-1]
+                    for call in run.call_args_list
+                    if call.args and call.args[0][-1].startswith("vm_action=")
+                ]
+                self.assertEqual(
+                    ["vm_action=validate", "vm_action=create"]
+                    + (["vm_action=destroy"] if acquired else []),
+                    actions,
+                )
 
     def test_rke2_launcher_rejects_undocumented_input_overrides(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
