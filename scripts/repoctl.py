@@ -4872,13 +4872,42 @@ def _approved_rke2_manifest_sha256() -> str:
     return digest
 
 
+def _canonical_rke2_vagrant_version() -> str:
+    contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
+    version = (
+        contract.get("mgmt_local_vm_contract", {})
+        .get("vagrant", {})
+        .get("version")
+    )
+    if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+        raise RuntimeError("canonical RKE2 Vagrant version is invalid")
+    return version
+
+
+def _canonical_rke2_vagrant_ready() -> bool:
+    executable = "/mnt/c/Program Files/Vagrant/bin/vagrant.exe"
+    result = run([executable, "--version"], check=False, capture=True)
+    if result.returncode != 0:
+        return False
+    expected = f"Vagrant {_canonical_rke2_vagrant_version()}"
+    return (result.stdout or "").strip() == expected
+
+
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
     vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
     result = run([vbox, "list", "vms"], check=False, capture=True)
     if result.returncode != 0:
         raise RuntimeError("cannot inspect VirtualBox registrations for RKE2 qualification")
     match = re.search(
-        rf'^"{re.escape(vm_name)}"\s+\{{([0-9a-fA-F-]{{36}})\}}    workflow = qualification_workflow("rke2_local_virtualbox")
+        rf'^"{re.escape(vm_name)}"\s+\{{([0-9a-fA-F-]{{36}})\}}$',
+        result.stdout or "",
+        re.MULTILINE,
+    )
+    return match.group(1).lower() if match else None
+
+
+def rke2_local_virtualbox_qualification(inputs: str) -> int:
+    workflow = qualification_workflow("rke2_local_virtualbox")
     expected_entrypoint = (
         "scripts/repoctl.py rke2-local-virtualbox-qualification "
         "--inputs .context/mgmt-vm-inputs.json"
@@ -4917,7 +4946,6 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
         "vm_mac",
         "vm_cpus",
         "vm_memory",
-        "vm_vagrant_windows",
         "mgmt_offline_bundle_dir",
         "mgmt_offline_manifest_sha256",
     }
@@ -4936,6 +4964,11 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
         return fail(
             "RKE2 local qualification inputs must use the canonical approved manifest digest"
         )
+    if not _canonical_rke2_vagrant_ready():
+        return fail(
+            f"RKE2 local qualification requires canonical Vagrant {_canonical_rke2_vagrant_version()}"
+        )
+
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
     frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
 
@@ -5013,6 +5046,7 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
                 run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source changed during execution")
     return 0
+
 
 def _qualification_audit_path(head_sha: str) -> Path:
     template = str(qualification_workflow("qualification_proof")["performance_audit_output"])
