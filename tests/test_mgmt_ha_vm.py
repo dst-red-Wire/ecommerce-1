@@ -187,6 +187,14 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("Cold-stage the approved PR 128 bundle two VMs at a time", source)
         self.assertIn("ansible.builtin.include_tasks: cold_stage_batch.yml", source)
         self.assertIn("ha_cold_stage_batches", source)
+        self.assertIn(
+            'platform/ansible/tests/mgmt_ha_vm/cold_stage_batch.yml',
+            source,
+        )
+        self.assertIn(
+            'platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml',
+            source,
+        )
         self.assertIn("async: 1800", cold_helper)
         self.assertIn("poll: 0", cold_helper)
         self.assertIn("'vm_action': 'test'", cold_helper)
@@ -225,6 +233,12 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn(
             'serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
             cluster,
+        )
+        self.assertGreaterEqual(
+            cluster.count(
+                'serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"'
+            ),
+            6,
         )
         self.assertIn("strategy: free", cluster)
         self.assertGreaterEqual(
