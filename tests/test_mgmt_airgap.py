@@ -441,12 +441,20 @@ class OfflineAnsibleContractTests(unittest.TestCase):
 
     def test_rke2_server_flushes_handlers_and_bounds_notify_readiness(self):
         tasks = (ROOT / 'platform/ansible/roles/rke2_server/tasks/main.yml').read_text()
+        handlers = (ROOT / 'platform/ansible/roles/rke2_server/handlers/main.yml').read_text()
         enable = tasks.index('- name: Enable RKE2 server')
         flush = tasks.index('- name: Apply pending RKE2 restart handlers')
+        job = tasks.index('- name: Wait boundedly for the queued native RKE2 service job')
         readiness = tasks.index('- name: Wait boundedly for the native RKE2 service readiness')
         self.assertLess(enable, flush)
-        self.assertLess(flush, readiness)
+        self.assertLess(flush, job)
+        self.assertLess(job, readiness)
         self.assertIn('no_block: true', tasks[enable:flush])
+        self.assertIn('no_block: true', handlers)
+        self.assertIn('--property=Job', tasks[job:readiness])
+        self.assertIn("until: rke2_server_job.stdout | default('') | trim == ''", tasks[job:readiness])
+        self.assertIn('retries: 180', tasks[job:readiness])
+        self.assertIn('delay: 5', tasks[job:readiness])
         self.assertIn("stdout | default('') | trim == 'active'", tasks[readiness:])
         self.assertIn('retries:', tasks[readiness:])
 

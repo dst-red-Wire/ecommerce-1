@@ -123,6 +123,15 @@
 - name: Apply pending RKE2 restart handlers before readiness evaluation
   ansible.builtin.meta: flush_handlers
 
+- name: Wait boundedly for the queued native RKE2 service job
+  ansible.builtin.command:
+    argv: [systemctl, show, rke2-server.service, --property=Job, --value]
+  register: rke2_server_job
+  changed_when: false
+  until: rke2_server_job.stdout | default('') | trim == ''
+  retries: 180
+  delay: 5
+
 - name: Wait boundedly for the native RKE2 service readiness notification
   ansible.builtin.command:
     argv: [systemctl, is-active, rke2-server.service]

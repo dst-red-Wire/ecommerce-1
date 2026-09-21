@@ -115,6 +115,19 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-reconstructible"):
                 RESTAGE.clean((unrelated,), allowed=(images,))
 
+    def test_restage_cleanup_refuses_symlinked_allowed_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "runtime"
+            target.mkdir()
+            sentinel = target / "etcd-state"
+            sentinel.write_text("must survive")
+            images = root / "images"
+            images.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                RESTAGE.clean((images,), allowed=(images,))
+            self.assertEqual(sentinel.read_text(), "must survive")
+
 
 if __name__ == "__main__":
     unittest.main()

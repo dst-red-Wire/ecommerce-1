@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 from pathlib import Path
 
 ALLOWED = (
@@ -13,15 +15,22 @@ ALLOWED = (
 
 
 def clean(paths: tuple[Path, ...], allowed: tuple[Path, ...] = ALLOWED) -> list[str]:
-    normalized_allowed = {path.resolve(strict=False) for path in allowed}
+    normalized_allowed = {Path(os.path.abspath(path)) for path in allowed}
     removed = []
     for path in paths:
-        resolved = path.resolve(strict=False)
-        if resolved not in normalized_allowed:
+        lexical = Path(os.path.abspath(path))
+        if lexical not in normalized_allowed:
             raise ValueError("refuse removing non-reconstructible fixture state")
-        if resolved.exists():
-            shutil.rmtree(resolved)
-            removed.append(str(resolved))
+        for entry in (lexical, *lexical.parents):
+            try:
+                mode = entry.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(mode):
+                raise ValueError("refuse removing through a symbolic link")
+        if lexical.exists():
+            shutil.rmtree(lexical)
+            removed.append(str(lexical))
     return removed
 
 
