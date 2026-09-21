@@ -169,9 +169,17 @@
       loop_control:
         label: "{{ item.key }}"
 
-    - name: Probe fixed HA addresses before VM creation
+    - name: Probe fixed HA addresses on the selected Windows host-only segment before VM creation
       ansible.builtin.command:
-        argv: [ping, -c, "1", -W, "1", "{{ item.value.address }}"]
+        argv:
+          - "{{ mgmt_local_ha_contract.controller.windows_ping }}"
+          - -n
+          - "1"
+          - -w
+          - "1000"
+          - -S
+          - "{{ mgmt_local_ha_contract.controller.host_address }}"
+          - "{{ item.value.address }}"
       loop: "{{ ha_nodes }}"
       loop_control:
         label: "{{ item.key }}={{ item.value.address }}"
@@ -183,7 +191,10 @@
       ansible.builtin.assert:
         that:
           - item.rc != 0
-        fail_msg: "Address {{ item.item.value.address }} already responds; refusing a local network collision."
+        fail_msg: >-
+          Address {{ item.item.value.address }} responds from the selected VirtualBox
+          host-only source {{ mgmt_local_ha_contract.controller.host_address }};
+          refusing a local host-only network collision.
       loop: "{{ ha_address_probes.results }}"
       loop_control:
         label: "{{ item.item.key }}={{ item.item.value.address }}"
