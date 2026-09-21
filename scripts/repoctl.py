@@ -273,12 +273,9 @@ def qualification_execution_policy() -> dict:
             or waits_policy.get("every_wait_must_be_bounded") is not True
             or waits_policy.get("indefinite_wait") != "forbidden"
             or not isinstance(rerun_policy, dict)
-            or rerun_policy.get("final_candidate_runs") != 1
             or rerun_policy.get("non_blocking_improvement_creates_follow_up") is not True
             or not isinstance(duplication_policy, dict)
             or duplication_policy.get("precommit_is_development_gate") is not True
-            or duplication_policy.get("final_authoritative_qualification_runs") != 1
-            or duplication_policy.get("fresh_exact_sha_evidence_must_be_reused") is not True
             or duplication_policy.get("duplicate_full_gate_run_same_sha") != "forbidden"
         ):
             raise RuntimeError("qualification lifecycle stop/rerun/evidence policy is invalid")
