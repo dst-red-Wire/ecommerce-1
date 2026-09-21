@@ -100,13 +100,18 @@ os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(PROJECT_COLLECTIONS)
 os.environ["ANSIBLE_CONFIG"] = str(toolchain_projection_path("ansible_config"))
 CONTEXT = ROOT / ".context"
 
+_DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
+_DYNAMIC_WRITE_BYTES_VISIBLE = False
+
 
 class MissingRunnerPrerequisite(RuntimeError):
     """A runner-owned primitive is absent; repository code must not install it."""
 
 
 def fail(message: str, code: int = 2) -> int:
+    _clear_dynamic_write_bytes()
     print(f"FAIL {message}", file=sys.stderr)
+    _print_dynamic_write_bytes_snapshot()
     return code
 
 
@@ -123,10 +128,71 @@ def _paint(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _supports_color() else text
 
 
+def _context_written_bytes() -> int:
+    context_root = ROOT / ".context"
+    if not context_root.is_dir():
+        return 0
+    total = 0
+    for path in context_root.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _write_bytes_color(value: int) -> str:
+    if value < 1 * 1024 * 1024:
+        return "36"
+    if value < 64 * 1024 * 1024:
+        return "32"
+    if value < 512 * 1024 * 1024:
+        return "33"
+    return "35"
+
+
+def _clear_dynamic_write_bytes() -> None:
+    global _DYNAMIC_WRITE_BYTES_VISIBLE
+    if _DYNAMIC_WRITE_BYTES_VISIBLE and _supports_color():
+        print("\r\033[2K", end="", flush=True)
+    _DYNAMIC_WRITE_BYTES_VISIBLE = False
+
+
+def _emit_dynamic_write_bytes(*, force: bool = False) -> int | None:
+    global _DYNAMIC_WRITE_BYTES_LAST_EMIT, _DYNAMIC_WRITE_BYTES_VISIBLE
+    if not _supports_color():
+        return None
+    now = time.monotonic()
+    if not force and now - _DYNAMIC_WRITE_BYTES_LAST_EMIT < 0.25:
+        return None
+    value = _context_written_bytes()
+    label = _paint("Nombre d'octets écrits dynamique:", "35")
+    number = _paint(str(value), _write_bytes_color(value))
+    print(f"\r{label} {number}", end="", flush=True)
+    _DYNAMIC_WRITE_BYTES_LAST_EMIT = now
+    _DYNAMIC_WRITE_BYTES_VISIBLE = True
+    return value
+
+
+def _print_dynamic_write_bytes_snapshot() -> int | None:
+    if not _supports_color():
+        return None
+    _clear_dynamic_write_bytes()
+    value = _context_written_bytes()
+    label = _paint("Nombre d'octets écrits dynamique:", "35")
+    number = _paint(str(value), _write_bytes_color(value))
+    print(f"{label} {number}", flush=True)
+    return value
+
+
 def _workflow_status(kind: str, label: str) -> None:
+    _clear_dynamic_write_bytes()
     styles = {"RUN": ("●", "36"), "PASS": ("✓", "32"), "FAIL": ("✗", "31")}
     symbol, color = styles[kind]
     print(_paint(f"{symbol} {kind:<4} {label}", color), flush=True)
+    if kind in {"PASS", "FAIL"}:
+        _print_dynamic_write_bytes_snapshot()
 
 
 def require(name: str) -> str:
@@ -146,6 +212,7 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    _clear_dynamic_write_bytes()
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -154,7 +221,9 @@ def run(
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
+    _emit_dynamic_write_bytes()
     if check and p.returncode:
+        _clear_dynamic_write_bytes()
         detail = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
     return p
