@@ -56,10 +56,8 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotEqual(endpoint["registration_port"], endpoint["kubernetes_api_port"])
         self.assertTrue(1 <= endpoint["registration_port"] <= 65535)
         self.assertTrue(1 <= endpoint["kubernetes_api_port"] <= 65535)
-        self.assertIsInstance(endpoint["run_as_user"], int)
-        self.assertIsInstance(endpoint["run_as_group"], int)
-        self.assertGreater(endpoint["run_as_user"], 0)
-        self.assertGreater(endpoint["run_as_group"], 0)
+        self.assertEqual(99, endpoint["run_as_user"])
+        self.assertEqual(99, endpoint["run_as_group"])
         self.assertRegex(
             endpoint["image"]["reference"],
             r"^docker\.io/library/haproxy@sha256:[0-9a-f]{64}$",
@@ -162,6 +160,15 @@ class MgmtHaVmTests(unittest.TestCase):
             source,
         )
         self.assertIn("runAsNonRoot: true", source)
+        main_source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "(ha_haproxy_preparation.content | b64decode | from_json).run_as_user",
+            main_source,
+        )
+        self.assertIn(
+            "(ha_haproxy_preparation.content | b64decode | from_json).run_as_group",
+            main_source,
+        )
 
     def test_ha_completion_is_published_only_after_source_check_and_cleanup(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
@@ -205,7 +212,11 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertRegex(reference, r"@sha256:[0-9a-f]{64}$")
         self.assertIn("mgmt_local_ha_contract.ha_endpoint.image.reference", source)
         self.assertIn("docker, pull", source)
-        self.assertIn("docker", source)
+        self.assertIn("--network", source)
+        self.assertIn("id -u haproxy", source)
+        self.assertIn("id -g haproxy", source)
+        self.assertIn("run_as_user", source)
+        self.assertIn("run_as_group", source)
         self.assertIn("archive_sha256", source)
         self.assertNotIn(":latest", source)
 
