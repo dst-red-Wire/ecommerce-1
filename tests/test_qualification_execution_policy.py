@@ -162,6 +162,22 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "platform/ansible/tests/mgmt_offline_vm",
             completion["invalidation_inputs"],
         )
+        toolchain_inputs = [
+            "config/contracts/toolchain-lock.json",
+            "config/toolchain/versions.env",
+            "platform/ansible/requirements.yml",
+        ]
+        for path in toolchain_inputs:
+            self.assertIn(path, completion["invalidation_inputs"])
+            with self.subTest(invalidation_input=path):
+                changed = MOD.subprocess.CompletedProcess([], 1, "", "")
+                with mock.patch.object(MOD, "run", return_value=changed):
+                    self.assertFalse(
+                        MOD._completed_proof_inputs_unchanged(
+                            completion["qualified_source_sha"],
+                            [path],
+                        )
+                    )
         self.assertEqual(
             ".context/mgmt-offline-vm/<name>/rke2-result.json",
             rke2["evidence"]["runtime"],
@@ -256,18 +272,44 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             root = Path(directory)
             inputs = root / ".context" / "mgmt-vm-inputs.json"
             inputs.parent.mkdir(parents=True)
-            inputs.write_text("{}\n", encoding="utf-8")
+            vm_name = "ecommerce-mgmt-test-policy"
+            inputs.write_text(
+                __import__("json").dumps({"vm_name": vm_name}) + "\n",
+                encoding="utf-8",
+            )
+            state = root / ".context" / "mgmt-offline-vm" / vm_name
+            head = "c" * 40
             workflow = {
                 "entrypoint": (
                     "scripts/repoctl.py rke2-local-virtualbox-qualification "
                     "--inputs .context/mgmt-vm-inputs.json"
-                )
+                ),
+                "exact_sha_required": True,
+                "clean_worktree_required": True,
             }
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=server":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "server-source.json").write_text(
+                        __import__("json").dumps({"git_sha": head}) + "\n",
+                        encoding="utf-8",
+                    )
+                return completed
+
             with (
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
-                mock.patch.object(MOD, "run", return_value=completed) as run,
+                mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
                     0,
@@ -277,7 +319,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         actions = [
             call.args[0][-1]
             for call in run.call_args_list
-            if call.args and call.args[0][-2] == "-e"
+            if call.args and call.args[0][-2] == "-e" and call.args[0][-1].startswith("vm_action=")
         ]
         self.assertEqual(
             [
@@ -294,6 +336,130 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ],
             actions,
         )
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertIn(f"vm_repo={root}", command)
+            self.assertIn(f"vm_state={state}", command)
+
+    def test_rke2_launcher_rejects_dirty_worktree_and_vm_repo_override(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text(
+                __import__("json").dumps({"vm_name": "ecommerce-mgmt-test-policy"}) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(
+                    MOD,
+                    "git",
+                    side_effect=lambda *args, **kwargs: (
+                        " M scripts/repoctl.py\n"
+                        if args == ("status", "--porcelain", "--untracked-files=all")
+                        else head + "\n"
+                    ),
+                ),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+                run.assert_not_called()
+
+            inputs.write_text(
+                __import__("json").dumps(
+                    {
+                        "vm_name": "ecommerce-mgmt-test-policy",
+                        "vm_repo": "/tmp/alternate-source",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=clean_git),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+                run.assert_not_called()
+
+    def test_rke2_launcher_rejects_source_evidence_from_another_sha(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "e" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vm_name = "ecommerce-mgmt-test-policy"
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text(
+                __import__("json").dumps({"vm_name": vm_name}) + "\n",
+                encoding="utf-8",
+            )
+            state = root / ".context" / "mgmt-offline-vm" / vm_name
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=server":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "server-source.json").write_text(
+                        __import__("json").dumps({"git_sha": "f" * 40}) + "\n",
+                        encoding="utf-8",
+                    )
+                return completed
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=clean_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+        self.assertEqual("vm_action=destroy", run.call_args_list[-1].args[0][-1])
 
     def test_tekton_proof_launcher_consumes_registry_and_records_remote_readback(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
