@@ -40,6 +40,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         lifecycle = policy["qualification_lifecycle"]
         defaults = lifecycle["workflow_defaults"]
         proof = policy["workflows"]["qualification_proof"]
+        rke2 = policy["workflows"]["rke2_local_virtualbox"]
         campaign = policy["workflows"]["performance_campaign"]
 
         self.assertEqual("every-qualification-workflow", lifecycle["applies_to"])
@@ -54,6 +55,21 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             lifecycle["registration"]["unregistered_authoritative_qualification"],
         )
         self.assertEqual("forbidden", lifecycle["registration"]["local_lifecycle_override"])
+        completed_registration = lifecycle["completed_proof_registration"]
+        self.assertIs(False, completed_registration["registration_is_execution"])
+        self.assertEqual(
+            "forbidden",
+            completed_registration["execute_entrypoint_on_registration"],
+        )
+        self.assertEqual(
+            "qualified-source-sha-and-invalidation-inputs",
+            completed_registration["proof_binding"],
+        )
+        self.assertIs(
+            False,
+            completed_registration["metadata_only_registry_change_invalidates_runtime_proof"],
+        )
+        self.assertIs(True, completed_registration["reuse_until_invalidation_input_changes"])
         self.assertIs(True, defaults["stop_when_exit_criteria_pass"])
         self.assertEqual("forbidden", defaults["post_pass_scope_expansion"])
         self.assertEqual("follow-up-work-item", defaults["non_blocking_findings"])
@@ -81,12 +97,56 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
 
         resolved_proof = MOD.qualification_workflow("qualification_proof")
+        resolved_rke2 = MOD.qualification_workflow("rke2_local_virtualbox")
         resolved_campaign = MOD.qualification_workflow("performance_campaign")
         self.assertIs(True, resolved_proof["exact_sha_required"])
         self.assertIs(True, resolved_proof["clean_worktree_required"])
         self.assertIs(True, resolved_proof["stop_when_exit_criteria_pass"])
+        self.assertIs(True, resolved_rke2["exact_sha_required"])
+        self.assertIs(True, resolved_rke2["clean_worktree_required"])
+        self.assertIs(True, resolved_rke2["stop_when_exit_criteria_pass"])
         self.assertIs(True, resolved_campaign["exact_sha_required"])
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
+
+        completion = rke2["completion"]
+        self.assertEqual("complete", completion["status"])
+        self.assertEqual("PASS", completion["criteria_status"])
+        self.assertEqual("existing-proof-no-rerun", completion["proof_registration"])
+        self.assertEqual(
+            "84cf01601aa336f0cdd2d1899d764437294fbfe6",
+            completion["qualified_source_sha"],
+        )
+        self.assertEqual(128, completion["merged_by_pr"])
+        self.assertEqual(
+            "088b576dac43cb17e304967e3e58433499760fa9",
+            completion["merge_commit_sha"],
+        )
+        self.assertEqual(
+            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746",
+            completion["provenance"]["code_review"],
+        )
+        self.assertEqual(
+            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831",
+            completion["provenance"]["security_review"],
+        )
+        self.assertEqual(
+            "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
+            completion["provenance"]["approved_manifest_sha256"],
+        )
+        self.assertIn(
+            "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json",
+            completion["invalidation_inputs"],
+        )
+        self.assertIn(
+            "platform/ansible/tests/mgmt_offline_vm/**/*",
+            completion["invalidation_inputs"],
+        )
+        self.assertEqual(
+            ".context/mgmt-offline-vm/<name>/rke2-result.json",
+            rke2["evidence"]["runtime"],
+        )
+        self.assertIn("exact-sha-code-review-pass", rke2["exit_criteria"])
+        self.assertIn("exact-sha-security-review-pass", rke2["exit_criteria"])
 
         self.assertEqual(1, proof["verify_change_runs"])
         self.assertEqual(1, proof["performance_audit_runs"])
