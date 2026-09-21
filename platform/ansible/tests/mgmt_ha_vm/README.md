@@ -60,6 +60,22 @@ If the already-qualified #128 console transport hits its bounded 180-second wait
 wrapper may resume that exact owned VM once; unrelated creation failures are never
 retried. The campaign is still allowed to fail closed under host memory pressure.
 
+## Bounded parallelism
+
+The functional lab uses a contract-driven parallelism ceiling instead of making every
+phase concurrent:
+
+- global Ansible ceiling: 6 forks;
+- VM creation and console bootstrap: 1 VM at a time, fail-fast;
+- PR 128 cold-stage: 2 VMs at a time;
+- worker-01 and worker-02 join through HAProxy in parallel;
+- DNS/NTP/SELinux/egress validation: at most 4 hosts at a time;
+- cleanup: 2 owned VMs at a time while still attempting all six;
+- CP-01, CP-02, CP-03, etcd/quorum and HAProxy dependency phases: serial 1.
+
+These values live only in `mgmt_local_ha_contract.execution`; playbooks consume the
+contract and do not define independent parallelism policy.
+
 ## Existing offline bundle
 
 The campaign never downloads or silently rebuilds the #128 RKE2 bundle. It requires
