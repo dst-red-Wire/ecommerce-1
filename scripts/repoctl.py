@@ -139,7 +139,7 @@ class _GateProgress:
         self.previous_duration = ""
         self.previous_bytes = ""
         self.bytes_color = ""
-        self.prefix = f"{'RUN':<5}{gate} |"
+        self.prefix = f"{'RUN':<6}{gate} |"
 
     def _duration(self, elapsed: float) -> str:
         return f"{max(0.0, elapsed):{self.DURATION_WIDTH}.3f}s"
@@ -216,7 +216,7 @@ class _GateProgress:
         style = {"PASS": "32", "FAIL": "31"}.get(status, "36")
         # Status occupies a fixed five-cell field, including its separator.
         # RUN/PASS/FAIL therefore transition without moving the gate name.
-        replacement = status[:5].ljust(5)
+        replacement = status[:6].ljust(6)
         print(f"\r{_paint(replacement, style)}", end="", flush=True)
         print("", flush=True)
         self.visible = False
@@ -239,7 +239,7 @@ def _emit_compact_gate_status(
         "SKIP": "33",
         "REUSE": "35",
     }
-    status_text = _paint(f"{status:<5}", styles.get(status, "36"))
+    status_text = _paint(f"{status:<6}", styles.get(status, "36"))
     number = _paint(
         _format_written_bytes(written_bytes),
         _write_bytes_color(written_bytes),
