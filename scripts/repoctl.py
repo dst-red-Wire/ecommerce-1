@@ -234,8 +234,16 @@ def qualification_execution_policy() -> dict:
             or lifecycle.get("per_workflow_policy_duplication") != "forbidden"
         ):
             raise RuntimeError("qualification lifecycle authority is invalid")
+        registration = lifecycle.get("registration")
         defaults = lifecycle.get("workflow_defaults")
         required_per_workflow = lifecycle.get("required_per_workflow")
+        if (
+            not isinstance(registration, dict)
+            or registration.get("registry") != "workflows"
+            or registration.get("unregistered_authoritative_qualification") != "forbidden"
+            or registration.get("local_lifecycle_override") != "forbidden"
+        ):
+            raise RuntimeError("qualification lifecycle registration policy is invalid")
         if not isinstance(defaults, dict) or not defaults:
             raise RuntimeError("qualification lifecycle must declare workflow_defaults")
         if (
@@ -252,7 +260,7 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError("qualification lifecycle workflow_defaults are invalid")
         if (
             not isinstance(required_per_workflow, list)
-            or set(required_per_workflow) != {"purpose", "exit_criteria", "evidence"}
+            or set(required_per_workflow) != {"owner", "purpose", "entrypoint", "exit_criteria", "evidence"}
             or len(required_per_workflow) != len(set(required_per_workflow))
         ):
             raise RuntimeError("qualification lifecycle required_per_workflow is invalid")
@@ -302,11 +310,17 @@ def qualification_execution_policy() -> dict:
                 raise RuntimeError(
                     f"qualification workflow {workflow_name} is missing required fields: {missing}"
                 )
+            owner = workflow.get("owner")
             purpose = workflow.get("purpose")
+            entrypoint = workflow.get("entrypoint")
             exit_criteria = workflow.get("exit_criteria")
             evidence = workflow.get("evidence")
+            if not isinstance(owner, str) or not owner.strip():
+                raise RuntimeError(f"qualification workflow {workflow_name} owner is invalid")
             if not isinstance(purpose, str) or not purpose.strip():
                 raise RuntimeError(f"qualification workflow {workflow_name} purpose is invalid")
+            if not isinstance(entrypoint, str) or not entrypoint.strip():
+                raise RuntimeError(f"qualification workflow {workflow_name} entrypoint is invalid")
             if (
                 not isinstance(exit_criteria, list)
                 or not exit_criteria
