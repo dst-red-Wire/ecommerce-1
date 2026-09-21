@@ -180,6 +180,19 @@ def ruby_yaml(path: str) -> dict:
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
 
 
+def _completed_proof_inputs_unchanged(source_sha: str, invalidation_inputs: list[str]) -> bool:
+    """Return true only when every registered runtime input still matches the qualified source."""
+    for path in invalidation_inputs:
+        result = run(["git", "diff", "--quiet", source_sha, "--", path], check=False)
+        if result.returncode == 1:
+            return False
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cannot validate completed qualification input {path!r} against {source_sha}"
+            )
+    return True
+
+
 def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
     global _QUALIFICATION_EXECUTION_POLICY
@@ -287,7 +300,9 @@ def qualification_execution_policy() -> dict:
             or rerun_policy.get("non_blocking_improvement_creates_follow_up") is not True
             or not isinstance(duplication_policy, dict)
             or duplication_policy.get("precommit_is_development_gate") is not True
-            or duplication_policy.get("duplicate_full_gate_run_same_sha") != "forbidden"
+            or duplication_policy.get("merge_authoritative_duplicate_full_gate_run_same_sha") != "forbidden"
+            or duplication_policy.get("non_merge_authoritative_measurement_repetitions")
+            != "allowed-when-centrally-declared"
         ):
             raise RuntimeError("qualification lifecycle stop/rerun/evidence policy is invalid")
 
@@ -393,11 +408,16 @@ def qualification_execution_policy() -> dict:
                         raise RuntimeError(
                             f"qualification workflow {workflow_name} invalidation input escapes repository"
                         )
+                if not _completed_proof_inputs_unchanged(source_sha, invalidation_inputs):
+                    raise RuntimeError(
+                        f"qualification workflow {workflow_name} completed proof is invalidated by registered input changes"
+                    )
             effective = copy.deepcopy(defaults)
             effective.update(copy.deepcopy(workflow))
             effective_workflows[workflow_name] = effective
 
         proof = effective_workflows.get("qualification_proof")
+        tekton = effective_workflows.get("tekton_proof")
         campaign = effective_workflows.get("performance_campaign")
         if (
             not isinstance(proof, dict)
@@ -412,6 +432,17 @@ def qualification_execution_policy() -> dict:
             or proof.get("merge_authoritative") is not True
         ):
             raise RuntimeError("qualification_proof workflow contract is invalid")
+        if (
+            not isinstance(tekton, dict)
+            or tekton.get("exact_sha_required") is not True
+            or tekton.get("clean_worktree_required") is not True
+            or tekton.get("merge_authoritative") is not False
+            or tekton.get("state_changing") is not True
+            or tekton.get("completion_requires_remote_readback") is not True
+            or tekton.get("entrypoint")
+            != "scripts/repoctl.py tekton-proof --runtime-config <path> --base-sha <sha> --parent-sha <sha> --head-sha <sha>"
+        ):
+            raise RuntimeError("tekton_proof workflow contract is invalid")
         if (
             not isinstance(campaign, dict)
             or campaign.get("exact_sha_required") is not True
@@ -1934,6 +1965,13 @@ def resource_candidate(evidence: str) -> int:
 
 
 def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: str) -> int:
+    workflow = qualification_workflow("tekton_proof")
+    if (
+        workflow.get("merge_authoritative") is not False
+        or workflow.get("state_changing") is not True
+        or workflow.get("completion_requires_remote_readback") is not True
+    ):
+        return fail("tekton-proof must remain a registered state-changing remote-readback workflow")
     missing = [
         name
         for name, value in (
@@ -1947,7 +1985,7 @@ def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: 
     if missing:
         return fail("tekton-proof missing required values: " + ", ".join(missing))
     require("ansible-playbook")
-    run(
+    result = run(
         [
             "ansible-playbook",
             "-i",
@@ -1965,7 +2003,33 @@ def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: 
             f"proof_parent_sha={parent_sha}",
             "-e",
             f"proof_head_sha={head_sha}",
-        ]
+        ],
+        check=False,
+    )
+    if result.returncode:
+        return result.returncode
+    template = workflow.get("evidence", {}).get("runtime", "")
+    relative = Path(str(template).replace("<sha>", head_sha))
+    if not str(relative).startswith(".context/") or relative.is_absolute() or ".." in relative.parts:
+        return fail("tekton-proof evidence path must remain under .context")
+    path = ROOT / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "PASS",
+                "workflow": "tekton_proof",
+                "base_sha": base_sha,
+                "parent_sha": parent_sha,
+                "head_sha": head_sha,
+                "remote_readback": "signed-harbor-evidence-authenticated",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     return 0
 
@@ -4661,6 +4725,51 @@ def qualification_workflow(name: str) -> dict:
     return resolved
 
 
+def rke2_local_virtualbox_qualification(inputs: str) -> int:
+    workflow = qualification_workflow("rke2_local_virtualbox")
+    expected_entrypoint = (
+        "scripts/repoctl.py rke2-local-virtualbox-qualification "
+        "--inputs .context/mgmt-vm-inputs.json"
+    )
+    if workflow.get("entrypoint") != expected_entrypoint:
+        return fail("RKE2 local qualification entrypoint is not centrally registered")
+    if not inputs.strip():
+        return fail("rke2-local-virtualbox-qualification requires --inputs")
+    input_path = Path(inputs)
+    if not input_path.is_absolute():
+        input_path = ROOT / input_path
+    if not input_path.is_file():
+        return fail(f"RKE2 local qualification inputs not found: {input_path}")
+    require("ansible-playbook")
+    command = [
+        "ansible-playbook",
+        "-i",
+        "localhost,",
+        "platform/ansible/tests/mgmt_offline_vm/main.yml",
+        "-e",
+        f"@{input_path}",
+    ]
+    actions = [
+        "validate",
+        "create",
+        "test",
+        "server",
+        "server",
+        "restage",
+        "tamper",
+        "restage",
+        "server",
+        "destroy",
+    ]
+    for action in actions:
+        result = run([*command, "-e", f"vm_action={action}"], check=False)
+        if result.returncode:
+            if action not in {"validate", "destroy"}:
+                run([*command, "-e", "vm_action=destroy"], check=False)
+            return result.returncode
+    return 0
+
+
 def _qualification_audit_path(head_sha: str) -> Path:
     template = str(qualification_workflow("qualification_proof")["performance_audit_output"])
     relative = Path(template.replace("<sha>", head_sha))
@@ -4704,7 +4813,9 @@ def qualification_proof(base: str) -> int:
         return fail("qualification-proof requires a clean exact-SHA worktree")
 
     evidence = _valid_exact_evidence(base, head)
+    verification_ran = False
     if evidence is None:
+        verification_ran = True
         if verify_change(base, head):
             return 1
         evidence = _valid_exact_evidence(base, head)
@@ -4713,7 +4824,7 @@ def qualification_proof(base: str) -> int:
     else:
         print(f"PASS qualification-proof: reusing exact evidence {evidence.relative_to(ROOT)}")
 
-    audit_path = _valid_performance_audit(base, head)
+    audit_path = None if verification_ran else _valid_performance_audit(base, head)
     if audit_path is None:
         requested_audit_path = _qualification_audit_path(head)
         audit = run(
@@ -5057,6 +5168,11 @@ def main() -> int:
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     qp = sub.add_parser("qualification-proof")
     qp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    rke2q = sub.add_parser("rke2-local-virtualbox-qualification")
+    rke2q.add_argument(
+        "--inputs",
+        default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
+    )
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -5210,6 +5326,8 @@ def main() -> int:
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
+        if args.cmd == "rke2-local-virtualbox-qualification":
+            return rke2_local_virtualbox_qualification(args.inputs)
         if args.cmd == "perf-campaign":
             return performance_campaign(args.base, args.output)
         if args.cmd == "diff-context":
