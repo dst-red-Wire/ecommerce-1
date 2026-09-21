@@ -479,7 +479,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             self.assertTrue(progress.finish("PASS"))
 
         rendered = stream.getvalue()
-        prefix = "RUN governance |"
+        prefix = "RUN   governance |"
         self.assertEqual(1, rendered.count(prefix))
         self.assertIn("\033[36m  45.376s\033[0m", rendered)
         self.assertIn("\033[32m1 652 089\033[0m", rendered)
@@ -492,7 +492,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             f"\r\033[{bytes_column}C\033[32m190\033[0m",
             rendered,
         )
-        self.assertIn("\r\033[32mPASS\033[0m", rendered)
+        self.assertIn("\r\033[32mPASS  \033[0m", rendered)
         self.assertEqual(1, rendered.count("\n"))
 
     def test_live_gate_record_is_not_printed_twice_after_status_transition(self):
@@ -522,7 +522,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             MOD._emit_compact_gate_status("REUSE", "security", 0.0, 19_556)
         self.assertEqual(
             [
-                "SKIP frontend:none | 0.000s | 0",
+                "SKIP  frontend:none | 0.000s | 0",
                 "REUSE security | 0.000s | 19 556",
             ],
             stream.getvalue().splitlines(),
@@ -1548,7 +1548,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 MOD._emit_gate_record(ok, record)
             self.assertIn(
                 (
-                    f"PASS security | {record['duration_seconds']:.3f}s | "
+                    f"PASS  security | {record['duration_seconds']:.3f}s | "
                     f"{MOD._format_written_bytes(record['written_bytes'])}"
                 ),
                 emitted.getvalue(),
