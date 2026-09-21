@@ -1,0 +1,73 @@
+---
+- name: Launch bounded parallel PR 128 cold-stage jobs
+  ansible.builtin.command:
+    argv:
+      - "{{ ha_ansible_playbook }}"
+      - -i
+      - localhost,
+      - "{{ ha_single_fixture }}"
+      - -e
+      - >-
+        {{
+          {
+            'vm_action': 'test',
+            'vm_name': ha_batch_node.value.vm_name,
+            'vm_address': ha_batch_node.value.address,
+            'vm_mac': ha_batch_node.value.mac,
+            'vm_cpus': (
+              mgmt_local_ha_contract.resources.control_plane.cpus
+              if ha_batch_node.value.role == 'control-plane'
+              else mgmt_local_ha_contract.resources.worker.cpus
+            ),
+            'vm_memory': (
+              mgmt_local_ha_contract.resources.control_plane.memory_mib
+              if ha_batch_node.value.role == 'control-plane'
+              else mgmt_local_ha_contract.resources.worker.memory_mib
+            ),
+            'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
+            'vm_host_address': mgmt_local_ha_contract.controller.host_address,
+            'vm_repo': ha_repo,
+            'mgmt_offline_bundle_dir': ha_bundle_dir,
+            'mgmt_offline_manifest_sha256': ha_manifest_sha256
+          } | to_json
+        }}
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  loop: "{{ ha_vm_batch }}"
+  loop_control:
+    loop_var: ha_batch_node
+    label: "{{ ha_batch_node.key }}"
+  async: 1800
+  poll: 0
+  register: ha_cold_stage_jobs
+  changed_when: true
+
+- name: Wait for both cold-stage jobs in this bounded batch
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ ha_cold_stage_jobs.results }}"
+  loop_control:
+    label: "{{ item.ha_batch_node.key }}"
+  register: ha_cold_stage_poll
+  until: ha_cold_stage_poll.finished | default(false)
+  retries: 180
+  delay: 10
+  failed_when: false
+
+- name: Require every cold-stage job in the bounded batch to pass
+  ansible.builtin.assert:
+    that:
+      - ha_cold_stage_poll.results | length == ha_vm_batch | length
+      - >-
+        ha_cold_stage_poll.results
+        | selectattr('finished', 'defined')
+        | selectattr('finished', 'equalto', true)
+        | list | length == ha_vm_batch | length
+      - >-
+        ha_cold_stage_poll.results
+        | selectattr('rc', 'defined')
+        | selectattr('rc', 'ne', 0)
+        | list | length == 0
+    fail_msg: >-
+      At least one PR 128 cold-stage job failed in the bounded parallel batch;
+      stop before starting the next pair.
