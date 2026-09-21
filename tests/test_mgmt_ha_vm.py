@@ -49,6 +49,18 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual(2560, contract["resources"]["control_plane"]["memory_mib"])
         self.assertEqual(1024, contract["resources"]["worker"]["memory_mib"])
         self.assertEqual(10752, calculated_memory)
+        self.assertEqual(
+            {
+                "max_forks": 6,
+                "vm_create_parallelism": 1,
+                "cold_stage_parallelism": 2,
+                "node_validation_parallelism": 4,
+                "worker_join_parallelism": 2,
+                "cleanup_parallelism": 2,
+                "control_plane_parallelism": 1,
+            },
+            contract["execution"],
+        )
         self.assertFalse(contract["resources"]["vendor_minimum_capacity_profile"])
         self.assertFalse(contract["capacity_production_claim"])
         self.assertFalse(contract["real_hetzner_network_claim"])
@@ -158,43 +170,83 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn('argv: [ping, -c, "1", -W, "1"', source)
         self.assertNotIn("MODULE_STRICT_UTF8_RESPONSE", source)
 
-    def test_nested_single_vm_calls_are_sequential_fail_fast_and_json_safe(self):
+    def test_nested_vm_phases_are_bounded_parallel_and_json_safe(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
-        helper = (FIXTURE / "single_vm_action.yml").read_text(encoding="utf-8")
+        create_helper = (FIXTURE / "single_vm_action.yml").read_text(encoding="utf-8")
+        cold_helper = (FIXTURE / "cold_stage_batch.yml").read_text(encoding="utf-8")
+        destroy_helper = (FIXTURE / "destroy_vm_batch.yml").read_text(encoding="utf-8")
 
         self.assertIn(
             "Create each Rocky VM sequentially and fail fast before the next node",
             source,
         )
         self.assertIn("ansible.builtin.include_tasks: single_vm_action.yml", source)
-        self.assertIn("loop_var: ha_node", source)
         self.assertIn("ha_single_vm_action: create", source)
-        self.assertIn("ha_single_vm_action: test", source)
-        self.assertIn(
-            'platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml',
-            source,
-        )
+        self.assertNotIn("ha_single_vm_action: test", source)
 
-        self.assertIn("ha_single_vm_common", helper)
-        self.assertIn("| to_json", helper)
-        self.assertIn("'vm_resume_owned_creation': false", helper)
-        self.assertIn("'vm_resume_owned_creation': true", helper)
-        self.assertIn("Timed out waiting for isolated VM console", helper)
+        self.assertIn("Cold-stage the approved PR 128 bundle two VMs at a time", source)
+        self.assertIn("ansible.builtin.include_tasks: cold_stage_batch.yml", source)
+        self.assertIn("ha_cold_stage_batches", source)
+        self.assertIn("async: 1800", cold_helper)
+        self.assertIn("poll: 0", cold_helper)
+        self.assertIn("'vm_action': 'test'", cold_helper)
+
+        self.assertIn("Destroy owned HA VMs two at a time while attempting all six", source)
+        self.assertIn("ansible.builtin.include_tasks: destroy_vm_batch.yml", source)
+        self.assertIn("ha_cleanup_batches", source)
+        self.assertIn("async: 900", destroy_helper)
+        self.assertIn("poll: 0", destroy_helper)
+        self.assertIn("'vm_action': 'destroy'", destroy_helper)
+
+        self.assertIn("ha_single_vm_common", create_helper)
+        self.assertIn("| to_json", create_helper)
+        self.assertIn("'vm_resume_owned_creation': false", create_helper)
+        self.assertIn("'vm_resume_owned_creation': true", create_helper)
+        self.assertIn("Timed out waiting for isolated VM console", create_helper)
         self.assertIn(
             "Fail closed when fresh creation failed for anything except the bounded console wait",
-            helper,
-        )
-        self.assertIn(
-            'vm_hostonly_adapter: "{{ mgmt_local_ha_contract.controller.hostonly_adapter }}"',
-            helper,
+            create_helper,
         )
 
-        self.assertIn("'vm_action': 'destroy'", source)
-        self.assertIn("| to_json", source)
-        self.assertNotIn("vm_hostonly_adapter=", source)
+        for helper in (create_helper, cold_helper, destroy_helper):
+            self.assertNotIn("vm_hostonly_adapter=", helper)
         self.assertNotIn('"vm_action=create"', source)
         self.assertNotIn('"vm_action=test"', source)
         self.assertNotIn('"vm_action=destroy"', source)
+
+    def test_cluster_parallelism_matches_bounded_contract(self):
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        cluster = (FIXTURE / "cluster.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            '- "{{ mgmt_local_ha_contract.execution.max_forks }}"',
+            source,
+        )
+        self.assertIn(
+            'serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
+            cluster,
+        )
+        self.assertIn("strategy: free", cluster)
+        self.assertGreaterEqual(
+            cluster.count(
+                'throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"'
+            ),
+            5,
+        )
+
+        for play in (
+            "Bootstrap first RKE2 control plane",
+            "Join second RKE2 control plane directly to the bootstrap member",
+            "Deploy HAProxy in front of the control planes",
+            "Join third control plane through HAProxy",
+            "Prove six-node HA, quorum, snapshot and recovery",
+        ):
+            self.assertIn(f"- name: {play}", cluster)
+
+        self.assertIn("hosts: ha-cp-01", cluster)
+        self.assertIn("hosts: ha-cp-02", cluster)
+        self.assertIn("hosts: ha-cp-03", cluster)
+        self.assertNotIn("serial: 6", cluster)
 
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
@@ -238,7 +290,9 @@ class MgmtHaVmTests(unittest.TestCase):
         )
         self.assertLess(source_check, cleanup)
         self.assertLess(cleanup, completion)
-        self.assertIn("register: ha_destroy_results", source)
+        self.assertIn("ha_destroy_results: []", source)
+        self.assertIn("ansible.builtin.include_tasks: destroy_vm_batch.yml", source)
+        self.assertIn("ha_destroy_results | length == ha_nodes | length", source)
         self.assertIn("cleanup_complete", source)
         self.assertIn("source_manifest_sha256", source)
         self.assertIn("evidence_sha256", source)
