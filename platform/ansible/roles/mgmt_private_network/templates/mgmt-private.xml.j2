@@ -4,6 +4,7 @@
 {% for cidr in mgmt_firewall_cidrs.values() | sort %}
   <source address="{{ cidr | e }}"/>
 {% endfor %}
+  <source address="{{ mgmt_pod_cidr | e }}"/>
   <rule family="ipv4">
     <source address="{{ mgmt_firewall_cidrs['401'] | e }}"/>
     <service name="ssh"/>
@@ -16,7 +17,18 @@
     <accept/>
   </rule>
 {% endfor %}
+  <!-- Cluster workloads reach kubelet metrics only; other host ports stay denied. -->
+  <rule family="ipv4">
+    <source address="{{ mgmt_pod_cidr | e }}"/>
+    <port port="10250" protocol="tcp"/>
+    <accept/>
+  </rule>
 {% if mgmt_firewall_role == 'control-plane' %}
+  <rule family="ipv4">
+    <source address="{{ mgmt_pod_cidr | e }}"/>
+    <port port="6443" protocol="tcp"/>
+    <accept/>
+  </rule>
 {% for port in ['6443', '9345', '2379-2381'] %}
   <rule family="ipv4">
     <source address="{{ mgmt_firewall_cidrs['402'] | e }}"/>

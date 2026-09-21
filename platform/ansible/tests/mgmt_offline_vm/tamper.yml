@@ -1,0 +1,37 @@
+---
+- name: Mutate one staged RKE2 binary byte for the fail-closed trial
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n,
+           python3, '-', "/var/lib/ecommerce/bootstrap/{{ mgmt_offline_manifest_sha256 }}/rke2.linux-amd64"]
+    stdin: "{{ lookup('file', playbook_dir ~ '/tamper_artifact.py') }}"
+  register: vm_tamper_result
+  changed_when: true
+
+- name: Require the server action to stop on immediate bundle revalidation
+  block:
+    - name: Exercise the complete server action with tampered staged bytes
+      ansible.builtin.include_tasks: server.yml
+    - name: Refuse a server action that accepted the tampered artifact
+      ansible.builtin.fail:
+        msg: The server action accepted a deliberately modified staged artifact.
+  rescue:
+    - name: Require failure at the exact pre-installation trust gate
+      ansible.builtin.assert:
+        that:
+          - ansible_failed_task.name == 'Revalidate every staged byte immediately before privileged installation'
+          - ansible_failed_result.rc | default(0) | int != 0
+    - name: Prove RKE2 remained stopped after rejected staged bytes
+      ansible.builtin.command:
+        argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n,
+               systemctl, is-active, rke2-server.service]
+      register: vm_tamper_service
+      changed_when: false
+      failed_when: vm_tamper_service.rc not in [3, 4]
+    - name: Preserve bounded fail-closed mutation evidence
+      ansible.builtin.copy:
+        dest: "{{ vm_state }}/tamper-result.json"
+        mode: '0600'
+        content: >-
+          {{ {'mutation': vm_tamper_result.stdout | from_json,
+              'blocked_task': ansible_failed_task.name,
+              'rke2_service': vm_tamper_service.stdout | trim} | to_nice_json }}

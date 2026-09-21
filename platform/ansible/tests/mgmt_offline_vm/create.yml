@@ -1,0 +1,210 @@
+---
+- name: List existing machines without changing them
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", list, vms]
+  register: vm_existing
+  changed_when: false
+- name: Inspect existing Vagrant state before granting creation ownership
+  ansible.builtin.stat:
+    path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_previous_identity
+- name: Read explicitly resumed Vagrant identity
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_resume_id_file
+  when: vm_resume_owned_creation | bool and vm_previous_identity.stat.exists
+- name: Preserve explicitly resumed machine identity
+  ansible.builtin.set_fact:
+    vm_resume_uuid: "{{ vm_resume_id_file.content | b64decode | trim }}"
+  when: vm_resume_id_file.content is defined
+- name: Inspect only the explicitly resumed machine
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_resume_uuid }}", --machinereadable]
+  register: vm_resume_current
+  changed_when: false
+  when: vm_resume_uuid is defined
+- name: Require either a fresh identity or the exact explicitly resumed machine
+  ansible.builtin.assert:
+    that:
+      - >-
+        (not (vm_resume_owned_creation | bool)
+         and not vm_previous_identity.stat.exists
+         and vm_name not in vm_existing.stdout)
+        or
+        ((vm_resume_owned_creation | bool)
+         and vm_previous_identity.stat.exists
+         and vm_resume_uuid is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+         and vm_resume_uuid in vm_existing.stdout
+         and ('name="' ~ vm_name ~ '"') in vm_resume_current.stdout)
+    fail_msg: Refuse stale, renamed or unowned Vagrant state; destroy only a previously verified fixture.
+- name: Check selected host-only adapter already exists
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", list, hostonlyifs]
+  register: vm_adapters
+  changed_when: false
+- name: Refuse creating or reconfiguring host network adapters
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import re,sys;
+        blocks=[dict(line.split(':',1) for line in block.splitlines() if ':' in line)
+        for block in re.split(r'\n\s*\n',sys.stdin.read())];
+        blocks=[{k.strip():v.strip() for k,v in block.items()} for block in blocks];
+        selected=[block for block in blocks if block.get('Name')==sys.argv[1]];
+        assert len(selected)==1 and selected[0].get('IPAddress')==sys.argv[2];
+        assert selected[0].get('NetworkMask')=='255.255.255.0'
+      - "{{ vm_hostonly_adapter }}"
+      - "{{ vm_host_address }}"
+    stdin: "{{ vm_adapters.stdout }}"
+  changed_when: false
+- name: Generate only a disposable controller SSH key
+  ansible.builtin.command:
+    argv: [ssh-keygen, -q, -t, ed25519, -N, '', -C, ecommerce-local-vm-test, -f, "{{ vm_state }}/identity"]
+    creates: "{{ vm_state }}/identity"
+  no_log: true
+- name: Authorize cleanup only for this fresh creation attempt
+  ansible.builtin.set_fact:
+    vm_creation_authorized: true
+- name: Boot through Vagrant with no connected network and no shared folders
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, up, --provider, virtualbox, --no-provision]
+  changed_when: true
+- name: Read only the owned Vagrant machine UUID
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_id_file
+- name: Preserve owned machine identity
+  ansible.builtin.set_fact:
+    vm_uuid: "{{ vm_id_file.content | b64decode | trim }}"
+- name: Inspect adapter configuration before any guest bootstrap
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_uuid }}", --machinereadable]
+  register: vm_initial
+  changed_when: false
+- name: Require actual network isolation and bounded VM resources
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, 'null',
+           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
+    stdin: "{{ vm_initial.stdout }}"
+  changed_when: false
+- name: Record initial VM isolation
+  ansible.builtin.copy:
+    content: "{{ vm_initial.stdout }}\n"
+    dest: "{{ vm_state }}/vm-before-network.txt"
+    mode: '0600'
+- name: Render guest-only access and persistent egress protection
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/guest-access.txt"
+    mode: '0600'
+    content: |
+      set -eu
+      test "$(getenforce)" = Enforcing
+      install -d -m 0700 -o vagrant -g vagrant /home/vagrant/.ssh
+      printf '%s\n' '{{ lookup("file", vm_state ~ "/identity.pub") }}' > /home/vagrant/.ssh/authorized_keys
+      chmod 0600 /home/vagrant/.ssh/authorized_keys
+      chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
+      restorecon -RF /home/vagrant/.ssh
+      cat > /etc/ssh/sshd_config.d/00-ecommerce-test.conf <<'SSH'
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      AuthenticationMethods publickey
+      SSH
+      sshd -t
+      systemctl reload sshd
+      sshd -T | grep -qx 'passwordauthentication no'
+      sshd -T | grep -qx 'kbdinteractiveauthentication no'
+      sshd -T | grep -qx 'permitrootlogin no'
+      cat > /etc/ecommerce-test-offline.nft <<'NFT'
+      table inet ecommerce_test_offline {
+       chain output { type filter hook output priority -150; policy drop;
+        oifname "lo" accept
+        ip daddr {{ vm_host_address }} ct state established,related accept
+       }
+       chain forward { type filter hook forward priority -150; policy drop; }
+      }
+      NFT
+      nft -f /etc/ecommerce-test-offline.nft
+      cat > /etc/systemd/system/ecommerce-test-offline.service <<'UNIT'
+      [Unit]
+      Description=Disposable offline VM test isolation
+      DefaultDependencies=no
+      Before=network-pre.target
+      Wants=network-pre.target
+      After=local-fs.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/nft -f /etc/ecommerce-test-offline.nft
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=network-pre.target
+      UNIT
+      systemctl daemon-reload
+      systemctl enable ecommerce-test-offline.service
+      nmcli connection add type ethernet con-name ecommerce-offline ifname '*' 802-3-ethernet.mac-address {{ vm_mac | regex_replace('(..)(?!$)', '\1:') }} ipv4.method manual ipv4.addresses {{ vm_address }}/24 ipv4.never-default yes ipv6.method disabled
+      getenforce
+      printf 'MGMT_HOST_KEY:'
+      cat /etc/ssh/ssh_host_ed25519_key.pub
+- name: Configure guest exclusively through its private local serial pipe
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ vm_bridge }}", console, --state, "{{ vm_windows_state }}", --script, "{{ vm_state }}/guest-access.txt"]
+  register: vm_console
+  changed_when: true
+- name: Preserve console bootstrap result
+  ansible.builtin.copy:
+    content: "{{ vm_console.stdout }}\n"
+    dest: "{{ vm_state }}/console.log"
+    mode: '0600'
+- name: Pin the VM host key obtained through its private identified console
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/known_hosts"
+    mode: '0600'
+    content: >-
+      {{ vm_address }} {{ (vm_console.stdout | regex_search('MGMT_HOST_KEY:(ssh-ed25519 [A-Za-z0-9+/=]+)', '\1')) | first }}
+- name: Attach only selected existing host-only network after guest output is denied
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", controlvm, "{{ vm_uuid }}", nic1, hostonly, "{{ vm_hostonly_adapter }}"]
+  register: vm_attach
+  until: vm_attach.rc == 0
+  retries: 3
+  delay: 2
+  changed_when: true
+- name: Render isolated SSH transport with a controller-only key
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/ssh_config"
+    mode: '0600'
+    content: |
+      Host {{ vm_name }}
+        HostName {{ vm_address }}
+        User vagrant
+        IdentityFile {{ vm_state }}/identity
+        IdentitiesOnly yes
+        UserKnownHostsFile {{ vm_state }}/known_hosts
+        StrictHostKeyChecking yes
+        ConnectTimeout 10
+        ProxyCommand {{ vm_python | quote }} {{ vm_bridge | quote }} proxy --state {{ vm_windows_state | quote }}
+- name: Wait for SSH and require real enforcing guest kernel
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", getenforce]
+  register: vm_ssh_ready
+  changed_when: false
+  until: vm_ssh_ready.rc == 0 and vm_ssh_ready.stdout | trim == 'Enforcing'
+  retries: 24
+  delay: 3
+- name: Probe independent kernel and denied Internet before package installation
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n, python3, '-', --before]
+    stdin: "{{ lookup('file', playbook_dir ~ '/guest_probe.py') }}"
+  register: vm_preflight
+  changed_when: false
+- name: Record meaningful cold VM preflight proof
+  ansible.builtin.copy:
+    content: "{{ vm_preflight.stdout }}\n"
+    dest: "{{ vm_state }}/preflight.json"
+    mode: '0600'
+- name: Require the fresh guest to expose the requested CPU count
+  ansible.builtin.assert:
+    that: [(vm_preflight.stdout | from_json).online_cpus == vm_cpus | int]

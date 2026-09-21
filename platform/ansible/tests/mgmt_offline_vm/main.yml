@@ -1,0 +1,138 @@
+---
+- name: Qualify offline MGMT artifacts in an owned local Rocky VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    vm_action: create
+    vm_memory: "{{ mgmt_local_vm_contract.resources.artifact_default.memory_mib }}"
+    vm_cpus: "{{ mgmt_local_vm_contract.resources.artifact_default.cpus }}"
+    vm_resume_owned_creation: false
+    vm_box_name: "{{ mgmt_local_vm_contract.rocky_box.name }}"
+    vm_box_url: "{{ mgmt_local_vm_contract.rocky_box.url }}"
+    vm_box_sha256: "{{ mgmt_local_vm_contract.rocky_box.sha256 }}"
+    vm_vagrant_version: "{{ mgmt_local_vm_contract.vagrant.version }}"
+    vm_vbox: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
+    vm_vagrant_windows: C:\Program Files\Vagrant\bin\vagrant.exe
+    vm_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
+    vm_state: "{{ vm_repo }}/.context/mgmt-offline-vm/{{ vm_name }}"
+    vm_python: "{{ ansible_playbook_python }}"
+    vm_bridge: "{{ playbook_dir }}/transport.py"
+    vm_dns_fixture: "{{ mgmt_local_vm_contract.services.dns }}"
+    vm_ntp_fixture: "{{ mgmt_local_vm_contract.services.ntp }}"
+  tasks:
+    - name: Validate explicit disposable resource inputs
+      ansible.builtin.assert:
+        that:
+          - vm_action in ['validate', 'create', 'resize', 'test', 'restage', 'tamper', 'server', 'qualify', 'destroy']
+          - vm_resume_owned_creation | bool in [true, false]
+          - vm_name is match('^ecommerce-mgmt-test-[a-z0-9-]+$')
+          - vm_vagrant_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - vm_cpus | string is match('^[0-9]+$')
+          - vm_memory | string is match('^[0-9]+$')
+          - vm_cpus | int >= mgmt_local_vm_contract.resources.cpu_minimum
+          - vm_cpus | int <= mgmt_local_vm_contract.resources.cpu_maximum
+          - vm_memory | int >= mgmt_local_vm_contract.resources.memory_minimum_mib
+          - vm_memory | int <= mgmt_local_vm_contract.resources.memory_maximum_mib
+          - >-
+            vm_action != 'server'
+            or (vm_cpus | int >= mgmt_local_vm_contract.resources.rke2_server.cpus
+                and vm_memory | int >= mgmt_local_vm_contract.resources.rke2_server.memory_mib)
+          - vm_hostonly_adapter | length > 0
+          - vm_mac is match('^02[0-9A-Fa-f]{10}$')
+          - vm_address is match('^[0-9.]+$')
+          - vm_host_address is match('^[0-9.]+$')
+    - name: Validate private addresses share the existing host-only subnet
+      ansible.builtin.command:
+        argv:
+          - "{{ vm_python }}"
+          - -c
+          - >-
+            import ipaddress,sys;
+            guest=ipaddress.IPv4Address(sys.argv[1]); host=ipaddress.IPv4Address(sys.argv[2]);
+            network=ipaddress.IPv4Network(str(host)+'/24', strict=False);
+            assert guest.is_private and host.is_private and guest != host;
+            assert guest in network and guest not in (network.network_address,network.broadcast_address);
+            assert not guest.is_loopback and not host.is_loopback
+          - "{{ vm_address }}"
+          - "{{ vm_host_address }}"
+      changed_when: false
+    - name: Discover Windows user temporary artifact root without changing host settings
+      ansible.builtin.command:
+        argv:
+          - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+          - -NoProfile
+          - -NonInteractive
+          - -Command
+          - '[Environment]::GetFolderPath("LocalApplicationData")'
+      register: vm_localappdata
+      changed_when: false
+    - name: Resolve Windows artifact root to WSL
+      ansible.builtin.command:
+        argv: [wslpath, -u, "{{ vm_localappdata.stdout | trim }}"]
+      register: vm_windows_parent
+      changed_when: false
+    - name: Define owned Windows state directory
+      ansible.builtin.set_fact:
+        vm_windows_state: "{{ vm_windows_parent.stdout | trim }}/Temp/ecommerce/.context/{{ vm_name }}"
+    - name: Create only dedicated controller and Windows state directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ vm_state }}"
+        - "{{ vm_windows_state }}"
+    - name: Materialize pinned Vagrant definition in ignored Windows state
+      ansible.builtin.copy:
+        src: Vagrantfile
+        dest: "{{ vm_windows_state }}/Vagrantfile"
+        mode: '0600'
+    - name: Record non-secret runtime parameters for native Windows transports
+      ansible.builtin.copy:
+        dest: "{{ vm_windows_state }}/runtime.json"
+        mode: '0600'
+        content: >-
+          {{ {'name': vm_name, 'memory': vm_memory | int, 'cpus': vm_cpus | int, 'mac': vm_mac,
+              'address': vm_address, 'box_name': vm_box_name, 'box_url': vm_box_url,
+              'box_sha256': vm_box_sha256,
+              'vagrant_version': vm_vagrant_version,
+              'vagrant_windows': vm_vagrant_windows} | to_nice_json }}
+    - name: Run native Vagrant validation
+      ansible.builtin.command:
+        argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, validate]
+      changed_when: false
+    - name: Execute requested lifecycle and always clean a complete qualification attempt
+      block:
+        - name: Start without authority to clean a previously existing VM
+          ansible.builtin.set_fact:
+            vm_creation_authorized: false
+        - name: Create and preflight isolated VM
+          ansible.builtin.include_tasks: create.yml
+          when: vm_action in ['create', 'qualify']
+        - name: Resize and restart the exact owned VM
+          ansible.builtin.include_tasks: resize.yml
+          when: vm_action == 'resize'
+        - name: Execute actual repository artifact role
+          ansible.builtin.include_tasks: test.yml
+          when: vm_action in ['test', 'restage', 'qualify']
+        - name: Start and functionally verify canonical RKE2 server
+          ansible.builtin.include_tasks: server.yml
+          when: vm_action == 'server'
+        - name: Prove staged-byte mutation fails before RKE2 installation
+          ansible.builtin.include_tasks: tamper.yml
+          when: vm_action == 'tamper'
+        - name: Destroy only owned VM
+          ansible.builtin.include_tasks: destroy.yml
+          when: vm_action == 'destroy'
+      always:
+        - name: Clean the owned VM after qualification success or failure
+          ansible.builtin.include_tasks: destroy.yml
+          when: vm_action == 'qualify' and vm_creation_authorized | default(false) | bool
+        - name: Remove invocation-owned SSH sockets after success or failure
+          ansible.builtin.file:
+            path: "{{ vm_control_path.path }}"
+            state: absent
+          when: vm_control_path.path is defined

@@ -7,6 +7,7 @@
       - ansible_facts.architecture == "x86_64"
       - mgmt_offline_bundle_dir is match('^/')
       - mgmt_offline_manifest_sha256 is match('^[0-9a-f]{64}$')
+      - mgmt_offline_image_stage_mode in ['copy', 'hardlink']
     fail_msg: "Require approved bundle and internal DNS/NTP before any offline package transaction."
 
 - name: Validate controller bundle before transfer
@@ -137,6 +138,21 @@
   loop:
     - rke2-images-core.linux-amd64.tar
     - rke2-images-cilium.linux-amd64.tar
+  when: mgmt_offline_image_stage_mode == 'copy'
+
+- name: Hardlink verified images for the disk-bounded local fixture
+  ansible.builtin.file:
+    src: "{{ mgmt_offline_target_dir }}/{{ item }}"
+    dest: "/var/lib/rancher/rke2/agent/images/{{ item }}"
+    state: hard
+    owner: root
+    group: root
+    mode: "0600"
+    force: true
+  loop:
+    - rke2-images-core.linux-amd64.tar
+    - rke2-images-cilium.linux-amd64.tar
+  when: mgmt_offline_image_stage_mode == 'hardlink'
 
 - name: Disable conditional image cache so every service start imports images
   ansible.builtin.file:
