@@ -355,20 +355,111 @@ def chatgpt_review_handoff(
     changes: dict[str, Any],
     files: list[str],
 ) -> str:
+    prior_verdict = str(previous.get("validated_verdict") or "")
+    reuse = (
+        "Reuse the previous validated ChatGPT verdict and adjust only what this delta invalidates."
+        if prior_verdict
+        else "No previous validated ChatGPT verdict is available; review only this bounded delta."
+    )
     instruction = (
         "ChatGPT incremental exact-SHA PR review handoff. "
         "Do not reload PR history or repeat proven gates. "
-        "Review only changed_files plus finding paths in delta, then issue CODE/SECURITY findings "
-        "bound to current_head. No other AI reviewer is authorized.\n"
+        f"{reuse} "
+        "Read only changed_files plus finding paths in delta and issue CODE/SECURITY findings "
+        "bound to current_head. Return the compact UX summary as five lines: "
+        "PR #<number>; HEAD : <old> → <new or unchanged>; CHANGEMENT : <delta>; "
+        "VERDICT : READY | BLOCKED | WAITING; ACTION : <one next action>.\n"
     )
     payload = {
         "pr": number,
+        "previous_validated_verdict": prior_verdict,
         "delta": changes,
+        "previous_head": previous.get("head_sha"),
         "current_head": current.get("head_sha"),
         "changed_files": files,
+        "exact_head_verified": bool(current.get("exact_head_verified")),
     }
     encoded = bounded_payload(payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode()))
     return instruction + encoded
+
+
+def _supports_color() -> bool:
+    return (
+        "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "") != "dumb"
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _paint(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _supports_color() else text
+
+
+def compact_status_lines(
+    number: int,
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    changes: dict[str, Any],
+) -> list[str]:
+    old_head = str(previous.get("head_sha") or "none")
+    new_head = str(current.get("head_sha") or "none")
+    changed = ", ".join(sorted(changes)) or "aucun"
+    verdict = str(current.get("validated_verdict") or "WAITING")
+    if verdict == "READY":
+        action = "continuer les gates qualification/fusion"
+        verdict_color = "32"
+    elif verdict == "BLOCKED":
+        action = "review ChatGPT bornée sur le delta"
+        verdict_color = "31"
+    else:
+        action = "review ChatGPT bornée sur le delta"
+        verdict_color = "33"
+    return [
+        _paint(f"PR #{number}", "36"),
+        _paint(f"HEAD : {old_head} → {new_head}", "34"),
+        _paint(f"CHANGEMENT : {changed}", "33"),
+        _paint(f"VERDICT : {verdict}", verdict_color),
+        _paint(f"ACTION : {action}", "35"),
+    ]
+
+
+def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+
+@contextmanager
+def exact_head_worktree(head_sha: str):
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError(f"invalid exact PR head SHA: {head_sha!r}")
+    repo_root = Path(__file__).resolve().parents[1]
+    with tempfile.TemporaryDirectory(prefix="pr-monitor-") as directory:
+        worktree = Path(directory) / "repo"
+        try:
+            _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=repo_root)
+        except subprocess.CalledProcessError as exc:
+            raise TransientGitHubError(f"git fetch failed transiently for {head_sha}") from exc
+        fetched = _run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo_root).stdout.strip()
+        if fetched != head_sha:
+            raise RuntimeError(f"fetched head mismatch: expected {head_sha}, got {fetched}")
+        _run(["git", "worktree", "add", "--detach", str(worktree), head_sha], cwd=repo_root)
+        try:
+            yield worktree
+        finally:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(worktree)],
+                cwd=repo_root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
 
 
 def next_interval(unchanged: int, minimum: int, maximum: int) -> int:
@@ -416,11 +507,28 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
         token=token,
     )
     current = snapshot(pr, etag=etag, timestamp=int(time.time()))
+    if (
+        previous
+        and current.get("head_sha") == previous.get("head_sha")
+        and not current.get("validated_verdict")
+        and previous.get("validated_verdict")
+    ):
+        current["validated_verdict"] = previous["validated_verdict"]
+        current["chatgpt_review"] = previous.get("chatgpt_review", {})
+    current["exact_head_verified"] = bool(
+        previous
+        and current.get("head_sha") == previous.get("head_sha")
+        and previous.get("exact_head_verified")
+    )
     changes = delta(previous, current) if previous else {}
     unchanged = 0 if changes else int(previous.get("unchanged_polls", 0)) + 1
     current["unchanged_polls"] = unchanged
 
     if previous and changes:
+        if not current["exact_head_verified"]:
+            with exact_head_worktree(str(current.get("head_sha") or "")):
+                pass
+            current["exact_head_verified"] = True
         files = changed_files(
             args.owner,
             args.repo,
@@ -431,7 +539,9 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
         handoff = chatgpt_review_handoff(args.pr, previous, current, changes, files)
         current["chatgpt_review_handoff"] = handoff
         print("CHATGPT_REVIEW_REQUIRED", flush=True)
-        print(handoff, flush=True)
+        for line in compact_status_lines(args.pr, previous, current, changes):
+            print(line, flush=True)
+        print("CHATGPT_REVIEW_HANDOFF " + handoff, flush=True)
     else:
         print("NO_CHANGE", flush=True)
 
