@@ -52,10 +52,6 @@ class MgmtHaVmTests(unittest.TestCase):
             r"^docker\.io/library/haproxy@sha256:[0-9a-f]{64}$",
         )
         self.assertNotIn(":latest", endpoint["image"]["reference"])
-        self.assertEqual(
-            "ecommerce.local/haproxy:3.2.23-locked",
-            endpoint["image"]["runtime_reference"],
-        )
 
     def test_cluster_campaign_contains_required_ha_proofs(self):
         source = (FIXTURE / "cluster.yml").read_text(encoding="utf-8")
@@ -76,6 +72,7 @@ class MgmtHaVmTests(unittest.TestCase):
                 self.assertIn(marker, source)
         self.assertIn("ha-cp-02", source)
         self.assertIn("imagePullPolicy: Never", source)
+        self.assertIn("--digests", source)
         self.assertIn("offline.validation_services", source)
 
     def test_main_reuses_pr128_fixture_and_never_implicitly_rebuilds_bundle(self):
@@ -85,7 +82,6 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("build_bundle.yml", source)
         self.assertNotRegex(source, r"\bcurl\b|\bwget\b")
         self.assertIn("docker, pull", source)
-        self.assertIn("docker, tag", source)
         self.assertIn("sha256sum, --check", source)
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
