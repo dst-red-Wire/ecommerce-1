@@ -1256,6 +1256,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_rke2_local_ha_evidence_matches", return_value=True),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=False),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
             ):
                 self.assertEqual(2, MOD.rke2_local_ha_qualification())
