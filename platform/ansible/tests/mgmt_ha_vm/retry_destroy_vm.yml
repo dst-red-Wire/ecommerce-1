@@ -52,33 +52,15 @@
 - name: Retry only the proven owned transient cleanup once and sequentially
   ansible.builtin.command:
     argv:
-      - "{{ ha_ansible_playbook }}"
-      - -i
-      - localhost,
-      - "{{ ha_single_fixture }}"
-      - -e
-      - >-
-        {{
-          {
-            'vm_action': 'destroy',
-            'vm_name': mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name,
-            'vm_address': mgmt_local_ha_contract.nodes[ha_failed_destroy.node].address,
-            'vm_mac': mgmt_local_ha_contract.nodes[ha_failed_destroy.node].mac,
-            'vm_cpus': (
-              mgmt_local_ha_contract.resources.control_plane.cpus
-              if mgmt_local_ha_contract.nodes[ha_failed_destroy.node].role == 'control-plane'
-              else mgmt_local_ha_contract.resources.worker.cpus
-            ),
-            'vm_memory': (
-              mgmt_local_ha_contract.resources.control_plane.memory_mib
-              if mgmt_local_ha_contract.nodes[ha_failed_destroy.node].role == 'control-plane'
-              else mgmt_local_ha_contract.resources.worker.memory_mib
-            ),
-            'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
-            'vm_host_address': mgmt_local_ha_contract.controller.host_address,
-            'vm_repo': ha_repo
-          } | to_json
-        }}
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - destroy-owned
+      - --vbox
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - --identity
+      - "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
+      - --vm-name
+      - "{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}"
   environment:
     PYTHONDONTWRITEBYTECODE: "1"
   register: ha_destroy_retry

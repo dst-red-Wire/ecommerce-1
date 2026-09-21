@@ -1,4 +1,25 @@
 ---
+- name: Select exact recovery paths
+  ansible.builtin.set_fact:
+    ha_create_repair_state: "{{ ha_repo }}/.context/mgmt-offline-vm/{{ ha_node.value.vm_name }}"
+    ha_create_repair_windows_state: "{{ ha_windows_state_root }}/{{ ha_node.value.vm_name }}"
+    ha_create_repair_transport: "{{ ha_repo }}/platform/ansible/tests/mgmt_offline_vm/transport.py"
+  changed_when: false
+
+- name: Require exact successful console proof and materialize its host key
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - console-proof
+      - --console
+      - "{{ ha_create_repair_state }}/console.log"
+      - --known-hosts
+      - "{{ ha_create_repair_state }}/known_hosts"
+      - --address
+      - "{{ ha_node.value.address }}"
+  changed_when: true
+
 - name: Read exact ownership accepted for host-only attach recovery
   ansible.builtin.slurp:
     src: "{{ ha_state }}/create-{{ ha_node.key }}-ownership.json"
@@ -7,9 +28,6 @@
 - name: Select exact owned VM UUID for host-only attach recovery
   ansible.builtin.set_fact:
     ha_create_repair_ownership: "{{ ha_create_repair_ownership_file.content | b64decode | from_json }}"
-    ha_create_repair_state: "{{ ha_repo }}/.context/mgmt-offline-vm/{{ ha_node.value.vm_name }}"
-    ha_create_repair_windows_state: "{{ ha_windows_state_root }}/{{ ha_node.value.vm_name }}"
-    ha_create_repair_transport: "{{ ha_repo }}/platform/ansible/tests/mgmt_offline_vm/transport.py"
   changed_when: false
 
 - name: Inspect exact VM state before repairing only the failed host-only attach
@@ -124,7 +142,7 @@
       {{
         {
           'node': ha_node.key,
-          'classification': 'owned-wsl-hostonly-attach-failure',
+          'classification': ha_create_repair_classification,
           'rc': ha_create_repair_attach.rc,
           'stdout': ha_create_repair_attach.stdout | default(''),
           'stderr': ha_create_repair_attach.stderr | default(''),

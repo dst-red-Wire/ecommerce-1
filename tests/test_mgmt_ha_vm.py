@@ -324,6 +324,30 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("nic1=\\\"null\\\"", repair)
         self.assertIn("MGMT_CONSOLE_RESULT:0", repair)
         self.assertIn("guest_probe.py", repair)
+        self.assertIn("console-proof", create_helper)
+        self.assertIn("ha_single_vm_console_completed", create_helper)
+
+    def test_console_proof_requires_success_and_one_exact_host_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            console = root / "console.log"
+            known_hosts = root / "known_hosts"
+            console.write_text(
+                "MGMT_HOST_KEY:ssh-ed25519 AAAAC3NzaValidFixtureKey\n"
+                "MGMT_CONSOLE_RESULT:0\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                GUARD.preserve_console_proof(console, known_hosts, "192.168.22.62")
+            )
+            self.assertEqual(
+                "192.168.22.62 ssh-ed25519 AAAAC3NzaValidFixtureKey\n",
+                known_hosts.read_text(encoding="utf-8"),
+            )
+            console.write_text("MGMT_CONSOLE_RESULT:1\n", encoding="utf-8")
+            self.assertFalse(
+                GUARD.preserve_console_proof(console, known_hosts, "192.168.22.62")
+            )
 
     def test_cleanup_decisions_preserve_failures_and_bound_retry(self):
         def result(rc: int, text: str = "") -> dict:
@@ -373,6 +397,38 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("async:", retry)
         self.assertIn("ha_cleanup_decision.resolution == 'retry'", retry)
         self.assertIn("already-absent", retry)
+        self.assertIn("destroy-owned", retry)
+
+    def test_owned_destroy_uses_only_proven_uuid_and_removes_identity(self):
+        vm_name = "ecommerce-mgmt-test-ha-cp-02"
+        uuid = "11111111-2222-3333-4444-555555555555"
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id"
+            identity.write_text(uuid + "\n", encoding="utf-8")
+            inspected = GUARD.subprocess.CompletedProcess(
+                [], 0, 'VMState="poweroff"\n', ""
+            )
+            removed = GUARD.subprocess.CompletedProcess([], 0, "removed\n", "")
+            with (
+                mock.patch.object(
+                    GUARD,
+                    "probe_ownership",
+                    return_value={"state": "owned", "vm_name": vm_name, "uuid": uuid},
+                ),
+                mock.patch.object(
+                    GUARD, "run_windows_command", side_effect=[inspected, removed]
+                ) as run,
+            ):
+                result = GUARD.destroy_owned("vbox", identity, vm_name)
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(identity.exists())
+            self.assertEqual(
+                [
+                    mock.call(["vbox", "showvminfo", uuid, "--machinereadable"]),
+                    mock.call(["vbox", "unregistervm", uuid, "--delete"]),
+                ],
+                run.call_args_list,
+            )
 
     def test_cold_stage_retries_only_owned_final_wsl_postcondition(self):
         failure = {

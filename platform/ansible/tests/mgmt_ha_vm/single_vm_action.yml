@@ -137,6 +137,38 @@
       refusing to resume a possibly unrelated or unsafe failure.
   when: ha_single_vm_action == 'create'
 
+- name: Consume completed console proof that arrived at the timeout boundary
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - console-proof
+      - --console
+      - "{{ ha_repo }}/.context/mgmt-offline-vm/{{ ha_node.value.vm_name }}/console.log"
+      - --known-hosts
+      - "{{ ha_repo }}/.context/mgmt-offline-vm/{{ ha_node.value.vm_name }}/known_hosts"
+      - --address
+      - "{{ ha_node.value.address }}"
+  register: ha_single_vm_console_proof
+  until: ha_single_vm_console_proof.rc == 0
+  retries: 10
+  delay: 2
+  failed_when: false
+  changed_when: ha_single_vm_console_proof.rc == 0
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_resume | bool
+
+- name: Select completed-at-boundary console recovery
+  ansible.builtin.set_fact:
+    ha_single_vm_console_completed: >-
+      {{
+        ha_single_vm_create_resume | bool
+        and ha_single_vm_console_proof.rc | default(1) == 0
+      }}
+  changed_when: false
+  when: ha_single_vm_action == 'create'
+
 - name: Resume the exact owned VM once when console bootstrap exceeded the first bounded attempt
   ansible.builtin.command:
     argv:
@@ -158,6 +190,7 @@
     - ha_single_vm_action == 'create'
     - ha_single_vm_create_initial.rc != 0
     - ha_single_vm_create_resume | bool
+    - not ha_single_vm_console_completed | bool
   register: ha_single_vm_create_resume_result
 
 - name: Complete only the exact WSL-interrupted host-only attach path
@@ -165,7 +198,14 @@
   when:
     - ha_single_vm_action == 'create'
     - ha_single_vm_create_initial.rc != 0
-    - ha_single_vm_create_repair | bool
+    - ha_single_vm_create_repair | bool or ha_single_vm_console_completed | bool
+  vars:
+    ha_create_repair_classification: >-
+      {{
+        'owned-console-timeout-completed'
+        if ha_single_vm_console_completed | bool
+        else 'owned-wsl-hostonly-attach-failure'
+      }}
 
 - name: Preserve bounded one-shot resume diagnostics
   ansible.builtin.copy:
@@ -184,3 +224,4 @@
   when:
     - ha_single_vm_action == 'create'
     - ha_single_vm_create_resume | bool
+    - not ha_single_vm_console_completed | bool

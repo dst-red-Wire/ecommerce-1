@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import subprocess
@@ -48,6 +49,7 @@ POSTCONDITION_TASK_RE = re.compile(
     r"verify\s+native\s+selinux,\s+egress\s+denial,\s+exact\s+rpms\s+and\s+staged\s+image\s+hashes",
     re.IGNORECASE,
 )
+HOST_KEY_RE = re.compile(r"^MGMT_HOST_KEY:(ssh-ed25519 [A-Za-z0-9+/=]+)(?:\s+.*)?$")
 
 WINDOWS_INTEROP_ATTEMPTS = 3
 WINDOWS_INTEROP_DELAY_SECONDS = 2
@@ -178,6 +180,61 @@ def run_windows_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def preserve_console_proof(console: Path, known_hosts: Path, address: str) -> bool:
+    """Materialize an exact host key only after successful private-console bootstrap."""
+    parsed_address = ipaddress.IPv4Address(address)
+    if not parsed_address.is_private or parsed_address.is_loopback:
+        raise ValueError("private non-loopback guest address required")
+    if not console.is_file() or console.is_symlink():
+        return False
+    text = ANSI_RE.sub("", console.read_text(encoding="utf-8", errors="replace"))
+    if "MGMT_CONSOLE_RESULT:0" not in text:
+        return False
+    keys = {
+        match.group(1)
+        for line in text.splitlines()
+        if (match := HOST_KEY_RE.fullmatch(line.strip())) is not None
+    }
+    if len(keys) != 1:
+        return False
+    _write_text(known_hosts, f"{parsed_address} {keys.pop()}\n")
+    return True
+
+
+def _write_text(path: Path, contents: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(contents, encoding="utf-8")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def destroy_owned(vbox: str, identity: Path, vm_name: str) -> subprocess.CompletedProcess[str]:
+    """Delete only the currently UUID-bound owned fixture in one bounded retry."""
+    ownership = probe_ownership(vbox, identity, vm_name)
+    if ownership["state"] in {"absent", "stale_identity"}:
+        if identity.exists() and identity.is_file() and not identity.is_symlink():
+            identity.unlink()
+        return subprocess.CompletedProcess([vbox], 0, "already absent\n", "")
+    if ownership["state"] != "owned":
+        return subprocess.CompletedProcess([vbox], 1, "", "ownership mismatch")
+    uuid = ownership["uuid"]
+    inspected = run_windows_command([vbox, "showvminfo", uuid, "--machinereadable"])
+    if inspected.returncode != 0:
+        return inspected
+    properties = dict(
+        line.split("=", 1) for line in inspected.stdout.splitlines() if "=" in line
+    )
+    if properties.get("VMState") != '"poweroff"':
+        stopped = run_windows_command([vbox, "controlvm", uuid, "poweroff"])
+        if stopped.returncode != 0:
+            return stopped
+    removed = run_windows_command([vbox, "unregistervm", uuid, "--delete"])
+    if removed.returncode == 0 and identity.is_file() and not identity.is_symlink():
+        identity.unlink()
+    return removed
+
+
 def probe_ownership(vbox: str, identity: Path, vm_name: str) -> dict[str, Any]:
     """Classify only the expected Vagrant identity against live VirtualBox registration."""
     if VM_NAME_RE.fullmatch(vm_name) is None:
@@ -232,6 +289,14 @@ def main() -> int:
     probe.add_argument("--output", type=Path, required=True)
     windows = subparsers.add_parser("run-windows")
     windows.add_argument("command", nargs=argparse.REMAINDER)
+    console = subparsers.add_parser("console-proof")
+    console.add_argument("--console", type=Path, required=True)
+    console.add_argument("--known-hosts", type=Path, required=True)
+    console.add_argument("--address", required=True)
+    destroy = subparsers.add_parser("destroy-owned")
+    destroy.add_argument("--vbox", required=True)
+    destroy.add_argument("--identity", type=Path, required=True)
+    destroy.add_argument("--vm-name", required=True)
     for action in ("classify-create", "classify-cleanup", "classify-cold-stage"):
         command = subparsers.add_parser(action)
         command.add_argument("--result", type=Path, required=True)
@@ -242,6 +307,13 @@ def main() -> int:
     if args.action == "run-windows":
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         result = run_windows_command(command)
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    if args.action == "console-proof":
+        return 0 if preserve_console_proof(args.console, args.known_hosts, args.address) else 1
+    if args.action == "destroy-owned":
+        result = destroy_owned(args.vbox, args.identity, args.vm_name)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         return result.returncode
