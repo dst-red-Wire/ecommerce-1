@@ -41,6 +41,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         defaults = lifecycle["workflow_defaults"]
         proof = policy["workflows"]["qualification_proof"]
         rke2 = policy["workflows"]["rke2_local_virtualbox"]
+        tekton = policy["workflows"]["tekton_proof"]
         campaign = policy["workflows"]["performance_campaign"]
 
         self.assertEqual("every-qualification-workflow", lifecycle["applies_to"])
@@ -82,7 +83,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, lifecycle["waits"]["every_wait_must_be_bounded"])
         self.assertEqual("forbidden", lifecycle["waits"]["indefinite_wait"])
         self.assertIs(True, lifecycle["reruns"]["non_blocking_improvement_creates_follow_up"])
-        self.assertEqual("forbidden", lifecycle["duplication"]["duplicate_full_gate_run_same_sha"])
+        self.assertEqual(
+            "forbidden",
+            lifecycle["duplication"]["merge_authoritative_duplicate_full_gate_run_same_sha"],
+        )
+        self.assertEqual(
+            "allowed-when-centrally-declared",
+            lifecycle["duplication"]["non_merge_authoritative_measurement_repetitions"],
+        )
 
         for name, workflow in policy["workflows"].items():
             with self.subTest(workflow=name):
@@ -98,6 +106,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         resolved_proof = MOD.qualification_workflow("qualification_proof")
         resolved_rke2 = MOD.qualification_workflow("rke2_local_virtualbox")
+        resolved_tekton = MOD.qualification_workflow("tekton_proof")
         resolved_campaign = MOD.qualification_workflow("performance_campaign")
         self.assertIs(True, resolved_proof["exact_sha_required"])
         self.assertIs(True, resolved_proof["clean_worktree_required"])
@@ -105,6 +114,18 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_rke2["exact_sha_required"])
         self.assertIs(True, resolved_rke2["clean_worktree_required"])
         self.assertIs(True, resolved_rke2["stop_when_exit_criteria_pass"])
+        self.assertEqual(
+            "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
+            resolved_rke2["entrypoint"],
+        )
+        self.assertIs(True, resolved_tekton["exact_sha_required"])
+        self.assertIs(False, resolved_tekton["merge_authoritative"])
+        self.assertIs(True, resolved_tekton["state_changing"])
+        self.assertIs(True, resolved_tekton["completion_requires_remote_readback"])
+        self.assertEqual(
+            ".context/runtime/tekton-proof/<sha>.json",
+            tekton["evidence"]["runtime"],
+        )
         self.assertIs(True, resolved_campaign["exact_sha_required"])
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
@@ -138,7 +159,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             completion["invalidation_inputs"],
         )
         self.assertIn(
-            "platform/ansible/tests/mgmt_offline_vm/**/*",
+            "platform/ansible/tests/mgmt_offline_vm",
             completion["invalidation_inputs"],
         )
         self.assertEqual(
@@ -176,14 +197,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             mock.patch.object(MOD, "verify_change", return_value=0) as verify,
             mock.patch.object(MOD, "_valid_exact_evidence", side_effect=[None, evidence]) as valid_evidence,
             mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
-            mock.patch.object(MOD, "_valid_performance_audit", side_effect=[None, audit_path]) as valid_audit,
+            mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path) as valid_audit,
             mock.patch.object(MOD, "run", return_value=completed) as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
 
         verify.assert_called_once_with("origin/main", head)
         self.assertEqual(2, valid_evidence.call_count)
-        self.assertEqual(2, valid_audit.call_count)
+        self.assertEqual(1, valid_audit.call_count)
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertIn("scripts/performance_audit.py", command)
@@ -216,6 +237,91 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         verify.assert_not_called()
         requested_audit.assert_not_called()
         run.assert_not_called()
+
+    def test_completed_proof_inputs_detect_registered_runtime_change(self):
+        source = "a" * 40
+        unchanged = MOD.subprocess.CompletedProcess([], 0, "", "")
+        changed = MOD.subprocess.CompletedProcess([], 1, "", "")
+        with mock.patch.object(MOD, "run", side_effect=[unchanged, changed]) as run:
+            self.assertFalse(
+                MOD._completed_proof_inputs_unchanged(source, ["config/a.yaml", "platform/runtime"])
+            )
+        self.assertEqual(2, run.call_count)
+        with mock.patch.object(MOD, "run", return_value=unchanged):
+            self.assertTrue(MOD._completed_proof_inputs_unchanged(source, ["config/a.yaml"]))
+
+    def test_rke2_registered_entrypoint_executes_complete_existing_fixture_sequence(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text("{}\n", encoding="utf-8")
+            workflow = {
+                "entrypoint": (
+                    "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                    "--inputs .context/mgmt-vm-inputs.json"
+                )
+            }
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+
+        actions = [
+            call.args[0][-1]
+            for call in run.call_args_list
+            if call.args and call.args[0][-2] == "-e"
+        ]
+        self.assertEqual(
+            [
+                "vm_action=validate",
+                "vm_action=create",
+                "vm_action=test",
+                "vm_action=server",
+                "vm_action=server",
+                "vm_action=restage",
+                "vm_action=tamper",
+                "vm_action=restage",
+                "vm_action=server",
+                "vm_action=destroy",
+            ],
+            actions,
+        )
+
+    def test_tekton_proof_launcher_consumes_registry_and_records_remote_readback(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflow = {
+                "merge_authoritative": False,
+                "state_changing": True,
+                "completion_requires_remote_readback": True,
+                "evidence": {"runtime": ".context/runtime/tekton-proof/<sha>.json"},
+            }
+            head = "c" * 40
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.tekton_proof("runtime.yaml", "a" * 40, "b" * 40, head),
+                )
+            payload = __import__("json").loads(
+                (root / ".context" / "runtime" / "tekton-proof" / f"{head}.json").read_text()
+            )
+            self.assertEqual("PASS", payload["status"])
+            self.assertEqual("signed-harbor-evidence-authenticated", payload["remote_readback"])
+            run.assert_called_once()
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
