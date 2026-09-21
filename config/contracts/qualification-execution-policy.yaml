@@ -530,6 +530,13 @@ workflows:
         tests/test_mgmt_airgap.py: 7f684fc7be132bd84d6aa1f06e2a68b0b4ce9f3f
         tests/test_mgmt_airgap_bundle.py: 8312be07bacb063be634b23675b337f0f1fbed45
         tests/test_mgmt_offline_vm.py: 667520cbfd5bcc6773043594a34f6779420b5755
+      invalidation_semantic_regions:
+        scripts/repoctl.py:
+          end_marker: class MissingRunnerPrerequisite
+          sha256: 873c3549faf0d9e7fb75280289afff76d3ef1de532adc3b5f9855bb0e9a3db34
+        scripts/capability_bootstrap.py:
+          end_marker: "@dataclass(frozen=True)"
+          sha256: fc84aea4d2840442be10a19cbd881ff7870a4a278e9c8f0bbc5648cbf2a130f6
       invalidation_semantic_functions:
         scripts/repoctl.py:
           _raw_toolchain_lock: f8d6d4b1e29150b88292be2708723c630a9c10dfa31e435415926b94d4f1a10a
