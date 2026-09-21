@@ -81,11 +81,22 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("Refuse to rebuild or download the #128 bundle implicitly", source)
         self.assertNotIn("build_bundle.yml", source)
         self.assertNotRegex(source, r"\bcurl\b|\bwget\b")
-        self.assertIn("docker, pull", source)
+        self.assertNotIn("docker, pull", source)
+        self.assertIn("HAProxy preparation evidence", source)
         self.assertIn("sha256sum, --check", source)
         self.assertNotIn("docker\n          - image\n          - save\n          - --platform", source)
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
+
+    def test_haproxy_preparation_is_digest_pinned_and_separate_from_qualification(self):
+        source = (FIXTURE / "prepare_haproxy.yml").read_text(encoding="utf-8")
+        contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
+        reference = contract["ha_endpoint"]["image"]["reference"]
+        self.assertIn(reference, source)
+        self.assertIn("docker, pull", source)
+        self.assertIn("docker", source)
+        self.assertIn("archive_sha256", source)
+        self.assertNotIn(":latest", source)
 
     def test_fixture_python_helpers_parse(self):
         for name in ("lab_services.py", "service_probe.py", "ha_probe.py"):
