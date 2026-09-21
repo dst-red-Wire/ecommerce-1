@@ -599,7 +599,6 @@
             | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'forward')
             | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop')
             | list | length == 1
-      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
 
     - name: Require public TCP egress to remain denied
       ansible.builtin.command:
