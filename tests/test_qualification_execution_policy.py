@@ -48,6 +48,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             lifecycle["single_authority"],
         )
         self.assertEqual("forbidden", lifecycle["per_workflow_policy_duplication"])
+        self.assertEqual("workflows", lifecycle["registration"]["registry"])
+        self.assertEqual(
+            "forbidden",
+            lifecycle["registration"]["unregistered_authoritative_qualification"],
+        )
+        self.assertEqual("forbidden", lifecycle["registration"]["local_lifecycle_override"])
         self.assertIs(True, defaults["stop_when_exit_criteria_pass"])
         self.assertEqual("forbidden", defaults["post_pass_scope_expansion"])
         self.assertEqual("follow-up-work-item", defaults["non_blocking_findings"])
@@ -65,7 +71,9 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         for name, workflow in policy["workflows"].items():
             with self.subTest(workflow=name):
                 self.assertFalse(set(defaults).intersection(workflow))
+                self.assertTrue(workflow["owner"])
                 self.assertTrue(workflow["purpose"])
+                self.assertTrue(workflow["entrypoint"])
                 self.assertTrue(workflow["exit_criteria"])
                 self.assertTrue(workflow["evidence"])
                 self.assertTrue(
