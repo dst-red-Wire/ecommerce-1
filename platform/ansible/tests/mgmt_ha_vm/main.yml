@@ -14,6 +14,7 @@
     ha_haproxy_evidence: "{{ ha_repo }}/{{ mgmt_local_ha_contract.ha_endpoint.image.cache_evidence }}"
     ha_inventory: "{{ ha_state }}/inventory.yml"
     ha_cluster_log: "{{ ha_state }}/cluster.log"
+    ha_completion: "{{ ha_state }}/completion.json"
     ha_sources: "{{ mgmt_local_ha_contract.canonical_sources }}"
     ha_single_contract_path: "{{ ha_repo }}/{{ ha_sources.local_vm_contract }}"
     ha_single_contract: "{{ (lookup('file', ha_single_contract_path) | from_yaml).mgmt_local_vm_contract }}"
@@ -43,6 +44,11 @@
         path: "{{ ha_state }}"
         state: directory
         mode: "0700"
+
+    - name: Remove stale HA completion marker before any state-changing campaign
+      ansible.builtin.file:
+        path: "{{ ha_completion }}"
+        state: absent
 
     - name: Require existing PR 128 offline bundle
       ansible.builtin.stat:
@@ -327,7 +333,7 @@
                       {{ item.value.hostname }}:
                         ha_node_ip: {{ item.value.address }}
                         mgmt_ip: {{ item.value.address }}
-                        ansible_host: {{ item.value.address }}
+                        ansible_host: {{ item.value.vm_name }}
                         ansible_user: vagrant
                         ansible_become: true
                         ansible_python_interpreter: /usr/bin/python3
@@ -339,7 +345,7 @@
                       {{ item.value.hostname }}:
                         ha_node_ip: {{ item.value.address }}
                         mgmt_ip: {{ item.value.address }}
-                        ansible_host: {{ item.value.address }}
+                        ansible_host: {{ item.value.vm_name }}
                         ansible_user: vagrant
                         ansible_become: true
                         ansible_python_interpreter: /usr/bin/python3
@@ -456,6 +462,7 @@
           loop: "{{ ha_nodes }}"
           loop_control:
             label: "{{ item.key }}"
+          register: ha_destroy_results
           failed_when: false
           changed_when: true
 
@@ -463,3 +470,40 @@
           ansible.builtin.file:
             path: "{{ ha_token_file }}"
             state: absent
+
+        - name: Require successful destruction of every owned HA VM
+          ansible.builtin.assert:
+            that:
+              - ha_destroy_results.results | length == ha_nodes | length
+              - ha_destroy_results.results | selectattr('rc', 'ne', 0) | list | length == 0
+            fail_msg: >-
+              At least one owned HA VM could not be destroyed; qualification is failed
+              and cleanup must be completed before another campaign.
+
+    - name: Hash final authoritative HA result after all campaign postconditions
+      ansible.builtin.command:
+        argv: [sha256sum, "{{ ha_state }}/result.json"]
+      register: ha_final_result_hash
+      changed_when: false
+
+    - name: Hash frozen source manifest after successful cleanup
+      ansible.builtin.command:
+        argv: [sha256sum, "{{ ha_state }}/source.sha256"]
+      register: ha_final_source_manifest_hash
+      changed_when: false
+
+    - name: Publish completion marker only after source verification and full cleanup
+      ansible.builtin.copy:
+        dest: "{{ ha_completion }}"
+        mode: "0600"
+        content: >-
+          {{
+            {
+              'schema_version': 1,
+              'status': 'PASS',
+              'head_sha': ha_head_sha,
+              'evidence_sha256': (ha_final_result_hash.stdout | trim).split()[0],
+              'source_manifest_sha256': (ha_final_source_manifest_hash.stdout | trim).split()[0],
+              'cleanup_complete': true
+            } | to_nice_json
+          }}
