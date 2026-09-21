@@ -38,6 +38,12 @@ The current local host contract is:
 No Vagrant plugin is required. The #128 Windows bridge sets `VAGRANT_NO_PLUGINS=1`
 when Vagrant is invoked.
 
+Before VM creation, collision checks are scoped to the selected VirtualBox host-only
+segment. They use Windows `ping.exe` with source address `192.168.22.1` instead
+of an unbound WSL ping, so an overlapping RFC1918 route exposed through a VPN/LAN
+cannot be mistaken for a host on the VirtualBox network. A reply sourced through the
+selected host-only adapter still fails closed.
+
 ## Resource boundary
 
 The six-VM profile is intentionally a constrained functional laboratory profile:
