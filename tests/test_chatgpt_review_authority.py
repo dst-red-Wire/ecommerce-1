@@ -56,8 +56,13 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
             json.dumps(
                 [
                     [
-                        {"body": body, "user": {"login": author}}
-                        for body in comments
+                        {
+                            "id": index + 1,
+                            "created_at": f"2026-09-21T08:{index:02d}:00Z",
+                            "body": body,
+                            "user": {"login": author},
+                        }
+                        for index, body in enumerate(comments)
                     ]
                 ]
             ),
@@ -109,18 +114,18 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("ChatGPT code review is not PASS", reason)
 
-    def test_conflicting_exact_sha_markers_fail_closed_regardless_of_order(self):
+    def test_latest_exact_sha_marker_supersedes_earlier_same_kind_verdict(self):
         pass_code = self.marker("code")
         blocked_code = self.marker("code", status="BLOCKED", blockers=1)
         security = self.marker("security")
-        for comments in (
-            [pass_code, blocked_code, security],
-            [blocked_code, pass_code, security],
-        ):
-            with self.subTest(order=[comments.index(pass_code), comments.index(blocked_code)]):
-                ready, reason = self.run_with_comments(comments)
-                self.assertFalse(ready)
-                self.assertIn("ChatGPT code review is not PASS", reason)
+
+        ready, reason = self.run_with_comments([pass_code, blocked_code, security])
+        self.assertFalse(ready)
+        self.assertIn("ChatGPT code review is not PASS", reason)
+
+        ready, reason = self.run_with_comments([blocked_code, pass_code, security])
+        self.assertTrue(ready)
+        self.assertIn("ChatGPT CODE and SECURITY reviews PASS", reason)
 
     def test_reads_all_paginated_comment_pages(self):
         owner = subprocess.CompletedProcess(
