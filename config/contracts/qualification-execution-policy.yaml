@@ -21,6 +21,10 @@ qualification_lifecycle:
     - freeze
     - qualification
     - complete
+  registration:
+    registry: workflows
+    unregistered_authoritative_qualification: forbidden
+    local_lifecycle_override: forbidden
   workflow_defaults:
     exact_sha_required: true
     clean_worktree_required: true
@@ -32,7 +36,9 @@ qualification_lifecycle:
     non_blocking_findings: follow-up-work-item
     blocking_findings: return-to-development
   required_per_workflow:
+    - owner
     - purpose
+    - entrypoint
     - exit_criteria
     - evidence
   evidence:
@@ -424,7 +430,9 @@ gates:
 
 workflows:
   qualification_proof:
+    owner: quality-engineering
     purpose: merge-authoritative exact-SHA repository qualification
+    entrypoint: scripts/repoctl.py qualification-proof
     exit_criteria:
       - verify-change-pass
       - exact-sha-evidence-valid
@@ -438,7 +446,9 @@ workflows:
     performance_campaign_required: false
     merge_authoritative: true
   performance_campaign:
+    owner: quality-engineering
     purpose: non-merge-authoritative performance characterization
+    entrypoint: scripts/repoctl.py perf-campaign
     exit_criteria:
       - configured-repetitions-complete
       - all-performance-budgets-pass
