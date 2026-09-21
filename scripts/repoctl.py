@@ -5483,11 +5483,16 @@ def rke2_local_ha_restore_bundle(source_value: str) -> int:
     if source == destination:
         return fail("RKE2 local HA bundle restore source and destination must differ")
 
-    locked_entries = [
-        *lock.get("rpm_signing_keys", []),
-        *lock.get("rpms", []),
-        *lock.get("release_artifacts", {}).values(),
-    ]
+    signing_keys = lock.get("rpm_signing_keys")
+    rpms = lock.get("rpms")
+    releases = lock.get("release_artifacts")
+    if (
+        not isinstance(signing_keys, list)
+        or not isinstance(rpms, list)
+        or not isinstance(releases, dict)
+    ):
+        return fail("RKE2 local HA bundle lock artifact collections are invalid")
+    locked_entries = [*signing_keys, *rpms, *releases.values()]
     expected_files: dict[str, str] = {"manifest.json": approved_manifest}
     for entry in locked_entries:
         if not isinstance(entry, dict):
