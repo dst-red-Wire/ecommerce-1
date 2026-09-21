@@ -28,6 +28,18 @@
     ha_single_fixture: "{{ ha_repo }}/{{ ha_sources.local_vm_entrypoint }}"
     ha_ansible_playbook: "{{ ansible_playbook_python | dirname }}/ansible-playbook"
     ha_nodes: "{{ mgmt_local_ha_contract.nodes | dict2items }}"
+    ha_cold_stage_batches: >-
+      {{
+        ha_nodes
+        | batch(mgmt_local_ha_contract.execution.cold_stage_parallelism)
+        | list
+      }}
+    ha_cleanup_batches: >-
+      {{
+        ha_nodes
+        | batch(mgmt_local_ha_contract.execution.cleanup_parallelism)
+        | list
+      }}
   tasks:
     - name: Require exact SHA input from registered launcher
       ansible.builtin.assert:
@@ -215,6 +227,8 @@
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/contract.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/main.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cold_stage_batch.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cluster.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/server_node.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/agent_node.yml"
@@ -268,14 +282,15 @@
           vars:
             ha_single_vm_action: create
 
-        - name: Cold-stage the approved PR 128 bundle sequentially on each ready VM
-          ansible.builtin.include_tasks: single_vm_action.yml
-          loop: "{{ ha_nodes }}"
+        - name: Cold-stage the approved PR 128 bundle two VMs at a time
+          ansible.builtin.include_tasks: cold_stage_batch.yml
+          loop: "{{ ha_cold_stage_batches }}"
           loop_control:
-            loop_var: ha_node
-            label: "{{ ha_node.key }}"
-          vars:
-            ha_single_vm_action: test
+            loop_var: ha_vm_batch
+            label: >-
+              {{
+                ha_vm_batch | map(attribute='key') | join(',')
+              }}
 
         - name: Render six-node Ansible inventory using pinned per-VM SSH identities
           ansible.builtin.copy:
@@ -319,6 +334,8 @@
               - -i
               - "{{ ha_inventory }}"
               - "{{ playbook_dir }}/cluster.yml"
+              - --forks
+              - "{{ mgmt_local_ha_contract.execution.max_forks }}"
               - -e
               - "ha_repo={{ ha_repo }}"
               - -e
@@ -383,44 +400,20 @@
           changed_when: false
 
       always:
-        - name: Destroy every VM owned by this HA invocation
-          ansible.builtin.command:
-            argv:
-              - "{{ ha_ansible_playbook }}"
-              - -i
-              - localhost,
-              - "{{ ha_single_fixture }}"
-              - -e
-              - >-
-                {{
-                  {
-                    'vm_action': 'destroy',
-                    'vm_name': item.value.vm_name,
-                    'vm_address': item.value.address,
-                    'vm_mac': item.value.mac,
-                    'vm_cpus': (
-                      mgmt_local_ha_contract.resources.control_plane.cpus
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.cpus
-                    ),
-                    'vm_memory': (
-                      mgmt_local_ha_contract.resources.control_plane.memory_mib
-                      if item.value.role == 'control-plane'
-                      else mgmt_local_ha_contract.resources.worker.memory_mib
-                    ),
-                    'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
-                    'vm_host_address': mgmt_local_ha_contract.controller.host_address,
-                    'vm_repo': ha_repo
-                  } | to_json
-                }}
-          environment:
-            PYTHONDONTWRITEBYTECODE: "1"
-          loop: "{{ ha_nodes }}"
+        - name: Initialize bounded cleanup result accumulator
+          ansible.builtin.set_fact:
+            ha_destroy_results: []
+          changed_when: false
+
+        - name: Destroy owned HA VMs two at a time while attempting all six
+          ansible.builtin.include_tasks: destroy_vm_batch.yml
+          loop: "{{ ha_cleanup_batches }}"
           loop_control:
-            label: "{{ item.key }}"
-          register: ha_destroy_results
-          failed_when: false
-          changed_when: true
+            loop_var: ha_vm_batch
+            label: >-
+              {{
+                ha_vm_batch | map(attribute='key') | join(',')
+              }}
 
         - name: Remove invocation-local cluster token
           ansible.builtin.file:
@@ -430,11 +423,21 @@
         - name: Require successful destruction of every owned HA VM
           ansible.builtin.assert:
             that:
-              - ha_destroy_results.results | length == ha_nodes | length
-              - ha_destroy_results.results | selectattr('rc', 'ne', 0) | list | length == 0
+              - ha_destroy_results | length == ha_nodes | length
+              - >-
+                ha_destroy_results
+                | selectattr('finished', 'defined')
+                | selectattr('finished', 'equalto', true)
+                | list | length == ha_nodes | length
+              - >-
+                ha_destroy_results
+                | selectattr('rc', 'defined')
+                | selectattr('rc', 'ne', 0)
+                | list | length == 0
             fail_msg: >-
-              At least one owned HA VM could not be destroyed; qualification is failed
-              and cleanup must be completed before another campaign.
+              At least one owned HA VM could not be destroyed; all six cleanup attempts
+              were issued in bounded pairs, but qualification remains failed until every
+              owned VM cleanup result is complete and successful.
 
     - name: Hash final authoritative HA result after all campaign postconditions
       ansible.builtin.command:
