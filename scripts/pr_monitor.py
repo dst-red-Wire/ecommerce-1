@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Low-cost GitHub PR watcher that wakes Codex only for meaningful deltas."""
+"""Low-cost GitHub PR watcher that emits bounded ChatGPT review handoffs for meaningful deltas."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -20,7 +19,7 @@ import urllib.error
 import urllib.request
 
 PROMPT_BUDGET_BYTES = 16 * 1024
-GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
+GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){owner{login} pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid comments(last:100){nodes{id createdAt body author{login}}} reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
 THREADS_QUERY = """query PRMonitorThreads($owner:String!,$repo:String!,$number:Int!,$threadCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}}}}}"""
 
 
@@ -85,7 +84,9 @@ def _graphql_pr(payload: dict[str, Any], number: int) -> dict[str, Any]:
     pr = repository.get("pullRequest")
     if pr is None:
         raise RuntimeError(f"pull request #{number} not found")
-    return pr
+    result = dict(pr)
+    result["_repository_owner_login"] = ((repository.get("owner") or {}).get("login") or "")
+    return result
 
 
 def paginate_review_threads(
@@ -117,7 +118,54 @@ def paginate_review_threads(
     return result
 
 
+CHATGPT_REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*chatgpt-exact-sha-review:v1\s+(\{[^\n]*\})\s*-->"
+)
+
+
+def _latest_chatgpt_review(pr: dict[str, Any]) -> dict[str, Any]:
+    head_sha = str(pr.get("headRefOid") or "")
+    owner_login = str(pr.get("_repository_owner_login") or "")
+    latest: dict[str, dict[str, Any]] = {}
+    comments = list(((pr.get("comments") or {}).get("nodes") or []))
+    comments.sort(key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
+    for comment in comments:
+        if owner_login and str((comment.get("author") or {}).get("login") or "") != owner_login:
+            continue
+        for raw in CHATGPT_REVIEW_MARKER_RE.findall(str(comment.get("body") or "")):
+            try:
+                proof = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = str(proof.get("kind") or "")
+            if (
+                proof.get("provider") == "ChatGPT"
+                and proof.get("head_sha") == head_sha
+                and kind in {"code", "security"}
+            ):
+                latest[kind] = proof
+    code = latest.get("code")
+    security = latest.get("security")
+    if not code and not security:
+        return {}
+    ready = bool(
+        code
+        and security
+        and code.get("status") == "PASS"
+        and security.get("status") == "PASS"
+        and code.get("blocking_findings") == 0
+        and security.get("blocking_findings") == 0
+    )
+    return {
+        "head_sha": head_sha,
+        "verdict": "READY" if ready else "BLOCKED",
+        "code": code or {},
+        "security": security or {},
+    }
+
+
 def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]:
+    chatgpt_review = _latest_chatgpt_review(pr)
     nodes = (pr.get("commits") or {}).get("nodes") or []
     rollup = ((nodes[-1].get("commit") or {}).get("statusCheckRollup") or {}) if nodes else {}
     checks = {}
@@ -154,6 +202,8 @@ def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]
         "reviews": reviews,
         "open_findings_count": len(findings),
         "open_findings": findings,
+        "chatgpt_review": chatgpt_review,
+        "validated_verdict": (chatgpt_review.get("verdict") or ""),
         "mergeable": pr.get("mergeable"),
         "merge_state_status": pr.get("mergeStateStatus"),
         "is_draft": bool(pr.get("isDraft")),
@@ -172,6 +222,7 @@ MEANINGFUL = (
     "reviews",
     "open_findings_count",
     "open_findings",
+    "chatgpt_review",
     "mergeable",
     "merge_state_status",
     "is_draft",
@@ -298,34 +349,80 @@ def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTE
     return encoded
 
 
-def codex_prompt(
+def chatgpt_review_handoff(
     number: int,
     previous: dict[str, Any],
     current: dict[str, Any],
     changes: dict[str, Any],
     files: list[str],
 ) -> str:
-    prior_verdict = previous.get("validated_verdict") or ""
+    prior_verdict = str(previous.get("validated_verdict") or "")
     reuse = (
-        "Reuse the previous validated verdict below and adjust only what the delta invalidates."
+        "Reuse the previous validated ChatGPT verdict and adjust only what this delta invalidates."
         if prior_verdict
-        else "No previous validated verdict is available; evaluate only this bounded delta."
+        else "No previous validated ChatGPT verdict is available; review only this bounded delta."
     )
     instruction = (
-        "Incremental PR review only. Do not reload PR history or repeat the full audit. "
-        f"{reuse} Read only changed_files plus the finding paths in delta and run only related validations. "
-        "Return exactly five lines: PR #<number>; HEAD : <old> → <new or unchanged>; "
-        "CHANGEMENT : <delta>; VERDICT : READY | BLOCKED | WAITING; ACTION : <one next action>.\n"
+        "ChatGPT incremental exact-SHA PR review handoff. "
+        "Do not reload PR history or repeat proven gates. "
+        f"{reuse} "
+        "Read only changed_files plus finding paths in delta and issue CODE/SECURITY findings "
+        "bound to current_head. Return the compact UX summary as five lines: "
+        "PR #<number>; HEAD : <old> → <new or unchanged>; CHANGEMENT : <delta>; "
+        "VERDICT : READY | BLOCKED | WAITING; ACTION : <one next action>.\n"
     )
     payload = {
         "pr": number,
         "previous_validated_verdict": prior_verdict,
         "delta": changes,
+        "previous_head": previous.get("head_sha"),
         "current_head": current.get("head_sha"),
         "changed_files": files,
+        "exact_head_verified": bool(current.get("exact_head_verified")),
     }
     encoded = bounded_payload(payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode()))
     return instruction + encoded
+
+
+def _supports_color() -> bool:
+    return (
+        "NO_COLOR" not in os.environ
+        and os.environ.get("TERM", "") != "dumb"
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
+
+
+def _paint(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m" if _supports_color() else text
+
+
+def compact_status_lines(
+    number: int,
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    changes: dict[str, Any],
+) -> list[str]:
+    old_head = str(previous.get("head_sha") or "none")
+    new_head = str(current.get("head_sha") or "none")
+    changed = ", ".join(sorted(changes)) or "aucun"
+    verdict = str(current.get("validated_verdict") or "WAITING")
+    if verdict == "READY":
+        action = "continuer les gates qualification/fusion"
+        verdict_color = "32"
+    elif verdict == "BLOCKED":
+        action = "review ChatGPT bornée sur le delta"
+        verdict_color = "31"
+    else:
+        action = "review ChatGPT bornée sur le delta"
+        verdict_color = "33"
+    return [
+        _paint(f"PR #{number}", "36"),
+        _paint(f"HEAD : {old_head} → {new_head}", "34"),
+        _paint(f"CHANGEMENT : {changed}", "33"),
+        _paint(f"VERDICT : {verdict}", verdict_color),
+        _paint(f"ACTION : {action}", "35"),
+    ]
 
 
 def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -341,6 +438,8 @@ def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> sub
 
 @contextmanager
 def exact_head_worktree(head_sha: str):
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError(f"invalid exact PR head SHA: {head_sha!r}")
     repo_root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="pr-monitor-") as directory:
         worktree = Path(directory) / "repo"
@@ -362,18 +461,6 @@ def exact_head_worktree(head_sha: str):
                 capture_output=True,
                 check=False,
             )
-
-
-def invoke_codex(command: list[str], prompt: str, *, head_sha: str) -> str:
-    if not command:
-        print("CHANGE_DETECTED", flush=True)
-        return ""
-    with exact_head_worktree(head_sha) as worktree:
-        completed = _run(command, cwd=worktree, input_text=prompt)
-    output = completed.stdout.strip()
-    if not output:
-        raise RuntimeError("configured Codex command produced no validated verdict")
-    return output
 
 
 def next_interval(unchanged: int, minimum: int, maximum: int) -> int:
@@ -421,12 +508,28 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
         token=token,
     )
     current = snapshot(pr, etag=etag, timestamp=int(time.time()))
+    if (
+        previous
+        and current.get("head_sha") == previous.get("head_sha")
+        and not current.get("validated_verdict")
+        and previous.get("validated_verdict")
+    ):
+        current["validated_verdict"] = previous["validated_verdict"]
+        current["chatgpt_review"] = previous.get("chatgpt_review", {})
+    current["exact_head_verified"] = bool(
+        previous
+        and current.get("head_sha") == previous.get("head_sha")
+        and previous.get("exact_head_verified")
+    )
     changes = delta(previous, current) if previous else {}
     unchanged = 0 if changes else int(previous.get("unchanged_polls", 0)) + 1
     current["unchanged_polls"] = unchanged
-    current["validated_verdict"] = previous.get("validated_verdict", "")
 
     if previous and changes:
+        if not current["exact_head_verified"]:
+            with exact_head_worktree(str(current.get("head_sha") or "")):
+                pass
+            current["exact_head_verified"] = True
         files = changed_files(
             args.owner,
             args.repo,
@@ -434,14 +537,12 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
             current.get("head_sha", ""),
             token,
         )
-        prompt = codex_prompt(args.pr, previous, current, changes, files)
-        verdict = invoke_codex(
-            args.codex_command,
-            prompt,
-            head_sha=current.get("head_sha") or "",
-        )
-        if verdict:
-            current["validated_verdict"] = verdict
+        handoff = chatgpt_review_handoff(args.pr, previous, current, changes, files)
+        current["chatgpt_review_handoff"] = handoff
+        print("CHATGPT_REVIEW_REQUIRED", flush=True)
+        for line in compact_status_lines(args.pr, previous, current, changes):
+            print(line, flush=True)
+        print("CHATGPT_REVIEW_HANDOFF " + handoff, flush=True)
     else:
         print("NO_CHANGE", flush=True)
 
@@ -471,12 +572,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--abandoned", action="store_true")
-    parser.add_argument("--codex-command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.interval < 1 or args.max_interval < args.interval:
         parser.error("intervals must satisfy 1 <= --interval <= --max-interval")
-    if args.codex_command is None:
-        args.codex_command = shlex.split(os.environ.get("PR_MONITOR_CODEX_COMMAND", ""))
     return args
 
 

@@ -14,7 +14,6 @@ def args(**overrides):
         "owner": "o",
         "repo": "r",
         "pr": 7,
-        "codex_command": [],
         "abandoned": False,
     }
     values.update(overrides)
@@ -130,7 +129,7 @@ class PRMonitorTest(unittest.TestCase):
             self.assertTrue(terminal)
             self.assertEqual(unchanged, 4)
 
-    def test_changed_state_is_persisted_only_after_successful_processing(self):
+    def test_changed_state_emits_and_persists_chatgpt_review_handoff(self):
         previous = {
             "etag": "old",
             "head_sha": "old",
@@ -156,28 +155,121 @@ class PRMonitorTest(unittest.TestCase):
             with (
                 mock.patch.object(pr_monitor, "github_request", return_value=(200, payload, "newtag")),
                 mock.patch.object(pr_monitor, "changed_files", return_value=["x.py"]),
-                mock.patch.object(pr_monitor, "invoke_codex", side_effect=RuntimeError("review failed")),
+                mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
+                mock.patch("builtins.print") as output,
             ):
-                with self.assertRaises(RuntimeError):
-                    pr_monitor.poll_once(args(codex_command=["codex"]), state, "token")
-            self.assertEqual(json.loads(state.read_text())["head_sha"], "old")
+                checkout.return_value.__enter__.return_value = Path("/exact")
+                checkout.return_value.__exit__.return_value = False
+                terminal, unchanged = pr_monitor.poll_once(args(), state, "token")
+            self.assertFalse(terminal)
+            self.assertEqual(unchanged, 0)
+            stored = json.loads(state.read_text())
+            self.assertEqual("new", stored["head_sha"])
+            self.assertIn("chatgpt_review_handoff", stored)
+            self.assertIn("current_head", stored["chatgpt_review_handoff"])
+            self.assertTrue(stored["exact_head_verified"])
+            checkout.assert_called_once_with("new")
+            output.assert_any_call("CHATGPT_REVIEW_REQUIRED", flush=True)
 
-    def test_validated_verdict_is_stored_and_reused_in_prompt(self):
+    def test_chatgpt_review_handoff_is_bounded_and_exact_sha_oriented(self):
         previous = {
-            "etag": "old",
             "head_sha": "old",
             "checks": {},
             "reviews": {},
             "open_findings": {},
-            "open_findings_count": 0,
-            "state": "OPEN",
-            "merged": False,
-            "validated_verdict": "VERDICT : READY",
+            "validated_verdict": "READY",
         }
         current = dict(previous, head_sha="new")
-        prompt = pr_monitor.codex_prompt(7, previous, current, {"head_sha": {"before": "old", "after": "new"}}, ["x.py"])
-        self.assertIn("VERDICT : READY", prompt)
-        self.assertLessEqual(len(prompt.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
+        handoff = pr_monitor.chatgpt_review_handoff(
+            7,
+            previous,
+            current,
+            {"head_sha": {"before": "old", "after": "new"}},
+            ["x.py"],
+        )
+        self.assertIn("ChatGPT incremental exact-SHA PR review handoff", handoff)
+        self.assertIn("Return the compact UX summary as five lines", handoff)
+        self.assertIn('"current_head":"new"', handoff)
+        self.assertIn('"previous_validated_verdict":"READY"', handoff)
+        self.assertLessEqual(len(handoff.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
+
+        with mock.patch.object(pr_monitor, "_supports_color", return_value=False):
+            lines = pr_monitor.compact_status_lines(
+                7,
+                previous,
+                {**current, "validated_verdict": "WAITING"},
+                {"head_sha": {"before": "old", "after": "new"}},
+            )
+        self.assertEqual(5, len(lines))
+        self.assertTrue(lines[0].startswith("PR #7"))
+        self.assertTrue(lines[1].startswith("HEAD :"))
+        self.assertTrue(lines[2].startswith("CHANGEMENT :"))
+        self.assertTrue(lines[3].startswith("VERDICT :"))
+        self.assertTrue(lines[4].startswith("ACTION :"))
+
+        with mock.patch.object(pr_monitor, "_supports_color", return_value=True):
+            colored = pr_monitor.compact_status_lines(
+                7,
+                previous,
+                {**current, "validated_verdict": "READY"},
+                {"head_sha": {"before": "old", "after": "new"}},
+            )
+        self.assertEqual(5, len(colored))
+        self.assertTrue(all("\033[" in line and line.endswith("\033[0m") for line in colored))
+
+    def test_snapshot_reuses_latest_chatgpt_exact_sha_verdict(self):
+        head = "a" * 40
+        def marker(kind, status, blockers):
+            return (
+                '<!-- chatgpt-exact-sha-review:v1 '
+                + json.dumps(
+                    {
+                        "provider": "ChatGPT",
+                        "kind": kind,
+                        "head_sha": head,
+                        "status": status,
+                        "blocking_findings": blockers,
+                    },
+                    separators=(",", ":"),
+                )
+                + " -->"
+            )
+
+        pr = {
+            "headRefOid": head,
+            "_repository_owner_login": "owner",
+            "comments": {
+                "nodes": [
+                    {
+                        "id": "1",
+                        "createdAt": "2026-09-21T08:00:00Z",
+                        "body": marker("code", "BLOCKED", 1),
+                        "author": {"login": "owner"},
+                    },
+                    {
+                        "id": "2",
+                        "createdAt": "2026-09-21T08:01:00Z",
+                        "body": marker("code", "PASS", 0),
+                        "author": {"login": "owner"},
+                    },
+                    {
+                        "id": "3",
+                        "createdAt": "2026-09-21T08:02:00Z",
+                        "body": marker("security", "PASS", 0),
+                        "author": {"login": "owner"},
+                    },
+                ]
+            },
+            "reviews": {"nodes": []},
+            "commits": {"nodes": []},
+            "reviewThreads": {"nodes": []},
+            "state": "OPEN",
+            "merged": False,
+        }
+        result = pr_monitor.snapshot(pr, etag="tag", timestamp=1)
+        self.assertEqual("READY", result["validated_verdict"])
+        self.assertEqual("PASS", result["chatgpt_review"]["code"]["status"])
+        self.assertEqual("PASS", result["chatgpt_review"]["security"]["status"])
 
     def test_bounded_prompt_stays_within_budget(self):
         findings = {
@@ -199,17 +291,16 @@ class PRMonitorTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode()), 4096)
         json.loads(encoded)
 
-    def test_invoke_codex_uses_exact_head_worktree(self):
-        with (
-            mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
-            mock.patch.object(pr_monitor, "_run") as run,
+    def test_pr_monitor_has_no_codex_control_or_external_ai_execution_hook(self):
+        source = (Path(pr_monitor.__file__)).read_text(encoding="utf-8").lower()
+        for forbidden in (
+            "codex",
+            "--codex-command",
+            "pr_monitor_codex_command",
+            "invoke_codex",
         ):
-            checkout.return_value.__enter__.return_value = Path("/exact")
-            checkout.return_value.__exit__.return_value = False
-            run.return_value = mock.Mock(stdout="VERDICT : READY\n")
-            result = pr_monitor.invoke_codex(["codex"], "prompt", head_sha="abc")
-        self.assertEqual(result, "VERDICT : READY")
-        run.assert_called_once_with(["codex"], cwd=Path("/exact"), input_text="prompt")
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
 
     def test_transient_http_failures_are_classified_for_retry(self):
         error = urllib.error.HTTPError(

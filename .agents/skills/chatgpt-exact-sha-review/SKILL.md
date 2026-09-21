@@ -13,7 +13,9 @@ The user's explicit instructions take precedence.
 
 ChatGPT is the only AI review authority for CODE and SECURITY review in this repository.
 
-Never trigger, request, rerun, poll, or rely on Codex review workflows. Do not post `@codex review`, `@codex security review`, or equivalent triggers. Historical Codex findings may be migrated as ordinary findings, but they do not authorize a new Codex invocation.
+Never trigger, request, rerun, poll, or rely on Codex review workflows. Do not post `@codex review`, `@codex security review`, or equivalent triggers. Historical Codex findings may be migrated as ordinary findings, but they do not authorize a new Codex review invocation.
+
+Codex is permitted only as a narrowly scoped execution fallback when a required task cannot be performed with ChatGPT's available capabilities. Record why ChatGPT cannot perform the task, constrain Codex to the minimum executable scope, and treat its result as evidence for ChatGPT. Codex never issues CODE/SECURITY review verdicts, merge-readiness markers, or merge decisions.
 
 ## Exact-SHA contract
 

@@ -1231,6 +1231,50 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        active_review_automation = {
+            "Makefile": ("CODEX_COMMAND", "--codex-command"),
+            "scripts/pr_monitor.py": (
+                "PR_MONITOR_CODEX_COMMAND",
+                "--codex-command",
+                "invoke_codex",
+                "codex_prompt",
+            ),
+        }
+        for relative, forbidden_tokens in active_review_automation.items():
+            source_path = root / relative
+            # Focused authority tests intentionally materialize only the files
+            # required by the contract under test. Missing optional automation
+            # surfaces must not mask the targeted authority error.
+            if not source_path.is_file():
+                continue
+            source = source_path.read_text(encoding="utf-8")
+            if any(token.lower() in source.lower() for token in forbidden_tokens):
+                errors.append(
+                    "review automation must not expose Codex trigger, polling, or invocation controls"
+                )
+                break
+
+        execution_fallback = review_policy.get("pull_request_review", {}).get(
+            "agent_execution_fallback", {}
+        )
+        if execution_fallback != {
+            "primary_agent": "ChatGPT",
+            "fallback_agent": "Codex",
+            "codex_allowed_when": "chatgpt-capability-unavailable",
+            "codex_scope": "execution-only",
+            "minimal_task_scope_required": True,
+            "fallback_reason_must_be_recorded": True,
+            "codex_output_role": "evidence-for-chatgpt",
+            "code_security_review_authority": "ChatGPT-only",
+            "merge_readiness_authority": "ChatGPT-only",
+            "merge_decision_authority": "repository-owner",
+            "codex_review_markers": "forbidden",
+            "codex_merge_decision": "forbidden",
+        }:
+            errors.append(
+                "Codex must be limited to execution fallback when ChatGPT lacks the required capability"
+            )
+
         review_budget = load_yaml(root / lock["machine_contracts"]["review_budget"])
         if review_budget.get("review_authority_source") != (
             "config/contracts/review-policy.yaml#pull_request_review.ai_reviewer"

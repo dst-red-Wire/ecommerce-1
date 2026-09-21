@@ -14,6 +14,14 @@ assert SPEC and SPEC.loader
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
 
+PERF_SPEC = importlib.util.spec_from_file_location(
+    "qualification_performance_campaign_test",
+    ROOT / "scripts/qualification_performance_campaign.py",
+)
+assert PERF_SPEC and PERF_SPEC.loader
+PERF_MOD = importlib.util.module_from_spec(PERF_SPEC)
+PERF_SPEC.loader.exec_module(PERF_MOD)
+
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
     def test_policy_is_registered_under_architecture_root(self):
@@ -37,8 +45,186 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_qualification_workflows_are_centralized(self):
         policy = MOD.qualification_execution_policy()
+        lifecycle = policy["qualification_lifecycle"]
+        defaults = lifecycle["workflow_defaults"]
         proof = policy["workflows"]["qualification_proof"]
+        rke2 = policy["workflows"]["rke2_local_virtualbox"]
+        tekton = policy["workflows"]["tekton_proof"]
         campaign = policy["workflows"]["performance_campaign"]
+
+        self.assertEqual("every-qualification-workflow", lifecycle["applies_to"])
+        self.assertEqual(
+            "config/contracts/qualification-execution-policy.yaml",
+            lifecycle["single_authority"],
+        )
+        self.assertEqual("forbidden", lifecycle["per_workflow_policy_duplication"])
+        self.assertEqual("workflows", lifecycle["registration"]["registry"])
+        self.assertEqual(
+            "forbidden",
+            lifecycle["registration"]["unregistered_authoritative_qualification"],
+        )
+        self.assertEqual("forbidden", lifecycle["registration"]["local_lifecycle_override"])
+        completed_registration = lifecycle["completed_proof_registration"]
+        self.assertIs(False, completed_registration["registration_is_execution"])
+        self.assertEqual(
+            "forbidden",
+            completed_registration["execute_entrypoint_on_registration"],
+        )
+        self.assertEqual(
+            "qualified-source-sha-and-invalidation-inputs",
+            completed_registration["proof_binding"],
+        )
+        self.assertIs(
+            False,
+            completed_registration["metadata_only_registry_change_invalidates_runtime_proof"],
+        )
+        self.assertIs(True, completed_registration["reuse_until_invalidation_input_changes"])
+        self.assertIs(True, defaults["stop_when_exit_criteria_pass"])
+        self.assertEqual("forbidden", defaults["post_pass_scope_expansion"])
+        self.assertEqual("follow-up-work-item", defaults["non_blocking_findings"])
+        self.assertEqual("return-to-development", defaults["blocking_findings"])
+        authoritative = lifecycle["authoritative_completion"]
+        self.assertEqual("merge_authoritative=true", authoritative["applies_when"])
+        self.assertEqual("reuse-valid-evidence", authoritative["same_sha_pass_replay"])
+        self.assertEqual("requires-explicit-blocking-reason", authoritative["same_sha_failed_replay"])
+        self.assertEqual(1, authoritative["final_candidate_runs"])
+        self.assertIs(True, lifecycle["waits"]["every_wait_must_be_bounded"])
+        self.assertEqual("forbidden", lifecycle["waits"]["indefinite_wait"])
+        self.assertIs(True, lifecycle["reruns"]["non_blocking_improvement_creates_follow_up"])
+        self.assertEqual(
+            "forbidden",
+            lifecycle["duplication"]["merge_authoritative_duplicate_full_gate_run_same_sha"],
+        )
+        self.assertEqual(
+            "allowed-when-centrally-declared",
+            lifecycle["duplication"]["non_merge_authoritative_measurement_repetitions"],
+        )
+
+        for name, workflow in policy["workflows"].items():
+            with self.subTest(workflow=name):
+                self.assertFalse(set(defaults).intersection(workflow))
+                self.assertTrue(workflow["owner"])
+                self.assertTrue(workflow["purpose"])
+                self.assertTrue(workflow["entrypoint"])
+                self.assertTrue(workflow["exit_criteria"])
+                self.assertTrue(workflow["evidence"])
+                self.assertTrue(
+                    all(path.startswith(".context/") for path in workflow["evidence"].values())
+                )
+
+        resolved_proof = MOD.qualification_workflow("qualification_proof")
+        resolved_rke2 = MOD.qualification_workflow("rke2_local_virtualbox")
+        resolved_tekton = MOD.qualification_workflow("tekton_proof")
+        resolved_campaign = MOD.qualification_workflow("performance_campaign")
+        self.assertIs(True, resolved_proof["exact_sha_required"])
+        self.assertIs(True, resolved_proof["clean_worktree_required"])
+        self.assertIs(True, resolved_proof["stop_when_exit_criteria_pass"])
+        self.assertIs(True, resolved_rke2["exact_sha_required"])
+        self.assertIs(True, resolved_rke2["clean_worktree_required"])
+        self.assertIs(True, resolved_rke2["stop_when_exit_criteria_pass"])
+        self.assertEqual(
+            "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
+            resolved_rke2["entrypoint"],
+        )
+        self.assertIs(True, resolved_tekton["exact_sha_required"])
+        self.assertIs(False, resolved_tekton["merge_authoritative"])
+        self.assertIs(True, resolved_tekton["state_changing"])
+        self.assertIs(True, resolved_tekton["completion_requires_remote_readback"])
+        self.assertEqual(
+            ".context/runtime/tekton-proof/<sha>.json",
+            tekton["evidence"]["runtime"],
+        )
+        self.assertIs(True, resolved_campaign["exact_sha_required"])
+        self.assertIs(True, resolved_campaign["clean_worktree_required"])
+
+        completion = rke2["completion"]
+        self.assertEqual("complete", completion["status"])
+        self.assertEqual("PASS", completion["criteria_status"])
+        self.assertEqual("existing-proof-no-rerun", completion["proof_registration"])
+        self.assertEqual(
+            "84cf01601aa336f0cdd2d1899d764437294fbfe6",
+            completion["qualified_source_sha"],
+        )
+        self.assertEqual(128, completion["merged_by_pr"])
+        self.assertEqual(
+            "088b576dac43cb17e304967e3e58433499760fa9",
+            completion["merge_commit_sha"],
+        )
+        self.assertEqual(
+            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746",
+            completion["provenance"]["code_review"],
+        )
+        self.assertEqual(
+            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831",
+            completion["provenance"]["security_review"],
+        )
+        self.assertEqual(
+            "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
+            completion["provenance"]["approved_manifest_sha256"],
+        )
+        self.assertIn(
+            "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json",
+            completion["invalidation_inputs"],
+        )
+        runtime_fixture_inputs = [
+            "platform/ansible/tests/mgmt_offline_vm/Vagrantfile",
+            "platform/ansible/tests/mgmt_offline_vm/contract.yml",
+            "platform/ansible/tests/mgmt_offline_vm/create.yml",
+            "platform/ansible/tests/mgmt_offline_vm/destroy.yml",
+            "platform/ansible/tests/mgmt_offline_vm/main.yml",
+            "platform/ansible/tests/mgmt_offline_vm/server.yml",
+            "platform/ansible/tests/mgmt_offline_vm/test.yml",
+            "platform/ansible/tests/mgmt_offline_vm/transport.py",
+        ]
+        for path in runtime_fixture_inputs:
+            self.assertIn(path, completion["invalidation_inputs"])
+        self.assertNotIn(
+            "platform/ansible/tests/mgmt_offline_vm/README.md",
+            completion["invalidation_inputs"],
+        )
+        self.assertEqual(
+            set(completion["invalidation_inputs"]),
+            set(completion["invalidation_object_ids"]),
+        )
+        self.assertTrue(
+            all(
+                __import__("re").fullmatch(r"[0-9a-f]{40}", object_id)
+                for object_id in completion["invalidation_object_ids"].values()
+            )
+        )
+        toolchain_inputs = [
+            "config/contracts/toolchain-lock.json",
+            "config/toolchain/versions.env",
+            "platform/ansible/requirements.yml",
+        ]
+        for path in toolchain_inputs:
+            self.assertIn(path, completion["invalidation_inputs"])
+            with self.subTest(invalidation_input=path):
+                expected = completion["invalidation_object_ids"][path]
+                changed = MOD.subprocess.CompletedProcess([], 0, "f" * 40 + "\n", "")
+                with mock.patch.object(MOD, "run", return_value=changed):
+                    self.assertFalse(
+                        MOD._completed_proof_inputs_unchanged(
+                            completion["qualified_source_sha"],
+                            [path],
+                            {path: expected},
+                        )
+                    )
+        semantic = completion["invalidation_semantic_functions"]
+        self.assertIn("scripts/repoctl.py", semantic)
+        self.assertIn("scripts/capability_bootstrap.py", semantic)
+        self.assertIn("ansible_collections_ready", semantic["scripts/repoctl.py"])
+        self.assertIn(
+            "validate_toolchain_projections",
+            semantic["scripts/capability_bootstrap.py"],
+        )
+        self.assertTrue(MOD._semantic_function_snapshot_unchanged(semantic))
+        self.assertEqual(
+            ".context/mgmt-offline-vm/<name>/rke2-result.json",
+            rke2["evidence"]["runtime"],
+        )
+        self.assertIn("exact-sha-code-review-pass", rke2["exit_criteria"])
+        self.assertIn("exact-sha-security-review-pass", rke2["exit_criteria"])
 
         self.assertEqual(1, proof["verify_change_runs"])
         self.assertEqual(1, proof["performance_audit_runs"])
@@ -50,7 +236,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(False, campaign["merge_authoritative"])
         self.assertNotIn("repetitions", policy["performance"]["campaign"])
 
-    def test_qualification_proof_runs_exact_verify_once_then_audit_once(self):
+    def test_qualification_proof_runs_missing_exact_steps_once(self):
         head = "a" * 40
         evidence = ROOT / ".context" / "evidence" / f"{head}.json"
 
@@ -66,21 +252,884 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with (
             mock.patch.object(MOD, "git", side_effect=fake_git),
             mock.patch.object(MOD, "verify_change", return_value=0) as verify,
-            mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "_valid_exact_evidence", side_effect=[None, evidence]) as valid_evidence,
             mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
             mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path) as valid_audit,
+            mock.patch.object(MOD, "_completed_proof_inputs_unchanged", return_value=True),
             mock.patch.object(MOD, "run", return_value=completed) as run,
         ):
             self.assertEqual(0, MOD.qualification_proof("origin/main"))
 
         verify.assert_called_once_with("origin/main", head)
-        valid_audit.assert_called_once_with("origin/main", head)
+        self.assertEqual(2, valid_evidence.call_count)
+        self.assertEqual(1, valid_audit.call_count)
         run.assert_called_once()
         command = run.call_args.args[0]
         self.assertIn("scripts/performance_audit.py", command)
         self.assertEqual(1, command.count("--evidence"))
         self.assertEqual(1, command.count("--output"))
         self.assertEqual(str(audit_path), command[command.index("--output") + 1])
+
+    def test_chatgpt_review_readiness_uses_latest_exact_sha_verdict_per_kind(self):
+        head = "a" * 40
+        policy = {
+            "ai_reviewer": {
+                "evidence": {
+                    "required_kinds": ["code", "security"],
+                    "required_status": "PASS",
+                }
+            }
+        }
+
+        def proof(kind, status, blockers):
+            return (
+                '<!-- chatgpt-exact-sha-review:v1 '
+                + __import__("json").dumps(
+                    {
+                        "provider": "ChatGPT",
+                        "kind": kind,
+                        "head_sha": head,
+                        "status": status,
+                        "blocking_findings": blockers,
+                    },
+                    separators=(",", ":"),
+                )
+                + " -->"
+            )
+
+        cases = (
+            (
+                "blocked-then-pass",
+                [
+                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
+                    {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
+                ],
+                True,
+            ),
+            (
+                "pass-then-blocked",
+                [
+                    {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
+                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
+                ],
+                False,
+            ),
+        )
+
+        for name, comments, expected_ready in cases:
+            with self.subTest(case=name):
+                owner = MOD.subprocess.CompletedProcess(
+                    [],
+                    0,
+                    __import__("json").dumps(
+                        {"owner": {"login": "owner"}, "nameWithOwner": "owner/repo"}
+                    ),
+                    "",
+                )
+                history = MOD.subprocess.CompletedProcess(
+                    [], 0, __import__("json").dumps([comments]), ""
+                )
+
+                def fake_run(command, **kwargs):
+                    if command[1:3] == ["repo", "view"]:
+                        return owner
+                    if command[1:3] == ["api", "--paginate"]:
+                        return history
+                    raise AssertionError(command)
+
+                with (
+                    mock.patch.object(MOD, "pull_request_review_policy", return_value=policy),
+                    mock.patch.object(MOD, "run", side_effect=fake_run),
+                ):
+                    ready, reason = MOD.chatgpt_review_readiness("gh", 129, head)
+                self.assertIs(expected_ready, ready)
+                if expected_ready:
+                    self.assertIn("PASS", reason)
+                else:
+                    self.assertIn("not PASS", reason)
+
+    def test_qualification_proof_reuses_fresh_exact_sha_pass_without_replay(self):
+        head = "a" * 40
+        evidence = ROOT / ".context" / "evidence" / f"{head}.json"
+        audit_path = ROOT / ".context" / "performance" / f"{head}.json"
+
+        def fake_git(*args, check=True):
+            if args == ("rev-parse", "HEAD"):
+                return head + "\n"
+            if args == ("status", "--porcelain", "--untracked-files=all"):
+                return ""
+            raise AssertionError(args)
+
+        with (
+            mock.patch.object(MOD, "git", side_effect=fake_git),
+            mock.patch.object(MOD, "verify_change") as verify,
+            mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+            mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path),
+            mock.patch.object(MOD, "_qualification_audit_path") as requested_audit,
+            mock.patch.object(MOD, "_completed_proof_inputs_unchanged", return_value=True),
+            mock.patch.object(MOD, "run") as run,
+        ):
+            self.assertEqual(0, MOD.qualification_proof("origin/main"))
+
+        verify.assert_not_called()
+        requested_audit.assert_not_called()
+        run.assert_not_called()
+
+    def test_qualification_proof_rechecks_frozen_source_after_audit(self):
+        head = "a" * 40
+        evidence = ROOT / ".context" / "evidence" / f"{head}.json"
+        audit_path = ROOT / ".context" / "performance" / f"{head}.json"
+        workflow = {
+            "verify_change_runs": 1,
+            "performance_audit_runs": 1,
+            "clean_worktree_required": True,
+            "exact_sha_required": True,
+        }
+
+        for mutation in ("dirty", "head-moved"):
+            with self.subTest(mutation=mutation):
+                calls = {"status": 0, "head": 0}
+
+                def fake_git(*args, check=True):
+                    if args == ("rev-parse", "HEAD"):
+                        calls["head"] += 1
+                        if mutation == "head-moved" and calls["head"] >= 2:
+                            return "b" * 40 + "\n"
+                        return head + "\n"
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        calls["status"] += 1
+                        if mutation == "dirty" and calls["status"] >= 2:
+                            return " M scripts/repoctl.py\n"
+                        return ""
+                    raise AssertionError(args)
+
+                with (
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "git", side_effect=fake_git),
+                    mock.patch.object(MOD, "_valid_exact_evidence", return_value=evidence),
+                    mock.patch.object(MOD, "_valid_performance_audit", return_value=audit_path),
+                    mock.patch.object(MOD, "_qualification_audit_path"),
+                    mock.patch.object(MOD, "verify_change") as verify,
+                    mock.patch.object(MOD, "run") as run,
+                ):
+                    self.assertEqual(2, MOD.qualification_proof("origin/main"))
+                verify.assert_not_called()
+                run.assert_not_called()
+
+    def test_completed_proof_inputs_use_stored_object_ids_without_historical_commit(self):
+        source = "a" * 40
+        expected = {
+            "config/a.yaml": "1" * 40,
+            "platform/runtime": "2" * 40,
+        }
+        unchanged_a = MOD.subprocess.CompletedProcess([], 0, "1" * 40 + "\n", "")
+        changed_b = MOD.subprocess.CompletedProcess([], 0, "f" * 40 + "\n", "")
+        with mock.patch.object(MOD, "run", side_effect=[unchanged_a, changed_b]) as run:
+            self.assertFalse(
+                MOD._completed_proof_inputs_unchanged(
+                    source,
+                    ["config/a.yaml", "platform/runtime"],
+                    expected,
+                )
+            )
+        self.assertEqual(2, run.call_count)
+        for call in run.call_args_list:
+            self.assertEqual(["git", "rev-parse"], call.args[0][:2])
+            self.assertNotIn(source, call.args[0])
+        with mock.patch.object(
+            MOD,
+            "run",
+            return_value=MOD.subprocess.CompletedProcess([], 0, "1" * 40 + "\n", ""),
+        ):
+            self.assertTrue(
+                MOD._completed_proof_inputs_unchanged(
+                    source,
+                    ["config/a.yaml"],
+                    {"config/a.yaml": "1" * 40},
+                )
+            )
+
+    def test_gate_written_bytes_color_thresholds_and_grouping(self):
+        self.assertEqual("0", MOD._format_written_bytes(0))
+        self.assertEqual("1 652 089", MOD._format_written_bytes(1_652_089))
+        self.assertEqual("56 262 884", MOD._format_written_bytes(56_262_884))
+        self.assertEqual("36", MOD._write_bytes_color(0))
+        self.assertEqual("32", MOD._write_bytes_color(56_262_884))
+        self.assertEqual("33", MOD._write_bytes_color(128 * 1024 * 1024))
+        self.assertEqual("35", MOD._write_bytes_color(1024 * 1024 * 1024))
+        with mock.patch.object(MOD, "_supports_color", return_value=True):
+            self.assertIn(
+                "\033[32m56 262 884\033[0m",
+                MOD._paint(MOD._format_written_bytes(56_262_884), "32"),
+            )
+
+    def test_gate_progress_keeps_prefix_fixed_and_updates_stopwatch_and_odometer_fields(self):
+        import io
+
+        stream = io.StringIO()
+        with (
+            mock.patch.object(MOD, "_supports_color", return_value=True),
+            mock.patch("sys.stdout", stream),
+        ):
+            progress = MOD._GateProgress("governance", enabled=True)
+            progress.update(45.376, 1_652_089)
+            progress.update(45.627, 1_652_190)
+            self.assertTrue(progress.finish("PASS"))
+
+        rendered = stream.getvalue()
+        prefix = "RUN   governance |"
+        self.assertEqual(1, rendered.count(prefix))
+        self.assertIn("\033[36m  45.376s\033[0m", rendered)
+        self.assertIn("\033[32m1 652 089\033[0m", rendered)
+        self.assertEqual(1, rendered.count("1 652 "))
+        self.assertIn("\033[36m627s\033[0m", rendered)
+
+        duration = progress._duration(45.627)
+        bytes_column = len(prefix) + len(duration) + len(" | ") + len("1 652 ")
+        self.assertIn(
+            f"\r\033[{bytes_column}C\033[32m190\033[0m",
+            rendered,
+        )
+        self.assertIn("\r\033[32mPASS  \033[0m", rendered)
+        self.assertEqual(1, rendered.count("\n"))
+
+    def test_live_gate_record_is_not_printed_twice_after_status_transition(self):
+        import io
+
+        stream = io.StringIO()
+        record = {
+            "gate": "system",
+            "duration_seconds": 33.046,
+            "written_bytes": 19_556,
+            "live_status_rendered": True,
+            "log": ".context/logs/system.log",
+        }
+        with redirect_stdout(stream):
+            MOD._emit_gate_record(True, record)
+        self.assertEqual("", stream.getvalue())
+
+    def test_compact_static_gate_status_supports_skip_and_reuse(self):
+        import io
+
+        stream = io.StringIO()
+        with (
+            mock.patch.object(MOD, "_supports_color", return_value=False),
+            redirect_stdout(stream),
+        ):
+            MOD._emit_compact_gate_status("SKIP", "frontend:none", 0.0, 0)
+            MOD._emit_compact_gate_status("REUSE", "security", 0.0, 19_556)
+        self.assertEqual(
+            [
+                "SKIP  frontend:none | 0.000s | 0",
+                "REUSE security | 0.000s | 19 556",
+            ],
+            stream.getvalue().splitlines(),
+        )
+
+    def test_semantic_region_snapshot_detects_module_binding_mutation(self):
+        source = "BINDING = 'one'\n\nclass Stop:\n    pass\n"
+        projection = "BINDING = 'one'\n"
+        digest = MOD.hashlib.sha256(projection.encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "scripts" / "helper.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(source, encoding="utf-8")
+            snapshot = {
+                "scripts/helper.py": {
+                    "end_marker": "class Stop",
+                    "sha256": digest,
+                }
+            }
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertTrue(MOD._semantic_region_snapshot_unchanged(snapshot))
+                script.write_text(
+                    "BINDING = 'two'\n\nclass Stop:\n    pass\n",
+                    encoding="utf-8",
+                )
+                self.assertFalse(MOD._semantic_region_snapshot_unchanged(snapshot))
+
+    def test_semantic_function_snapshot_detects_consumed_helper_mutation(self):
+        source = "def helper():\n    return 1\n"
+        digest = MOD.hashlib.sha256(source.encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "scripts" / "helper.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(source, encoding="utf-8")
+            snapshot = {"scripts/helper.py": {"helper": digest}}
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertTrue(MOD._semantic_function_snapshot_unchanged(snapshot))
+                script.write_text("def helper():\n    return 2\n", encoding="utf-8")
+                self.assertFalse(MOD._semantic_function_snapshot_unchanged(snapshot))
+
+    def test_rke2_registered_entrypoint_executes_complete_existing_fixture_sequence(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            vm_name = "ecommerce-mgmt-test-policy"
+            input_values = {
+                "vm_name": vm_name,
+                "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
+            }
+            inputs.write_text(
+                __import__("json").dumps(input_values) + "\n",
+                encoding="utf-8",
+            )
+            frozen_inputs = __import__("json").dumps(
+                input_values,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            state = root / ".context" / "mgmt-offline-vm" / vm_name
+            head = "c" * 40
+            workflow = {
+                "entrypoint": (
+                    "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                    "--inputs .context/mgmt-vm-inputs.json"
+                ),
+                "exact_sha_required": True,
+                "clean_worktree_required": True,
+            }
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=create":
+                    inputs.write_text(
+                        __import__("json").dumps(
+                            {
+                                **input_values,
+                                "vm_python": "/tmp/untrusted-python",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                if command[-1] == "vm_action=server":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "server-source.json").write_text(
+                        __import__("json").dumps({"git_sha": head}) + "\n",
+                        encoding="utf-8",
+                    )
+                return completed
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+
+        actions = [
+            call.args[0][-1]
+            for call in run.call_args_list
+            if call.args and call.args[0][-2] == "-e" and call.args[0][-1].startswith("vm_action=")
+        ]
+        self.assertEqual(
+            [
+                "vm_action=validate",
+                "vm_action=create",
+                "vm_action=test",
+                "vm_action=server",
+                "vm_action=server",
+                "vm_action=restage",
+                "vm_action=tamper",
+                "vm_action=restage",
+                "vm_action=server",
+                "vm_action=destroy",
+            ],
+            actions,
+        )
+        ansible_calls = [
+            call
+            for call in run.call_args_list
+            if call.args and call.args[0] and call.args[0][0] == "ansible-playbook"
+        ]
+        self.assertEqual(10, len(ansible_calls))
+        for call in ansible_calls:
+            command = call.args[0]
+            self.assertIn(f"vm_repo={root}", command)
+            self.assertIn(f"vm_state={state}", command)
+            self.assertIn(frozen_inputs, command)
+            self.assertFalse(any(str(part).startswith("@") for part in command))
+
+    def test_rke2_launcher_rejects_dirty_worktree_and_vm_repo_override(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text(
+                __import__("json").dumps({"vm_name": "ecommerce-mgmt-test-policy"}) + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(
+                    MOD,
+                    "git",
+                    side_effect=lambda *args, **kwargs: (
+                        " M scripts/repoctl.py\n"
+                        if args == ("status", "--porcelain", "--untracked-files=all")
+                        else head + "\n"
+                    ),
+                ),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+                run.assert_not_called()
+
+            inputs.write_text(
+                __import__("json").dumps(
+                    {
+                        "vm_name": "ecommerce-mgmt-test-policy",
+                        "vm_repo": "/tmp/alternate-source",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=clean_git),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+                run.assert_not_called()
+
+    def test_rke2_vagrant_runtime_must_match_canonical_version(self):
+        good = MOD.subprocess.CompletedProcess(
+            [], 0, "Vagrant 2.4.9\n", ""
+        )
+        wrong = MOD.subprocess.CompletedProcess(
+            [], 0, "Vagrant 2.5.0\n", ""
+        )
+        missing = MOD.subprocess.CompletedProcess([], 1, "", "missing")
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=good) as run,
+        ):
+            self.assertTrue(MOD._canonical_rke2_vagrant_ready())
+            run.assert_called_once_with(
+                ["/mnt/c/Program Files/Vagrant/bin/vagrant.exe", "--version"],
+                check=False,
+                capture=True,
+            )
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=wrong),
+        ):
+            self.assertFalse(MOD._canonical_rke2_vagrant_ready())
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=missing),
+        ):
+            self.assertFalse(MOD._canonical_rke2_vagrant_ready())
+
+    def test_rke2_create_failure_cleans_only_new_virtualbox_registration(self):
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
+        cases = [
+            ("preexisting-vm", "old-uuid", "old-uuid", False),
+            ("no-vm-created", None, None, False),
+            ("fresh-vm-with-stale-key", None, "new-uuid", True),
+        ]
+
+        for name, before, after, cleanup_expected in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                vm_name = "ecommerce-mgmt-test-policy"
+                state = root / ".context" / "mgmt-offline-vm" / vm_name
+                inputs = root / ".context" / "mgmt-vm-inputs.json"
+                inputs.parent.mkdir(parents=True)
+                inputs.write_text(
+                    __import__("json").dumps(
+                        {
+                            "vm_name": vm_name,
+                            "mgmt_offline_manifest_sha256": approved,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if name == "fresh-vm-with-stale-key":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "identity").write_text("stale-key\n", encoding="utf-8")
+
+                def clean_git(*args, check=True):
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        return ""
+                    if args == ("rev-parse", "HEAD"):
+                        return head + "\n"
+                    raise AssertionError(args)
+
+                completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+                failed = MOD.subprocess.CompletedProcess([], 1, "", "")
+
+                def fake_run(command, **kwargs):
+                    if command[-1] == "vm_action=create":
+                        return failed
+                    return completed
+
+                with (
+                    mock.patch.object(MOD, "ROOT", root),
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value=approved),
+                    mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                    mock.patch.object(
+                        MOD,
+                        "_rke2_registered_vm_identity",
+                        side_effect=[before, after],
+                    ),
+                    mock.patch.object(MOD, "git", side_effect=clean_git),
+                    mock.patch.object(MOD, "require"),
+                    mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+                ):
+                    self.assertEqual(
+                        1,
+                        MOD.rke2_local_virtualbox_qualification(
+                            ".context/mgmt-vm-inputs.json"
+                        ),
+                    )
+
+                actions = [
+                    call.args[0][-1]
+                    for call in run.call_args_list
+                    if call.args and call.args[0][-1].startswith("vm_action=")
+                ]
+                self.assertEqual(
+                    ["vm_action=validate", "vm_action=create"]
+                    + (["vm_action=destroy"] if cleanup_expected else []),
+                    actions,
+                )
+
+    def test_rke2_launcher_rejects_undocumented_input_overrides(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        forbidden = [
+            "vm_python",
+            "vm_bridge",
+            "vm_box_url",
+            "vm_box_sha256",
+            "vm_vagrant_windows",
+            "vm_state",
+            "vm_action",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            for field in forbidden:
+                with self.subTest(field=field):
+                    inputs.write_text(
+                        __import__("json").dumps(
+                            {
+                                "vm_name": "ecommerce-mgmt-test-policy",
+                                field: "untrusted-override",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with (
+                        mock.patch.object(MOD, "ROOT", root),
+                        mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                        mock.patch.object(MOD, "git", side_effect=clean_git),
+                        mock.patch.object(MOD, "run", return_value=completed) as run,
+                    ):
+                        self.assertEqual(
+                            2,
+                            MOD.rke2_local_virtualbox_qualification(
+                                ".context/mgmt-vm-inputs.json"
+                            ),
+                        )
+                        run.assert_not_called()
+
+    def test_rke2_launcher_rejects_noncanonical_manifest_digest(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "e" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text(
+                __import__("json").dumps(
+                    {
+                        "vm_name": "ecommerce-mgmt-test-policy",
+                        "mgmt_offline_manifest_sha256": "f" * 64,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(MOD, "git", side_effect=clean_git),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+                run.assert_not_called()
+
+    def test_rke2_launcher_rejects_source_evidence_from_another_sha(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "e" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vm_name = "ecommerce-mgmt-test-policy"
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            inputs.write_text(
+                __import__("json").dumps(
+                    {
+                        "vm_name": vm_name,
+                        "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            state = root / ".context" / "mgmt-offline-vm" / vm_name
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=server":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "server-source.json").write_text(
+                        __import__("json").dumps({"git_sha": "f" * 40}) + "\n",
+                        encoding="utf-8",
+                    )
+                return completed
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(MOD, "git", side_effect=clean_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", side_effect=fake_run) as run,
+            ):
+                self.assertEqual(
+                    2,
+                    MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
+                )
+        self.assertEqual("vm_action=destroy", run.call_args_list[-1].args[0][-1])
+
+    def test_tekton_proof_launcher_consumes_registry_and_records_remote_readback(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflow = {
+                "exact_sha_required": True,
+                "clean_worktree_required": True,
+                "merge_authoritative": False,
+                "state_changing": True,
+                "completion_requires_remote_readback": True,
+                "evidence": {"runtime": ".context/runtime/tekton-proof/<sha>.json"},
+            }
+            head = "c" * 40
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "require"),
+                mock.patch.object(MOD, "run", return_value=completed) as run,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.tekton_proof("runtime.yaml", "a" * 40, "b" * 40, head),
+                )
+            payload = __import__("json").loads(
+                (root / ".context" / "runtime" / "tekton-proof" / f"{head}.json").read_text()
+            )
+            self.assertEqual("PASS", payload["status"])
+            self.assertEqual("signed-harbor-evidence-authenticated", payload["remote_readback"])
+            run.assert_called_once()
+
+    def test_tekton_proof_rechecks_frozen_checkout_before_pass_evidence(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "merge_authoritative": False,
+            "state_changing": True,
+            "completion_requires_remote_readback": True,
+            "evidence": {"runtime": ".context/runtime/tekton-proof/<sha>.json"},
+        }
+        head = "c" * 40
+
+        for mutation in ("dirty-worktree", "head-moved"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls = {"status": 0, "head": 0}
+
+                def fake_git(*args, check=True):
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        calls["status"] += 1
+                        if mutation == "dirty-worktree" and calls["status"] >= 2:
+                            return " M platform/tekton/pipeline.yaml\n"
+                        return ""
+                    if args == ("rev-parse", "HEAD"):
+                        calls["head"] += 1
+                        if mutation == "head-moved" and calls["head"] >= 2:
+                            return "d" * 40 + "\n"
+                        return head + "\n"
+                    raise AssertionError(args)
+
+                with (
+                    mock.patch.object(MOD, "ROOT", root),
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "git", side_effect=fake_git),
+                    mock.patch.object(MOD, "require"),
+                    mock.patch.object(MOD, "run", return_value=completed) as run,
+                ):
+                    self.assertEqual(
+                        2,
+                        MOD.tekton_proof("runtime.yaml", "a" * 40, "b" * 40, head),
+                    )
+
+                self.assertFalse(
+                    (root / ".context" / "runtime" / "tekton-proof" / f"{head}.json").exists()
+                )
+                run.assert_called_once()
+
+    def test_performance_campaign_freeze_helper_rejects_source_drift(self):
+        head = "a" * 40
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            side_effect=["\n", head + "\n"],
+        ):
+            self.assertEqual(head, PERF_MOD._assert_frozen_checkout())
+
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            return_value=" M scripts/repoctl.py\n",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worktree changed"):
+                PERF_MOD._assert_frozen_checkout(head)
+
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            side_effect=["\n", "b" * 40 + "\n"],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HEAD changed"):
+                PERF_MOD._assert_frozen_checkout(head)
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
@@ -487,7 +1536,23 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertEqual("", terminal.getvalue())
-            self.assertEqual("GATE-LOG-ONLY\n", (root / record["log"]).read_text(encoding="utf-8"))
+            log_text = (root / record["log"]).read_text(encoding="utf-8")
+            self.assertEqual("GATE-LOG-ONLY\n", log_text)
+            self.assertEqual(len(log_text.encode("utf-8")), record["written_bytes"])
+
+            emitted = io.StringIO()
+            with (
+                mock.patch.object(MOD, "_supports_color", return_value=False),
+                redirect_stdout(emitted),
+            ):
+                MOD._emit_gate_record(ok, record)
+            self.assertIn(
+                (
+                    f"PASS  security | {record['duration_seconds']:.3f}s | "
+                    f"{MOD._format_written_bytes(record['written_bytes'])}"
+                ),
+                emitted.getvalue(),
+            )
 
     def test_parallel_batch_preserves_declared_order_and_serial_barrier(self):
         records = []
@@ -498,6 +1563,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 "status": "PASS",
                 "exit_code": 0,
                 "duration_seconds": 0.001,
+                "written_bytes": 0,
                 "command": command,
                 "log": ".context/logs/test.log",
                 "execution": "fresh",
