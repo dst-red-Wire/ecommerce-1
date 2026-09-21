@@ -295,6 +295,7 @@
               - "ha_manifest_sha256={{ ha_manifest_sha256 }}"
           environment:
             PYTHONDONTWRITEBYTECODE: "1"
+            ANSIBLE_ROLES_PATH: "{{ ha_repo }}/platform/ansible/roles"
           register: ha_cluster
           failed_when: false
           changed_when: true
