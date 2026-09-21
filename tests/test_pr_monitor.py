@@ -193,18 +193,29 @@ class PRMonitorTest(unittest.TestCase):
         self.assertIn('"previous_validated_verdict":"READY"', handoff)
         self.assertLessEqual(len(handoff.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
 
-        lines = pr_monitor.compact_status_lines(
-            7,
-            previous,
-            {**current, "validated_verdict": "WAITING"},
-            {"head_sha": {"before": "old", "after": "new"}},
-        )
+        with mock.patch.object(pr_monitor, "_supports_color", return_value=False):
+            lines = pr_monitor.compact_status_lines(
+                7,
+                previous,
+                {**current, "validated_verdict": "WAITING"},
+                {"head_sha": {"before": "old", "after": "new"}},
+            )
         self.assertEqual(5, len(lines))
         self.assertTrue(lines[0].startswith("PR #7"))
         self.assertTrue(lines[1].startswith("HEAD :"))
         self.assertTrue(lines[2].startswith("CHANGEMENT :"))
         self.assertTrue(lines[3].startswith("VERDICT :"))
         self.assertTrue(lines[4].startswith("ACTION :"))
+
+        with mock.patch.object(pr_monitor, "_supports_color", return_value=True):
+            colored = pr_monitor.compact_status_lines(
+                7,
+                previous,
+                {**current, "validated_verdict": "READY"},
+                {"head_sha": {"before": "old", "after": "new"}},
+            )
+        self.assertEqual(5, len(colored))
+        self.assertTrue(all("\033[" in line and line.endswith("\033[0m") for line in colored))
 
     def test_snapshot_reuses_latest_chatgpt_exact_sha_verdict(self):
         head = "a" * 40
