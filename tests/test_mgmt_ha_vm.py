@@ -186,6 +186,18 @@ class MgmtHaVmTests(unittest.TestCase):
             repoctl,
         )
 
+    def test_pr128_bundle_restore_is_explicit_offline_and_fail_closed(self):
+        repoctl = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        readme = (FIXTURE / "README.md").read_text(encoding="utf-8")
+        self.assertIn("def rke2_local_ha_restore_bundle", repoctl)
+        self.assertIn('"bundle_offline=true"', repoctl)
+        self.assertIn("source / \"manifest.json\"", repoctl)
+        self.assertIn("refusing to overwrite existing evidence bytes", repoctl)
+        self.assertIn("rke2-local-ha-restore-bundle", makefile)
+        self.assertIn("SOURCE=/absolute/path/to/pr128", readme)
+        self.assertIn("No network fallback is permitted", readme)
+
     def test_haproxy_preparation_is_digest_pinned_and_separate_from_qualification(self):
         source = (FIXTURE / "prepare_haproxy.yml").read_text(encoding="utf-8")
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
