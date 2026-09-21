@@ -453,6 +453,8 @@
                 securityContext:
                   allowPrivilegeEscalation: false
                   runAsNonRoot: true
+                  runAsUser: {{ mgmt_local_ha_contract.ha_endpoint.run_as_user }}
+                  runAsGroup: {{ mgmt_local_ha_contract.ha_endpoint.run_as_group }}
                   readOnlyRootFilesystem: true
                   capabilities:
                     drop: ["ALL"]
