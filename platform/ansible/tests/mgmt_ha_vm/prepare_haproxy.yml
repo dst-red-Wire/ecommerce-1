@@ -1,0 +1,68 @@
+---
+- name: Prepare digest-pinned HAProxy archive for local RKE2 HA
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    ha_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
+    ha_cache_tar: "{{ ha_repo }}/{{ mgmt_local_ha_contract.ha_endpoint.image.cache_tar }}"
+    ha_cache_evidence: "{{ ha_repo }}/{{ mgmt_local_ha_contract.ha_endpoint.image.cache_evidence }}"
+    ha_cache_dir: "{{ ha_cache_tar | dirname }}"
+  tasks:
+    - name: Create private HAProxy preparation cache
+      ansible.builtin.file:
+        path: "{{ ha_cache_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Require Docker daemon for one-time HAProxy preparation
+      ansible.builtin.command:
+        argv: [docker, version, --format, "client={{ '{{.Client.Version}}' }} server={{ '{{.Server.Version}}' }}"]
+      register: ha_docker_version
+      changed_when: false
+
+    - name: Pull exact immutable HAProxy manifest
+      ansible.builtin.command:
+        argv: [docker, pull, "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"]
+      register: ha_haproxy_pull
+      changed_when: true
+
+    - name: Resolve pulled HAProxy image ID
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"]
+      register: ha_haproxy_image_id
+      changed_when: false
+
+    - name: Export exact HAProxy image without mutable runtime tag
+      ansible.builtin.command:
+        argv:
+          - docker
+          - image
+          - save
+          - --output
+          - "{{ ha_cache_tar }}"
+          - "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"
+      changed_when: true
+
+    - name: Hash prepared HAProxy archive
+      ansible.builtin.command:
+        argv: [sha256sum, "{{ ha_cache_tar }}"]
+      register: ha_haproxy_tar_hash
+      changed_when: false
+
+    - name: Preserve bounded HAProxy preparation evidence
+      ansible.builtin.copy:
+        dest: "{{ ha_cache_evidence }}"
+        mode: "0600"
+        content: >-
+          {{ {
+            'schema_version': 1,
+            'status': 'PASS',
+            'source_reference': mgmt_local_ha_contract.ha_endpoint.image.reference,
+            'platform': mgmt_local_ha_contract.ha_endpoint.image.platform,
+            'image_id': ha_haproxy_image_id.stdout | trim,
+            'archive_sha256': (ha_haproxy_tar_hash.stdout | trim).split()[0],
+            'docker_version': ha_docker_version.stdout | trim
+          } | to_nice_json }}
