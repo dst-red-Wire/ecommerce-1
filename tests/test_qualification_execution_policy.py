@@ -451,6 +451,25 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
 
+    def test_dynamic_written_bytes_reports_context_footprint_and_color(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = root / ".context"
+            context.mkdir()
+            (context / "a.bin").write_bytes(b"a" * 5)
+            nested = context / "nested"
+            nested.mkdir()
+            (nested / "b.bin").write_bytes(b"b" * 7)
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertEqual(12, MOD._context_written_bytes())
+
+        self.assertEqual("36", MOD._write_bytes_color(0))
+        self.assertEqual("32", MOD._write_bytes_color(56_262_884))
+        self.assertEqual("33", MOD._write_bytes_color(128 * 1024 * 1024))
+        self.assertEqual("35", MOD._write_bytes_color(1024 * 1024 * 1024))
+        with mock.patch.object(MOD, "_supports_color", return_value=True):
+            self.assertIn("\033[32m56262884\033[0m", MOD._paint("56262884", "32"))
+
     def test_semantic_region_snapshot_detects_module_binding_mutation(self):
         source = "BINDING = 'one'\n\nclass Stop:\n    pass\n"
         projection = "BINDING = 'one'\n"
