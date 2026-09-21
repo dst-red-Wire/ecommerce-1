@@ -516,6 +516,7 @@
       - ha-worker-02
       - ha-worker-03
     ha_endpoint_ip: "{{ mgmt_local_ha_contract.ha_endpoint.address }}"
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}"
   tasks:
     - name: Wait for all six nodes Ready
       ansible.builtin.command:
