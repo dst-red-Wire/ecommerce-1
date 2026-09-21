@@ -97,6 +97,8 @@ mgmt_local_ha_contract:
       version: 3.2.23
       platform: linux/amd64
       pull_policy: Never
+      cache_tar: .context/mgmt-ha-cache/haproxy-37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2.tar
+      cache_evidence: .context/mgmt-ha-cache/haproxy-37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2.json
 
   offline:
     approved_manifest_sha256: 738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad
