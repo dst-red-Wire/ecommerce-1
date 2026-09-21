@@ -2014,6 +2014,12 @@ def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: 
     )
     if result.returncode:
         return result.returncode
+    if workflow.get("clean_worktree_required") is True and git(
+        "status", "--porcelain", "--untracked-files=all"
+    ).strip():
+        return fail("tekton-proof source changed during execution")
+    if workflow.get("exact_sha_required") is True and git("rev-parse", "HEAD").strip() != head_sha:
+        return fail("tekton-proof HEAD changed during execution")
     template = workflow.get("evidence", {}).get("runtime", "")
     relative = Path(str(template).replace("<sha>", head_sha))
     if not str(relative).startswith(".context/") or relative.is_absolute() or ".." in relative.parts:
@@ -4763,6 +4769,24 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         return fail("RKE2 local qualification inputs must be a JSON object")
     if "vm_repo" in input_values:
         return fail("RKE2 local qualification inputs must not override vm_repo")
+    allowed_input_fields = {
+        "vm_name",
+        "vm_hostonly_adapter",
+        "vm_host_address",
+        "vm_address",
+        "vm_mac",
+        "vm_cpus",
+        "vm_memory",
+        "vm_vagrant_windows",
+        "mgmt_offline_bundle_dir",
+        "mgmt_offline_manifest_sha256",
+    }
+    unsupported_fields = sorted(set(input_values) - allowed_input_fields)
+    if unsupported_fields:
+        return fail(
+            "RKE2 local qualification inputs contain unsupported fields: "
+            + ", ".join(unsupported_fields)
+        )
     vm_name = input_values.get("vm_name")
     if not isinstance(vm_name, str) or re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
         return fail("RKE2 local qualification inputs must declare a valid vm_name")
