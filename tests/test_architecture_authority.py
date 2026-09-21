@@ -477,6 +477,27 @@ graph LR
                     policy.write_text(original)
                     self.assertEqual([], authority.validate(root))
 
+            makefile = root / "Makefile"
+            original_makefile = makefile.read_text()
+            makefile.write_text(original_makefile + "\n# CODEX_COMMAND forbidden regression\n")
+            self.assertIn(
+                "review automation must not expose Codex trigger, polling, or invocation controls",
+                authority.validate(root),
+            )
+            makefile.write_text(original_makefile)
+
+            monitor = root / "scripts/pr_monitor.py"
+            original_monitor = monitor.read_text()
+            monitor.write_text(
+                original_monitor + "\n# PR_MONITOR_CODEX_COMMAND forbidden regression\n"
+            )
+            self.assertIn(
+                "review automation must not expose Codex trigger, polling, or invocation controls",
+                authority.validate(root),
+            )
+            monitor.write_text(original_monitor)
+            self.assertEqual([], authority.validate(root))
+
     def test_review_budget_inherits_chatgpt_review_authority(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
