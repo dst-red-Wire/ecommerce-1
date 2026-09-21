@@ -121,8 +121,6 @@
           - docker
           - image
           - save
-          - --platform
-          - "{{ mgmt_local_ha_contract.ha_endpoint.image.platform }}"
           - --output
           - "{{ ha_haproxy_tar }}"
           - "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"
