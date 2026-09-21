@@ -1,0 +1,90 @@
+---
+- name: Build exact single-VM invocation variables
+  ansible.builtin.set_fact:
+    ha_single_vm_common:
+      vm_action: "{{ ha_single_vm_action }}"
+      vm_name: "{{ ha_node.value.vm_name }}"
+      vm_address: "{{ ha_node.value.address }}"
+      vm_mac: "{{ ha_node.value.mac }}"
+      vm_cpus: >-
+        {{
+          mgmt_local_ha_contract.resources.control_plane.cpus
+          if ha_node.value.role == 'control-plane'
+          else mgmt_local_ha_contract.resources.worker.cpus
+        }}
+      vm_memory: >-
+        {{
+          mgmt_local_ha_contract.resources.control_plane.memory_mib
+          if ha_node.value.role == 'control-plane'
+          else mgmt_local_ha_contract.resources.worker.memory_mib
+        }}
+      vm_hostonly_adapter: "{{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+      vm_host_address: "{{ mgmt_local_ha_contract.controller.host_address }}"
+      vm_repo: "{{ ha_repo }}"
+  changed_when: false
+
+- name: Attempt fresh isolated Rocky VM creation once
+  ansible.builtin.command:
+    argv:
+      - "{{ ha_ansible_playbook }}"
+      - -i
+      - localhost,
+      - "{{ ha_single_fixture }}"
+      - -e
+      - >-
+        {{
+          ha_single_vm_common
+          | combine({'vm_resume_owned_creation': false})
+          | to_json
+        }}
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  register: ha_single_vm_create_initial
+  failed_when: false
+  changed_when: true
+  when: ha_single_vm_action == 'create'
+
+- name: Resume the exact owned VM once when console bootstrap exceeded the first bounded attempt
+  ansible.builtin.command:
+    argv:
+      - "{{ ha_ansible_playbook }}"
+      - -i
+      - localhost,
+      - "{{ ha_single_fixture }}"
+      - -e
+      - >-
+        {{
+          ha_single_vm_common
+          | combine({'vm_resume_owned_creation': true})
+          | to_json
+        }}
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  changed_when: true
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_initial.rc != 0
+
+- name: Cold-stage independently approved PR 128 bundle on exact owned VM
+  ansible.builtin.command:
+    argv:
+      - "{{ ha_ansible_playbook }}"
+      - -i
+      - localhost,
+      - "{{ ha_single_fixture }}"
+      - -e
+      - >-
+        {{
+          ha_single_vm_common
+          | combine(
+              {
+                'mgmt_offline_bundle_dir': ha_bundle_dir,
+                'mgmt_offline_manifest_sha256': ha_manifest_sha256
+              }
+            )
+          | to_json
+        }}
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  changed_when: true
+  when: ha_single_vm_action == 'test'
