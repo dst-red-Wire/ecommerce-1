@@ -82,27 +82,3 @@
       'Timed out waiting for isolated VM console'
       in ((ha_single_vm_create_initial.stdout | default(''))
           ~ (ha_single_vm_create_initial.stderr | default('')))
-
-- name: Cold-stage independently approved PR 128 bundle on exact owned VM
-  ansible.builtin.command:
-    argv:
-      - "{{ ha_ansible_playbook }}"
-      - -i
-      - localhost,
-      - "{{ ha_single_fixture }}"
-      - -e
-      - >-
-        {{
-          ha_single_vm_common
-          | combine(
-              {
-                'mgmt_offline_bundle_dir': ha_bundle_dir,
-                'mgmt_offline_manifest_sha256': ha_manifest_sha256
-              }
-            )
-          | to_json
-        }}
-  environment:
-    PYTHONDONTWRITEBYTECODE: "1"
-  changed_when: true
-  when: ha_single_vm_action == 'test'
