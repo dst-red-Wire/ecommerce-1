@@ -4832,6 +4832,79 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             return fail("RKE2 local qualification source changed during execution")
     return 0
 
+def rke2_local_ha_qualification() -> int:
+    workflow = qualification_workflow("rke2_local_ha")
+    expected_entrypoint = "scripts/repoctl.py rke2-local-ha-qualification"
+    if workflow.get("entrypoint") != expected_entrypoint:
+        return fail("RKE2 local HA qualification entrypoint is not centrally registered")
+    if workflow.get("exact_sha_required") is not True:
+        return fail("RKE2 local HA qualification must require an exact SHA")
+    if workflow.get("clean_worktree_required") is not True:
+        return fail("RKE2 local HA qualification must require a clean worktree")
+    if workflow.get("capacity_production_claim") is not False:
+        return fail("RKE2 local HA qualification must not claim production capacity")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA qualification requires a clean exact-SHA worktree")
+    head_sha = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        return fail("RKE2 local HA qualification could not resolve the exact checkout SHA")
+
+    evidence_template = workflow.get("evidence", {}).get("authoritative")
+    if not isinstance(evidence_template, str) or "<sha>" not in evidence_template:
+        return fail("RKE2 local HA authoritative evidence path is invalid")
+    relative = Path(evidence_template.replace("<sha>", head_sha))
+    if relative.is_absolute() or ".." in relative.parts or not str(relative).startswith(".context/"):
+        return fail("RKE2 local HA evidence must remain under .context")
+    evidence = ROOT / relative
+    state = evidence.parent
+
+    require("ansible-playbook")
+    command = [
+        "ansible-playbook",
+        "-i",
+        "localhost,",
+        "platform/ansible/tests/mgmt_ha_vm/main.yml",
+        "-e",
+        f"ha_repo={ROOT}",
+        "-e",
+        f"ha_head_sha={head_sha}",
+        "-e",
+        f"ha_state={state}",
+    ]
+    result = run(command, check=False)
+    if result.returncode:
+        return result.returncode
+
+    if git("rev-parse", "HEAD").strip() != head_sha:
+        return fail("RKE2 local HA source changed after qualification freeze")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA qualification modified tracked or untracked repository sources")
+
+    try:
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 local HA evidence missing or invalid: {exc}")
+    required = {
+        "status": "PASS",
+        "head_sha": head_sha,
+        "six_machines_simultaneously_running": True,
+        "etcd_members": 3,
+        "quorum_required": 2,
+        "control_plane_recovered": True,
+        "cilium_multinode": True,
+        "simulated_internal_dns": True,
+        "simulated_internal_ntp": True,
+        "capacity_production": False,
+        "real_hetzner_network": False,
+        "physical_failure": False,
+    }
+    for key, expected in required.items():
+        if payload.get(key) != expected:
+            return fail(f"RKE2 local HA evidence mismatch for {key}: expected {expected!r}")
+    print(f"PASS rke2-local-ha {head_sha[:12]} evidence={relative}")
+    return 0
+
+
 def _qualification_audit_path(head_sha: str) -> Path:
     template = str(qualification_workflow("qualification_proof")["performance_audit_output"])
     relative = Path(template.replace("<sha>", head_sha))
@@ -5237,6 +5310,7 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    rke2ha = sub.add_parser("rke2-local-ha-qualification")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -5392,6 +5466,8 @@ def main() -> int:
             return qualification_proof(args.base)
         if args.cmd == "rke2-local-virtualbox-qualification":
             return rke2_local_virtualbox_qualification(args.inputs)
+        if args.cmd == "rke2-local-ha-qualification":
+            return rke2_local_ha_qualification()
         if args.cmd == "perf-campaign":
             return performance_campaign(args.base, args.output)
         if args.cmd == "diff-context":
