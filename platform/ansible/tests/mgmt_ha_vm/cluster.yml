@@ -322,7 +322,7 @@
         owner: root
         group: root
         mode: "0600"
-    - name: Import pinned HAProxy image into RKE2 containerd
+    - name: Import pinned HAProxy image and create digest reference in RKE2 containerd
       ansible.builtin.command:
         argv:
           - /var/lib/rancher/rke2/bin/ctr
@@ -332,8 +332,30 @@
           - k8s.io
           - images
           - import
+          - --digests
+          - --base-name
+          - docker.io/library/haproxy
           - /var/lib/rancher/rke2/agent/images/ecommerce-haproxy.tar
       changed_when: true
+
+    - name: List imported RKE2 containerd image references
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/ctr
+          - --address
+          - /run/k3s/containerd/containerd.sock
+          - --namespace
+          - k8s.io
+          - images
+          - list
+          - --quiet
+      register: ha_haproxy_imported_images
+      changed_when: false
+
+    - name: Require exact HAProxy digest reference after offline import
+      ansible.builtin.assert:
+        that:
+          - mgmt_local_ha_contract.ha_endpoint.image.reference in ha_haproxy_imported_images.stdout_lines
 
 - name: Deploy HAProxy in front of the control planes
   hosts: ha-cp-01
@@ -398,7 +420,7 @@
             restartPolicy: Always
             containers:
               - name: haproxy
-                image: {{ mgmt_local_ha_contract.ha_endpoint.image.runtime_reference }}
+                image: {{ mgmt_local_ha_contract.ha_endpoint.image.reference }}
                 imagePullPolicy: Never
                 args: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
                 securityContext:
