@@ -458,6 +458,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
@@ -563,6 +564,38 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
                 run.assert_not_called()
 
+    def test_rke2_vagrant_runtime_must_match_canonical_version(self):
+        good = MOD.subprocess.CompletedProcess(
+            [], 0, "Vagrant 2.4.9\n", ""
+        )
+        wrong = MOD.subprocess.CompletedProcess(
+            [], 0, "Vagrant 2.5.0\n", ""
+        )
+        missing = MOD.subprocess.CompletedProcess([], 1, "", "missing")
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=good) as run,
+        ):
+            self.assertTrue(MOD._canonical_rke2_vagrant_ready())
+            run.assert_called_once_with(
+                ["/mnt/c/Program Files/Vagrant/bin/vagrant.exe", "--version"],
+                check=False,
+                capture=True,
+            )
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=wrong),
+        ):
+            self.assertFalse(MOD._canonical_rke2_vagrant_ready())
+
+        with (
+            mock.patch.object(MOD, "_canonical_rke2_vagrant_version", return_value="2.4.9"),
+            mock.patch.object(MOD, "run", return_value=missing),
+        ):
+            self.assertFalse(MOD._canonical_rke2_vagrant_ready())
+
     def test_rke2_create_failure_cleans_only_new_virtualbox_registration(self):
         workflow = {
             "entrypoint": (
@@ -620,6 +653,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     mock.patch.object(MOD, "ROOT", root),
                     mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                     mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value=approved),
+                    mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                     mock.patch.object(
                         MOD,
                         "_rke2_registered_vm_identity",
@@ -663,6 +697,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "vm_bridge",
             "vm_box_url",
             "vm_box_sha256",
+            "vm_vagrant_windows",
             "vm_state",
             "vm_action",
         ]
@@ -741,6 +776,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=clean_git),
                 mock.patch.object(MOD, "run", return_value=completed) as run,
             ):
@@ -798,6 +834,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=clean_git),
                 mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
