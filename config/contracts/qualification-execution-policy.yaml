@@ -503,6 +503,23 @@ workflows:
         - tests/test_mgmt_airgap.py
         - tests/test_mgmt_airgap_bundle.py
         - tests/test_mgmt_offline_vm.py
+      invalidation_object_ids:
+        config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json: acc86510ab2f4379d4bec2b0fc14b389b19b0246
+        config/infrastructure/mgmt-bootstrap.yaml: 128d0ae26b5a2b35ea484bf94bf91e89f4d56c06
+        config/infrastructure/network-plan.yaml: 28752b2c3db1221dfe3a77bea01130baf8dc0068
+        config/contracts/toolchain-lock.json: 69e40f7fed49ba552044c3e489c7323ab1471931
+        config/toolchain/versions.env: a3875b9317134d731861befa4e545b3a87fd2a40
+        platform/ansible/requirements.yml: ccdbaaba616e5cceb2b1297e6aefa5a91d3ba2f5
+        platform/ansible/roles/mgmt_offline_artifacts: 1e75728a812dae941b6f295849ab6bfe1e2bafab
+        platform/ansible/roles/mgmt_private_network: c2b8b3790ec974744baf963fc5d67a2b6d381a36
+        platform/ansible/roles/rke2_server: 24c58b4a17227dd744ae02f7d1bf9a068dcc6aa0
+        platform/ansible/tests/mgmt_offline_vm: b46c2904989e545f59ecc0b74a755ab65e85b453
+        scripts/build_mgmt_airgap_bundle.py: ce268a81a4eb4428939299de98bc403b39bf7161
+        scripts/mgmt_airgap.py: 2bbd8a6a8017092ee9a7088a15291812df16e80c
+        tests/test_ansible_mgmt_private_network.py: 0af30a2772d98989b96f9491fca10703614a7742
+        tests/test_mgmt_airgap.py: 7f684fc7be132bd84d6aa1f06e2a68b0b4ce9f3f
+        tests/test_mgmt_airgap_bundle.py: 8312be07bacb063be634b23675b337f0f1fbed45
+        tests/test_mgmt_offline_vm.py: 667520cbfd5bcc6773043594a34f6779420b5755
   tekton_proof:
     owner: cloud-platform
     purpose: state-changing management-plane proof of exact Tekton execution, signed Harbor evidence round-trip, and direct-parent reuse
