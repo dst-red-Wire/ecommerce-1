@@ -248,9 +248,6 @@ def qualification_execution_policy() -> dict:
             or defaults.get("post_pass_scope_expansion") != "forbidden"
             or defaults.get("non_blocking_findings") != "follow-up-work-item"
             or defaults.get("blocking_findings") != "return-to-development"
-            or defaults.get("same_sha_pass_replay") != "reuse-valid-evidence"
-            or defaults.get("same_sha_failed_replay") != "requires-explicit-blocking-reason"
-            or defaults.get("final_candidate_runs") != 1
         ):
             raise RuntimeError("qualification lifecycle workflow_defaults are invalid")
         if (
@@ -260,6 +257,7 @@ def qualification_execution_policy() -> dict:
         ):
             raise RuntimeError("qualification lifecycle required_per_workflow is invalid")
         evidence_policy = lifecycle.get("evidence")
+        authoritative_completion = lifecycle.get("authoritative_completion")
         waits_policy = lifecycle.get("waits")
         rerun_policy = lifecycle.get("reruns")
         duplication_policy = lifecycle.get("duplication")
@@ -269,6 +267,11 @@ def qualification_execution_policy() -> dict:
             or evidence_policy.get("tracked") is not False
             or evidence_policy.get("exact_sha_binding_required") is not True
             or evidence_policy.get("source_mutation_for_evidence") != "forbidden"
+            or not isinstance(authoritative_completion, dict)
+            or authoritative_completion.get("applies_when") != "merge_authoritative=true"
+            or authoritative_completion.get("same_sha_pass_replay") != "reuse-valid-evidence"
+            or authoritative_completion.get("same_sha_failed_replay") != "requires-explicit-blocking-reason"
+            or authoritative_completion.get("final_candidate_runs") != 1
             or not isinstance(waits_policy, dict)
             or waits_policy.get("every_wait_must_be_bounded") is not True
             or waits_policy.get("indefinite_wait") != "forbidden"
