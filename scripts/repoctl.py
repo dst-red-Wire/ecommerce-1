@@ -180,16 +180,23 @@ def ruby_yaml(path: str) -> dict:
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
 
 
-def _completed_proof_inputs_unchanged(source_sha: str, invalidation_inputs: list[str]) -> bool:
-    """Return true only when every registered runtime input still matches the qualified source."""
+def _completed_proof_inputs_unchanged(
+    source_sha: str,
+    invalidation_inputs: list[str],
+    invalidation_object_ids: dict[str, str],
+) -> bool:
+    """Return true only when every registered HEAD object matches the qualified proof snapshot."""
+    if set(invalidation_inputs) != set(invalidation_object_ids):
+        raise RuntimeError(
+            f"completed qualification {source_sha} invalidation object ids do not cover every input"
+        )
     for path in invalidation_inputs:
-        result = run(["git", "diff", "--quiet", source_sha, "--", path], check=False)
-        if result.returncode == 1:
-            return False
+        expected = invalidation_object_ids[path]
+        result = run(["git", "rev-parse", f"HEAD:{path}"], check=False, capture=True)
         if result.returncode != 0:
-            raise RuntimeError(
-                f"cannot validate completed qualification input {path!r} against {source_sha}"
-            )
+            return False
+        if result.stdout.strip() != expected:
+            return False
     return True
 
 
@@ -376,6 +383,7 @@ def qualification_execution_policy() -> dict:
                 source_sha = completion.get("qualified_source_sha")
                 provenance = completion.get("provenance")
                 invalidation_inputs = completion.get("invalidation_inputs")
+                invalidation_object_ids = completion.get("invalidation_object_ids")
                 if (
                     completion.get("status") != "complete"
                     or completion.get("criteria_status") != "PASS"
@@ -398,6 +406,13 @@ def qualification_execution_policy() -> dict:
                         for path in invalidation_inputs
                     )
                     or len(invalidation_inputs) != len(set(invalidation_inputs))
+                    or not isinstance(invalidation_object_ids, dict)
+                    or set(invalidation_object_ids) != set(invalidation_inputs)
+                    or any(
+                        not isinstance(object_id, str)
+                        or re.fullmatch(r"[0-9a-f]{40}", object_id) is None
+                        for object_id in invalidation_object_ids.values()
+                    )
                 ):
                     raise RuntimeError(
                         f"qualification workflow {workflow_name} completed proof record is invalid"
@@ -408,7 +423,11 @@ def qualification_execution_policy() -> dict:
                         raise RuntimeError(
                             f"qualification workflow {workflow_name} invalidation input escapes repository"
                         )
-                if not _completed_proof_inputs_unchanged(source_sha, invalidation_inputs):
+                if not _completed_proof_inputs_unchanged(
+                    source_sha,
+                    invalidation_inputs,
+                    invalidation_object_ids,
+                ):
                     raise RuntimeError(
                         f"qualification workflow {workflow_name} completed proof is invalidated by registered input changes"
                     )
@@ -2014,6 +2033,12 @@ def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: 
     )
     if result.returncode:
         return result.returncode
+    if workflow.get("clean_worktree_required") is True and git(
+        "status", "--porcelain", "--untracked-files=all"
+    ).strip():
+        return fail("tekton-proof source changed during execution")
+    if workflow.get("exact_sha_required") is True and git("rev-parse", "HEAD").strip() != head_sha:
+        return fail("tekton-proof HEAD changed during execution")
     template = workflow.get("evidence", {}).get("runtime", "")
     relative = Path(str(template).replace("<sha>", head_sha))
     if not str(relative).startswith(".context/") or relative.is_absolute() or ".." in relative.parts:
@@ -4731,6 +4756,18 @@ def qualification_workflow(name: str) -> dict:
     return resolved
 
 
+def _approved_rke2_manifest_sha256() -> str:
+    lock_path = ROOT / "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read canonical RKE2 artifact lock: {exc}") from exc
+    digest = payload.get("approved_manifest_sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise RuntimeError("canonical RKE2 artifact lock approved_manifest_sha256 is invalid")
+    return digest
+
+
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
     workflow = qualification_workflow("rke2_local_virtualbox")
     expected_entrypoint = (
@@ -4763,10 +4800,35 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         return fail("RKE2 local qualification inputs must be a JSON object")
     if "vm_repo" in input_values:
         return fail("RKE2 local qualification inputs must not override vm_repo")
+    allowed_input_fields = {
+        "vm_name",
+        "vm_hostonly_adapter",
+        "vm_host_address",
+        "vm_address",
+        "vm_mac",
+        "vm_cpus",
+        "vm_memory",
+        "vm_vagrant_windows",
+        "mgmt_offline_bundle_dir",
+        "mgmt_offline_manifest_sha256",
+    }
+    unsupported_fields = sorted(set(input_values) - allowed_input_fields)
+    if unsupported_fields:
+        return fail(
+            "RKE2 local qualification inputs contain unsupported fields: "
+            + ", ".join(unsupported_fields)
+        )
     vm_name = input_values.get("vm_name")
     if not isinstance(vm_name, str) or re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
         return fail("RKE2 local qualification inputs must declare a valid vm_name")
+    approved_manifest = _approved_rke2_manifest_sha256()
+    supplied_manifest = input_values.get("mgmt_offline_manifest_sha256")
+    if supplied_manifest != approved_manifest:
+        return fail(
+            "RKE2 local qualification inputs must use the canonical approved manifest digest"
+        )
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
+    frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
 
     def source_is_frozen() -> bool:
         return (
@@ -4789,7 +4851,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "localhost,",
         "platform/ansible/tests/mgmt_offline_vm/main.yml",
         "-e",
-        f"@{input_path}",
+        frozen_inputs,
         "-e",
         f"vm_repo={ROOT}",
         "-e",
