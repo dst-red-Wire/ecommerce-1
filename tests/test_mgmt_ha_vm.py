@@ -203,6 +203,8 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("refusing to overwrite existing evidence bytes", repoctl)
         self.assertIn('["docker", "image", "inspect", preparer_image]', repoctl)
         self.assertIn("restore never pulls it", repoctl)
+        self.assertIn('prefix="rke2-ha-restore-cache-"', repoctl)
+        self.assertIn('f"bundle_cache={cache_dir}"', repoctl)
         self.assertIn("rke2-local-ha-restore-bundle", makefile)
         self.assertIn("SOURCE=/absolute/path/to/pr128", readme)
         self.assertIn("No network fallback is permitted", readme)
