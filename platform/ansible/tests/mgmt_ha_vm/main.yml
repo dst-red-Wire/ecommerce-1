@@ -172,12 +172,14 @@
     - name: Probe fixed HA addresses on the selected Windows host-only segment before VM creation
       ansible.builtin.command:
         argv:
+          - "{{ ansible_playbook_python }}"
+          - -c
+          - >-
+            import subprocess,sys;
+            raise SystemExit(subprocess.run(
+            [sys.argv[1],'-n','1','-w','1000','-S',sys.argv[2],sys.argv[3]],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode)
           - "{{ mgmt_local_ha_contract.controller.windows_ping }}"
-          - -n
-          - "1"
-          - -w
-          - "1000"
-          - -S
           - "{{ mgmt_local_ha_contract.controller.host_address }}"
           - "{{ item.value.address }}"
       loop: "{{ ha_nodes }}"
