@@ -233,6 +233,14 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("hosts: ha-worker-01,ha-worker-02", cluster)
         self.assertIn("strategy: free", cluster)
         self.assertIn(
+            "Require worker join host-set to match bounded parallelism contract",
+            cluster,
+        )
+        self.assertIn(
+            "ansible_play_hosts_all | length == mgmt_local_ha_contract.execution.worker_join_parallelism",
+            cluster,
+        )
+        self.assertNotIn(
             'throttle: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
             cluster,
         )
