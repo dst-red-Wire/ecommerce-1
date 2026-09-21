@@ -5404,7 +5404,7 @@ def _sha256_path(path: Path) -> str | None:
 
 
 def _sha256_manifest_matches(manifest: Path) -> bool:
-    """Verify a sha256sum-style source manifest without adding a host-tool dependency."""
+    """Verify the recorded SHA-256 source manifest without adding a host-tool dependency."""
     try:
         lines = manifest.read_text(encoding="utf-8").splitlines()
         root = ROOT.resolve()
