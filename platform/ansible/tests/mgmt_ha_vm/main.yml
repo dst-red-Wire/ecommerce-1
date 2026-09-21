@@ -115,9 +115,27 @@
       register: ha_haproxy_pull
       changed_when: true
 
+    - name: Resolve exact digest-pinned HAProxy image ID
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"]
+      register: ha_haproxy_source_id
+      changed_when: false
+
+    - name: Apply invocation-local runtime tag to the exact pinned HAProxy image
+      ansible.builtin.command:
+        argv: [docker, tag, "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.runtime_reference }}"]
+      changed_when: true
+
+    - name: Require runtime HAProxy tag to resolve to the exact pulled image
+      ansible.builtin.command:
+        argv: [docker, image, inspect, --format, "{{ '{{.Id}}' }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.runtime_reference }}"]
+      register: ha_haproxy_runtime_id
+      changed_when: false
+      failed_when: ha_haproxy_runtime_id.stdout | trim != ha_haproxy_source_id.stdout | trim
+
     - name: Save exact HAProxy image for offline import into worker-03
       ansible.builtin.command:
-        argv: [docker, save, --output, "{{ ha_haproxy_tar }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.reference }}"]
+        argv: [docker, save, --output, "{{ ha_haproxy_tar }}", "{{ mgmt_local_ha_contract.ha_endpoint.image.runtime_reference }}"]
       changed_when: true
 
     - name: Generate invocation-local shared RKE2 token
@@ -229,10 +247,6 @@
               - "mgmt_offline_bundle_dir={{ ha_bundle_dir }}"
               - -e
               - "mgmt_offline_manifest_sha256={{ ha_manifest_sha256 }}"
-              - -e
-              - "vm_dns_fixture={{ [mgmt_local_ha_contract.services.dns.address] | to_json }}"
-              - -e
-              - "vm_ntp_fixture={{ [mgmt_local_ha_contract.services.ntp.address] | to_json }}"
           environment:
             PYTHONDONTWRITEBYTECODE: "1"
           loop: "{{ ha_nodes }}"
