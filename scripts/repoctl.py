@@ -4649,6 +4649,14 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         return False, "GitHub PR paginated comments payload is invalid"
     comments = [comment for page in pages for comment in page]
+    comments.sort(
+        key=lambda comment: (
+            str(comment.get("created_at") or "") if isinstance(comment, dict) else "",
+            int(comment.get("id") or 0)
+            if isinstance(comment, dict) and str(comment.get("id") or "").isdigit()
+            else 0,
+        )
+    )
 
     for comment in comments:
         if not isinstance(comment, dict):
