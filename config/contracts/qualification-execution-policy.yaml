@@ -493,6 +493,11 @@ workflows:
         - config/contracts/toolchain-lock.json
         - config/toolchain/versions.env
         - platform/ansible/requirements.yml
+        - config/toolchain/capabilities.json
+        - platform/ansible/ansible.cfg
+        - .bazelversion
+        - .bazelrc
+        - config/python/requirements.lock
         - platform/ansible/roles/mgmt_offline_artifacts
         - platform/ansible/roles/mgmt_private_network
         - platform/ansible/roles/rke2_server
@@ -510,6 +515,11 @@ workflows:
         config/contracts/toolchain-lock.json: 69e40f7fed49ba552044c3e489c7323ab1471931
         config/toolchain/versions.env: a3875b9317134d731861befa4e545b3a87fd2a40
         platform/ansible/requirements.yml: ccdbaaba616e5cceb2b1297e6aefa5a91d3ba2f5
+        config/toolchain/capabilities.json: fb5862b4ecda340fbe55569abe09cfdbd591b31f
+        platform/ansible/ansible.cfg: 4a2cc432522110ddc49259fe96241ba90e7a1080
+        .bazelversion: 3b6825376addb7433aa80c05f27d2d6151af9cf3
+        .bazelrc: cfbc93e1dc1ec421ebfe0eb28320c2f82fcd09bd
+        config/python/requirements.lock: c8b856b64428fdae8b5d4240ad573bc1d4381d73
         platform/ansible/roles/mgmt_offline_artifacts: 1e75728a812dae941b6f295849ab6bfe1e2bafab
         platform/ansible/roles/mgmt_private_network: c2b8b3790ec974744baf963fc5d67a2b6d381a36
         platform/ansible/roles/rke2_server: 24c58b4a17227dd744ae02f7d1bf9a068dcc6aa0
@@ -520,6 +530,23 @@ workflows:
         tests/test_mgmt_airgap.py: 7f684fc7be132bd84d6aa1f06e2a68b0b4ce9f3f
         tests/test_mgmt_airgap_bundle.py: 8312be07bacb063be634b23675b337f0f1fbed45
         tests/test_mgmt_offline_vm.py: 667520cbfd5bcc6773043594a34f6779420b5755
+      invalidation_semantic_functions:
+        scripts/repoctl.py:
+          _raw_toolchain_lock: f8d6d4b1e29150b88292be2708723c630a9c10dfa31e435415926b94d4f1a10a
+          managed_bin_dirs: 018244612cd0a1ae5b7021ad3ccc43d701ede474556b48d3b586fbf04d34bf2a
+          toolchain_projection_path: b74bcf7bd32341a42de9a46789a18cc8cfbf9e2b86e0edd647628d3be420a4f7
+          ansible_collections_root: 4dfb8c2475598550dcc201ac27ca9ee222108c5da334162bc4a12313196c9a4d
+          pinned_versions: c94479b347af9d2b03abbd2ac96900222f54c7d1074d812ee1dc9a7cd3fa64a0
+          required_ansible_collections: d7a8c304274747f30322dfdceb73c6aab050c73b5d6a299daf82f9724bd4bd13
+          resolved_ansible_collection_version: 19d5c7b599ddd9aa71b7a6140ae1e7cad5ced56bbab58fedbe5d61a48c76fd98
+          ansible_collections_ready: e3a821d73db2e1285820964e981745afcbd6613f6d423726ca190473ef5f98b1
+        scripts/capability_bootstrap.py:
+          _parse_versions_env: 4e6ea55fa4b89fcaecda7b0ec04e39ab4d2524b17905cfd42414cc37a5a106db
+          _parse_ansible_collection_projection: e2f439c5260e69812e3fc9aaef226612486a85bf74e57dcb415b8d0dcfdd0394
+          load_contract: 2babe7dea86089ee8c34698f88f3eb2260a941d49c24872c4dcfd56690faa904
+          load_versions: 3ad32578d24fb441918454143af4edb1cb8ac96c88b3019fea34d5adc5c6083a
+          load_toolchain_lock: 1ce78af5c9b778c0b82f7e55b83d04f9ca923c5fbfe1f9bb2f81f0cab75fac58
+          validate_toolchain_projections: 5420a2af60d51661cab495fa445911c5b6dce4c30d452e339a3db7941a8e8f33
   rke2_local_ha:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove six simultaneous local Rocky nodes with three RKE2 control planes, three workers, HAProxy registration/API endpoint, embedded-etcd quorum, snapshot, one-control-plane loss/recovery, Cilium multinode, and simulated internal DNS/NTP without claiming production capacity
