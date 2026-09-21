@@ -1984,6 +1984,12 @@ def tekton_proof(runtime_config: str, base_sha: str, parent_sha: str, head_sha: 
     ]
     if missing:
         return fail("tekton-proof missing required values: " + ", ".join(missing))
+    if workflow.get("clean_worktree_required") is True and git(
+        "status", "--porcelain", "--untracked-files=all"
+    ).strip():
+        return fail("tekton-proof requires a clean exact-SHA worktree")
+    if workflow.get("exact_sha_required") is True and git("rev-parse", "HEAD").strip() != head_sha:
+        return fail("tekton-proof HEAD_SHA must match the current exact checkout")
     require("ansible-playbook")
     result = run(
         [
@@ -4827,6 +4833,8 @@ def qualification_proof(base: str) -> int:
     audit_path = None if verification_ran else _valid_performance_audit(base, head)
     if audit_path is None:
         requested_audit_path = _qualification_audit_path(head)
+        if verification_ran:
+            requested_audit_path.unlink(missing_ok=True)
         audit = run(
             [
                 sys.executable,
