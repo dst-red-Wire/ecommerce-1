@@ -5434,7 +5434,6 @@ def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str
     return source_check.returncode == 0
 
 
-
 def rke2_local_ha_restore_bundle(source_value: str) -> int:
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("RKE2 local HA bundle restore requires a clean exact-SHA worktree")
@@ -5484,44 +5483,46 @@ def rke2_local_ha_restore_bundle(source_value: str) -> int:
     if source == destination:
         return fail("RKE2 local HA bundle restore source and destination must differ")
 
-    preparer_image = lock.get("preparer_image")
-    if (
-        not isinstance(preparer_image, str)
-        or re.fullmatch(r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", preparer_image) is None
-    ):
-        return fail("RKE2 local HA pinned preparer image reference is invalid")
-    require("docker")
-    cached_preparer = run(
-        ["docker", "image", "inspect", preparer_image],
-        check=False,
-        capture=True,
-    )
-    if cached_preparer.returncode:
-        return fail(
-            "RKE2 local HA restore requires the digest-pinned PR 128 preparer image "
-            "already cached locally; restore never pulls it"
-        )
+    locked_entries = [
+        *lock.get("rpm_signing_keys", []),
+        *lock.get("rpms", []),
+        *lock.get("release_artifacts", {}).values(),
+    ]
+    expected_files: dict[str, str] = {"manifest.json": approved_manifest}
+    for entry in locked_entries:
+        if not isinstance(entry, dict):
+            return fail("RKE2 local HA bundle lock contains an invalid artifact entry")
+        filename = entry.get("file")
+        checksum = entry.get("sha256")
+        if (
+            not isinstance(filename, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", filename) is None
+            or not isinstance(checksum, str)
+            or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+            or filename in expected_files
+        ):
+            return fail("RKE2 local HA bundle lock contains an invalid or duplicate artifact")
+        expected_files[filename] = checksum
 
-    require("ansible-playbook")
+    source_entries = list(source.iterdir())
+    if any(entry.is_symlink() or not entry.is_file() for entry in source_entries):
+        return fail("PR 128 source bundle must contain regular files only; links/directories are forbidden")
+    source_names = {entry.name for entry in source_entries}
+    if source_names != set(expected_files):
+        return fail("PR 128 source bundle file set differs from the approved lock")
+    for filename, checksum in expected_files.items():
+        if _sha256_path(source / filename) != checksum:
+            return fail(f"PR 128 source bundle artifact digest mismatch: {filename}")
+
     CONTEXT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="rke2-ha-restore-cache-", dir=CONTEXT) as cache_dir:
-        restore = run(
-            [
-                "ansible-playbook",
-                "-i",
-                "localhost,",
-                "platform/ansible/tests/mgmt_offline_vm/build_bundle.yml",
-                "-e",
-                f"bundle_source={source}",
-                "-e",
-                f"bundle_cache={cache_dir}",
-                "-e",
-                "bundle_offline=true",
-            ],
-            check=False,
-        )
-    if restore.returncode:
-        return restore.returncode
+    with tempfile.TemporaryDirectory(prefix="rke2-ha-restore-", dir=CONTEXT) as temporary:
+        staging = Path(temporary) / destination.name
+        staging.mkdir(mode=0o700)
+        for filename, checksum in expected_files.items():
+            shutil.copy2(source / filename, staging / filename, follow_symlinks=False)
+            if _sha256_path(staging / filename) != checksum:
+                return fail(f"restored PR 128 bundle artifact digest mismatch: {filename}")
+        os.replace(staging, destination)
 
     restored_manifest = _sha256_path(destination / "manifest.json")
     if restored_manifest != approved_manifest:
