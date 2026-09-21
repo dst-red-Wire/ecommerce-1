@@ -1241,7 +1241,13 @@ def validate(root):
             ),
         }
         for relative, forbidden_tokens in active_review_automation.items():
-            source = (root / relative).read_text(encoding="utf-8")
+            source_path = root / relative
+            # Focused authority tests intentionally materialize only the files
+            # required by the contract under test. Missing optional automation
+            # surfaces must not mask the targeted authority error.
+            if not source_path.is_file():
+                continue
+            source = source_path.read_text(encoding="utf-8")
             if any(token.lower() in source.lower() for token in forbidden_tokens):
                 errors.append(
                     "review automation must not expose Codex trigger, polling, or invocation controls"
