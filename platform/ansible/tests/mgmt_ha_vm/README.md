@@ -124,10 +124,20 @@ The write/read during the one-server outage is the functional quorum proof.
 
 ## Run
 
-Use the single registered entrypoint from a clean exact-SHA checkout:
+Prepare HAProxy once while Docker Desktop is available:
 
 ```console
-.venv/qualification/bin/python scripts/repoctl.py rke2-local-ha-qualification
+make rke2-local-ha-prepare
+```
+
+The preparation step pulls the immutable digest, exports the archive below
+`.context/mgmt-ha-cache`, records its SHA-256 and source reference, and then exits.
+Docker Desktop may be closed after this step to free RAM.
+
+Then use the registered qualification entrypoint from a clean exact-SHA checkout:
+
+```console
+make rke2-local-ha-qualification
 ```
 
 The authoritative result is written to:
