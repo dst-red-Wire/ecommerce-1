@@ -225,11 +225,115 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError(
                 "qualification execution policy global_gate_order must list every executable global gate exactly once"
             )
+        lifecycle = policy.get("qualification_lifecycle")
+        if not isinstance(lifecycle, dict):
+            raise RuntimeError("qualification execution policy must declare qualification_lifecycle")
+        if (
+            lifecycle.get("applies_to") != "every-qualification-workflow"
+            or lifecycle.get("single_authority") != "config/contracts/qualification-execution-policy.yaml"
+            or lifecycle.get("per_workflow_policy_duplication") != "forbidden"
+        ):
+            raise RuntimeError("qualification lifecycle authority is invalid")
+        defaults = lifecycle.get("workflow_defaults")
+        required_per_workflow = lifecycle.get("required_per_workflow")
+        if not isinstance(defaults, dict) or not defaults:
+            raise RuntimeError("qualification lifecycle must declare workflow_defaults")
+        if (
+            defaults.get("exact_sha_required") is not True
+            or defaults.get("clean_worktree_required") is not True
+            or defaults.get("freeze_before_authoritative_run") is not True
+            or defaults.get("source_change_after_freeze_invalidates_evidence") is not True
+            or defaults.get("evidence_must_not_modify_tracked_files") is not True
+            or defaults.get("stop_when_exit_criteria_pass") is not True
+            or defaults.get("post_pass_scope_expansion") != "forbidden"
+            or defaults.get("non_blocking_findings") != "follow-up-work-item"
+            or defaults.get("blocking_findings") != "return-to-development"
+            or defaults.get("same_sha_pass_replay") != "reuse-valid-evidence"
+            or defaults.get("same_sha_failed_replay") != "requires-explicit-blocking-reason"
+            or defaults.get("final_candidate_runs") != 1
+        ):
+            raise RuntimeError("qualification lifecycle workflow_defaults are invalid")
+        if (
+            not isinstance(required_per_workflow, list)
+            or set(required_per_workflow) != {"purpose", "exit_criteria", "evidence"}
+            or len(required_per_workflow) != len(set(required_per_workflow))
+        ):
+            raise RuntimeError("qualification lifecycle required_per_workflow is invalid")
+        evidence_policy = lifecycle.get("evidence")
+        waits_policy = lifecycle.get("waits")
+        rerun_policy = lifecycle.get("reruns")
+        duplication_policy = lifecycle.get("duplication")
+        if (
+            not isinstance(evidence_policy, dict)
+            or evidence_policy.get("root") != ".context"
+            or evidence_policy.get("tracked") is not False
+            or evidence_policy.get("exact_sha_binding_required") is not True
+            or evidence_policy.get("source_mutation_for_evidence") != "forbidden"
+            or not isinstance(waits_policy, dict)
+            or waits_policy.get("every_wait_must_be_bounded") is not True
+            or waits_policy.get("indefinite_wait") != "forbidden"
+            or not isinstance(rerun_policy, dict)
+            or rerun_policy.get("final_candidate_runs") != 1
+            or rerun_policy.get("non_blocking_improvement_creates_follow_up") is not True
+            or not isinstance(duplication_policy, dict)
+            or duplication_policy.get("precommit_is_development_gate") is not True
+            or duplication_policy.get("final_authoritative_qualification_runs") != 1
+            or duplication_policy.get("fresh_exact_sha_evidence_must_be_reused") is not True
+            or duplication_policy.get("duplicate_full_gate_run_same_sha") != "forbidden"
+        ):
+            raise RuntimeError("qualification lifecycle stop/rerun/evidence policy is invalid")
+
         workflows = policy.get("workflows")
-        if not isinstance(workflows, dict):
+        if not isinstance(workflows, dict) or not workflows:
             raise RuntimeError("qualification execution policy must declare workflows")
-        proof = workflows.get("qualification_proof")
-        campaign = workflows.get("performance_campaign")
+
+        effective_workflows: dict[str, dict] = {}
+        default_keys = set(defaults)
+        for workflow_name, workflow in workflows.items():
+            if not isinstance(workflow_name, str) or not workflow_name or not isinstance(workflow, dict):
+                raise RuntimeError("qualification workflow registry contains an invalid entry")
+            duplicated = default_keys.intersection(workflow)
+            if duplicated:
+                raise RuntimeError(
+                    f"qualification workflow {workflow_name} duplicates central defaults: {sorted(duplicated)}"
+                )
+            missing = [field for field in required_per_workflow if field not in workflow]
+            if missing:
+                raise RuntimeError(
+                    f"qualification workflow {workflow_name} is missing required fields: {missing}"
+                )
+            purpose = workflow.get("purpose")
+            exit_criteria = workflow.get("exit_criteria")
+            evidence = workflow.get("evidence")
+            if not isinstance(purpose, str) or not purpose.strip():
+                raise RuntimeError(f"qualification workflow {workflow_name} purpose is invalid")
+            if (
+                not isinstance(exit_criteria, list)
+                or not exit_criteria
+                or any(not isinstance(item, str) or not item.strip() for item in exit_criteria)
+                or len(exit_criteria) != len(set(exit_criteria))
+            ):
+                raise RuntimeError(f"qualification workflow {workflow_name} exit_criteria are invalid")
+            if not isinstance(evidence, dict) or not evidence:
+                raise RuntimeError(f"qualification workflow {workflow_name} evidence contract is invalid")
+            for evidence_name, evidence_path in evidence.items():
+                if not isinstance(evidence_name, str) or not evidence_name:
+                    raise RuntimeError(f"qualification workflow {workflow_name} evidence key is invalid")
+                if not isinstance(evidence_path, str) or not evidence_path.startswith(".context/"):
+                    raise RuntimeError(
+                        f"qualification workflow {workflow_name} evidence must stay under .context"
+                    )
+                normalized = Path(evidence_path.replace("<sha>", "0" * 40))
+                if normalized.is_absolute() or ".." in normalized.parts:
+                    raise RuntimeError(
+                        f"qualification workflow {workflow_name} evidence path escapes repository context"
+                    )
+            effective = copy.deepcopy(defaults)
+            effective.update(copy.deepcopy(workflow))
+            effective_workflows[workflow_name] = effective
+
+        proof = effective_workflows.get("qualification_proof")
+        campaign = effective_workflows.get("performance_campaign")
         if (
             not isinstance(proof, dict)
             or proof.get("exact_sha_required") is not True
@@ -2517,6 +2621,7 @@ def qualification_identity() -> str:
         "scripts/ci-affected.rb",
         "config/contracts/ci-evidence.yaml",
         "config/contracts/ci-topology.yaml",
+        "config/contracts/qualification-execution-policy.yaml",
         "config/toolchain/versions.env",
         "config/toolchain/capabilities.json",
     ):
@@ -4478,11 +4583,17 @@ def deliver(base: str, title: str, message: str) -> int:
 
 
 def qualification_workflow(name: str) -> dict:
-    workflows = qualification_execution_policy().get("workflows", {})
+    policy = qualification_execution_policy()
+    workflows = policy.get("workflows", {})
     workflow = workflows.get(name)
     if not isinstance(workflow, dict):
         raise RuntimeError(f"qualification workflow is not declared: {name}")
-    return copy.deepcopy(workflow)
+    defaults = policy.get("qualification_lifecycle", {}).get("workflow_defaults", {})
+    if not isinstance(defaults, dict):
+        raise RuntimeError("qualification workflow defaults are invalid")
+    resolved = copy.deepcopy(defaults)
+    resolved.update(copy.deepcopy(workflow))
+    return resolved
 
 
 def _qualification_audit_path(head_sha: str) -> Path:
