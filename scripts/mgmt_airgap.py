@@ -5,12 +5,13 @@ import argparse
 import hashlib
 import ipaddress
 import json
-from pathlib import Path, PurePosixPath
+import os
 import re
 import stat
 import subprocess
 import tarfile
 import tempfile
+from pathlib import Path, PurePosixPath
 
 REQUIRED_RPMS = frozenset({
     "curl", "ca-certificates", "chrony", "jq", "NetworkManager", "iproute", "tar",
@@ -110,8 +111,30 @@ def validate_image_archive(path: Path) -> list[str]:
             if "manifests" in document:
                 children = document.get("manifests")
                 require(isinstance(children, list) and children, "empty nested OCI image index")
+                target_children = [
+                    child for child in children
+                    if isinstance(child, dict)
+                    and isinstance(child.get("platform"), dict)
+                    and child["platform"].get("os") == "linux"
+                    and child["platform"].get("architecture") == "amd64"
+                ]
+                require(target_children, "OCI target platform manifest missing")
                 for child in children:
-                    verify_descriptor(child, parse_json=True)
+                    require(isinstance(child, dict), "invalid OCI descriptor")
+                    child_identity = child.get("digest")
+                    require(isinstance(child_identity, str)
+                            and re.fullmatch(r"sha256:[0-9a-f]{64}", child_identity),
+                            "OCI image digest required")
+                    child_member = "blobs/sha256/" + child_identity.split(":", 1)[1]
+                    if child_member in regular_members:
+                        verify_descriptor(child, parse_json=True)
+                        continue
+                    platform = child.get("platform")
+                    require(isinstance(platform, dict)
+                            and isinstance(platform.get("os"), str)
+                            and isinstance(platform.get("architecture"), str)
+                            and not (platform["os"] == "linux" and platform["architecture"] == "amd64"),
+                            "OCI target platform content missing")
             else:
                 config = document.get("config")
                 layers = document.get("layers")
@@ -239,7 +262,12 @@ def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_met
     require(signing_keys and set(rpm_signers.values()) <= key_fingerprints,
             "every RPM signer must reference an approved signing key fingerprint")
     if rpm_signatures:
-        with tempfile.TemporaryDirectory(prefix="ecommerce-rpmdb-") as rpmdb:
+        # Enforcing Rocky labels /var/lib/rpm as rpm_var_lib_t and forbids rpm
+        # transaction locks in generic tmp_t directories. Keep the trust store
+        # isolated in its own child database without touching the system RPM DB.
+        rpmdb_parent = Path("/var/lib/rpm")
+        isolated_parent = str(rpmdb_parent) if os.geteuid() == 0 and rpmdb_parent.is_dir() else None
+        with tempfile.TemporaryDirectory(prefix="ecommerce-rpmdb-", dir=isolated_parent) as rpmdb:
             subprocess.run(["rpm", "--dbpath", rpmdb, "--initdb"],
                            check=True, capture_output=True, text=True, timeout=30)
             for key_name in signing_keys:

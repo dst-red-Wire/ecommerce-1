@@ -1,0 +1,58 @@
+---
+- name: Build the locked local MGMT RKE2 offline bundle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    bundle_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
+    bundle_lock: "{{ bundle_repo }}/{{ mgmt_local_vm_contract.bundle_lock }}"
+    bundle_cache: "{{ bundle_repo }}/.context/mgmt-airgap-download-cache"
+    bundle_output: >-
+      {{ bundle_repo }}/.context/rke2-offline-bundle-{{ bundle_version | regex_replace('[+.]', '-') }}
+    bundle_version: >-
+      {{ (lookup('file', bundle_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version }}
+    bundle_python: "{{ ansible_playbook_python }}"
+    bundle_offline: false
+  tasks:
+    - name: Require ignored absolute bundle paths
+      ansible.builtin.assert:
+        that:
+          - bundle_output is match('^' ~ (bundle_repo | regex_escape) ~ '/\.context/')
+          - bundle_cache is match('^' ~ (bundle_repo | regex_escape) ~ '/\.context/')
+          - bundle_source is not defined or bundle_source is match('^/')
+
+    - name: Create ignored bundle output and cache parents
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ bundle_output | dirname }}"
+        - "{{ bundle_cache }}"
+
+    - name: Assemble and independently validate every locked byte
+      ansible.builtin.command:
+        argv: >-
+          {{ [bundle_python, bundle_repo ~ '/scripts/build_mgmt_airgap_bundle.py',
+              '--lock', bundle_lock,
+              '--rke2-version', bundle_version,
+              '--output', bundle_output,
+              '--cache', bundle_cache,
+              '--repository', bundle_repo,
+              '--services-json', mgmt_local_vm_contract.services | to_json]
+             + (['--source', bundle_source] if bundle_source is defined else [])
+             + (['--offline'] if bundle_offline | bool else []) }}
+      register: bundle_build
+      changed_when: true
+
+    - name: Record bounded local result outside Git
+      ansible.builtin.copy:
+        dest: "{{ bundle_repo }}/.context/mgmt-airgap-bundle-result.json"
+        content: "{{ bundle_build.stdout_lines[-1] }}\n"
+        mode: '0600'
+
+    - name: Report manifest approval input
+      ansible.builtin.debug:
+        msg: "{{ bundle_build.stdout_lines[-1] | from_json }}"

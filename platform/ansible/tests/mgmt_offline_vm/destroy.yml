@@ -1,0 +1,75 @@
+---
+- name: Inspect only the fixture Vagrant identity file
+  ansible.builtin.stat:
+    path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_owned_id
+- name: Clean owned lifecycle while always removing its generated private key
+  block:
+    - name: Destroy the precisely identified fixture
+      when: vm_owned_id.stat.exists
+      block:
+        - name: Read recorded VM identity
+          ansible.builtin.slurp:
+            src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+          register: vm_id_file
+        - name: Require canonical machine UUID before invoking VirtualBox
+          ansible.builtin.assert:
+            that:
+              - (vm_id_file.content | b64decode | trim) is match('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        - name: Read registrations without changing other machines
+          ansible.builtin.command:
+            argv: ["{{ vm_vbox }}", list, vms]
+          changed_when: false
+          register: vm_registered
+        - name: Shut down an owned machine that still exists
+          when: (vm_id_file.content | b64decode | trim) in vm_registered.stdout
+          block:
+            - name: Inspect named VM before destruction
+              ansible.builtin.command:
+                argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_id_file.content | b64decode | trim }}", --machinereadable]
+              changed_when: false
+              register: vm_owned
+            - name: Refuse deleting a machine with a different name
+              ansible.builtin.assert:
+                that: ["'name=\"' ~ vm_name ~ '\"' in vm_owned.stdout"]
+            - name: Request guest ACPI shutdown when running
+              ansible.builtin.command:
+                argv: ["{{ vm_vbox }}", controlvm, "{{ vm_id_file.content | b64decode | trim }}", acpipowerbutton]
+              when: "'VMState=\"running\"' in vm_owned.stdout"
+              changed_when: true
+              failed_when: false
+            - name: Bound graceful shutdown before forcing only the validated fixture
+              block:
+                - name: Wait for owned guest to stop
+                  ansible.builtin.command:
+                    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_id_file.content | b64decode | trim }}", --machinereadable]
+                  register: vm_stopped
+                  changed_when: false
+                  until: vm_stopped.stdout is search('VMState="(poweroff|saved|aborted)"')
+                  retries: 10
+                  delay: 2
+              rescue:
+                - name: Force off only the already ownership-validated fixture
+                  ansible.builtin.command:
+                    argv: ["{{ vm_vbox }}", controlvm, "{{ vm_id_file.content | b64decode | trim }}", poweroff]
+                  changed_when: true
+            - name: Remove only this Vagrant-managed machine
+              ansible.builtin.command:
+                argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, destroy, --force]
+              changed_when: true
+        - name: Remove stale local identity when its VM is already absent
+          ansible.builtin.file:
+            path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+            state: absent
+          when: (vm_id_file.content | b64decode | trim) not in vm_registered.stdout
+  always:
+    - name: Remove generated local credentials and rendered token-bearing inputs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ vm_state }}/identity"
+        - "{{ vm_state }}/rke2-token"
+        - "{{ vm_state }}/server.yml"
+        - "{{ vm_state }}/server-inventory.json"
+      no_log: true

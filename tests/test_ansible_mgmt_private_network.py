@@ -4,15 +4,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
-
-from jinja2 import Environment, StrictUndefined
+from pathlib import Path
 
 import yaml
+from jinja2 import Environment, StrictUndefined
 
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "platform/ansible/inventories/mgmt/inventory.rb"
@@ -174,6 +173,7 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
     def render_private_zone(self, node):
         inventory = json.loads(subprocess.check_output(["ruby", str(INVENTORY)], text=True, cwd=ROOT))
         variables = dict(inventory["_meta"]["hostvars"][node])
+        variables.update(inventory["all"]["vars"])
         variables["hostvars"] = inventory["_meta"]["hostvars"]
         variables["groups"] = {"access_gateways": inventory["access_gateways"]["hosts"]}
         source = ROLE.parent.parent / "templates/mgmt-private.xml.j2"
@@ -191,7 +191,8 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             zone, variables = self.render_private_zone(node)
             self.assertEqual("DROP", zone.attrib["target"])
             self.assertEqual(
-                set(variables["mgmt_firewall_cidrs"].values()),
+                set(variables["mgmt_firewall_cidrs"].values())
+                | {variables["mgmt_pod_cidr"]},
                 {source.attrib["address"] for source in zone.findall("source")},
             )
             self.assertFalse(zone.findall("service"))
@@ -209,18 +210,27 @@ class MgmtPrivateNetworkTest(unittest.TestCase):
             for rule in zone.findall("rule")
             if rule.find("port") is not None and rule.find("port").attrib["port"] == "6443"
         }
-        self.assertEqual({variables["mgmt_firewall_cidrs"]["402"], gateway}, api_sources)
+        self.assertEqual(
+            {variables["mgmt_firewall_cidrs"]["402"], variables["mgmt_pod_cidr"], gateway},
+            api_sources,
+        )
         gateway_ports = [
             rule.find("port").attrib["port"]
             for rule in zone.findall("rule")
             if rule.find("source").attrib["address"] == gateway
         ]
         self.assertEqual(["6443"], gateway_ports)
+        pod_kubelet_ports = [
+            rule.find("port").attrib["port"]
+            for rule in zone.findall("rule")
+            if rule.find("source").attrib["address"] == variables["mgmt_pod_cidr"]
+        ]
+        self.assertEqual(["10250", "6443"], pod_kubelet_ports)
         worker, _ = self.render_private_zone("worker-01")
         self.assertFalse(any(rule.find("source").attrib["address"] == gateway for rule in worker.findall("rule")))
 
     def test_zone_render_replaces_revoked_sources_and_rules(self):
-        zone, variables = self.render_private_zone("cp-01")
+        _, variables = self.render_private_zone("cp-01")
         old_cidr = variables["mgmt_firewall_cidrs"]["402"]
         variables["mgmt_firewall_cidrs"]["402"] = "192.0.2.0/24"
         template = ROLE.parent.parent / "templates/mgmt-private.xml.j2"

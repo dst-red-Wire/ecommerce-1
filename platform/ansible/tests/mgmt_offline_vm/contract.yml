@@ -1,0 +1,26 @@
+---
+# Canonical inputs for the disposable local qualification fixture. Production
+# architecture remains owned by config/infrastructure and architecture.lock.yaml.
+mgmt_local_vm_contract:
+  schema_version: 1
+  vagrant:
+    version: 2.4.9
+  rocky_box:
+    name: ecommerce/rocky-9.8-20260525.0
+    url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-Vagrant-Vbox-9.8-20260525.0.x86_64.vagrant.virtualbox.box
+    sha256: beace4853d89f5d1def29fca6eec8893564882d7db85841d3d9c287ac84fb9e4
+  resources:
+    cpu_minimum: 2
+    cpu_maximum: 4
+    memory_minimum_mib: 1024
+    memory_maximum_mib: 16384
+    artifact_default:
+      cpus: 2
+      memory_mib: 2048
+    rke2_server:
+      cpus: 4
+      memory_mib: 4096
+  services:
+    dns: ['10.243.1.2']
+    ntp: ['10.243.1.3']
+  bundle_lock: config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json

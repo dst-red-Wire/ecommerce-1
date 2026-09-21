@@ -1,0 +1,1722 @@
+{
+  "approved_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
+  "image_inventory": {
+    "archives": {
+      "images-cilium": [
+        "docker.io/rancher/hardened-cni-plugins:v1.9.1-build20260903",
+        "docker.io/rancher/mirrored-cilium-certgen:v0.4.9",
+        "docker.io/rancher/mirrored-cilium-cilium-envoy:v1.37.5-1786810558-766ccfb37260a43e9d228837aa84ce3faf9f64e7",
+        "docker.io/rancher/mirrored-cilium-cilium:v1.20.1",
+        "docker.io/rancher/mirrored-cilium-clustermesh-apiserver:v1.20.1",
+        "docker.io/rancher/mirrored-cilium-hubble-relay:v1.20.1",
+        "docker.io/rancher/mirrored-cilium-hubble-ui-backend:v0.13.5",
+        "docker.io/rancher/mirrored-cilium-hubble-ui:v0.13.5",
+        "docker.io/rancher/mirrored-cilium-operator-aws:v1.20.1",
+        "docker.io/rancher/mirrored-cilium-operator-azure:v1.20.1",
+        "docker.io/rancher/mirrored-cilium-operator-generic:v1.20.1"
+      ],
+      "images-core": [
+        "rancher/hardened-addon-resizer:1.8.23-build20260909",
+        "rancher/hardened-cluster-autoscaler:v1.10.3-build20260819",
+        "rancher/hardened-coredns:v1.14.7-build20260909",
+        "rancher/hardened-dns-node-cache:1.26.8-build20260909",
+        "rancher/hardened-etcd:v3.7.1-k3s1-build20260910",
+        "rancher/hardened-k8s-metrics-server:v0.9.0-build20260909",
+        "rancher/hardened-kubernetes:v1.37.0-rke2r1-build20260909",
+        "rancher/hardened-snapshot-controller:v8.6.0-build20260909",
+        "rancher/hardened-traefik:v3.7.13-build20260910",
+        "rancher/klipper-helm:v0.13.3-build20260909",
+        "rancher/klipper-lb:v0.4.17",
+        "rancher/mirrored-pause:3.10.2",
+        "rancher/rke2-cloud-provider:v1.35.1-0.20260817230842-2a1e2e8cf41b-build20260910",
+        "rancher/rke2-runtime:v1.37.0-rke2r1",
+        "rancher/rke2-security-responder:v0.1.5",
+        "sha256:3b22418b8d19711924b74091dab7b1e511ce352652d2ad8eedb46de365b50fbb",
+        "sha256:577c1202f08bd085e03e240d795257f8fbea58527271185fdccadec7ce15648c",
+        "sha256:66822795b54aaea56220b62c0223106449ac6b82751bb6728c2a1a522a0f03c8",
+        "sha256:66d66121b3efa6588f5d3eb26b6c0ddaec775fdbcbf4f1b2cd73ca1fc2a0f264",
+        "sha256:70871d9e0d5d505354dd2c69daae6c2010851bff70138fc2cf3ee3c394ffaaad",
+        "sha256:72dacd6919c408d6bdb619c3df5a2ccb68235d3150d3e118929a7320ab2b2d43",
+        "sha256:7914f4b7206cb3387d5059b9434fb656115f418681e559c66508b684a636333a",
+        "sha256:7b122b30e5c62f55889e7d2d2fb6565c7d8cdc749c7fc5dc7690b1d213dbe271",
+        "sha256:7cfc2ec25ea65eb2fe572df5ead508279813088f4383210ead336b09f538962d",
+        "sha256:8a993d863feb767ef99e08bbc37e88d88f3a0b59f38ee382c138010be2f765e9",
+        "sha256:910944bb0bd94f060a82a56ca1ea1c577d3e49b3473a093a47a985f32e92d94a",
+        "sha256:9298306cd6de814e35cf9a22faf0825d4130e71c22c493431779163622013ef8",
+        "sha256:c9b9b027e4d2cf1731311f9714f4aa633d37d7b0a72c9d3e6fc7a0594350d27c",
+        "sha256:e89ce639d4e7aec131aaf7aecb7fd9b3b26f21f5604bdc37c2336b8901a2d9b0",
+        "sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+      ]
+    },
+    "rke2_version": "v1.37.0+rke2r1"
+  },
+  "preparer_image": "quay.io/rockylinux/rockylinux@sha256:ed654c694190a670bb5c33f68995b862214fc96ffbdca95e07a8935ba0a3717d",
+  "release_artifacts": {
+    "binary": {
+      "category": "binary",
+      "file": "rke2.linux-amd64",
+      "sha256": "0200ef2151296d35c662ee00732db1adadff37ba15b8c0ee37abded7c26e79d9",
+      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2.linux-amd64"
+    },
+    "images-cilium": {
+      "category": "images-cilium",
+      "compressed_file": "rke2-images-cilium.linux-amd64.tar.zst",
+      "compressed_sha256": "37ea271fee07962b89183c5b8f70f3e1d6bc7ef0017deaf2c987a32f6786b234",
+      "file": "rke2-images-cilium.linux-amd64.tar",
+      "sha256": "125d9b7eaed7794488abc679af6e6b64ef6e22962d0d715a0d3a059d2275ed4e",
+      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2-images-cilium.linux-amd64.tar.zst"
+    },
+    "images-core": {
+      "category": "images-core",
+      "compressed_file": "rke2-images-core.linux-amd64.tar.zst",
+      "compressed_sha256": "234b5f88463289b9abede674667d24c186945279fc6d658cb43db39e8ccb2657",
+      "file": "rke2-images-core.linux-amd64.tar",
+      "sha256": "f672f4fffb6fd9a286b01651c9c93fc6bfb46b9b1d897ee36f7132b793d60bbd",
+      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2-images-core.linux-amd64.tar.zst"
+    }
+  },
+  "rke2_version": "v1.37.0+rke2r1",
+  "rpm_signing_keys": [
+    {
+      "category": "rpm-signing-key",
+      "file": "rancher-public.asc",
+      "fingerprint": "C8CFF216455126E9B9C918BE925EA29AE257814A",
+      "sha256": "7d2415f7fc532c365c8874bfad966566daaa0d04a9a5ba14d1db6080a9c12629",
+      "url": "https://rpm.rancher.io/public.key"
+    },
+    {
+      "category": "rpm-signing-key",
+      "file": "rocky-9-public.asc",
+      "fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "sha256": "3a66e521e7a4abac9768d889c7cd60a8250f59512b275cf576c8a10ff34624c1",
+      "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
+    }
+  ],
+  "rpms": [
+    {
+      "category": "rpm",
+      "file": "NetworkManager-1.54.3-5.el9_8.x86_64.rpm",
+      "nevra": "NetworkManager-1:1.54.3-5.el9_8.x86_64",
+      "package": "NetworkManager",
+      "sha256": "1b48e6b16b1ba21ac161c88c9887b021a67c77f24371803434c33b7e78405c7c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/NetworkManager-1.54.3-5.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "NetworkManager-libnm-1.54.3-5.el9_8.x86_64.rpm",
+      "nevra": "NetworkManager-libnm-1:1.54.3-5.el9_8.x86_64",
+      "package": "NetworkManager-libnm",
+      "sha256": "9feb8ff34fa71920b9c1a8ce5c611c81dc4ee1586290e3c542750a7c1caa9f6d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/NetworkManager-libnm-1.54.3-5.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "NetworkManager-team-1.54.3-5.el9_8.x86_64.rpm",
+      "nevra": "NetworkManager-team-1:1.54.3-5.el9_8.x86_64",
+      "package": "NetworkManager-team",
+      "sha256": "db8bd91a8772d8231cd09f0e754a6921080dc84b6ed290350bc62f5a5221d1b9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/NetworkManager-team-1.54.3-5.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "NetworkManager-tui-1.54.3-5.el9_8.x86_64.rpm",
+      "nevra": "NetworkManager-tui-1:1.54.3-5.el9_8.x86_64",
+      "package": "NetworkManager-tui",
+      "sha256": "4bca716095dfc8fc9009f50225b5ced8a30d8dc567446097a0a7e0793d24baa7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/NetworkManager-tui-1.54.3-5.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "acl-2.4.0-1.el9_8.x86_64.rpm",
+      "nevra": "acl-0:2.4.0-1.el9_8.x86_64",
+      "package": "acl",
+      "sha256": "ec46754c9646187acea06332851f70a6714769c7cee332504862b8027cf07ff0",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/a/acl-2.4.0-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "alternatives-1.24-2.el9.x86_64.rpm",
+      "nevra": "alternatives-0:1.24-2.el9.x86_64",
+      "package": "alternatives",
+      "sha256": "f86eaeb883bf10655478306b8aafbb5f14f1b1e37270b177ad59d600a4a86a9e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/a/alternatives-1.24-2.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "attr-2.6.0-1.el9_8.x86_64.rpm",
+      "nevra": "attr-0:2.6.0-1.el9_8.x86_64",
+      "package": "attr",
+      "sha256": "d23df955aee6f893dec80bb51cbb844dd8153b80d941f8febe072a3c523b0334",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/a/attr-2.6.0-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "audit-libs-3.1.5-8.el9.x86_64.rpm",
+      "nevra": "audit-libs-0:3.1.5-8.el9.x86_64",
+      "package": "audit-libs",
+      "sha256": "4c22958e01fa6f44140d4afb92418fd012f3dab04a9cbf441b9d931e94422ff7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/a/audit-libs-3.1.5-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "basesystem-11-13.el9.0.1.noarch.rpm",
+      "nevra": "basesystem-0:11-13.el9.0.1.noarch",
+      "package": "basesystem",
+      "sha256": "9f707e8d1046381c9b4a4df6a6674327df6ffe0298d48e1750972212c97aafad",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/b/basesystem-11-13.el9.0.1.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "bash-5.1.8-9.el9.x86_64.rpm",
+      "nevra": "bash-0:5.1.8-9.el9.x86_64",
+      "package": "bash",
+      "sha256": "2c1cfef019e5fecfe00d7a1cde3e34456871b447debb4b32c9aacd8045d3e1f6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/b/bash-5.1.8-9.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "bzip2-libs-1.0.8-11.el9.x86_64.rpm",
+      "nevra": "bzip2-libs-0:1.0.8-11.el9.x86_64",
+      "package": "bzip2-libs",
+      "sha256": "5fb0a15f1406a01d120dd468ee90a46fc76c10cecffe4750596e3f734eac4571",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/b/bzip2-libs-1.0.8-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "ca-certificates-2025.2.80_v9.0.305-91.el9.noarch.rpm",
+      "nevra": "ca-certificates-0:2025.2.80_v9.0.305-91.el9.noarch",
+      "package": "ca-certificates",
+      "sha256": "e9a23ff4a534bfbe07df445df2c37a4f7e80260ce6a4c07863443fc77df167a8",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/ca-certificates-2025.2.80_v9.0.305-91.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "chrony-4.8-1.el9.x86_64.rpm",
+      "nevra": "chrony-0:4.8-1.el9.x86_64",
+      "package": "chrony",
+      "sha256": "431a65095a9445b33994ccc31e839939915ca0e562cb69d9b76835694d8d482f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/chrony-4.8-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "container-selinux-2.245.0-1.el9.noarch.rpm",
+      "nevra": "container-selinux-4:2.245.0-1.el9.noarch",
+      "package": "container-selinux",
+      "sha256": "59a415e878fbd61b317a6cda5ec7aac07fa215cd1b11356b974ac28e6dc27dc7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages/c/container-selinux-2.245.0-1.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "coreutils-8.32-41.el9_8.1.x86_64.rpm",
+      "nevra": "coreutils-0:8.32-41.el9_8.1.x86_64",
+      "package": "coreutils",
+      "sha256": "db8cf9b01d7a5302ab618ece248a6ab5a21f3a8b6d7fbf7fabe1a54332ece664",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/coreutils-8.32-41.el9_8.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "coreutils-common-8.32-41.el9_8.1.x86_64.rpm",
+      "nevra": "coreutils-common-0:8.32-41.el9_8.1.x86_64",
+      "package": "coreutils-common",
+      "sha256": "112fe1d5bd1026374254feb3118a2dd49b727d5ba21305e9a67c33c36f86e822",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/coreutils-common-8.32-41.el9_8.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "cracklib-2.9.6-28.el9.x86_64.rpm",
+      "nevra": "cracklib-0:2.9.6-28.el9.x86_64",
+      "package": "cracklib",
+      "sha256": "bdbb75ee38932342f05008bcef9e1ce85bae5a037a0b4b1a697cda0c096e8012",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/cracklib-2.9.6-28.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "cracklib-dicts-2.9.6-28.el9.x86_64.rpm",
+      "nevra": "cracklib-dicts-0:2.9.6-28.el9.x86_64",
+      "package": "cracklib-dicts",
+      "sha256": "568f1036a8982ccdd2acf8c07846c94b95dbd6b148096fb969b5a7caaf3a495c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/cracklib-dicts-2.9.6-28.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "crypto-policies-20260224-1.gitea0f072.el9.noarch.rpm",
+      "nevra": "crypto-policies-0:20260224-1.gitea0f072.el9.noarch",
+      "package": "crypto-policies",
+      "sha256": "c2126b5911e11a930f109596b6d523acaadc3a080234a3f7ea8a21a753740557",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/crypto-policies-20260224-1.gitea0f072.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "cryptsetup-libs-2.8.1-3.el9.x86_64.rpm",
+      "nevra": "cryptsetup-libs-0:2.8.1-3.el9.x86_64",
+      "package": "cryptsetup-libs",
+      "sha256": "21a0f0dca33ce3ae80c79db37dd0e3343eebff58c7bc1c60930b04991d374701",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/cryptsetup-libs-2.8.1-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "curl-7.76.1-40.el9_8.5.x86_64.rpm",
+      "nevra": "curl-0:7.76.1-40.el9_8.5.x86_64",
+      "package": "curl",
+      "sha256": "1472cf5a56e7a00563a13aa32ce1d1c381d044754cb156c1cc686d385b7fea20",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/curl-7.76.1-40.el9_8.5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "cyrus-sasl-lib-2.1.27-22.el9_7.x86_64.rpm",
+      "nevra": "cyrus-sasl-lib-0:2.1.27-22.el9_7.x86_64",
+      "package": "cyrus-sasl-lib",
+      "sha256": "dce77bdef6637955b07de109615d76659cb15dd22a73ace9ceb828840aec3bd6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/c/cyrus-sasl-lib-2.1.27-22.el9_7.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "dbus-1.12.20-8.el9.x86_64.rpm",
+      "nevra": "dbus-1:1.12.20-8.el9.x86_64",
+      "package": "dbus",
+      "sha256": "f9ab612861c66de02ad73a0ffb56b2f83b71de2326ea595ffeac47eea517e18f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/dbus-1.12.20-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "dbus-broker-28-9.el9_8.x86_64.rpm",
+      "nevra": "dbus-broker-0:28-9.el9_8.x86_64",
+      "package": "dbus-broker",
+      "sha256": "fc1775336f65da4c997c0dd832065d679b13a603ab7679c826c9ac3a08bb4c6d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/dbus-broker-28-9.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "dbus-common-1.12.20-8.el9.noarch.rpm",
+      "nevra": "dbus-common-1:1.12.20-8.el9.noarch",
+      "package": "dbus-common",
+      "sha256": "1dd8709f43f63277d6305b2ef572cb091ef748ce1588a0bafc95866c397335b9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/dbus-common-1.12.20-8.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "dbus-libs-1.12.20-8.el9.x86_64.rpm",
+      "nevra": "dbus-libs-1:1.12.20-8.el9.x86_64",
+      "package": "dbus-libs",
+      "sha256": "ab81c1e16482f333aa285db120051b099b56661d4620f0f1af05f8e69126e97b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/dbus-libs-1.12.20-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "device-mapper-1.02.207-4.el9.1.x86_64.rpm",
+      "nevra": "device-mapper-9:1.02.207-4.el9.1.x86_64",
+      "package": "device-mapper",
+      "sha256": "752cce161260aecfeb017d56548224bf3b37fa91e33a807ac37e28c4a655785d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/device-mapper-1.02.207-4.el9.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "device-mapper-libs-1.02.207-4.el9.1.x86_64.rpm",
+      "nevra": "device-mapper-libs-9:1.02.207-4.el9.1.x86_64",
+      "package": "device-mapper-libs",
+      "sha256": "0640018f65402841563c3d935b3f15367a6c181fdecdb876524e157cd9aa2f92",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/device-mapper-libs-1.02.207-4.el9.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "diffutils-3.7-12.el9.x86_64.rpm",
+      "nevra": "diffutils-0:3.7-12.el9.x86_64",
+      "package": "diffutils",
+      "sha256": "d3932991f5d9b1e5f6326e376cf77f3f676bbf0c5657b2ddf1013bfdb4738a69",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/d/diffutils-3.7-12.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "elfutils-libelf-0.194-1.el9.rocky.0.1.x86_64.rpm",
+      "nevra": "elfutils-libelf-0:0.194-1.el9.rocky.0.1.x86_64",
+      "package": "elfutils-libelf",
+      "sha256": "0409e21273c5ad14f92b4f4b81feddce2e87835607c2793df39588e78cd872b6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/e/elfutils-libelf-0.194-1.el9.rocky.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "expat-2.5.0-6.el9_8.3.x86_64.rpm",
+      "nevra": "expat-0:2.5.0-6.el9_8.3.x86_64",
+      "package": "expat",
+      "sha256": "ab935b68aacb29a5e5bda1236e6cb6efc70380322a73baa1824efddeb6d7dc97",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/e/expat-2.5.0-6.el9_8.3.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "filesystem-3.16-5.el9.x86_64.rpm",
+      "nevra": "filesystem-0:3.16-5.el9.x86_64",
+      "package": "filesystem",
+      "sha256": "cabe98453b9517158c5a045cfec0418b747c874da2717d183f4296f240bdf8d9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/f/filesystem-3.16-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "findutils-4.8.0-7.el9.x86_64.rpm",
+      "nevra": "findutils-1:4.8.0-7.el9.x86_64",
+      "package": "findutils",
+      "sha256": "1c9c28792695c61ced41da9337f323111973ba7eea938c3c11944532e384a662",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/f/findutils-4.8.0-7.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "firewalld-1.3.4-20.el9_8.noarch.rpm",
+      "nevra": "firewalld-0:1.3.4-20.el9_8.noarch",
+      "package": "firewalld",
+      "sha256": "8a4821b6ad2ecd0e622f543df46e4e2f42959c22e6172466e571a171acfe1286",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/f/firewalld-1.3.4-20.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "firewalld-filesystem-1.3.4-20.el9_8.noarch.rpm",
+      "nevra": "firewalld-filesystem-0:1.3.4-20.el9_8.noarch",
+      "package": "firewalld-filesystem",
+      "sha256": "a21ceef05ea3baee55f35a2ccaf858d08957494fda808469cb4835587e109eed",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/f/firewalld-filesystem-1.3.4-20.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gawk-5.1.0-6.el9.x86_64.rpm",
+      "nevra": "gawk-0:5.1.0-6.el9.x86_64",
+      "package": "gawk",
+      "sha256": "eaca68b315d6c2ef5ec30deaf9b7c38401e2ed0169972d158fd88b917e8a47dc",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gawk-5.1.0-6.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gawk-all-langpacks-5.1.0-6.el9.x86_64.rpm",
+      "nevra": "gawk-all-langpacks-0:5.1.0-6.el9.x86_64",
+      "package": "gawk-all-langpacks",
+      "sha256": "6c30bc197b6bd129d814a55a107fd783377f056deab292bb3563865834513533",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages/g/gawk-all-langpacks-5.1.0-6.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gdbm-libs-1.23-1.el9.x86_64.rpm",
+      "nevra": "gdbm-libs-1:1.23-1.el9.x86_64",
+      "package": "gdbm-libs",
+      "sha256": "bb36dd4e2083f62f26f9e942dd88f72bdbf5a8b67404833ddbbf1a1d6d8bd29f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gdbm-libs-1.23-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glib2-2.68.4-19.el9_8.10.x86_64.rpm",
+      "nevra": "glib2-0:2.68.4-19.el9_8.10.x86_64",
+      "package": "glib2",
+      "sha256": "953fe80bbd71428254d5950c4c4adfa19bce99477dd77a7dffe5a6c1054634c7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glib2-2.68.4-19.el9_8.10.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glibc-2.34-275.el9_8.x86_64.rpm",
+      "nevra": "glibc-0:2.34-275.el9_8.x86_64",
+      "package": "glibc",
+      "sha256": "8094d98d60e676de0eee5710d69fce571dcd34350d19339128c024299720e4e2",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glibc-2.34-275.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glibc-common-2.34-275.el9_8.x86_64.rpm",
+      "nevra": "glibc-common-0:2.34-275.el9_8.x86_64",
+      "package": "glibc-common",
+      "sha256": "243156253aaa83cf19e0475583f56f4b9759037919276f5677f8b6cbb9b269c9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glibc-common-2.34-275.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glibc-gconv-extra-2.34-275.el9_8.x86_64.rpm",
+      "nevra": "glibc-gconv-extra-0:2.34-275.el9_8.x86_64",
+      "package": "glibc-gconv-extra",
+      "sha256": "f9871f4eda24be53e5d88882066975084a21fcedc6d173111253b0735421d28c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glibc-gconv-extra-2.34-275.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glibc-langpack-en-2.34-275.el9_8.x86_64.rpm",
+      "nevra": "glibc-langpack-en-0:2.34-275.el9_8.x86_64",
+      "package": "glibc-langpack-en",
+      "sha256": "9f11192f3faa1a29def4b866ac89dd1a520d6a563f93e48a5cf7b81ed066c77f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glibc-langpack-en-2.34-275.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "glibc-minimal-langpack-2.34-275.el9_8.x86_64.rpm",
+      "nevra": "glibc-minimal-langpack-0:2.34-275.el9_8.x86_64",
+      "package": "glibc-minimal-langpack",
+      "sha256": "6722cd0ca8bcf59d038e81a4ec9683c93d3f89e3014db83b197433a1ad002586",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/glibc-minimal-langpack-2.34-275.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gmp-6.2.0-13.el9.x86_64.rpm",
+      "nevra": "gmp-1:6.2.0-13.el9.x86_64",
+      "package": "gmp",
+      "sha256": "ca72ae69218b96c43c82bdc35dd1078300692714db76d21c7f7dedd8268af799",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gmp-6.2.0-13.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gnutls-3.8.10-8.el9_8.x86_64.rpm",
+      "nevra": "gnutls-0:3.8.10-8.el9_8.x86_64",
+      "package": "gnutls",
+      "sha256": "995cb723525e87dbc580553a75dd448e6069d2f450b6836c8f533db87411b279",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gnutls-3.8.10-8.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gobject-introspection-1.68.0-11.el9.x86_64.rpm",
+      "nevra": "gobject-introspection-0:1.68.0-11.el9.x86_64",
+      "package": "gobject-introspection",
+      "sha256": "0bdb038fcd75126324e7a5a9c4ef18f487c1af764dfc9c600994ca1b04c605d3",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gobject-introspection-1.68.0-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "grep-3.6-5.el9.x86_64.rpm",
+      "nevra": "grep-0:3.6-5.el9.x86_64",
+      "package": "grep",
+      "sha256": "9c1beaec9264e08459f9097c9bd58aa6118293df47d6f07f8054054cc7c40544",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/grep-3.6-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "gzip-1.12-2.el9_8.x86_64.rpm",
+      "nevra": "gzip-0:1.12-2.el9_8.x86_64",
+      "package": "gzip",
+      "sha256": "49f379593425ecfc94b07df6021fb2e87ba14980edf01371f3ff3e85954e469a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/g/gzip-1.12-2.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "iproute-6.17.0-2.el9.x86_64.rpm",
+      "nevra": "iproute-0:6.17.0-2.el9.x86_64",
+      "package": "iproute",
+      "sha256": "85da7484cf9fae2aefe2eb01146359657129bf6700b424e2d042a400970a51cd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/iproute-6.17.0-2.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "ipset-7.11-11.el9_5.x86_64.rpm",
+      "nevra": "ipset-0:7.11-11.el9_5.x86_64",
+      "package": "ipset",
+      "sha256": "c9cc5bcf117624557112398a4881634ca1211974ef935a3e669ec266a1e856f7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/ipset-7.11-11.el9_5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "ipset-libs-7.11-11.el9_5.x86_64.rpm",
+      "nevra": "ipset-libs-0:7.11-11.el9_5.x86_64",
+      "package": "ipset-libs",
+      "sha256": "14c0f17a7317f25e3e947d909e948d12caca780c686fd8b7c6e51940de2d464f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/ipset-libs-7.11-11.el9_5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "iptables-libs-1.8.10-11.el9_5.x86_64.rpm",
+      "nevra": "iptables-libs-0:1.8.10-11.el9_5.x86_64",
+      "package": "iptables-libs",
+      "sha256": "3d9571eeda3a537660d7955bec839c59ec48a59423f49b23e52972a859fceda3",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/iptables-libs-1.8.10-11.el9_5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "iptables-nft-1.8.10-11.el9_5.x86_64.rpm",
+      "nevra": "iptables-nft-0:1.8.10-11.el9_5.x86_64",
+      "package": "iptables-nft",
+      "sha256": "6934590699b76caf0403253766510d397d2314cdec13e10c54b38f7d3d79e112",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/iptables-nft-1.8.10-11.el9_5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "iputils-20210202-15.el9.x86_64.rpm",
+      "nevra": "iputils-0:20210202-15.el9.x86_64",
+      "package": "iputils",
+      "sha256": "bbcaea3ab16e4175f52c09452558de7bc6209a7eed788742b5766f61d0b65b1f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/i/iputils-20210202-15.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "jansson-2.14-1.el9.0.1.x86_64.rpm",
+      "nevra": "jansson-0:2.14-1.el9.0.1.x86_64",
+      "package": "jansson",
+      "sha256": "930f3518fb038f6ef27bd3a0cc0960825a7294c94ea213c7707df942699a8f92",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/j/jansson-2.14-1.el9.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "jq-1.6-19.el9_8.2.x86_64.rpm",
+      "nevra": "jq-0:1.6-19.el9_8.2.x86_64",
+      "package": "jq",
+      "sha256": "c5bc6d4bb7474bc4c83056b9ba2cfbf3cbde2e9b224ec73759459fd8449b6a29",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/j/jq-1.6-19.el9_8.2.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "json-c-0.14-11.el9.x86_64.rpm",
+      "nevra": "json-c-0:0.14-11.el9.x86_64",
+      "package": "json-c",
+      "sha256": "e2e487e4b6d48595612b0785963f0a4294e5dbea8500284ff0df4571afe79c8f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/j/json-c-0.14-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "kbd-2.4.0-12.el9_8.x86_64.rpm",
+      "nevra": "kbd-0:2.4.0-12.el9_8.x86_64",
+      "package": "kbd",
+      "sha256": "f70d6ab14b2c2d27ba78d5ffc42697c170d3b0618103c12e2379c6ae1d0f4d8a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/kbd-2.4.0-12.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "kbd-legacy-2.4.0-12.el9_8.noarch.rpm",
+      "nevra": "kbd-legacy-0:2.4.0-12.el9_8.noarch",
+      "package": "kbd-legacy",
+      "sha256": "c515b5181449c4eadb7520c6dcc40aced170cb816e2ad7af7414ca5ec7db72da",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/kbd-legacy-2.4.0-12.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "kbd-misc-2.4.0-12.el9_8.noarch.rpm",
+      "nevra": "kbd-misc-0:2.4.0-12.el9_8.noarch",
+      "package": "kbd-misc",
+      "sha256": "a9686ef04eee7c11331fa5675e4bdcd702f66abb2272e38115ff1dd09fc8995f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/kbd-misc-2.4.0-12.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "keyutils-libs-1.6.3-1.el9.x86_64.rpm",
+      "nevra": "keyutils-libs-0:1.6.3-1.el9.x86_64",
+      "package": "keyutils-libs",
+      "sha256": "347a9d44e0271c1ff6f511fe493e736b3d36fde683360ccc51c852ab91810b16",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/keyutils-libs-1.6.3-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "kmod-28-11.el9.x86_64.rpm",
+      "nevra": "kmod-0:28-11.el9.x86_64",
+      "package": "kmod",
+      "sha256": "d60b35d04b0f9aec792047990fa6c6ad7b57e8531dfa307ce1987301567fb2a0",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/kmod-28-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "kmod-libs-28-11.el9.x86_64.rpm",
+      "nevra": "kmod-libs-0:28-11.el9.x86_64",
+      "package": "kmod-libs",
+      "sha256": "f994cf4f4d1bea1b5ce9b3f1eb7ec01eba9562cdaa3c7af9fd58fe8771720916",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/kmod-libs-28-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "krb5-libs-1.21.1-10.el9_8.x86_64.rpm",
+      "nevra": "krb5-libs-0:1.21.1-10.el9_8.x86_64",
+      "package": "krb5-libs",
+      "sha256": "0040de942069f8f8de50352fe1efd535d113033074e0deddbe15ba448131febd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/k/krb5-libs-1.21.1-10.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libacl-2.4.0-1.el9_8.x86_64.rpm",
+      "nevra": "libacl-0:2.4.0-1.el9_8.x86_64",
+      "package": "libacl",
+      "sha256": "05e7c03ad5ec358bc850ce3c7ff8164ad3d30a12f4623b2d26d277e1cfffb7f6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libacl-2.4.0-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libarchive-3.5.3-11.el9_8.x86_64.rpm",
+      "nevra": "libarchive-0:3.5.3-11.el9_8.x86_64",
+      "package": "libarchive",
+      "sha256": "032be918057d604e19d47f7684f2d5318020bcbfe7ba1d7fd1cc66d811468d69",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libarchive-3.5.3-11.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libattr-2.6.0-1.el9_8.x86_64.rpm",
+      "nevra": "libattr-0:2.6.0-1.el9_8.x86_64",
+      "package": "libattr",
+      "sha256": "015dbf4fe00714a4332aaffc18eb8980c205c8e864314c808ea08bd607f8020e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libattr-2.6.0-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libblkid-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "libblkid-0:2.37.4-25.el9.x86_64",
+      "package": "libblkid",
+      "sha256": "16723cf2603ec80a3e655301d58a256b50e6503a381b238d73c67b7ff1f8acc4",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libblkid-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libbpf-1.5.0-3.el9.x86_64.rpm",
+      "nevra": "libbpf-2:1.5.0-3.el9.x86_64",
+      "package": "libbpf",
+      "sha256": "3ec88205f695c54709581e8623a65decd8b5de769c266c70e8e1dba593c34f92",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libbpf-1.5.0-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libbrotli-1.0.9-9.el9_7.x86_64.rpm",
+      "nevra": "libbrotli-0:1.0.9-9.el9_7.x86_64",
+      "package": "libbrotli",
+      "sha256": "ad9f9d5fe07e9944dbfc6d28b9955c9b220f1887fb46bf45bbedb179373659c6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libbrotli-1.0.9-9.el9_7.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libcap-2.48-10.el9_7.1.x86_64.rpm",
+      "nevra": "libcap-0:2.48-10.el9_7.1.x86_64",
+      "package": "libcap",
+      "sha256": "e6152b9a1d44f9903d4e6c16dc778b40566b0cd66dcbbeac5b21fa84c3a38246",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libcap-2.48-10.el9_7.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libcap-ng-0.8.2-7.el9.x86_64.rpm",
+      "nevra": "libcap-ng-0:0.8.2-7.el9.x86_64",
+      "package": "libcap-ng",
+      "sha256": "eb8a42e8ac59905dfa2aa1530e4fb7a0b994ff4ae5ee79dd4557f972f1316ae8",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libcap-ng-0.8.2-7.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libcap-ng-python3-0.8.2-7.el9.x86_64.rpm",
+      "nevra": "libcap-ng-python3-0:0.8.2-7.el9.x86_64",
+      "package": "libcap-ng-python3",
+      "sha256": "a922e5f570adf9aa5ba03c4599df0993faaf1780150534f5224f770aaad7f1e6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages/l/libcap-ng-python3-0.8.2-7.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libcom_err-1.46.5-8.el9.x86_64.rpm",
+      "nevra": "libcom_err-0:1.46.5-8.el9.x86_64",
+      "package": "libcom_err",
+      "sha256": "efe6cf30cec41b29ebd8cbcdff587566a4567156420d9166d7cf1e8a365c9c4b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libcom_err-1.46.5-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libcurl-7.76.1-40.el9_8.5.x86_64.rpm",
+      "nevra": "libcurl-0:7.76.1-40.el9_8.5.x86_64",
+      "package": "libcurl",
+      "sha256": "79664279c893ed1ee07526e6c9c79d06a31316c38ac07dbb157b16a81cf8171b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libcurl-7.76.1-40.el9_8.5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libdaemon-0.14-23.el9.x86_64.rpm",
+      "nevra": "libdaemon-0:0.14-23.el9.x86_64",
+      "package": "libdaemon",
+      "sha256": "2976629fe52f7bff3ebe5635170eee91a988592788dd462a88a2b92efa49ae89",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libdaemon-0.14-23.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libdb-5.3.28-57.el9_6.x86_64.rpm",
+      "nevra": "libdb-0:5.3.28-57.el9_6.x86_64",
+      "package": "libdb",
+      "sha256": "d1eddd3b0bbbc9ff5e0b6e985093ae0f09f9b4a11257d871e83542654d5400bc",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libdb-5.3.28-57.el9_6.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libeconf-0.4.1-7.el9_8.x86_64.rpm",
+      "nevra": "libeconf-0:0.4.1-7.el9_8.x86_64",
+      "package": "libeconf",
+      "sha256": "cf817dde9b9cdfefdb0d48bf6d953c3d8e86bacc8778cffd22ef752c47c2a19b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libeconf-0.4.1-7.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libedit-3.1-39.20210216cvs.el9.x86_64.rpm",
+      "nevra": "libedit-0:3.1-39.20210216cvs.el9.x86_64",
+      "package": "libedit",
+      "sha256": "0ca45d4d11a2edf1dac22b85e803b1da1270060c792068e7200610521e688abe",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libedit-3.1-39.20210216cvs.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libevent-2.1.13-1.el9_8.x86_64.rpm",
+      "nevra": "libevent-0:2.1.13-1.el9_8.x86_64",
+      "package": "libevent",
+      "sha256": "3f5dec4cb901f21e0cd20bdca2a7a30cf2cc1973faa79896c19676dcb75e563b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libevent-2.1.13-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libfdisk-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "libfdisk-0:2.37.4-25.el9.x86_64",
+      "package": "libfdisk",
+      "sha256": "126b1ef3ed3f179a830dd1c1cf0c346279168b178ea99cc83f19c243e248692d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libfdisk-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libffi-3.4.2-8.el9.x86_64.rpm",
+      "nevra": "libffi-0:3.4.2-8.el9.x86_64",
+      "package": "libffi",
+      "sha256": "1bdb4b3b047169bc728c2612b71c31b79bb6f823f50134629bf650dcbf21565a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libffi-3.4.2-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libgcc-11.5.0-14.el9.x86_64.rpm",
+      "nevra": "libgcc-0:11.5.0-14.el9.x86_64",
+      "package": "libgcc",
+      "sha256": "18bf29de0a554f8f8fccce443801a53a2e9fc7277f6a50c6768707716c9793d9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libgcc-11.5.0-14.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libgcrypt-1.10.0-13.el9_8.x86_64.rpm",
+      "nevra": "libgcrypt-0:1.10.0-13.el9_8.x86_64",
+      "package": "libgcrypt",
+      "sha256": "7f1640e5c53049dfcc180ae98973855d660eae40636312f844eb8f356246a20e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libgcrypt-1.10.0-13.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libgpg-error-1.42-5.el9.x86_64.rpm",
+      "nevra": "libgpg-error-0:1.42-5.el9.x86_64",
+      "package": "libgpg-error",
+      "sha256": "7d48fb4ca1e935a491cb02a85abdd5b91b329168962c1b11ca434c2b80c079fa",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libgpg-error-1.42-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libidn2-2.3.0-7.el9.x86_64.rpm",
+      "nevra": "libidn2-0:2.3.0-7.el9.x86_64",
+      "package": "libidn2",
+      "sha256": "be32d8ba7ff8cf790c15d89c5ea18747d7fcc0126782a0e80f15901bb9889b31",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libidn2-2.3.0-7.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libmnl-1.0.4-16.el9_4.x86_64.rpm",
+      "nevra": "libmnl-0:1.0.4-16.el9_4.x86_64",
+      "package": "libmnl",
+      "sha256": "de67327a302fe3ec5a33d26f600e6450c9b4de408013fe5ca7747cade407131f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libmnl-1.0.4-16.el9_4.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libmount-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "libmount-0:2.37.4-25.el9.x86_64",
+      "package": "libmount",
+      "sha256": "1523f0e3f959a026500edeb514e19f57108b7dbd1dd5775e60f52ebfe6ac08c8",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libmount-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libndp-1.9-1.el9.x86_64.rpm",
+      "nevra": "libndp-0:1.9-1.el9.x86_64",
+      "package": "libndp",
+      "sha256": "327acd159405481a0f4d839f62371956db8ac5046594fdab1f3444b40d3a25dd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libndp-1.9-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnetfilter_conntrack-1.0.9-1.el9.x86_64.rpm",
+      "nevra": "libnetfilter_conntrack-0:1.0.9-1.el9.x86_64",
+      "package": "libnetfilter_conntrack",
+      "sha256": "162fdb1bfe7217bd77f06c19ccf45b274136b434101838ddcafff638fd83cf62",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnetfilter_conntrack-1.0.9-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnfnetlink-1.0.1-23.el9_5.x86_64.rpm",
+      "nevra": "libnfnetlink-0:1.0.1-23.el9_5.x86_64",
+      "package": "libnfnetlink",
+      "sha256": "1ed133b3c950dc1827b7b6139dbe29a59c351679a9a40dcb2c4114e76b810d34",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnfnetlink-1.0.1-23.el9_5.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnftnl-1.2.6-4.el9_4.x86_64.rpm",
+      "nevra": "libnftnl-0:1.2.6-4.el9_4.x86_64",
+      "package": "libnftnl",
+      "sha256": "53eb14c0ee34f68341db9a096520b4f86b554a109a28f1c9154b07331d8ce3c0",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnftnl-1.2.6-4.el9_4.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnghttp2-1.43.0-6.el9_8.2.x86_64.rpm",
+      "nevra": "libnghttp2-0:1.43.0-6.el9_8.2.x86_64",
+      "package": "libnghttp2",
+      "sha256": "ee018918e2ce36f0e1c1857b7f999bd472ab3538466b039f19452b8f0f9ab21c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnghttp2-1.43.0-6.el9_8.2.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnl3-3.11.0-1.el9.x86_64.rpm",
+      "nevra": "libnl3-0:3.11.0-1.el9.x86_64",
+      "package": "libnl3",
+      "sha256": "1e6f1d341a72c7a4e07ea4c13038184d349903481f1aae8a2fd6d328a88d57a5",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnl3-3.11.0-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libnl3-cli-3.11.0-1.el9.x86_64.rpm",
+      "nevra": "libnl3-cli-0:3.11.0-1.el9.x86_64",
+      "package": "libnl3-cli",
+      "sha256": "af2f19bf668693a455d0160926e10501e880529fb573f84f3b87c70ae49e4420",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libnl3-cli-3.11.0-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libpsl-0.21.1-5.el9.x86_64.rpm",
+      "nevra": "libpsl-0:0.21.1-5.el9.x86_64",
+      "package": "libpsl",
+      "sha256": "30553c652451362ebf346a98ff45fa2417dc25a9a644401b4d86d9000c0346a9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libpsl-0.21.1-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libpwquality-1.4.4-8.el9.x86_64.rpm",
+      "nevra": "libpwquality-0:1.4.4-8.el9.x86_64",
+      "package": "libpwquality",
+      "sha256": "d572dfa42d099b58e29fc0c1431c80e1baa4d0555265f79b1a346ebe99ac9ae1",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libpwquality-1.4.4-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libseccomp-2.5.2-2.el9.x86_64.rpm",
+      "nevra": "libseccomp-0:2.5.2-2.el9.x86_64",
+      "package": "libseccomp",
+      "sha256": "c5043228059ffb4e2ef855671909b22bd42784907979a27d25ca9f5163408ad1",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libseccomp-2.5.2-2.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libselinux-3.6-3.el9.x86_64.rpm",
+      "nevra": "libselinux-0:3.6-3.el9.x86_64",
+      "package": "libselinux",
+      "sha256": "52f36acacd851901745f7729b7bce31ef7e5fa0fa250a0ce653d4e76dce02664",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libselinux-3.6-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libselinux-utils-3.6-3.el9.x86_64.rpm",
+      "nevra": "libselinux-utils-0:3.6-3.el9.x86_64",
+      "package": "libselinux-utils",
+      "sha256": "0903fc2340c50a16178e8260dd6fe1f48578cf604088eb91f8aa591b441b1127",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libselinux-utils-3.6-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libsemanage-3.6-5.el9_6.x86_64.rpm",
+      "nevra": "libsemanage-0:3.6-5.el9_6.x86_64",
+      "package": "libsemanage",
+      "sha256": "e860232d6250dc38958018f06133f748a7bc93d4439df4a760d30ed889b38455",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libsemanage-3.6-5.el9_6.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libsepol-3.6-3.el9.x86_64.rpm",
+      "nevra": "libsepol-0:3.6-3.el9.x86_64",
+      "package": "libsepol",
+      "sha256": "f2f2f1461334547ba64c41ed7666dc3b8014d5a636edc7d22cfeab9689c1f8be",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libsepol-3.6-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libsigsegv-2.13-4.el9.x86_64.rpm",
+      "nevra": "libsigsegv-0:2.13-4.el9.x86_64",
+      "package": "libsigsegv",
+      "sha256": "a80701bd3f67994493b1a14e043d9212032c86fd24374c309cf2b7006900f4da",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libsigsegv-2.13-4.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libsmartcols-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "libsmartcols-0:2.37.4-25.el9.x86_64",
+      "package": "libsmartcols",
+      "sha256": "be4488628bb31823ee6642d546f005ccf7216969644c80e21c32325ba3b87243",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libsmartcols-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libssh-0.10.4-19.el9_8.x86_64.rpm",
+      "nevra": "libssh-0:0.10.4-19.el9_8.x86_64",
+      "package": "libssh",
+      "sha256": "7861a0af920045bd7e5d4212129d266d2eb78f228e31a75936c8171b0bec9271",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libssh-0.10.4-19.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libssh-config-0.10.4-19.el9_8.noarch.rpm",
+      "nevra": "libssh-config-0:0.10.4-19.el9_8.noarch",
+      "package": "libssh-config",
+      "sha256": "887be601839e2d5342a922222c6ec6b0657e3488c9014d2a81145cdaaa414b9e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libssh-config-0.10.4-19.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libtasn1-4.16.0-10.el9_8.x86_64.rpm",
+      "nevra": "libtasn1-0:4.16.0-10.el9_8.x86_64",
+      "package": "libtasn1",
+      "sha256": "c8be3c9ad78268e5fcf4cc7368dcaf803108e674e5704d69934e73b9680f0b28",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libtasn1-4.16.0-10.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libteam-1.31-16.el9_1.x86_64.rpm",
+      "nevra": "libteam-0:1.31-16.el9_1.x86_64",
+      "package": "libteam",
+      "sha256": "4c072fa54a5af2770c23d59ead51bfa0fe2bf7c0efb03e4fc82cdb1ed10d1923",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libteam-1.31-16.el9_1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libtool-ltdl-2.4.6-46.el9.x86_64.rpm",
+      "nevra": "libtool-ltdl-0:2.4.6-46.el9.x86_64",
+      "package": "libtool-ltdl",
+      "sha256": "2225f18e23d3b4b9e886c1048c93c23c74c32753cb74112812db1f2a688eed53",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libtool-ltdl-2.4.6-46.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libunistring-0.9.10-15.el9.x86_64.rpm",
+      "nevra": "libunistring-0:0.9.10-15.el9.x86_64",
+      "package": "libunistring",
+      "sha256": "7e8b90a282ec310de6766619056296bdf666f3040f22cff211cd52710b39ece5",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libunistring-0.9.10-15.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libutempter-1.2.1-6.el9.x86_64.rpm",
+      "nevra": "libutempter-0:1.2.1-6.el9.x86_64",
+      "package": "libutempter",
+      "sha256": "146dca82c8f1df8135ae7d5cc4aa4af35e02e60f1f61143badc9c5f7ff5029b9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libutempter-1.2.1-6.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libuuid-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "libuuid-0:2.37.4-25.el9.x86_64",
+      "package": "libuuid",
+      "sha256": "afc71c4a219f1d7940f45b55d33f9db7937a8e78b3f471172c7c787bb9dd8e66",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libuuid-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libverto-0.3.2-3.el9.x86_64.rpm",
+      "nevra": "libverto-0:0.3.2-3.el9.x86_64",
+      "package": "libverto",
+      "sha256": "f430f1b95b7467c461c7a745eba07beab00306984f2f21ecfcc04f37100405d1",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libverto-0.3.2-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libxcrypt-4.4.18-3.el9.x86_64.rpm",
+      "nevra": "libxcrypt-0:4.4.18-3.el9.x86_64",
+      "package": "libxcrypt",
+      "sha256": "e3c178ed2e04ac25699d5af612fad51694a23f5d544b72cab2f65d35b8db5f28",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libxcrypt-4.4.18-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libxcrypt-compat-4.4.18-3.el9.x86_64.rpm",
+      "nevra": "libxcrypt-compat-0:4.4.18-3.el9.x86_64",
+      "package": "libxcrypt-compat",
+      "sha256": "b4c7367dfae8a3d43b33c8bc098d77931e15df21c4cde0f3727c4e5478c37829",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages/l/libxcrypt-compat-4.4.18-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libxml2-2.9.13-14.el9_8.4.x86_64.rpm",
+      "nevra": "libxml2-0:2.9.13-14.el9_8.4.x86_64",
+      "package": "libxml2",
+      "sha256": "2fdfc8d03217a44593e51988dbe2a3c97b246fdfa909b9c4138fe926407fef51",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libxml2-2.9.13-14.el9_8.4.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "libzstd-1.5.5-1.el9.x86_64.rpm",
+      "nevra": "libzstd-0:1.5.5-1.el9.x86_64",
+      "package": "libzstd",
+      "sha256": "c5c8b675cfad29fee013a84a2f70bcb958f400b654ff63455bb80597daae86ab",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/libzstd-1.5.5-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "lua-libs-5.4.4-4.el9.x86_64.rpm",
+      "nevra": "lua-libs-0:5.4.4-4.el9.x86_64",
+      "package": "lua-libs",
+      "sha256": "164f78bdc4b37210c54752761d48a229c935824503d5c591c020e447318a1749",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/lua-libs-5.4.4-4.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "lz4-libs-1.9.3-5.el9.x86_64.rpm",
+      "nevra": "lz4-libs-0:1.9.3-5.el9.x86_64",
+      "package": "lz4-libs",
+      "sha256": "60f82f4c3f76a543ab247acb37cb439d9de9e40c410ac2f315d6805717d6283e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/l/lz4-libs-1.9.3-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "mpfr-4.1.0-10.el9.x86_64.rpm",
+      "nevra": "mpfr-0:4.1.0-10.el9.x86_64",
+      "package": "mpfr",
+      "sha256": "4fed42bddadf9e8da35a2767c91100b6630ec3236dce101a8345e801e34baa4e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/m/mpfr-4.1.0-10.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "ncurses-base-6.2-12.20210508.el9.noarch.rpm",
+      "nevra": "ncurses-base-0:6.2-12.20210508.el9.noarch",
+      "package": "ncurses-base",
+      "sha256": "2116eef9fcf217ba902c7e4d682a4c6fa182dc6d106e8d573d65461f0989bb05",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/ncurses-base-6.2-12.20210508.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "ncurses-libs-6.2-12.20210508.el9.x86_64.rpm",
+      "nevra": "ncurses-libs-0:6.2-12.20210508.el9.x86_64",
+      "package": "ncurses-libs",
+      "sha256": "7f2d8058b975c753388a7180e167c9c610060e6d20bd2212f39d5e7a7d850561",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/ncurses-libs-6.2-12.20210508.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "nettle-3.10.1-1.el9.x86_64.rpm",
+      "nevra": "nettle-0:3.10.1-1.el9.x86_64",
+      "package": "nettle",
+      "sha256": "25182aead477d29ed365a0d0663e91ffa54710e617615ea2b91c7abd9d56b4fd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/nettle-3.10.1-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "newt-0.52.21-11.el9.x86_64.rpm",
+      "nevra": "newt-0:0.52.21-11.el9.x86_64",
+      "package": "newt",
+      "sha256": "608c034c30ee82d1e022ba1ea8f3a22829a08a30b4ce137e1020c4735bca800c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/newt-0.52.21-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "nftables-1.0.9-9.el9_8.x86_64.rpm",
+      "nevra": "nftables-1:1.0.9-9.el9_8.x86_64",
+      "package": "nftables",
+      "sha256": "a09d489f6e6f3a4c7724377264b04245476f1f12132632b995bb765f2d104e99",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/n/nftables-1.0.9-9.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "oniguruma-6.9.6-1.el9.6.x86_64.rpm",
+      "nevra": "oniguruma-0:6.9.6-1.el9.6.x86_64",
+      "package": "oniguruma",
+      "sha256": "334114413718f1f081f8f6d4a6a32b17416443a1bdb0b9d65091626478f6e0a1",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/o/oniguruma-6.9.6-1.el9.6.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "openldap-2.6.8-4.el9.0.1.x86_64.rpm",
+      "nevra": "openldap-0:2.6.8-4.el9.0.1.x86_64",
+      "package": "openldap",
+      "sha256": "d8b53def51bfdc720f0e5be117498148bb22543e0627fd1f10b7ac3f11fea09a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/o/openldap-2.6.8-4.el9.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "openssl-3.5.8-1.el9_8.x86_64.rpm",
+      "nevra": "openssl-1:3.5.8-1.el9_8.x86_64",
+      "package": "openssl",
+      "sha256": "e13b15ccae518b70605fb71ae84cf67144b19980bd14a847805c78d025d4bcaa",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/o/openssl-3.5.8-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "openssl-fips-provider-3.5.8-1.el9_8.x86_64.rpm",
+      "nevra": "openssl-fips-provider-1:3.5.8-1.el9_8.x86_64",
+      "package": "openssl-fips-provider",
+      "sha256": "87cd39db833dcff0107e7021a4232e5600f410c3dd140c0dae3a6b6f0e56aa8e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/o/openssl-fips-provider-3.5.8-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "openssl-libs-3.5.8-1.el9_8.x86_64.rpm",
+      "nevra": "openssl-libs-1:3.5.8-1.el9_8.x86_64",
+      "package": "openssl-libs",
+      "sha256": "fe64d944374d2f236b21492cf82662281397b203f7c281f0c37609e9cc256104",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/o/openssl-libs-3.5.8-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "p11-kit-0.26.4-1.el9_8.x86_64.rpm",
+      "nevra": "p11-kit-0:0.26.4-1.el9_8.x86_64",
+      "package": "p11-kit",
+      "sha256": "1a1fe3ea461295cfdffa8eba7167012a40c75e4ae7ae59e29d7e12d30bb67f5e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/p11-kit-0.26.4-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "p11-kit-trust-0.26.4-1.el9_8.x86_64.rpm",
+      "nevra": "p11-kit-trust-0:0.26.4-1.el9_8.x86_64",
+      "package": "p11-kit-trust",
+      "sha256": "ecfe8f98ead310fa65c61c854c347262ce8d51ab5f15c37b54bd34c410cecefd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/p11-kit-trust-0.26.4-1.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "pam-1.5.1-28.el9_8.1.x86_64.rpm",
+      "nevra": "pam-0:1.5.1-28.el9_8.1.x86_64",
+      "package": "pam",
+      "sha256": "5182eec4d9a58c3958ab91ee8879d762d5c813a8f8fbebc6a75f62463e5675cc",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/pam-1.5.1-28.el9_8.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "pcre-8.44-4.el9.x86_64.rpm",
+      "nevra": "pcre-0:8.44-4.el9.x86_64",
+      "package": "pcre",
+      "sha256": "d167b64017c547bd39280de99875a7a32a4f869431d9c6fdad46d98ee9480c43",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/pcre-8.44-4.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "pcre2-10.40-6.el9.x86_64.rpm",
+      "nevra": "pcre2-0:10.40-6.el9.x86_64",
+      "package": "pcre2",
+      "sha256": "a63b04da521e99d3b5b3938e29dfd33b1f367735caa8b2986c5cf053871127ee",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/pcre2-10.40-6.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "pcre2-syntax-10.40-6.el9.noarch.rpm",
+      "nevra": "pcre2-syntax-0:10.40-6.el9.noarch",
+      "package": "pcre2-syntax",
+      "sha256": "833ca3aac79f43a85cc2152bc6ae72a7dc52b7e8212481a03a2516a369e522f2",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/pcre2-syntax-10.40-6.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "policycoreutils-3.6-5.el9.x86_64.rpm",
+      "nevra": "policycoreutils-0:3.6-5.el9.x86_64",
+      "package": "policycoreutils",
+      "sha256": "b7839494348fc03c0992ee17dda50a0b58dc74b134c3650cdc1cd0ede8b11595",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/policycoreutils-3.6-5.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "popt-1.18-8.el9.x86_64.rpm",
+      "nevra": "popt-0:1.18-8.el9.x86_64",
+      "package": "popt",
+      "sha256": "4306e6bb950191170669ccbfe904bf943a94736e910179f9b0db962148fe4bcf",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/popt-1.18-8.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "psmisc-23.4-3.el9.x86_64.rpm",
+      "nevra": "psmisc-0:23.4-3.el9.x86_64",
+      "package": "psmisc",
+      "sha256": "c6bb80487a9518ffd9956018f7577f93d011d28077ca4453a97701a181269745",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/psmisc-23.4-3.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "publicsuffix-list-dafsa-20210518-3.el9.noarch.rpm",
+      "nevra": "publicsuffix-list-dafsa-0:20210518-3.el9.noarch",
+      "package": "publicsuffix-list-dafsa",
+      "sha256": "e21742695de260517bfa5340aaab1360d936b20cd9896ab79ed74e74a0949eb2",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/publicsuffix-list-dafsa-20210518-3.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python-unversioned-command-3.9.25-7.el9_8.3.noarch.rpm",
+      "nevra": "python-unversioned-command-0:3.9.25-7.el9_8.3.noarch",
+      "package": "python-unversioned-command",
+      "sha256": "279f2c690c16889f86f7890e45b0ff2156f377466a015c75dc4aa9d530dd0024",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages/p/python-unversioned-command-3.9.25-7.el9_8.3.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-3.9.25-7.el9_8.3.x86_64.rpm",
+      "nevra": "python3-0:3.9.25-7.el9_8.3.x86_64",
+      "package": "python3",
+      "sha256": "d38577c9d7d92b4cf0dc09ba9c670a6aef78003f627315e3da493919e63a0f23",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-3.9.25-7.el9_8.3.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-dbus-1.2.18-2.el9.0.1.x86_64.rpm",
+      "nevra": "python3-dbus-0:1.2.18-2.el9.0.1.x86_64",
+      "package": "python3-dbus",
+      "sha256": "f432c1bbcacfba197cd5d93a530c635691967f86ce76266cf253df57c933f987",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-dbus-1.2.18-2.el9.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-firewall-1.3.4-20.el9_8.noarch.rpm",
+      "nevra": "python3-firewall-0:1.3.4-20.el9_8.noarch",
+      "package": "python3-firewall",
+      "sha256": "48d5490f1a3f0d83638b057daeb632e8ca1ff0b9bd9a3125c5b5ea276c4ee239",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-firewall-1.3.4-20.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-gobject-base-3.40.1-6.el9.x86_64.rpm",
+      "nevra": "python3-gobject-base-0:3.40.1-6.el9.x86_64",
+      "package": "python3-gobject-base",
+      "sha256": "d7e1edfadf0efe52373d0c928a73d54a54495314cdac0c024c5e4975c02ccfea",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-gobject-base-3.40.1-6.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-gobject-base-noarch-3.40.1-6.el9.noarch.rpm",
+      "nevra": "python3-gobject-base-noarch-0:3.40.1-6.el9.noarch",
+      "package": "python3-gobject-base-noarch",
+      "sha256": "b2dad2251c850ea5dd1e7488af0054d9ff5452af23e557d4fed71e7af3e10308",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-gobject-base-noarch-3.40.1-6.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-libs-3.9.25-7.el9_8.3.x86_64.rpm",
+      "nevra": "python3-libs-0:3.9.25-7.el9_8.3.x86_64",
+      "package": "python3-libs",
+      "sha256": "b802d3a2eb92533949857e081d27b718a2ecb32a83f2c552e6ba6ffbd2c9bf5f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-libs-3.9.25-7.el9_8.3.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-nftables-1.0.9-9.el9_8.x86_64.rpm",
+      "nevra": "python3-nftables-1:1.0.9-9.el9_8.x86_64",
+      "package": "python3-nftables",
+      "sha256": "37b64cb540b9b3f2a8769147530d1b276af8f03841771daea65ea3549ca76ccc",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-nftables-1.0.9-9.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-pip-wheel-21.3.1-2.el9_8.rocky.0.1.noarch.rpm",
+      "nevra": "python3-pip-wheel-0:21.3.1-2.el9_8.rocky.0.1.noarch",
+      "package": "python3-pip-wheel",
+      "sha256": "19fc45a6478f005563edfdc26e454f4d120a12ba5b60645d9f7ecbf57de3fb2d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-pip-wheel-21.3.1-2.el9_8.rocky.0.1.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "python3-setuptools-wheel-53.0.0-15.el9.noarch.rpm",
+      "nevra": "python3-setuptools-wheel-0:53.0.0-15.el9.noarch",
+      "package": "python3-setuptools-wheel",
+      "sha256": "9f77e9d42709dca0a92b6e1edc76a84406ec2b808cbebb4d570eff3dc51b886e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/p/python3-setuptools-wheel-53.0.0-15.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "readline-8.1-4.el9.x86_64.rpm",
+      "nevra": "readline-0:8.1-4.el9.x86_64",
+      "package": "readline",
+      "sha256": "b85f5cffef627afe640cf7405845cb45956d66ef5a06e7c48dc7da47a7191674",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/readline-8.1-4.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rke2-selinux-0.23-2.el9.noarch.rpm",
+      "nevra": "rke2-selinux-0:0.23-2.el9.noarch",
+      "package": "rke2-selinux",
+      "sha256": "d6b3cac887be731841a20f5bbeaaf478c396b1385c197dfae1ae9903f25fb1c6",
+      "signer_fingerprint": "C8CFF216455126E9B9C918BE925EA29AE257814A",
+      "url": "https://rpm.rancher.io/rke2/latest/common/centos/9/noarch/rke2-selinux-0.23-2.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rocky-gpg-keys-9.8-1.2.el9.noarch.rpm",
+      "nevra": "rocky-gpg-keys-0:9.8-1.2.el9.noarch",
+      "package": "rocky-gpg-keys",
+      "sha256": "42b553360b45570683084a47bf929a8cb68a98b43e5300c4461a0af349789574",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rocky-gpg-keys-9.8-1.2.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rocky-release-9.8-1.2.el9.noarch.rpm",
+      "nevra": "rocky-release-0:9.8-1.2.el9.noarch",
+      "package": "rocky-release",
+      "sha256": "847f7d31b99683faf068d7af75c7d05bc51703d2b753adeaa1c851d894e7f0ea",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rocky-release-9.8-1.2.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rocky-repos-9.8-1.2.el9.noarch.rpm",
+      "nevra": "rocky-repos-0:9.8-1.2.el9.noarch",
+      "package": "rocky-repos",
+      "sha256": "add43a8e5382026bb58e7b67fc442356e0e8138b700a790bc8bb765b34c5bc2a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rocky-repos-9.8-1.2.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rpm-4.16.1.3-40.el9.x86_64.rpm",
+      "nevra": "rpm-0:4.16.1.3-40.el9.x86_64",
+      "package": "rpm",
+      "sha256": "5a6be9d462199f8fd149667f71b243ded18ff0297c73893f845b413b4d075cbf",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rpm-4.16.1.3-40.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rpm-libs-4.16.1.3-40.el9.x86_64.rpm",
+      "nevra": "rpm-libs-0:4.16.1.3-40.el9.x86_64",
+      "package": "rpm-libs",
+      "sha256": "20b6df9f44648b6958ac8c3ca6eb2597a93753ccda4eb06cd2220a170f39a376",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rpm-libs-4.16.1.3-40.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "rpm-plugin-selinux-4.16.1.3-40.el9.x86_64.rpm",
+      "nevra": "rpm-plugin-selinux-0:4.16.1.3-40.el9.x86_64",
+      "package": "rpm-plugin-selinux",
+      "sha256": "7fd645175606b0c86a6604dd903269f45447c02fb99754980dd805000e5cc2dd",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/r/rpm-plugin-selinux-4.16.1.3-40.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "sed-4.8-10.el9_8.x86_64.rpm",
+      "nevra": "sed-0:4.8-10.el9_8.x86_64",
+      "package": "sed",
+      "sha256": "8cdc4f22b8b9be0ec13c4ff14181652081456f1bac5b2e354b3ade826394b94e",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/sed-4.8-10.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "selinux-policy-38.1.75-2.el9_8.noarch.rpm",
+      "nevra": "selinux-policy-0:38.1.75-2.el9_8.noarch",
+      "package": "selinux-policy",
+      "sha256": "af82298ffd83022c90d2e9b8189588e8452c3162646644dbd836e0fb4c49da7a",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/selinux-policy-38.1.75-2.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "selinux-policy-targeted-38.1.75-2.el9_8.noarch.rpm",
+      "nevra": "selinux-policy-targeted-0:38.1.75-2.el9_8.noarch",
+      "package": "selinux-policy-targeted",
+      "sha256": "73586e9c4ff175fe1b55cc23ef385c0ade1d8a3e3da3b1d6622f407704ac460b",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/selinux-policy-targeted-38.1.75-2.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "setup-2.13.7-10.el9.noarch.rpm",
+      "nevra": "setup-0:2.13.7-10.el9.noarch",
+      "package": "setup",
+      "sha256": "7a8a464a72c41f39eb4d4c47d33bd889b36d5c1d9eeb293c7d0a03b1b594743c",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/setup-2.13.7-10.el9.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "shadow-utils-4.9-16.el9.x86_64.rpm",
+      "nevra": "shadow-utils-2:4.9-16.el9.x86_64",
+      "package": "shadow-utils",
+      "sha256": "a357f6a74421df1d9aaf1fa6c71bae6f5d82d5e2334e624f0c3479c0f4ddfeb6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/shadow-utils-4.9-16.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "slang-2.3.2-11.el9.x86_64.rpm",
+      "nevra": "slang-0:2.3.2-11.el9.x86_64",
+      "package": "slang",
+      "sha256": "ce9de0b6765d6bc5a13dc0d70649c60f99b5566b8b779bc9d715170375192947",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/slang-2.3.2-11.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "sqlite-libs-3.34.1-11.el9_8.x86_64.rpm",
+      "nevra": "sqlite-libs-0:3.34.1-11.el9_8.x86_64",
+      "package": "sqlite-libs",
+      "sha256": "7150f09994a94181f9c6d3fce29abf922c20ae3d90683d2f0e535fa72ec04876",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/sqlite-libs-3.34.1-11.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "systemd-252-67.el9_8.6.rocky.0.1.x86_64.rpm",
+      "nevra": "systemd-0:252-67.el9_8.6.rocky.0.1.x86_64",
+      "package": "systemd",
+      "sha256": "ccc3ceac309c0829ec7a6c03cc22a95f131041098e58b82dca823b6327c6f166",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/systemd-252-67.el9_8.6.rocky.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "systemd-libs-252-67.el9_8.6.rocky.0.1.x86_64.rpm",
+      "nevra": "systemd-libs-0:252-67.el9_8.6.rocky.0.1.x86_64",
+      "package": "systemd-libs",
+      "sha256": "323d37ea3cdb339955f875a3686580dd668db33c781306e49744a18751b543ae",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/systemd-libs-252-67.el9_8.6.rocky.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "systemd-pam-252-67.el9_8.6.rocky.0.1.x86_64.rpm",
+      "nevra": "systemd-pam-0:252-67.el9_8.6.rocky.0.1.x86_64",
+      "package": "systemd-pam",
+      "sha256": "fd5022a6892543d143fff8c5b143775c51666966c10120d2ab26ecbe795f4ad6",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/systemd-pam-252-67.el9_8.6.rocky.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "systemd-rpm-macros-252-67.el9_8.6.rocky.0.1.noarch.rpm",
+      "nevra": "systemd-rpm-macros-0:252-67.el9_8.6.rocky.0.1.noarch",
+      "package": "systemd-rpm-macros",
+      "sha256": "8a2be045005e4317db4c38a1c4e120d7f27f3485682d0d5e945b8a3741017d39",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/systemd-rpm-macros-252-67.el9_8.6.rocky.0.1.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "systemd-udev-252-67.el9_8.6.rocky.0.1.x86_64.rpm",
+      "nevra": "systemd-udev-0:252-67.el9_8.6.rocky.0.1.x86_64",
+      "package": "systemd-udev",
+      "sha256": "f4e56f277d3c7ce8b7cc2ed8d6d163e8615a808120a53c2f3d63c45b77b0b70f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/s/systemd-udev-252-67.el9_8.6.rocky.0.1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "tar-1.34-13.el9_8.x86_64.rpm",
+      "nevra": "tar-2:1.34-13.el9_8.x86_64",
+      "package": "tar",
+      "sha256": "61d7dfb8258648db7c23baae3b9cd578056d4762a2ab4b4e5c8f28316c4db1a7",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/t/tar-1.34-13.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "teamd-1.31-16.el9_1.x86_64.rpm",
+      "nevra": "teamd-0:1.31-16.el9_1.x86_64",
+      "package": "teamd",
+      "sha256": "6348243c3dacec559dee1d79fd69e6396bd4fdbe7d37e33adae14dff0e61ee38",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/t/teamd-1.31-16.el9_1.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "tpm2-tss-3.2.3-1.el9.x86_64.rpm",
+      "nevra": "tpm2-tss-0:3.2.3-1.el9.x86_64",
+      "package": "tpm2-tss",
+      "sha256": "943b2d0a196739af7ffb0a9d73a914fa0b94c192f91417f3d1a197198e4ecc88",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/t/tpm2-tss-3.2.3-1.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "tzdata-2026c-1.el9_8.noarch.rpm",
+      "nevra": "tzdata-0:2026c-1.el9_8.noarch",
+      "package": "tzdata",
+      "sha256": "aef90bee6f2bddb40aa4ebd90ee8e1680646c58b8887b10dbbf834dba267f4e9",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/t/tzdata-2026c-1.el9_8.noarch.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "unzip-6.0-60.el9_8.x86_64.rpm",
+      "nevra": "unzip-0:6.0-60.el9_8.x86_64",
+      "package": "unzip",
+      "sha256": "c835a294fcb7c85fb6fef3e46d5c3e52d00daf1691cd927d8888d69d158bd79f",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/u/unzip-6.0-60.el9_8.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "util-linux-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "util-linux-0:2.37.4-25.el9.x86_64",
+      "package": "util-linux",
+      "sha256": "f7fa828340b7a98271b735bd126a03232bf8571275ffe034ccc2cfd6174526f1",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/u/util-linux-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "util-linux-core-2.37.4-25.el9.x86_64.rpm",
+      "nevra": "util-linux-core-0:2.37.4-25.el9.x86_64",
+      "package": "util-linux-core",
+      "sha256": "d0a349517a568014cef239ddc66095a604af6b7ea89eacecb4174b40a3671cf5",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/u/util-linux-core-2.37.4-25.el9.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "xz-libs-5.2.5-8.el9_0.x86_64.rpm",
+      "nevra": "xz-libs-0:5.2.5-8.el9_0.x86_64",
+      "package": "xz-libs",
+      "sha256": "7a6f5891537bbbf601ee574c5946c3f0f121369b85c6cdfdd07e974a4dc8d81d",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/x/xz-libs-5.2.5-8.el9_0.x86_64.rpm"
+    },
+    {
+      "category": "rpm",
+      "file": "zlib-1.2.11-40.el9.x86_64.rpm",
+      "nevra": "zlib-0:1.2.11-40.el9.x86_64",
+      "package": "zlib",
+      "sha256": "fcd8ca717c72aeb30ea69b4f892dc021e507d8835e7b03aff501cb094db083ea",
+      "signer_fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+      "url": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages/z/zlib-1.2.11-40.el9.x86_64.rpm"
+    }
+  ],
+  "schema_version": 1,
+  "target": {
+    "architecture": "amd64",
+    "os": "rocky-9.8"
+  }
+}

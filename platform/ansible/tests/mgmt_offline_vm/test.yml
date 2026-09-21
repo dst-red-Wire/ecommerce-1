@@ -1,0 +1,261 @@
+---
+- name: Require independently pinned VM-compatible offline bundle
+  ansible.builtin.assert:
+    that:
+      - mgmt_offline_bundle_dir is match('^/')
+      - mgmt_offline_manifest_sha256 is match('^[0-9a-f]{64}$')
+- name: Read owned Vagrant identity before executing target tasks
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_id_file
+- name: Check owned machine identity
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_id_file.content | b64decode | trim }}", --machinereadable]
+  register: vm_current
+  changed_when: false
+- name: Require the centrally validated running host-only fixture
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, hostonly,
+           --adapter, "{{ vm_hostonly_adapter }}", --mac, "{{ vm_mac }}", --running]
+    stdin: "{{ vm_current.stdout }}"
+  changed_when: false
+- name: Inspect whether RKE2 is active before artifact work
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
+           sudo, -n, systemctl, is-active, rke2-server.service]
+  register: vm_test_server_active
+  changed_when: false
+  failed_when: vm_test_server_active.rc not in [0, 3, 4]
+- name: Require the explicit restage action for an existing server
+  ansible.builtin.assert:
+    that:
+      - >-
+        vm_test_server_active.stdout | trim in ['inactive', 'failed', 'unknown']
+        or vm_action == 'restage'
+    fail_msg: Use vm_action=restage to stop and reconstruct verified transfer bytes safely.
+- name: Stop the existing server before reconstructing transfer inputs
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
+           sudo, -n, systemctl, stop, rke2-server.service]
+  when: >-
+    vm_action == 'restage'
+    and vm_test_server_active.stdout | trim not in ['inactive', 'failed', 'unknown']
+  changed_when: true
+- name: Terminate remaining service cgroup processes before restaging image archives
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
+           sudo, -n, systemctl, kill, --kill-who=all, rke2-server.service]
+  when: >-
+    vm_action == 'restage'
+    and vm_test_server_active.stdout | trim not in ['inactive', 'failed', 'unknown']
+  changed_when: true
+  failed_when: false
+- name: Require RKE2 to be fully stopped before deleting reconstructible state
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}",
+           sudo, -n, systemctl, is-active, rke2-server.service]
+  when: vm_action == 'restage'
+  register: vm_restage_stopped
+  changed_when: false
+  failed_when: >-
+    vm_restage_stopped.rc not in [3, 4]
+    or vm_restage_stopped.stdout | trim not in ['inactive', 'failed', 'unknown']
+- name: Release only reconstructible containerd and image-import state before restaging
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n, python3, '-']
+    stdin: "{{ lookup('file', playbook_dir ~ '/restage_cleanup.py') }}"
+  when: vm_action == 'restage'
+  register: vm_restage_cleanup
+  changed_when: (vm_restage_cleanup.stdout | from_json).removed | length > 0
+- name: Create controller harness matching role helper layout
+  ansible.builtin.file:
+    path: "{{ vm_state }}/controller/{{ item }}"
+    state: directory
+    mode: '0700'
+  loop: [platform/ansible, scripts]
+- name: Inspect actual package and artifact state before calling this a cold trial
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ssh', '-F', vm_state ~ '/ssh_config', vm_name, 'sudo', '-n', 'python3', '-']
+         + (['--before-restage'] if vm_action == 'restage' else ['--before']) }}
+    stdin: "{{ lookup('file', playbook_dir ~ '/guest_probe.py') }}"
+  changed_when: false
+  register: vm_before_role
+- name: Record native pre-transaction inventory and boot identity
+  ansible.builtin.copy:
+    content: "{{ vm_before_role.stdout }}\n"
+    dest: "{{ vm_state }}/before-role.json"
+    mode: '0600'
+- name: Detect previous role attempts on this fixture
+  ansible.builtin.stat:
+    path: "{{ vm_state }}/role-result.json"
+  register: vm_prior_attempt
+- name: Distinguish a first cold trial from an explicit replay
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/test-attempt.json"
+    mode: '0600'
+    content: >-
+      {{ {'vm_uuid': vm_id_file.content | b64decode | trim,
+          'boot_id': (vm_before_role.stdout | from_json).boot_id,
+          'previous_attempt': vm_prior_attempt.stat.exists,
+          'cold_trial': (vm_before_role.stdout | from_json).cold_artifact_target
+                        and not vm_prior_attempt.stat.exists} | to_nice_json }}
+- name: Fingerprint exact role and validator sources before execution
+  ansible.builtin.command:
+    argv:
+      - sha256sum
+      - "{{ vm_repo }}/scripts/mgmt_airgap.py"
+      - "{{ vm_repo }}/platform/ansible/roles/mgmt_offline_artifacts/tasks/main.yml"
+      - "{{ vm_repo }}/platform/ansible/roles/mgmt_offline_artifacts/defaults/main.yml"
+      - "{{ vm_repo }}/config/contracts/toolchain-lock.json"
+      - "{{ vm_repo }}/config/toolchain/versions.env"
+      - "{{ vm_repo }}/platform/ansible/requirements.yml"
+      - "{{ vm_repo }}/config/infrastructure/mgmt-bootstrap.yaml"
+  register: vm_source_hashes
+  changed_when: false
+- name: Preserve exact test inputs
+  ansible.builtin.copy:
+    content: "{{ vm_source_hashes.stdout }}\n"
+    dest: "{{ vm_state }}/source.sha256"
+    mode: '0600'
+- name: Copy exact repository validator into local harness
+  ansible.builtin.copy:
+    src: "{{ vm_repo }}/scripts/mgmt_airgap.py"
+    dest: "{{ vm_state }}/controller/scripts/mgmt_airgap.py"
+    mode: '0600'
+- name: Allocate a short private controller SSH socket directory
+  ansible.builtin.tempfile:
+    state: directory
+    path: /tmp
+    prefix: ecommerce-mgmt-ssh-
+  register: vm_control_path
+- name: Write target-only runtime inventory
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/inventory.json"
+    mode: '0600'
+    content: >-
+      {{ {'all': {'hosts': {vm_name: {'ansible_user': 'vagrant', 'ansible_become': true,
+          'ansible_python_interpreter': '/usr/bin/python3',
+          'ansible_ssh_common_args': '-F ' ~ (vm_state ~ '/ssh_config') | quote,
+          'ansible_control_path_dir': vm_control_path.path}}}} | to_nice_json }}
+- name: Configure single-target controller
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/ansible.cfg"
+    mode: '0600'
+    content: |
+      [defaults]
+      forks = 1
+      retry_files_enabled = False
+      [ssh_connection]
+      pipelining = True
+- name: Render actual role invocation with explicit fixture services
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/controller/platform/ansible/test.yml"
+    mode: '0600'
+    content: |
+      ---
+      - name: Qualify actual offline artifact role on local enforcing Rocky VM
+        hosts: all
+        gather_facts: true
+        vars:
+          rke2_version: {{ (lookup('file', vm_repo ~ '/config/infrastructure/mgmt-bootstrap.yaml') | from_yaml).rke2.version | to_json }}
+          mgmt_offline_bundle_dir: {{ mgmt_offline_bundle_dir | to_json }}
+          mgmt_offline_manifest_sha256: {{ mgmt_offline_manifest_sha256 | to_json }}
+          mgmt_internal_dns: {{ vm_dns_fixture | to_json }}
+          mgmt_internal_ntp: {{ vm_ntp_fixture | to_json }}
+          mgmt_offline_image_stage_mode: hardlink
+        pre_tasks:
+          - name: Require real enforcing SELinux before any package changes
+            ansible.builtin.command: /usr/sbin/getenforce
+            register: vm_enforcing
+            changed_when: false
+            failed_when: vm_enforcing.stdout != 'Enforcing'
+          - name: Clear DNF cache before this offline attempt
+            ansible.builtin.command: dnf clean all
+        roles:
+          - {{ (vm_repo ~ '/platform/ansible/roles/mgmt_offline_artifacts') | to_json }}
+        post_tasks:
+          - name: Preserve optional measured offline transport phases
+            ansible.builtin.copy:
+              dest: {{ (vm_state ~ '/transport-metrics.json') | to_json }}
+              content: '{{ "{{ mgmt_offline_transport_metrics | to_nice_json }}" }}'
+              mode: '0600'
+            delegate_to: localhost
+            become: false
+            when: mgmt_offline_transport_metrics is defined
+- name: Resolve canonical verified collection generation
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import sys; sys.path.insert(0,sys.argv[1]+'/scripts');
+        import ansible,repoctl;
+        assert ansible.__version__==repoctl.pinned_versions()['ANSIBLE_CORE_VERSION'];
+        assert repoctl.ansible_collections_ready();
+        print(repoctl.ansible_collections_root())
+      - "{{ vm_repo }}"
+  register: vm_collections
+  changed_when: false
+- name: Execute exact repository role through native Ansible SSH
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - -c
+      - >-
+        import os,subprocess,sys;
+        env={k:v for k,v in os.environ.items() if not k.startswith('ANSIBLE_')};
+        env.update(ANSIBLE_CONFIG=sys.argv[1],ANSIBLE_COLLECTIONS_PATH=sys.argv[2],ANSIBLE_FORKS='1');
+        sys.exit(subprocess.call(sys.argv[3:],env=env))
+      - "{{ vm_state }}/ansible.cfg"
+      - "{{ vm_collections.stdout | trim }}"
+      - "{{ vm_python | dirname }}/ansible-playbook"
+      - -i
+      - "{{ vm_state }}/inventory.json"
+      - "{{ vm_state }}/controller/platform/ansible/test.yml"
+  environment:
+    ANSIBLE_CONFIG: "{{ vm_state }}/ansible.cfg"
+    ANSIBLE_COLLECTIONS_PATH: "{{ vm_collections.stdout | trim }}"
+    PYTHONDONTWRITEBYTECODE: '1'
+  register: vm_role
+  failed_when: false
+  changed_when: true
+- name: Preserve actual role log before interpreting its outcome
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/actual-role.log"
+    content: "{{ vm_role.stdout }}\n{{ vm_role.stderr }}\n"
+    mode: '0600'
+- name: Preserve measured invocation and exact input hashes even on failure
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/role-result.json"
+    mode: '0600'
+    content: >-
+      {{ {'exit_code': vm_role.rc, 'started_at': vm_role.start,
+          'finished_at': vm_role.end, 'duration': vm_role.delta,
+          'vm_uuid': vm_id_file.content | b64decode | trim,
+          'bundle_manifest_sha256': mgmt_offline_manifest_sha256,
+          'source_sha256': vm_source_hashes.stdout,
+          'trial': lookup('file', vm_state ~ '/test-attempt.json') | from_json} | to_nice_json }}
+- name: Require complete role success without bypassing any runtime gate
+  ansible.builtin.assert:
+    that: [vm_role.rc == 0]
+    fail_msg: Inspect actual-role.log; no SELinux or dependency failure may be bypassed.
+- name: Require sources unchanged throughout the role trial
+  ansible.builtin.command:
+    argv: [sha256sum, --check, "{{ vm_state }}/source.sha256"]
+  changed_when: false
+- name: Verify native SELinux, egress denial, exact RPMs and staged image hashes
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ssh', '-F', vm_state ~ '/ssh_config', vm_name, 'sudo', '-n', 'python3', '-',
+          mgmt_offline_manifest_sha256, '--hardlink-images']
+         + (['--restage'] if vm_action == 'restage' else []) }}
+    stdin: "{{ lookup('file', playbook_dir ~ '/guest_probe.py') }}"
+  changed_when: false
+  register: vm_postconditions
+- name: Preserve post-role proof
+  ansible.builtin.copy:
+    content: "{{ vm_postconditions.stdout }}\n"
+    dest: "{{ vm_state }}/postconditions.json"
+    mode: '0600'
