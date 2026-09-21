@@ -4739,6 +4739,15 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     )
     if workflow.get("entrypoint") != expected_entrypoint:
         return fail("RKE2 local qualification entrypoint is not centrally registered")
+    if workflow.get("exact_sha_required") is not True:
+        return fail("RKE2 local qualification must require an exact SHA")
+    if workflow.get("clean_worktree_required") is not True:
+        return fail("RKE2 local qualification must require a clean worktree")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local qualification requires a clean exact-SHA worktree")
+    head_sha = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        return fail("RKE2 local qualification could not resolve the exact checkout SHA")
     if not inputs.strip():
         return fail("rke2-local-virtualbox-qualification requires --inputs")
     input_path = Path(inputs)
@@ -4746,6 +4755,33 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         input_path = ROOT / input_path
     if not input_path.is_file():
         return fail(f"RKE2 local qualification inputs not found: {input_path}")
+    try:
+        input_values = json.loads(input_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 local qualification inputs are invalid JSON: {exc}")
+    if not isinstance(input_values, dict):
+        return fail("RKE2 local qualification inputs must be a JSON object")
+    if "vm_repo" in input_values:
+        return fail("RKE2 local qualification inputs must not override vm_repo")
+    vm_name = input_values.get("vm_name")
+    if not isinstance(vm_name, str) or re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
+        return fail("RKE2 local qualification inputs must declare a valid vm_name")
+    vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
+
+    def source_is_frozen() -> bool:
+        return (
+            git("rev-parse", "HEAD").strip() == head_sha
+            and not git("status", "--porcelain", "--untracked-files=all").strip()
+        )
+
+    def source_evidence_matches() -> bool:
+        source_path = vm_state / "server-source.json"
+        try:
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("git_sha") == head_sha
+
     require("ansible-playbook")
     command = [
         "ansible-playbook",
@@ -4754,6 +4790,10 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "platform/ansible/tests/mgmt_offline_vm/main.yml",
         "-e",
         f"@{input_path}",
+        "-e",
+        f"vm_repo={ROOT}",
+        "-e",
+        f"vm_state={vm_state}",
     ]
     actions = [
         "validate",
@@ -4767,14 +4807,30 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server",
         "destroy",
     ]
+    vm_created = False
     for action in actions:
+        if not source_is_frozen():
+            if vm_created:
+                run([*command, "-e", "vm_action=destroy"], check=False)
+            return fail("RKE2 local qualification source changed after freeze")
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
             if action not in {"validate", "destroy"}:
                 run([*command, "-e", "vm_action=destroy"], check=False)
             return result.returncode
+        if action == "create":
+            vm_created = True
+        elif action == "destroy":
+            vm_created = False
+        if action == "server" and not source_evidence_matches():
+            if vm_created:
+                run([*command, "-e", "vm_action=destroy"], check=False)
+            return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
+        if not source_is_frozen():
+            if vm_created:
+                run([*command, "-e", "vm_action=destroy"], check=False)
+            return fail("RKE2 local qualification source changed during execution")
     return 0
-
 
 def _qualification_audit_path(head_sha: str) -> Path:
     template = str(qualification_workflow("qualification_proof")["performance_audit_output"])
