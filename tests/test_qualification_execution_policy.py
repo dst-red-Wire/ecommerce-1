@@ -1079,7 +1079,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            evidence = root / ".context" / "mgmt-ha" / head / "result.json"
+            state = root / ".context" / "mgmt-ha" / head
+            evidence = state / "result.json"
+            source_file = root / "tracked-source.txt"
+            source_file.write_text("authoritative-source\n", encoding="utf-8")
 
             def fake_git(*args, check=True):
                 if args == ("status", "--porcelain", "--untracked-files=all"):
@@ -1171,6 +1174,31 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
+                source_manifest = state / "source.sha256"
+                source_digest = __import__("hashlib").sha256(source_file.read_bytes()).hexdigest()
+                source_manifest.write_text(
+                    f"{source_digest}  {source_file}\n",
+                    encoding="utf-8",
+                )
+                completion = state / "completion.json"
+                completion.write_text(
+                    __import__("json").dumps(
+                        {
+                            "schema_version": 1,
+                            "status": "PASS",
+                            "head_sha": head,
+                            "evidence_sha256": __import__("hashlib").sha256(
+                                evidence.read_bytes()
+                            ).hexdigest(),
+                            "source_manifest_sha256": __import__("hashlib").sha256(
+                                source_manifest.read_bytes()
+                            ).hexdigest(),
+                            "cleanup_complete": True,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
                 return MOD.subprocess.CompletedProcess(command, 0, "", "")
 
             with (
@@ -1200,6 +1228,37 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ):
                 self.assertEqual(0, MOD.rke2_local_ha_qualification())
                 run.assert_not_called()
+
+    def test_rke2_local_ha_launcher_rejects_result_without_completion_marker(self):
+        head = "8" * 40
+        workflow = {
+            "entrypoint": "scripts/repoctl.py rke2-local-ha-qualification",
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "capacity_production_claim": False,
+            "evidence": {"authoritative": ".context/mgmt-ha/<sha>/result.json"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            evidence = root / ".context" / "mgmt-ha" / head / "result.json"
+            evidence.parent.mkdir(parents=True)
+            evidence.write_text('{"status":"PASS"}\n', encoding="utf-8")
+
+            def fake_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                mock.patch.object(MOD, "_rke2_local_ha_evidence_matches", return_value=True),
+                mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=False),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+            ):
+                self.assertEqual(2, MOD.rke2_local_ha_qualification())
 
     def test_rke2_local_ha_launcher_rejects_dirty_worktree(self):
         workflow = {
