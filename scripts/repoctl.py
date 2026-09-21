@@ -5434,6 +5434,84 @@ def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str
     return source_check.returncode == 0
 
 
+
+def rke2_local_ha_restore_bundle(source_value: str) -> int:
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA bundle restore requires a clean exact-SHA worktree")
+    if not source_value.strip():
+        return fail("RKE2 local HA bundle restore requires --source pointing to the completed PR 128 bundle")
+
+    source = Path(source_value).expanduser()
+    if not source.is_absolute():
+        return fail("RKE2 local HA bundle restore source must be an absolute path")
+    source = source.resolve()
+    if not source.is_dir():
+        return fail(f"RKE2 local HA bundle restore source does not exist: {source}")
+
+    contract = _rke2_local_ha_contract()
+    canonical = contract.get("canonical_sources")
+    if not isinstance(canonical, dict):
+        return fail("RKE2 local HA canonical source registry is invalid")
+    local_contract_path = canonical.get("local_vm_contract")
+    bootstrap_path = canonical.get("mgmt_bootstrap")
+    if not isinstance(local_contract_path, str) or not isinstance(bootstrap_path, str):
+        return fail("RKE2 local HA bundle authorities are not registered")
+
+    local_contract = ruby_yaml(local_contract_path).get("mgmt_local_vm_contract", {})
+    lock_relative = local_contract.get("bundle_lock")
+    version = ruby_yaml(bootstrap_path).get("rke2", {}).get("version")
+    if not isinstance(lock_relative, str) or not isinstance(version, str):
+        return fail("RKE2 local HA bundle lock/version authorities are invalid")
+
+    lock_path = ROOT / lock_relative
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 local HA bundle lock is unreadable: {exc}")
+    approved_manifest = lock.get("approved_manifest_sha256")
+    if re.fullmatch(r"[0-9a-f]{64}", str(approved_manifest or "")) is None:
+        return fail("RKE2 local HA approved manifest SHA256 is invalid")
+    if _sha256_path(source / "manifest.json") != approved_manifest:
+        return fail("PR 128 source bundle manifest does not match the independently approved SHA256")
+
+    bundle_version = re.sub(r"[+.]", "-", version)
+    destination = ROOT / ".context" / f"rke2-offline-bundle-{bundle_version}"
+    if destination.exists():
+        return fail(
+            f"RKE2 local HA bundle destination already exists: {destination}; "
+            "refusing to overwrite existing evidence bytes"
+        )
+    if source == destination:
+        return fail("RKE2 local HA bundle restore source and destination must differ")
+
+    require("ansible-playbook")
+    restore = run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "platform/ansible/tests/mgmt_offline_vm/build_bundle.yml",
+            "-e",
+            f"bundle_source={source}",
+            "-e",
+            "bundle_offline=true",
+        ],
+        check=False,
+    )
+    if restore.returncode:
+        return restore.returncode
+
+    restored_manifest = _sha256_path(destination / "manifest.json")
+    if restored_manifest != approved_manifest:
+        shutil.rmtree(destination, ignore_errors=True)
+        return fail("restored PR 128 bundle manifest failed final approval binding")
+
+    print(
+        f"PASS rke2-local-ha-restore-bundle source={source} "
+        f"destination={destination.relative_to(ROOT)} manifest_sha256={approved_manifest}"
+    )
+    return 0
+
 def rke2_local_ha_prepare() -> int:
     workflow = qualification_workflow("rke2_local_ha")
     if workflow.get("preparation") != "scripts/repoctl.py rke2-local-ha-prepare":
@@ -5944,6 +6022,11 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    restore_ha = sub.add_parser("rke2-local-ha-restore-bundle")
+    restore_ha.add_argument(
+        "--source",
+        default=os.environ.get("RKE2_PR128_BUNDLE_SOURCE", ""),
+    )
     sub.add_parser("rke2-local-ha-prepare")
     sub.add_parser("rke2-local-ha-qualification")
     pcamp = sub.add_parser("perf-campaign")
@@ -6101,6 +6184,8 @@ def main() -> int:
             return qualification_proof(args.base)
         if args.cmd == "rke2-local-virtualbox-qualification":
             return rke2_local_virtualbox_qualification(args.inputs)
+        if args.cmd == "rke2-local-ha-restore-bundle":
+            return rke2_local_ha_restore_bundle(args.source)
         if args.cmd == "rke2-local-ha-prepare":
             return rke2_local_ha_prepare()
         if args.cmd == "rke2-local-ha-qualification":
