@@ -449,29 +449,28 @@
               - localhost,
               - "{{ ha_single_fixture }}"
               - -e
-              - "vm_action=destroy"
-              - -e
-              - "vm_name={{ item.value.vm_name }}"
-              - -e
-              - "vm_address={{ item.value.address }}"
-              - -e
-              - "vm_mac={{ item.value.mac }}"
-              - -e
               - >-
-                vm_cpus={{ mgmt_local_ha_contract.resources.control_plane.cpus
-                if item.value.role == 'control-plane'
-                else mgmt_local_ha_contract.resources.worker.cpus }}
-              - -e
-              - >-
-                vm_memory={{ mgmt_local_ha_contract.resources.control_plane.memory_mib
-                if item.value.role == 'control-plane'
-                else mgmt_local_ha_contract.resources.worker.memory_mib }}
-              - -e
-              - "vm_hostonly_adapter={{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
-              - -e
-              - "vm_host_address={{ mgmt_local_ha_contract.controller.host_address }}"
-              - -e
-              - "vm_repo={{ ha_repo }}"
+                {{
+                  {
+                    'vm_action': 'destroy',
+                    'vm_name': item.value.vm_name,
+                    'vm_address': item.value.address,
+                    'vm_mac': item.value.mac,
+                    'vm_cpus': (
+                      mgmt_local_ha_contract.resources.control_plane.cpus
+                      if item.value.role == 'control-plane'
+                      else mgmt_local_ha_contract.resources.worker.cpus
+                    ),
+                    'vm_memory': (
+                      mgmt_local_ha_contract.resources.control_plane.memory_mib
+                      if item.value.role == 'control-plane'
+                      else mgmt_local_ha_contract.resources.worker.memory_mib
+                    ),
+                    'vm_hostonly_adapter': mgmt_local_ha_contract.controller.hostonly_adapter,
+                    'vm_host_address': mgmt_local_ha_contract.controller.host_address,
+                    'vm_repo': ha_repo
+                  } | to_json
+                }}
           environment:
             PYTHONDONTWRITEBYTECODE: "1"
           loop: "{{ ha_nodes }}"
