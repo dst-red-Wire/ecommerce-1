@@ -412,6 +412,63 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
                 run.assert_not_called()
 
+    def test_rke2_launcher_rejects_undocumented_input_overrides(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "entrypoint": (
+                "scripts/repoctl.py rke2-local-virtualbox-qualification "
+                "--inputs .context/mgmt-vm-inputs.json"
+            ),
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+        }
+        head = "d" * 40
+        forbidden = [
+            "vm_python",
+            "vm_bridge",
+            "vm_box_url",
+            "vm_box_sha256",
+            "vm_state",
+            "vm_action",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context" / "mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+
+            def clean_git(*args, check=True):
+                if args == ("status", "--porcelain", "--untracked-files=all"):
+                    return ""
+                if args == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                raise AssertionError(args)
+
+            for field in forbidden:
+                with self.subTest(field=field):
+                    inputs.write_text(
+                        __import__("json").dumps(
+                            {
+                                "vm_name": "ecommerce-mgmt-test-policy",
+                                field: "untrusted-override",
+                            }
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    with (
+                        mock.patch.object(MOD, "ROOT", root),
+                        mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                        mock.patch.object(MOD, "git", side_effect=clean_git),
+                        mock.patch.object(MOD, "run", return_value=completed) as run,
+                    ):
+                        self.assertEqual(
+                            2,
+                            MOD.rke2_local_virtualbox_qualification(
+                                ".context/mgmt-vm-inputs.json"
+                            ),
+                        )
+                        run.assert_not_called()
+
     def test_rke2_launcher_rejects_source_evidence_from_another_sha(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
         workflow = {
@@ -501,6 +558,53 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             self.assertEqual("PASS", payload["status"])
             self.assertEqual("signed-harbor-evidence-authenticated", payload["remote_readback"])
             run.assert_called_once()
+
+    def test_tekton_proof_rechecks_frozen_checkout_before_pass_evidence(self):
+        completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        workflow = {
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "merge_authoritative": False,
+            "state_changing": True,
+            "completion_requires_remote_readback": True,
+            "evidence": {"runtime": ".context/runtime/tekton-proof/<sha>.json"},
+        }
+        head = "c" * 40
+
+        for mutation in ("dirty-worktree", "head-moved"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                calls = {"status": 0, "head": 0}
+
+                def fake_git(*args, check=True):
+                    if args == ("status", "--porcelain", "--untracked-files=all"):
+                        calls["status"] += 1
+                        if mutation == "dirty-worktree" and calls["status"] >= 2:
+                            return " M platform/tekton/pipeline.yaml\n"
+                        return ""
+                    if args == ("rev-parse", "HEAD"):
+                        calls["head"] += 1
+                        if mutation == "head-moved" and calls["head"] >= 2:
+                            return "d" * 40 + "\n"
+                        return head + "\n"
+                    raise AssertionError(args)
+
+                with (
+                    mock.patch.object(MOD, "ROOT", root),
+                    mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                    mock.patch.object(MOD, "git", side_effect=fake_git),
+                    mock.patch.object(MOD, "require"),
+                    mock.patch.object(MOD, "run", return_value=completed) as run,
+                ):
+                    self.assertEqual(
+                        2,
+                        MOD.tekton_proof("runtime.yaml", "a" * 40, "b" * 40, head),
+                    )
+
+                self.assertFalse(
+                    (root / ".context" / "runtime" / "tekton-proof" / f"{head}.json").exists()
+                )
+                run.assert_called_once()
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
