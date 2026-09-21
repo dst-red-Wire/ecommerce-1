@@ -52,8 +52,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual("forbidden", defaults["post_pass_scope_expansion"])
         self.assertEqual("follow-up-work-item", defaults["non_blocking_findings"])
         self.assertEqual("return-to-development", defaults["blocking_findings"])
-        self.assertEqual("reuse-valid-evidence", defaults["same_sha_pass_replay"])
-        self.assertEqual(1, defaults["final_candidate_runs"])
+        authoritative = lifecycle["authoritative_completion"]
+        self.assertEqual("merge_authoritative=true", authoritative["applies_when"])
+        self.assertEqual("reuse-valid-evidence", authoritative["same_sha_pass_replay"])
+        self.assertEqual("requires-explicit-blocking-reason", authoritative["same_sha_failed_replay"])
+        self.assertEqual(1, authoritative["final_candidate_runs"])
         self.assertIs(True, lifecycle["waits"]["every_wait_must_be_bounded"])
         self.assertEqual("forbidden", lifecycle["waits"]["indefinite_wait"])
         self.assertIs(True, lifecycle["reruns"]["non_blocking_improvement_creates_follow_up"])
@@ -74,7 +77,6 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_proof["exact_sha_required"])
         self.assertIs(True, resolved_proof["clean_worktree_required"])
         self.assertIs(True, resolved_proof["stop_when_exit_criteria_pass"])
-        self.assertEqual(1, resolved_proof["final_candidate_runs"])
         self.assertIs(True, resolved_campaign["exact_sha_required"])
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
