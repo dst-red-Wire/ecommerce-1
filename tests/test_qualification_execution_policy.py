@@ -451,15 +451,21 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
 
-    def test_gate_written_bytes_color_thresholds(self):
+    def test_gate_written_bytes_color_thresholds_and_grouping(self):
+        self.assertEqual("0", MOD._format_written_bytes(0))
+        self.assertEqual("1 652 089", MOD._format_written_bytes(1_652_089))
+        self.assertEqual("56 262 884", MOD._format_written_bytes(56_262_884))
         self.assertEqual("36", MOD._write_bytes_color(0))
         self.assertEqual("32", MOD._write_bytes_color(56_262_884))
         self.assertEqual("33", MOD._write_bytes_color(128 * 1024 * 1024))
         self.assertEqual("35", MOD._write_bytes_color(1024 * 1024 * 1024))
         with mock.patch.object(MOD, "_supports_color", return_value=True):
-            self.assertIn("\033[32m56262884\033[0m", MOD._paint("56262884", "32"))
+            self.assertIn(
+                "\033[32m56 262 884\033[0m",
+                MOD._paint(MOD._format_written_bytes(56_262_884), "32"),
+            )
 
-    def test_gate_written_bytes_updates_only_numeric_field_like_stopwatch(self):
+    def test_gate_written_bytes_preserves_unchanged_groups_like_odometer(self):
         import io
 
         stream = io.StringIO()
@@ -473,10 +479,15 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             progress.finish()
 
         rendered = stream.getvalue()
-        self.assertEqual(1, rendered.count("RUN governance | Nombre d'octets écrits:"))
-        self.assertIn("1652089", rendered)
-        self.assertIn("1652190", rendered)
-        self.assertIn("\r\033[", rendered)
+        prefix = "RUN governance | Nombre d'octets écrits:"
+        self.assertEqual(1, rendered.count(prefix))
+        self.assertIn("\033[32m1 652 089\033[0m", rendered)
+        self.assertEqual(1, rendered.count("1 652 "))
+        numeric_column = len(prefix) + 1 + len("1 652 ")
+        self.assertIn(
+            f"\r\033[{numeric_column}C\033[32m190\033[0m",
+            rendered,
+        )
 
     def test_semantic_region_snapshot_detects_module_binding_mutation(self):
         source = "BINDING = 'one'\n\nclass Stop:\n    pass\n"
@@ -1497,7 +1508,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ):
                 MOD._emit_gate_record(ok, record)
             self.assertIn(
-                f"PASS security ({record['duration_seconds']:.3f}s, {record['written_bytes']} octets écrits)",
+                (
+                    f"PASS security ({record['duration_seconds']:.3f}s, "
+                    f"{MOD._format_written_bytes(record['written_bytes'])} octets écrits)"
+                ),
                 emitted.getvalue(),
             )
 
