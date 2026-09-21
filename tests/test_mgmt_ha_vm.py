@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import ipaddress
 import re
 from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -186,12 +189,47 @@ class MgmtHaVmTests(unittest.TestCase):
 
         repoctl = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         self.assertIn("def _rke2_local_ha_completion_matches", repoctl)
-        self.assertIn('["sha256sum", "--check", str(source_manifest)]', repoctl)
+        self.assertIn("def _sha256_manifest_matches", repoctl)
+        self.assertIn("return _sha256_manifest_matches(source_manifest)", repoctl)
+        self.assertNotIn('["sha256sum",', repoctl)
         self.assertIn('(state / "completion.json").unlink(missing_ok=True)', repoctl)
         self.assertIn(
             "_rke2_local_ha_completion_matches(state, evidence, head_sha)",
             repoctl,
         )
+
+    def test_source_manifest_verification_is_python_only_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.txt"
+            source.write_text("authoritative\n", encoding="utf-8")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            manifest = root / "source.sha256"
+            manifest.write_text(f"{digest}  {source}\n", encoding="utf-8")
+
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertTrue(MOD._sha256_manifest_matches(manifest))
+
+                source.write_text("mutated\n", encoding="utf-8")
+                self.assertFalse(MOD._sha256_manifest_matches(manifest))
+
+                source.write_text("authoritative\n", encoding="utf-8")
+                manifest.write_text(
+                    f"{digest}  {source}\n{digest}  {source}\n",
+                    encoding="utf-8",
+                )
+                self.assertFalse(MOD._sha256_manifest_matches(manifest))
+
+                outside = root.parent / "outside-source.txt"
+                outside.write_text("authoritative\n", encoding="utf-8")
+                try:
+                    manifest.write_text(
+                        f"{hashlib.sha256(outside.read_bytes()).hexdigest()}  {outside}\n",
+                        encoding="utf-8",
+                    )
+                    self.assertFalse(MOD._sha256_manifest_matches(manifest))
+                finally:
+                    outside.unlink(missing_ok=True)
 
     def test_pr128_bundle_restore_is_explicit_offline_and_fail_closed(self):
         repoctl = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
