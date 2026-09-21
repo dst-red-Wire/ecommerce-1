@@ -501,7 +501,23 @@ workflows:
         - platform/ansible/roles/mgmt_offline_artifacts
         - platform/ansible/roles/mgmt_private_network
         - platform/ansible/roles/rke2_server
-        - platform/ansible/tests/mgmt_offline_vm
+        - platform/ansible/tests/mgmt_offline_vm/Vagrantfile
+        - platform/ansible/tests/mgmt_offline_vm/build_bundle.yml
+        - platform/ansible/tests/mgmt_offline_vm/contract.yml
+        - platform/ansible/tests/mgmt_offline_vm/create.yml
+        - platform/ansible/tests/mgmt_offline_vm/destroy.yml
+        - platform/ansible/tests/mgmt_offline_vm/guest_probe.py
+        - platform/ansible/tests/mgmt_offline_vm/main.yml
+        - platform/ansible/tests/mgmt_offline_vm/resize.yml
+        - platform/ansible/tests/mgmt_offline_vm/resource_probe.py
+        - platform/ansible/tests/mgmt_offline_vm/restage_cleanup.py
+        - platform/ansible/tests/mgmt_offline_vm/rke2_probe.py
+        - platform/ansible/tests/mgmt_offline_vm/server.yml
+        - platform/ansible/tests/mgmt_offline_vm/tamper.yml
+        - platform/ansible/tests/mgmt_offline_vm/tamper_artifact.py
+        - platform/ansible/tests/mgmt_offline_vm/test.yml
+        - platform/ansible/tests/mgmt_offline_vm/transport.py
+        - platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py
         - scripts/build_mgmt_airgap_bundle.py
         - scripts/mgmt_airgap.py
         - tests/test_ansible_mgmt_private_network.py
@@ -523,7 +539,23 @@ workflows:
         platform/ansible/roles/mgmt_offline_artifacts: 1e75728a812dae941b6f295849ab6bfe1e2bafab
         platform/ansible/roles/mgmt_private_network: c2b8b3790ec974744baf963fc5d67a2b6d381a36
         platform/ansible/roles/rke2_server: 24c58b4a17227dd744ae02f7d1bf9a068dcc6aa0
-        platform/ansible/tests/mgmt_offline_vm: b46c2904989e545f59ecc0b74a755ab65e85b453
+        platform/ansible/tests/mgmt_offline_vm/Vagrantfile: 13ed1d3cdf745f41ba1c2f1e734cb79729d8332c
+        platform/ansible/tests/mgmt_offline_vm/build_bundle.yml: 21b82c18e8c8979d8f2cfb92ae88a5a60b36e76a
+        platform/ansible/tests/mgmt_offline_vm/contract.yml: d105b4feffe0655c326656266f4c934973b94b66
+        platform/ansible/tests/mgmt_offline_vm/create.yml: 70ca5b9907275f86d5802b2d46173aaa1887bfe0
+        platform/ansible/tests/mgmt_offline_vm/destroy.yml: cde4242f8f6a1626cfb0ffb645b8ed474f411f31
+        platform/ansible/tests/mgmt_offline_vm/guest_probe.py: 86445dbd26f1559163eab296caf28cd080210dda
+        platform/ansible/tests/mgmt_offline_vm/main.yml: 9160bdb89ac8f1af036ce256b5f2b0bbfc4dead7
+        platform/ansible/tests/mgmt_offline_vm/resize.yml: 3fd4e1c68d0c7c3d4576b77bb09f25262330ae7d
+        platform/ansible/tests/mgmt_offline_vm/resource_probe.py: 1fb8c558c1fdf559afbc127f9c9a7060cbb82639
+        platform/ansible/tests/mgmt_offline_vm/restage_cleanup.py: 5b2702b88957210715371229c1e5931daf551260
+        platform/ansible/tests/mgmt_offline_vm/rke2_probe.py: db594765103ca05aa0e9252ea4f909172fbdba68
+        platform/ansible/tests/mgmt_offline_vm/server.yml: 4ec09d33f1a46c468e17850e50d7b3ebc95037a8
+        platform/ansible/tests/mgmt_offline_vm/tamper.yml: 193ecab3608c65beeb40ad19d1e317beeab663fa
+        platform/ansible/tests/mgmt_offline_vm/tamper_artifact.py: 6e62b1d219a1c417a79f1b47a70606d7a82da302
+        platform/ansible/tests/mgmt_offline_vm/test.yml: c2cc206cc721b900e96047b45dbb08a00d00d0b6
+        platform/ansible/tests/mgmt_offline_vm/transport.py: a3e4854ae51eae22fb3116bb7351a813202c3571
+        platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py: f1a1a4dbf87850f1bdcfa70b3c3b94a1c9f27f4e
         scripts/build_mgmt_airgap_bundle.py: ce268a81a4eb4428939299de98bc403b39bf7161
         scripts/mgmt_airgap.py: 2bbd8a6a8017092ee9a7088a15291812df16e80c
         tests/test_ansible_mgmt_private_network.py: 0af30a2772d98989b96f9491fca10703614a7742
