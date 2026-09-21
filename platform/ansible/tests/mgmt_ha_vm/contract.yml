@@ -94,7 +94,6 @@ mgmt_local_ha_contract:
     kubernetes_api_port: 6443
     image:
       reference: docker.io/library/haproxy@sha256:37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2
-      runtime_reference: ecommerce.local/haproxy:3.2.23-locked
       version: 3.2.23
       platform: linux/amd64
       pull_policy: Never
