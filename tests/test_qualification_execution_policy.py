@@ -214,6 +214,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "embedded-etcd-quorum-survives-one-control-plane-loss",
             rke2_ha["exit_criteria"],
         )
+        self.assertIn("exact-sha-chatgpt-code-review-pass", rke2_ha["exit_criteria"])
+        self.assertIn("exact-sha-chatgpt-security-review-pass", rke2_ha["exit_criteria"])
         self.assertEqual(
             ".context/mgmt-ha/<sha>/result.json",
             rke2_ha["evidence"]["authoritative"],
