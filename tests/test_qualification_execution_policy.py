@@ -37,8 +37,46 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_qualification_workflows_are_centralized(self):
         policy = MOD.qualification_execution_policy()
+        lifecycle = policy["qualification_lifecycle"]
+        defaults = lifecycle["workflow_defaults"]
         proof = policy["workflows"]["qualification_proof"]
         campaign = policy["workflows"]["performance_campaign"]
+
+        self.assertEqual("every-qualification-workflow", lifecycle["applies_to"])
+        self.assertEqual(
+            "config/contracts/qualification-execution-policy.yaml",
+            lifecycle["single_authority"],
+        )
+        self.assertEqual("forbidden", lifecycle["per_workflow_policy_duplication"])
+        self.assertIs(True, defaults["stop_when_exit_criteria_pass"])
+        self.assertEqual("forbidden", defaults["post_pass_scope_expansion"])
+        self.assertEqual("follow-up-work-item", defaults["non_blocking_findings"])
+        self.assertEqual("return-to-development", defaults["blocking_findings"])
+        self.assertEqual("reuse-valid-evidence", defaults["same_sha_pass_replay"])
+        self.assertEqual(1, defaults["final_candidate_runs"])
+        self.assertIs(True, lifecycle["waits"]["every_wait_must_be_bounded"])
+        self.assertEqual("forbidden", lifecycle["waits"]["indefinite_wait"])
+        self.assertIs(True, lifecycle["reruns"]["non_blocking_improvement_creates_follow_up"])
+        self.assertEqual("forbidden", lifecycle["duplication"]["duplicate_full_gate_run_same_sha"])
+
+        for name, workflow in policy["workflows"].items():
+            with self.subTest(workflow=name):
+                self.assertFalse(set(defaults).intersection(workflow))
+                self.assertTrue(workflow["purpose"])
+                self.assertTrue(workflow["exit_criteria"])
+                self.assertTrue(workflow["evidence"])
+                self.assertTrue(
+                    all(path.startswith(".context/") for path in workflow["evidence"].values())
+                )
+
+        resolved_proof = MOD.qualification_workflow("qualification_proof")
+        resolved_campaign = MOD.qualification_workflow("performance_campaign")
+        self.assertIs(True, resolved_proof["exact_sha_required"])
+        self.assertIs(True, resolved_proof["clean_worktree_required"])
+        self.assertIs(True, resolved_proof["stop_when_exit_criteria_pass"])
+        self.assertEqual(1, resolved_proof["final_candidate_runs"])
+        self.assertIs(True, resolved_campaign["exact_sha_required"])
+        self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
         self.assertEqual(1, proof["verify_change_runs"])
         self.assertEqual(1, proof["performance_audit_runs"])
