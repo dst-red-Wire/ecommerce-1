@@ -554,6 +554,52 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual(1, cluster.count("hosts: ha-cp-03"))
         self.assertNotIn("serial: 6", cluster)
 
+        sequential_phases = (
+            "Bootstrap first RKE2 control plane",
+            "Join second RKE2 control plane directly to the bootstrap member",
+            "Wait for the first two control planes",
+            "Join worker-03 directly so it can host the HAProxy endpoint",
+            "Deploy HAProxy in front of the control planes",
+            "Join third control plane through HAProxy",
+        )
+        phase_offsets = [cluster.index(f"- name: {phase}") for phase in sequential_phases]
+        self.assertEqual(sorted(phase_offsets), phase_offsets)
+
+    def test_cp02_readiness_retries_api_and_node_wait_fail_closed(self):
+        cluster = (FIXTURE / "cluster.yml").read_text(encoding="utf-8")
+        start = cluster.index("- name: Wait for the first two control planes")
+        end = cluster.index("- name: Join worker-03 directly", start)
+        readiness = cluster[start:end]
+
+        readyz_offset = readiness.index("--raw=/readyz")
+        node_wait_offset = readiness.index("wait, node/ha-cp-02")
+        self.assertLess(readyz_offset, node_wait_offset)
+        self.assertIn("register: ha_cp02_api_readyz", readiness)
+        self.assertIn("until: ha_cp02_api_readyz.rc == 0", readiness)
+        self.assertIn("retries: 12", readiness)
+        self.assertIn("delay: 5", readiness)
+        self.assertIn("register: ha_cp02_node_ready", readiness)
+        self.assertIn("until: ha_cp02_node_ready.rc == 0", readiness)
+        self.assertIn("retries: 8", readiness)
+        self.assertEqual(2, readiness.count("delay: 5"))
+        self.assertIn("wait, node/ha-cp-02", readiness)
+        self.assertNotIn("failed_when: false", readiness)
+
+        for diagnostic in ("rc=", "stdout=", "stderr=", "attempts="):
+            with self.subTest(diagnostic=diagnostic):
+                self.assertIn(diagnostic, readiness)
+        for classification in (
+            "tls-handshake-timeout-exhausted",
+            "kubeconfig-invalid-or-missing",
+            "authentication-or-certificate-error",
+            "api-connection-refused",
+            "api-not-ready",
+            "node-not-registered",
+            "node-not-ready",
+        ):
+            with self.subTest(classification=classification):
+                self.assertIn(classification, readiness)
+
     def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
         self.assertEqual(2, source.count("ansible_host: {{ item.value.vm_name }}"))

@@ -322,10 +322,66 @@
   become: true
   gather_facts: false
   tasks:
-    - name: Wait for second control plane Ready
-      ansible.builtin.command:
-        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-cp-02, --for=condition=Ready, --timeout=600s]
-      changed_when: false
+    - name: Require the bootstrap API and second control plane to become Ready
+      block:
+        - name: Wait for bootstrap Kubernetes API readyz after second control-plane join
+          ansible.builtin.command:
+            argv:
+              - /var/lib/rancher/rke2/bin/kubectl
+              - --kubeconfig
+              - /etc/rancher/rke2/rke2.yaml
+              - --request-timeout=5s
+              - get
+              - --raw=/readyz
+          register: ha_cp02_api_readyz
+          changed_when: false
+          until: ha_cp02_api_readyz.rc == 0
+          retries: 12
+          delay: 5
+
+        - name: Wait for second control plane Ready
+          ansible.builtin.command:
+            argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-cp-02, --for=condition=Ready, --timeout=45s]
+          register: ha_cp02_node_ready
+          changed_when: false
+          until: ha_cp02_node_ready.rc == 0
+          retries: 8
+          delay: 5
+      rescue:
+        - name: Stop after bounded cp-02 readiness failure with exact diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              cp-02 readiness gate failed;
+              stage={{ ha_cp02_failure_stage }};
+              classification={{ ha_cp02_failure_classification }};
+              rc={{ ansible_failed_result.rc | default('unavailable') }};
+              stdout={{ ansible_failed_result.stdout | default('') | to_json }};
+              stderr={{ ansible_failed_result.stderr | default('') | to_json }};
+              attempts={{ ansible_failed_result.attempts | default(1) }}
+          vars:
+            ha_cp02_failure_stage: >-
+              {{ 'api-readyz' if ansible_failed_task.name is search('API readyz') else 'node-ready' }}
+            ha_cp02_failure_text: >-
+              {{ ((ansible_failed_result.stderr | default('')) ~ '\n'
+                  ~ (ansible_failed_result.stdout | default(''))) | lower }}
+            ha_cp02_failure_classification: >-
+              {% if 'tls handshake timeout' in ha_cp02_failure_text %}
+              tls-handshake-timeout-exhausted
+              {% elif 'error loading config file' in ha_cp02_failure_text or 'no such file or directory' in ha_cp02_failure_text %}
+              kubeconfig-invalid-or-missing
+              {% elif 'x509:' in ha_cp02_failure_text or 'certificate' in ha_cp02_failure_text or 'unauthorized' in ha_cp02_failure_text %}
+              authentication-or-certificate-error
+              {% elif ('connection refused' in ha_cp02_failure_text
+                        or 'was refused' in ha_cp02_failure_text
+                        or 'unable to connect to the server' in ha_cp02_failure_text) %}
+              api-connection-refused
+              {% elif ha_cp02_failure_stage == 'api-readyz' %}
+              api-not-ready
+              {% elif 'notfound' in ha_cp02_failure_text or 'not found' in ha_cp02_failure_text %}
+              node-not-registered
+              {% else %}
+              node-not-ready
+              {% endif %}
 
 - name: Join worker-03 directly so it can host the HAProxy endpoint
   hosts: ha-worker-03
