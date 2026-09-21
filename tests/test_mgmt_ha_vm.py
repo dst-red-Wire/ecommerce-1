@@ -56,6 +56,10 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotEqual(endpoint["registration_port"], endpoint["kubernetes_api_port"])
         self.assertTrue(1 <= endpoint["registration_port"] <= 65535)
         self.assertTrue(1 <= endpoint["kubernetes_api_port"] <= 65535)
+        self.assertIsInstance(endpoint["run_as_user"], int)
+        self.assertIsInstance(endpoint["run_as_group"], int)
+        self.assertGreater(endpoint["run_as_user"], 0)
+        self.assertGreater(endpoint["run_as_group"], 0)
         self.assertRegex(
             endpoint["image"]["reference"],
             r"^docker\.io/library/haproxy@sha256:[0-9a-f]{64}$",
@@ -134,6 +138,53 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("docker\n          - image\n          - save\n          - --platform", source)
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
+
+    def test_inventory_uses_the_per_vm_ssh_config_alias_not_literal_address(self):
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        self.assertEqual(2, source.count("ansible_host: {{ item.value.vm_name }}"))
+        self.assertNotIn("ansible_host: {{ item.value.address }}", source)
+        self.assertEqual(
+            2,
+            source.count(
+                'ansible_ssh_common_args: "-F {{ ha_repo }}/.context/mgmt-offline-vm/'
+                '{{ item.value.vm_name }}/ssh_config"'
+            ),
+        )
+
+    def test_haproxy_runtime_identity_is_explicitly_non_root(self):
+        source = (FIXTURE / "cluster.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "runAsUser: {{ mgmt_local_ha_contract.ha_endpoint.run_as_user }}",
+            source,
+        )
+        self.assertIn(
+            "runAsGroup: {{ mgmt_local_ha_contract.ha_endpoint.run_as_group }}",
+            source,
+        )
+        self.assertIn("runAsNonRoot: true", source)
+
+    def test_ha_completion_is_published_only_after_source_check_and_cleanup(self):
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        source_check = source.index("Require sources unchanged throughout HA campaign")
+        cleanup = source.index("Require successful destruction of every owned HA VM")
+        completion = source.index(
+            "Publish completion marker only after source verification and full cleanup"
+        )
+        self.assertLess(source_check, cleanup)
+        self.assertLess(cleanup, completion)
+        self.assertIn("register: ha_destroy_results", source)
+        self.assertIn("cleanup_complete", source)
+        self.assertIn("source_manifest_sha256", source)
+        self.assertIn("evidence_sha256", source)
+
+        repoctl = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        self.assertIn("def _rke2_local_ha_completion_matches", repoctl)
+        self.assertIn('["sha256sum", "--check", str(source_manifest)]', repoctl)
+        self.assertIn('(state / "completion.json").unlink(missing_ok=True)', repoctl)
+        self.assertIn(
+            "_rke2_local_ha_completion_matches(state, evidence, head_sha)",
+            repoctl,
+        )
 
     def test_haproxy_preparation_is_digest_pinned_and_separate_from_qualification(self):
         source = (FIXTURE / "prepare_haproxy.yml").read_text(encoding="utf-8")
