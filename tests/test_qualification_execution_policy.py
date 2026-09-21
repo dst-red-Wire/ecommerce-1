@@ -166,8 +166,20 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json",
             completion["invalidation_inputs"],
         )
-        self.assertIn(
-            "platform/ansible/tests/mgmt_offline_vm",
+        runtime_fixture_inputs = [
+            "platform/ansible/tests/mgmt_offline_vm/Vagrantfile",
+            "platform/ansible/tests/mgmt_offline_vm/contract.yml",
+            "platform/ansible/tests/mgmt_offline_vm/create.yml",
+            "platform/ansible/tests/mgmt_offline_vm/destroy.yml",
+            "platform/ansible/tests/mgmt_offline_vm/main.yml",
+            "platform/ansible/tests/mgmt_offline_vm/server.yml",
+            "platform/ansible/tests/mgmt_offline_vm/test.yml",
+            "platform/ansible/tests/mgmt_offline_vm/transport.py",
+        ]
+        for path in runtime_fixture_inputs:
+            self.assertIn(path, completion["invalidation_inputs"])
+        self.assertNotIn(
+            "platform/ansible/tests/mgmt_offline_vm/README.md",
             completion["invalidation_inputs"],
         )
         self.assertEqual(
