@@ -263,6 +263,15 @@ def campaign(base: str, repetitions: int) -> tuple[dict, bool]:
     final_product = _run_sample("final-product-exact", _controller("service", "product"), env=base_env)
     final_verify = _run_sample("final-verify-exact", verify, env=full_env)
 
+    final_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    final_clean = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True
+    ).strip()
+    if final_head != head:
+        raise RuntimeError("performance campaign HEAD changed during execution")
+    if final_clean:
+        raise RuntimeError("performance campaign worktree changed during execution")
+
     checks = {
         "cold_verify_change_wall": _budget_result(
             cold["median_wall_seconds"], float(budgets["cold_verify_change_wall_max"])
