@@ -178,7 +178,7 @@
           - --rke2-version
           - "{{ ha_rke2_version }}"
           - --services-json
-          - "{{ {'dns': [mgmt_local_ha_contract.services.dns.address], 'ntp': [mgmt_local_ha_contract.services.ntp.address]} | to_json }}"
+          - "{{ mgmt_local_ha_contract.offline.validation_services | to_json }}"
       register: ha_bundle_validation
       changed_when: false
 
@@ -395,7 +395,7 @@
             restartPolicy: Always
             containers:
               - name: haproxy
-                image: {{ mgmt_local_ha_contract.ha_endpoint.image.reference }}
+                image: {{ mgmt_local_ha_contract.ha_endpoint.image.runtime_reference }}
                 imagePullPolicy: Never
                 args: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
                 securityContext:
