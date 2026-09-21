@@ -22,6 +22,14 @@ CONSOLE_TASK_RE = re.compile(
     re.IGNORECASE,
 )
 CONSOLE_COMMAND_RE = re.compile(r"transport\.py.{0,400}\bconsole\b", re.IGNORECASE | re.DOTALL)
+ATTACH_TASK_RE = re.compile(
+    r"attach\s+only\s+selected\s+existing\s+host-only\s+network\s+after\s+guest\s+output\s+is\s+denied",
+    re.IGNORECASE,
+)
+WSL_INTEROP_RE = re.compile(
+    r"utilacceptvsock:\d+:\s*accept4\s+failed\s+110",
+    re.IGNORECASE,
+)
 TRANSIENT_CLEANUP_RE = re.compile(
     r"(?:"
     r"already\s+locked\s+for\s+a\s+session|"
@@ -71,9 +79,9 @@ def _valid_result(result: dict[str, Any]) -> bool:
 def create_decision(result: dict[str, Any], ownership: dict[str, Any]) -> dict[str, Any]:
     """Permit one resume only for the exact owned console-timeout failure."""
     if not _valid_result(result):
-        return {"classification": "invalid-result", "resume": False}
+        return {"classification": "invalid-result", "recovery": "fail", "resume": False}
     if result["rc"] == 0:
-        return {"classification": "create-complete", "resume": False}
+        return {"classification": "create-complete", "recovery": "none", "resume": False}
 
     text = _result_text(result)
     timeout = bool(CONSOLE_TIMEOUT_RE.search(text))
@@ -83,13 +91,20 @@ def create_decision(result: dict[str, Any], ownership: dict[str, Any]) -> dict[s
     resume = timeout and console_task and console_command and exact_owner
     if resume:
         classification = "owned-console-timeout"
+        recovery = "resume-console"
+    elif exact_owner and ATTACH_TASK_RE.search(text) and WSL_INTEROP_RE.search(text):
+        classification = "owned-wsl-hostonly-attach-failure"
+        recovery = "repair-hostonly-attach"
     elif timeout and not exact_owner:
         classification = "console-timeout-without-ownership"
+        recovery = "fail"
     elif timeout:
         classification = "unbound-console-timeout"
+        recovery = "fail"
     else:
         classification = "non-console-create-failure"
-    return {"classification": classification, "resume": resume}
+        recovery = "fail"
+    return {"classification": classification, "recovery": recovery, "resume": resume}
 
 
 def cleanup_decision(result: dict[str, Any], ownership: dict[str, Any]) -> dict[str, Any]:

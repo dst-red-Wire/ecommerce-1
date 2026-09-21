@@ -1,0 +1,134 @@
+---
+- name: Read exact ownership accepted for host-only attach recovery
+  ansible.builtin.slurp:
+    src: "{{ ha_state }}/create-{{ ha_node.key }}-ownership.json"
+  register: ha_create_repair_ownership_file
+
+- name: Select exact owned VM UUID for host-only attach recovery
+  ansible.builtin.set_fact:
+    ha_create_repair_ownership: "{{ ha_create_repair_ownership_file.content | b64decode | from_json }}"
+    ha_create_repair_state: "{{ ha_repo }}/.context/mgmt-offline-vm/{{ ha_node.value.vm_name }}"
+    ha_create_repair_windows_state: "{{ ha_windows_state_root }}/{{ ha_node.value.vm_name }}"
+    ha_create_repair_transport: "{{ ha_repo }}/platform/ansible/tests/mgmt_offline_vm/transport.py"
+  changed_when: false
+
+- name: Inspect exact VM state before repairing only the failed host-only attach
+  ansible.builtin.command:
+    argv:
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - showvminfo
+      - "{{ ha_create_repair_ownership.uuid }}"
+      - --machinereadable
+  register: ha_create_repair_vm
+  until: ha_create_repair_vm.rc == 0
+  retries: 3
+  delay: 2
+  changed_when: false
+
+- name: Require exact pre-attach state and preserved console bootstrap proof
+  ansible.builtin.assert:
+    that:
+      - ha_create_repair_ownership.state == 'owned'
+      - ('name="' ~ ha_node.value.vm_name ~ '"') in ha_create_repair_vm.stdout
+      - ('UUID="' ~ ha_create_repair_ownership.uuid ~ '"') in ha_create_repair_vm.stdout
+      - "'VMState=\"running\"' in ha_create_repair_vm.stdout"
+      - "'nic1=\"null\"' in ha_create_repair_vm.stdout"
+      - >-
+        ('uartmode1="server,\\\\.\\pipe\\' ~ ha_node.value.vm_name ~ '"')
+        in ha_create_repair_vm.stdout
+      - >-
+        lookup('file', ha_create_repair_state ~ '/console.log')
+        is search('MGMT_CONSOLE_RESULT:0')
+      - >-
+        lookup('file', ha_create_repair_state ~ '/known_hosts')
+        is match('^' ~ ha_node.value.address ~ ' ssh-ed25519 [A-Za-z0-9+/=]+$')
+    fail_msg: >-
+      Refusing host-only attach repair unless the exact owned running VM remains isolated
+      and the private console bootstrap already completed successfully.
+
+- name: Repair only the demonstrated WSL-interrupted host-only attach
+  ansible.builtin.command:
+    argv:
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - controlvm
+      - "{{ ha_create_repair_ownership.uuid }}"
+      - nic1
+      - hostonly
+      - "{{ mgmt_local_ha_contract.controller.hostonly_adapter }}"
+  register: ha_create_repair_attach
+  until: ha_create_repair_attach.rc == 0
+  retries: 6
+  delay: 2
+  changed_when: true
+
+- name: Render isolated SSH transport after exact host-only attach repair
+  ansible.builtin.copy:
+    dest: "{{ ha_create_repair_state }}/ssh_config"
+    mode: "0600"
+    content: |
+      Host {{ ha_node.value.vm_name }}
+        HostName {{ ha_node.value.address }}
+        User vagrant
+        IdentityFile {{ ha_create_repair_state }}/identity
+        IdentitiesOnly yes
+        UserKnownHostsFile {{ ha_create_repair_state }}/known_hosts
+        StrictHostKeyChecking yes
+        ConnectTimeout 10
+        ProxyCommand {{ ansible_playbook_python | quote }} {{ ha_create_repair_transport | quote }} proxy --state {{ ha_create_repair_windows_state | quote }}
+
+- name: Wait for repaired VM SSH and require real enforcing guest kernel
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ ha_create_repair_state }}/ssh_config"
+      - "{{ ha_node.value.vm_name }}"
+      - getenforce
+  register: ha_create_repair_ssh
+  changed_when: false
+  until: ha_create_repair_ssh.rc == 0 and ha_create_repair_ssh.stdout | trim == 'Enforcing'
+  retries: 24
+  delay: 3
+
+- name: Probe independent kernel and denied Internet after exact attach repair
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ ha_create_repair_state }}/ssh_config"
+      - "{{ ha_node.value.vm_name }}"
+      - sudo
+      - -n
+      - python3
+      - '-'
+      - --before
+    stdin: "{{ lookup('file', ha_repo ~ '/platform/ansible/tests/mgmt_offline_vm/guest_probe.py') }}"
+  register: ha_create_repair_preflight
+  changed_when: false
+
+- name: Preserve repaired cold VM preflight proof
+  ansible.builtin.copy:
+    content: "{{ ha_create_repair_preflight.stdout }}\n"
+    dest: "{{ ha_create_repair_state }}/preflight.json"
+    mode: "0600"
+
+- name: Require repaired fresh guest to expose requested CPU count
+  ansible.builtin.assert:
+    that:
+      - (ha_create_repair_preflight.stdout | from_json).online_cpus == ha_single_vm_common.vm_cpus | int
+
+- name: Preserve bounded host-only attach repair diagnostics
+  ansible.builtin.copy:
+    dest: "{{ ha_state }}/create-{{ ha_node.key }}-attach-repair.json"
+    content: >-
+      {{
+        {
+          'node': ha_node.key,
+          'classification': 'owned-wsl-hostonly-attach-failure',
+          'rc': ha_create_repair_attach.rc,
+          'stdout': ha_create_repair_attach.stdout | default(''),
+          'stderr': ha_create_repair_attach.stderr | default(''),
+          'cmd': ha_create_repair_attach.cmd | default([])
+        } | to_nice_json
+      }}
+    mode: "0600"

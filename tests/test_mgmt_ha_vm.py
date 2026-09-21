@@ -253,8 +253,30 @@ class MgmtHaVmTests(unittest.TestCase):
                 self.assertFalse(GUARD.create_decision(failed, owned)["resume"])
         self.assertFalse(GUARD.create_decision(timeout, {"state": "mismatch"})["resume"])
 
+        attach_failure = {
+            "rc": 2,
+            "stdout": (
+                "TASK [Attach only selected existing host-only network after guest output is denied]\n"
+                "WSL ERROR: UtilAcceptVsock:273: accept4 failed 110"
+            ),
+            "stderr": "",
+            "cmd": ["ansible-playbook"],
+        }
+        attach_decision = GUARD.create_decision(attach_failure, owned)
+        self.assertFalse(attach_decision["resume"])
+        self.assertEqual("repair-hostonly-attach", attach_decision["recovery"])
+        self.assertEqual(
+            "fail",
+            GUARD.create_decision(attach_failure, {"state": "mismatch"})["recovery"],
+        )
+
         create_helper = (FIXTURE / "single_vm_action.yml").read_text(encoding="utf-8")
         self.assertEqual(1, create_helper.count("vm_resume_owned_creation': true"))
+        repair = (FIXTURE / "complete_vm_creation.yml").read_text(encoding="utf-8")
+        self.assertNotIn("vm_resume_owned_creation", repair)
+        self.assertIn("nic1=\\\"null\\\"", repair)
+        self.assertIn("MGMT_CONSOLE_RESULT:0", repair)
+        self.assertIn("guest_probe.py", repair)
 
     def test_cleanup_decisions_preserve_failures_and_bound_retry(self):
         def result(rc: int, text: str = "") -> dict:

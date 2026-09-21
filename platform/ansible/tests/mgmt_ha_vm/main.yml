@@ -250,6 +250,7 @@
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/contract.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/main.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/complete_vm_creation.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cold_stage_batch.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/retry_cold_stage_vm.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml"

@@ -115,6 +115,12 @@
         ha_single_vm_create_initial.rc != 0
         and (ha_single_vm_create_decision_file.content | b64decode | from_json).resume | bool
       }}
+    ha_single_vm_create_repair: >-
+      {{
+        ha_single_vm_create_initial.rc != 0
+        and (ha_single_vm_create_decision_file.content | b64decode | from_json).recovery
+            == 'repair-hostonly-attach'
+      }}
   when: ha_single_vm_action == 'create'
 
 - name: Fail closed when fresh creation is not an owned bounded console timeout
@@ -124,6 +130,8 @@
         ha_single_vm_create_initial.rc == 0
         or
         ha_single_vm_create_resume | bool
+        or
+        ha_single_vm_create_repair | bool
     fail_msg: >-
       Fresh VM creation failed before the recognized bounded console timeout;
       refusing to resume a possibly unrelated or unsafe failure.
@@ -151,6 +159,13 @@
     - ha_single_vm_create_initial.rc != 0
     - ha_single_vm_create_resume | bool
   register: ha_single_vm_create_resume_result
+
+- name: Complete only the exact WSL-interrupted host-only attach path
+  ansible.builtin.include_tasks: complete_vm_creation.yml
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_initial.rc != 0
+    - ha_single_vm_create_repair | bool
 
 - name: Preserve bounded one-shot resume diagnostics
   ansible.builtin.copy:
