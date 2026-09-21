@@ -476,7 +476,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             progress = MOD._GateProgress("governance", enabled=True)
             progress.update(45.376, 1_652_089)
             progress.update(45.627, 1_652_190)
-            progress.finish()
+            self.assertTrue(progress.finish("PASS"))
 
         rendered = stream.getvalue()
         prefix = "RUN governance |"
@@ -491,6 +491,41 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIn(
             f"\r\033[{bytes_column}C\033[32m190\033[0m",
             rendered,
+        )
+        self.assertIn("\r\033[32mPASS\033[0m", rendered)
+        self.assertEqual(1, rendered.count("\n"))
+
+    def test_live_gate_record_is_not_printed_twice_after_status_transition(self):
+        import io
+
+        stream = io.StringIO()
+        record = {
+            "gate": "system",
+            "duration_seconds": 33.046,
+            "written_bytes": 19_556,
+            "live_status_rendered": True,
+            "log": ".context/logs/system.log",
+        }
+        with redirect_stdout(stream):
+            MOD._emit_gate_record(True, record)
+        self.assertEqual("", stream.getvalue())
+
+    def test_compact_static_gate_status_supports_skip_and_reuse(self):
+        import io
+
+        stream = io.StringIO()
+        with (
+            mock.patch.object(MOD, "_supports_color", return_value=False),
+            redirect_stdout(stream),
+        ):
+            MOD._emit_compact_gate_status("SKIP", "frontend:none", 0.0, 0)
+            MOD._emit_compact_gate_status("REUSE", "security", 0.0, 19_556)
+        self.assertEqual(
+            [
+                "SKIP frontend:none | 0.000s | 0",
+                "REUSE security | 0.000s | 19 556",
+            ],
+            stream.getvalue().splitlines(),
         )
 
     def test_semantic_region_snapshot_detects_module_binding_mutation(self):
