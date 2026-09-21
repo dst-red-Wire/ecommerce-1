@@ -127,72 +127,96 @@ def _format_written_bytes(value: int) -> str:
     return f"{max(0, int(value)):,}".replace(",", " ")
 
 
-class _GateByteProgress:
-    """TTY-only odometer display for one serial gate."""
+class _GateProgress:
+    """TTY-only stopwatch + byte odometer for one serial gate."""
 
-    LABEL = "Nombre d'octets écrits:"
+    DURATION_WIDTH = 8
 
     def __init__(self, gate: str, *, enabled: bool) -> None:
         self.gate = gate
         self.enabled = enabled
         self.visible = False
-        self.previous = ""
-        self.color = ""
-        self.prefix = f"RUN {gate} | {self.LABEL}"
+        self.previous_duration = ""
+        self.previous_bytes = ""
+        self.bytes_color = ""
+        self.prefix = f"RUN {gate} |"
 
-    def update(self, value: int) -> None:
+    def _duration(self, elapsed: float) -> str:
+        return f"{max(0.0, elapsed):{self.DURATION_WIDTH}.3f}s"
+
+    @staticmethod
+    def _first_changed(before: str, after: str) -> int:
+        if len(before) != len(after):
+            return 0
+        return next(
+            (
+                index
+                for index, (old, new) in enumerate(zip(before, after))
+                if old != new
+            ),
+            len(after),
+        )
+
+    def update(self, elapsed: float, written_bytes: int) -> None:
         if not self.enabled:
             return
-        formatted = _format_written_bytes(value)
-        color = _write_bytes_color(value)
+
+        duration = self._duration(elapsed)
+        formatted_bytes = _format_written_bytes(written_bytes)
+        color = _write_bytes_color(written_bytes)
 
         if not self.visible:
             print(
-                f"{_paint(self.prefix, '36')} {_paint(formatted, color)}",
+                f"{_paint(self.prefix, '36')}{_paint(duration, '36')} | "
+                f"{_paint(formatted_bytes, color)}",
                 end="",
                 flush=True,
             )
             self.visible = True
-            self.previous = formatted
-            self.color = color
+            self.previous_duration = duration
+            self.previous_bytes = formatted_bytes
+            self.bytes_color = color
             return
 
-        if formatted == self.previous and color == self.color:
-            return
-
-        # Odometer UX: preserve every unchanged leading digit/group on screen.
-        # Rewrite the entire numeric field only when grouping width or color changes.
-        if len(formatted) != len(self.previous) or color != self.color:
-            first_changed = 0
-            suffix = formatted.ljust(max(len(formatted), len(self.previous)))
-        else:
-            first_changed = next(
-                (
-                    index
-                    for index, (before, after) in enumerate(zip(self.previous, formatted))
-                    if before != after
-                ),
-                len(formatted),
+        duration_changed = self._first_changed(self.previous_duration, duration)
+        if duration_changed < len(duration):
+            duration_column = len(self.prefix) + duration_changed
+            print(
+                f"\r\033[{duration_column}C{_paint(duration[duration_changed:], '36')}",
+                end="",
+                flush=True,
             )
-            if first_changed == len(formatted):
-                return
-            suffix = formatted[first_changed:]
 
-        numeric_column = len(self.prefix) + 1 + first_changed
-        print(
-            f"\r\033[{numeric_column}C{_paint(suffix, color)}",
-            end="",
-            flush=True,
-        )
-        self.previous = formatted
-        self.color = color
+        bytes_changed = self._first_changed(self.previous_bytes, formatted_bytes)
+        if color != self.bytes_color or len(formatted_bytes) != len(self.previous_bytes):
+            bytes_changed = 0
+        if bytes_changed < len(formatted_bytes) or len(formatted_bytes) != len(self.previous_bytes):
+            suffix = formatted_bytes[bytes_changed:]
+            if len(formatted_bytes) < len(self.previous_bytes):
+                suffix = suffix.ljust(len(self.previous_bytes) - bytes_changed)
+            bytes_column = (
+                len(self.prefix)
+                + len(duration)
+                + len(" | ")
+                + bytes_changed
+            )
+            print(
+                f"\r\033[{bytes_column}C{_paint(suffix, color)}",
+                end="",
+                flush=True,
+            )
+
+        self.previous_duration = duration
+        self.previous_bytes = formatted_bytes
+        self.bytes_color = color
 
     def finish(self) -> None:
         if self.visible:
             print("", flush=True)
         self.visible = False
-        self.previous = ""
-        self.color = ""
+        self.previous_duration = ""
+        self.previous_bytes = ""
+        self.bytes_color = ""
 
 
 def _write_bytes_color(value: int) -> str:
@@ -3082,7 +3106,7 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
     except ValueError:
         anchor = start
     parallel_group = effective_env.get("ECOMMERCE_PARALLEL_GROUP", "serial")
-    progress = _GateByteProgress(
+    progress = _GateProgress(
         name,
         enabled=_supports_color() and str(parallel_group).startswith("local-serial-"),
     )
@@ -3095,19 +3119,19 @@ def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = No
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        progress.update(0)
+        progress.update(0.0, 0)
         while True:
             try:
                 returncode = process.wait(timeout=0.25)
                 break
             except subprocess.TimeoutExpired:
                 try:
-                    progress.update(log_path.stat().st_size)
+                    progress.update(time.monotonic() - start, log_path.stat().st_size)
                 except OSError:
-                    progress.update(0)
+                    progress.update(time.monotonic() - start, 0)
         log.flush()
     written_bytes = log_path.stat().st_size if log_path.is_file() else 0
-    progress.update(written_bytes)
+    progress.update(time.monotonic() - start, written_bytes)
     progress.finish()
     duration = round(time.monotonic() - start, 3)
     log_text = log_path.read_text(encoding="utf-8", errors="replace")
@@ -3167,7 +3191,8 @@ def _emit_gate_record(ok: bool, record: dict) -> None:
     duration = float(record.get("duration_seconds", 0.0))
     written_bytes = int(record.get("written_bytes", 0) or 0)
     number = _paint(_format_written_bytes(written_bytes), _write_bytes_color(written_bytes))
-    print(f"{'PASS' if ok else 'FAIL'} {name} ({duration:.3f}s, {number} octets écrits)")
+    status = 'PASS' if ok else 'FAIL'
+    print(f"{status} {name} | {duration:.3f}s | {number}")
     if not ok:
         log_path = ROOT / str(record["log"])
         print("\n".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-60:]), file=sys.stderr)
