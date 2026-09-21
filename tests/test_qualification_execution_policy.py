@@ -14,6 +14,14 @@ assert SPEC and SPEC.loader
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
 
+PERF_SPEC = importlib.util.spec_from_file_location(
+    "qualification_performance_campaign_test",
+    ROOT / "scripts/qualification_performance_campaign.py",
+)
+assert PERF_SPEC and PERF_SPEC.loader
+PERF_MOD = importlib.util.module_from_spec(PERF_SPEC)
+PERF_SPEC.loader.exec_module(PERF_MOD)
+
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
     def test_policy_is_registered_under_architecture_root(self):
@@ -351,6 +359,29 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
 
+    def test_semantic_region_snapshot_detects_module_binding_mutation(self):
+        source = "BINDING = 'one'\n\nclass Stop:\n    pass\n"
+        projection = "BINDING = 'one'\n"
+        digest = MOD.hashlib.sha256(projection.encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "scripts" / "helper.py"
+            script.parent.mkdir(parents=True)
+            script.write_text(source, encoding="utf-8")
+            snapshot = {
+                "scripts/helper.py": {
+                    "end_marker": "class Stop",
+                    "sha256": digest,
+                }
+            }
+            with mock.patch.object(MOD, "ROOT", root):
+                self.assertTrue(MOD._semantic_region_snapshot_unchanged(snapshot))
+                script.write_text(
+                    "BINDING = 'two'\n\nclass Stop:\n    pass\n",
+                    encoding="utf-8",
+                )
+                self.assertFalse(MOD._semantic_region_snapshot_unchanged(snapshot))
+
     def test_semantic_function_snapshot_detects_consumed_helper_mutation(self):
         source = "def helper():\n    return 1\n"
         digest = MOD.hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -532,7 +563,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
                 run.assert_not_called()
 
-    def test_rke2_create_failure_cleans_only_after_new_identity_ownership(self):
+    def test_rke2_create_failure_cleans_only_new_virtualbox_registration(self):
         workflow = {
             "entrypoint": (
                 "scripts/repoctl.py rke2-local-virtualbox-qualification "
@@ -543,9 +574,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         }
         head = "d" * 40
         approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
+        cases = [
+            ("preexisting-vm", "old-uuid", "old-uuid", False),
+            ("no-vm-created", None, None, False),
+            ("fresh-vm-with-stale-key", None, "new-uuid", True),
+        ]
 
-        for acquired in (False, True):
-            with self.subTest(acquired=acquired), tempfile.TemporaryDirectory() as directory:
+        for name, before, after, cleanup_expected in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 vm_name = "ecommerce-mgmt-test-policy"
                 state = root / ".context" / "mgmt-offline-vm" / vm_name
@@ -561,6 +597,9 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     + "\n",
                     encoding="utf-8",
                 )
+                if name == "fresh-vm-with-stale-key":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "identity").write_text("stale-key\n", encoding="utf-8")
 
                 def clean_git(*args, check=True):
                     if args == ("status", "--porcelain", "--untracked-files=all"):
@@ -573,11 +612,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 failed = MOD.subprocess.CompletedProcess([], 1, "", "")
 
                 def fake_run(command, **kwargs):
-                    action = command[-1]
-                    if action == "vm_action=create":
-                        if acquired:
-                            state.mkdir(parents=True, exist_ok=True)
-                            (state / "identity").write_text("owned\n", encoding="utf-8")
+                    if command[-1] == "vm_action=create":
                         return failed
                     return completed
 
@@ -585,6 +620,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     mock.patch.object(MOD, "ROOT", root),
                     mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                     mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value=approved),
+                    mock.patch.object(
+                        MOD,
+                        "_rke2_registered_vm_identity",
+                        side_effect=[before, after],
+                    ),
                     mock.patch.object(MOD, "git", side_effect=clean_git),
                     mock.patch.object(MOD, "require"),
                     mock.patch.object(MOD, "run", side_effect=fake_run) as run,
@@ -603,7 +643,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 ]
                 self.assertEqual(
                     ["vm_action=validate", "vm_action=create"]
-                    + (["vm_action=destroy"] if acquired else []),
+                    + (["vm_action=destroy"] if cleanup_expected else []),
                     actions,
                 )
 
@@ -853,6 +893,31 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     (root / ".context" / "runtime" / "tekton-proof" / f"{head}.json").exists()
                 )
                 run.assert_called_once()
+
+    def test_performance_campaign_freeze_helper_rejects_source_drift(self):
+        head = "a" * 40
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            side_effect=["\n", head + "\n"],
+        ):
+            self.assertEqual(head, PERF_MOD._assert_frozen_checkout())
+
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            return_value=" M scripts/repoctl.py\n",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worktree changed"):
+                PERF_MOD._assert_frozen_checkout(head)
+
+        with mock.patch.object(
+            PERF_MOD.subprocess,
+            "check_output",
+            side_effect=["\n", "b" * 40 + "\n"],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HEAD changed"):
+                PERF_MOD._assert_frozen_checkout(head)
 
     def test_performance_campaign_uses_central_workflow_repetition_count(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
