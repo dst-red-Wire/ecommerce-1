@@ -465,7 +465,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 MOD._paint(MOD._format_written_bytes(56_262_884), "32"),
             )
 
-    def test_gate_written_bytes_preserves_unchanged_groups_like_odometer(self):
+    def test_gate_progress_keeps_prefix_fixed_and_updates_stopwatch_and_odometer_fields(self):
         import io
 
         stream = io.StringIO()
@@ -473,19 +473,23 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             mock.patch.object(MOD, "_supports_color", return_value=True),
             mock.patch("sys.stdout", stream),
         ):
-            progress = MOD._GateByteProgress("governance", enabled=True)
-            progress.update(1_652_089)
-            progress.update(1_652_190)
+            progress = MOD._GateProgress("governance", enabled=True)
+            progress.update(45.376, 1_652_089)
+            progress.update(45.627, 1_652_190)
             progress.finish()
 
         rendered = stream.getvalue()
-        prefix = "RUN governance | Nombre d'octets écrits:"
+        prefix = "RUN governance |"
         self.assertEqual(1, rendered.count(prefix))
+        self.assertIn("\033[36m  45.376s\033[0m", rendered)
         self.assertIn("\033[32m1 652 089\033[0m", rendered)
         self.assertEqual(1, rendered.count("1 652 "))
-        numeric_column = len(prefix) + 1 + len("1 652 ")
+        self.assertIn("\033[36m627s\033[0m", rendered)
+
+        duration = progress._duration(45.627)
+        bytes_column = len(prefix) + len(duration) + len(" | ") + len("1 652 ")
         self.assertIn(
-            f"\r\033[{numeric_column}C\033[32m190\033[0m",
+            f"\r\033[{bytes_column}C\033[32m190\033[0m",
             rendered,
         )
 
@@ -1509,8 +1513,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 MOD._emit_gate_record(ok, record)
             self.assertIn(
                 (
-                    f"PASS security ({record['duration_seconds']:.3f}s, "
-                    f"{MOD._format_written_bytes(record['written_bytes'])} octets écrits)"
+                    f"PASS security | {record['duration_seconds']:.3f}s | "
+                    f"{MOD._format_written_bytes(record['written_bytes'])}"
                 ),
                 emitted.getvalue(),
             )
