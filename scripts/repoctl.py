@@ -107,6 +107,7 @@ class MissingRunnerPrerequisite(RuntimeError):
 
 _DYNAMIC_WRITE_BYTES_LAST_EMIT = 0.0
 _DYNAMIC_WRITE_BYTES_VISIBLE = False
+_DYNAMIC_WRITE_BYTES_WIDTH = 0
 
 
 def fail(message: str, code: int = 2) -> int:
@@ -153,35 +154,62 @@ def _write_bytes_color(value: int) -> str:
     return "35"
 
 
+_WRITE_BYTES_LABEL = "Nombre d'octets écrits:"
+
+
 def _clear_dynamic_write_bytes() -> None:
-    global _DYNAMIC_WRITE_BYTES_VISIBLE
+    global _DYNAMIC_WRITE_BYTES_VISIBLE, _DYNAMIC_WRITE_BYTES_WIDTH
     if _DYNAMIC_WRITE_BYTES_VISIBLE and _supports_color():
-        print("\r\033[2K", end="", flush=True)
+        # Finalize the stopwatch-like status line without erasing/repainting it.
+        print("", flush=True)
     _DYNAMIC_WRITE_BYTES_VISIBLE = False
+    _DYNAMIC_WRITE_BYTES_WIDTH = 0
 
 
 def _emit_dynamic_write_bytes(*, force: bool = False) -> int | None:
     global _DYNAMIC_WRITE_BYTES_LAST_EMIT, _DYNAMIC_WRITE_BYTES_VISIBLE
+    global _DYNAMIC_WRITE_BYTES_WIDTH
     if not _supports_color():
         return None
     now = time.monotonic()
     if not force and now - _DYNAMIC_WRITE_BYTES_LAST_EMIT < 0.25:
         return None
+
     value = _context_written_bytes()
-    label = _paint("Nombre d'octets écrits:", "35")
-    number = _paint(str(value), _write_bytes_color(value))
-    print(f"\r{label} {number}", end="", flush=True)
+    raw_number = str(value)
+    width = max(_DYNAMIC_WRITE_BYTES_WIDTH, len(raw_number))
+    number = _paint(raw_number.ljust(width), _write_bytes_color(value))
+
+    if not _DYNAMIC_WRITE_BYTES_VISIBLE:
+        # Stopwatch UX: paint the label once, then only replace the numeric field.
+        label = _paint(_WRITE_BYTES_LABEL, "35")
+        print(f"{label} {number}", end="", flush=True)
+        _DYNAMIC_WRITE_BYTES_VISIBLE = True
+    else:
+        # Return to column 1, move to the numeric field and update digits only.
+        numeric_column = len(_WRITE_BYTES_LABEL) + 1
+        print(
+            f"\r\033[{numeric_column}C{number}",
+            end="",
+            flush=True,
+        )
+
+    _DYNAMIC_WRITE_BYTES_WIDTH = width
     _DYNAMIC_WRITE_BYTES_LAST_EMIT = now
-    _DYNAMIC_WRITE_BYTES_VISIBLE = True
     return value
 
 
 def _print_dynamic_write_bytes_snapshot() -> int | None:
     if not _supports_color():
         return None
-    _clear_dynamic_write_bytes()
+    if _DYNAMIC_WRITE_BYTES_VISIBLE:
+        value = _context_written_bytes()
+        _emit_dynamic_write_bytes(force=True)
+        _clear_dynamic_write_bytes()
+        return value
+
     value = _context_written_bytes()
-    label = _paint("Nombre d'octets écrits:", "35")
+    label = _paint(_WRITE_BYTES_LABEL, "35")
     number = _paint(str(value), _write_bytes_color(value))
     print(f"{label} {number}", flush=True)
     return value
