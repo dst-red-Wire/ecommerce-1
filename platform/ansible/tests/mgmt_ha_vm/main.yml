@@ -27,6 +27,7 @@
     ha_manifest_sha256: "{{ (lookup('file', ha_bundle_lock_path) | from_json).approved_manifest_sha256 }}"
     ha_single_fixture: "{{ ha_repo }}/{{ ha_sources.local_vm_entrypoint }}"
     ha_ansible_playbook: "{{ ansible_playbook_python | dirname }}/ansible-playbook"
+    ha_lifecycle_guard: "{{ playbook_dir }}/lifecycle_guard.py"
     ha_nodes: "{{ mgmt_local_ha_contract.nodes | dict2items }}"
     ha_cold_stage_batches: >-
       {{
@@ -83,6 +84,28 @@
       failed_when: >-
         ha_vbox_version.rc != 0
         or ha_vbox_version.stdout | trim != mgmt_local_ha_contract.controller.virtualbox_version
+
+    - name: Discover Windows fixture state root without changing host settings
+      ansible.builtin.command:
+        argv:
+          - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+          - -NoProfile
+          - -NonInteractive
+          - -Command
+          - '[Environment]::GetFolderPath("LocalApplicationData")'
+      register: ha_localappdata
+      changed_when: false
+
+    - name: Resolve Windows fixture state root to WSL
+      ansible.builtin.command:
+        argv: [wslpath, -u, "{{ ha_localappdata.stdout | trim }}"]
+      register: ha_windows_parent
+      changed_when: false
+
+    - name: Define canonical Windows fixture state root
+      ansible.builtin.set_fact:
+        ha_windows_state_root: "{{ ha_windows_parent.stdout | trim }}/Temp/ecommerce/.context"
+      changed_when: false
 
     - name: Require pre-prepared digest-pinned HAProxy archive
       ansible.builtin.stat:
@@ -229,6 +252,8 @@
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/single_vm_action.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cold_stage_batch.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/retry_destroy_vm.yml"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/lifecycle_guard.py"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cluster.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/server_node.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/agent_node.yml"
@@ -403,6 +428,7 @@
         - name: Initialize bounded cleanup result accumulator
           ansible.builtin.set_fact:
             ha_destroy_results: []
+            ha_destroy_retry_results: []
           changed_when: false
 
         - name: Destroy owned HA VMs two at a time while attempting all six
@@ -420,6 +446,54 @@
             path: "{{ ha_token_file }}"
             state: absent
 
+        - name: Preserve every bounded-pair cleanup result before reconciliation
+          ansible.builtin.copy:
+            dest: "{{ ha_state }}/cleanup-initial.json"
+            content: "{{ ha_destroy_results | to_nice_json }}"
+            mode: "0600"
+
+        - name: Preserve each failed cleanup result for deterministic classification
+          ansible.builtin.copy:
+            dest: "{{ ha_state }}/cleanup-{{ item.node }}-initial.json"
+            content: "{{ item | to_nice_json }}"
+            mode: "0600"
+          loop: "{{ ha_destroy_results | selectattr('rc', 'ne', 0) | list }}"
+          loop_control:
+            label: "{{ item.node }}"
+
+        - name: Reconcile only failed cleanup results sequentially and at most once
+          ansible.builtin.include_tasks: retry_destroy_vm.yml
+          loop: "{{ ha_destroy_results | selectattr('rc', 'ne', 0) | list }}"
+          loop_control:
+            loop_var: ha_failed_destroy
+            label: "{{ ha_failed_destroy.node }}"
+
+        - name: Preserve bounded sequential cleanup reconciliation results
+          ansible.builtin.copy:
+            dest: "{{ ha_state }}/cleanup-retry.json"
+            content: "{{ ha_destroy_retry_results | to_nice_json }}"
+            mode: "0600"
+
+        - name: List VirtualBox registrations after every cleanup attempt
+          ansible.builtin.command:
+            argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, vms]
+          register: ha_registered_vms_after_cleanup
+          changed_when: false
+
+        - name: Preserve final VirtualBox cleanup postcondition
+          ansible.builtin.copy:
+            dest: "{{ ha_state }}/cleanup-final-vbox.json"
+            content: >-
+              {{
+                {
+                  'rc': ha_registered_vms_after_cleanup.rc,
+                  'stdout': ha_registered_vms_after_cleanup.stdout,
+                  'stderr': ha_registered_vms_after_cleanup.stderr,
+                  'cmd': ha_registered_vms_after_cleanup.cmd
+                } | to_nice_json
+              }}
+            mode: "0600"
+
         - name: Require successful destruction of every owned HA VM
           ansible.builtin.assert:
             that:
@@ -430,9 +504,17 @@
                 | selectattr('finished', 'equalto', true)
                 | list | length == ha_nodes | length
               - >-
-                ha_destroy_results
-                | selectattr('rc', 'defined')
-                | selectattr('rc', 'ne', 0)
+                (ha_destroy_results | selectattr('rc', 'equalto', 0) | list | length)
+                +
+                (ha_destroy_retry_results | selectattr('rc', 'equalto', 0) | list | length)
+                == ha_nodes | length
+              - >-
+                ha_destroy_retry_results | length
+                == ha_destroy_results | selectattr('rc', 'ne', 0) | list | length
+              - >-
+                mgmt_local_ha_contract.nodes.values()
+                | map(attribute='vm_name')
+                | select('in', ha_registered_vms_after_cleanup.stdout)
                 | list | length == 0
             fail_msg: >-
               At least one owned HA VM could not be destroyed; all six cleanup attempts

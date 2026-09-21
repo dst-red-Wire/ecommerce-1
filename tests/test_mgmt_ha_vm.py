@@ -5,11 +5,10 @@ import hashlib
 import importlib.util
 import ipaddress
 import re
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("repoctl_ha_fixture_test", ROOT / "scripts/repoctl.py")
@@ -17,6 +16,10 @@ assert SPEC and SPEC.loader
 MOD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MOD)
 FIXTURE = ROOT / "platform/ansible/tests/mgmt_ha_vm"
+GUARD_SPEC = importlib.util.spec_from_file_location("mgmt_ha_lifecycle_guard", FIXTURE / "lifecycle_guard.py")
+assert GUARD_SPEC and GUARD_SPEC.loader
+GUARD = importlib.util.module_from_spec(GUARD_SPEC)
+GUARD_SPEC.loader.exec_module(GUARD)
 
 
 class MgmtHaVmTests(unittest.TestCase):
@@ -210,9 +213,11 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("| to_json", create_helper)
         self.assertIn("'vm_resume_owned_creation': false", create_helper)
         self.assertIn("'vm_resume_owned_creation': true", create_helper)
-        self.assertIn("Timed out waiting for isolated VM console", create_helper)
+        self.assertIn("classify-create", create_helper)
+        self.assertIn("create-{{ ha_node.key }}-initial.json", create_helper)
+        self.assertIn("ha_single_vm_create_resume | bool", create_helper)
         self.assertIn(
-            "Fail closed when fresh creation failed for anything except the bounded console wait",
+            "Fail closed when fresh creation is not an owned bounded console timeout",
             create_helper,
         )
 
@@ -221,6 +226,116 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn('"vm_action=create"', source)
         self.assertNotIn('"vm_action=test"', source)
         self.assertNotIn('"vm_action=destroy"', source)
+
+    def test_create_resume_is_exactly_once_and_fail_closed(self):
+        success = {"rc": 0, "stdout": "", "stderr": "", "cmd": ["ansible-playbook"]}
+        timeout = {
+            "rc": 2,
+            "stdout": (
+                "TASK [Configure guest exclusively through its private local serial pipe]\n"
+                'fatal: cmd=["transport.py", "console", "--script", "guest-access.txt"]\n'
+                "Timed   out waiting for isolated VM console"
+            ),
+            "stderr": "",
+            "cmd": ["ansible-playbook"],
+        }
+        owned = {"state": "owned"}
+        self.assertFalse(GUARD.create_decision(success, owned)["resume"])
+        self.assertTrue(GUARD.create_decision(timeout, owned)["resume"])
+
+        for message in (
+            "network unreachable",
+            "Vagrant failed to validate",
+            "VBoxManage: error: VERR_ACCESS_DENIED",
+        ):
+            with self.subTest(message=message):
+                failed = {"rc": 1, "stdout": message, "stderr": "", "cmd": ["ansible-playbook"]}
+                self.assertFalse(GUARD.create_decision(failed, owned)["resume"])
+        self.assertFalse(GUARD.create_decision(timeout, {"state": "mismatch"})["resume"])
+
+        create_helper = (FIXTURE / "single_vm_action.yml").read_text(encoding="utf-8")
+        self.assertEqual(1, create_helper.count("vm_resume_owned_creation': true"))
+
+    def test_cleanup_decisions_preserve_failures_and_bound_retry(self):
+        def result(rc: int, text: str = "") -> dict:
+            return {"rc": rc, "stdout": text, "stderr": "", "cmd": ["ansible-playbook"]}
+
+        self.assertEqual(
+            "pass",
+            GUARD.cleanup_decision(result(0), {"state": "owned"})["resolution"],
+        )
+        for state in ("absent", "stale_identity"):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    "already-absent",
+                    GUARD.cleanup_decision(result(1), {"state": state})["resolution"],
+                )
+        self.assertEqual(
+            "retry",
+            GUARD.cleanup_decision(
+                result(1, "VBoxManage: error: machine is already locked for a session"),
+                {"state": "owned"},
+            )["resolution"],
+        )
+        self.assertEqual(
+            "fail",
+            GUARD.cleanup_decision(result(1, "permission denied"), {"state": "owned"})[
+                "resolution"
+            ],
+        )
+        self.assertEqual(
+            "fail",
+            GUARD.cleanup_decision(result(1, "already locked for a session"), {"state": "mismatch"})[
+                "resolution"
+            ],
+        )
+
+        source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        retry = (FIXTURE / "retry_destroy_vm.yml").read_text(encoding="utf-8")
+        self.assertIn("cleanup-final-vbox.json", source)
+        self.assertIn("selectattr('rc', 'ne', 0)", source)
+        self.assertNotIn("async:", retry)
+        self.assertIn("ha_cleanup_decision.resolution == 'retry'", retry)
+        self.assertIn("already-absent", retry)
+
+    def test_ownership_probe_distinguishes_owned_absent_stale_and_mismatch(self):
+        vm_name = "ecommerce-mgmt-test-ha-cp-01"
+        uuid = "11111111-2222-3333-4444-555555555555"
+
+        def completed(stdout: str, returncode: int = 0):
+            return GUARD.subprocess.CompletedProcess([], returncode, stdout, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            identity = Path(directory) / "id"
+            with mock.patch.object(GUARD.subprocess, "run", return_value=completed("")):
+                self.assertEqual("absent", GUARD.probe_ownership("vbox", identity, vm_name)["state"])
+
+            identity.write_text(uuid + "\n", encoding="utf-8")
+            with mock.patch.object(GUARD.subprocess, "run", return_value=completed("")):
+                self.assertEqual(
+                    "stale_identity",
+                    GUARD.probe_ownership("vbox", identity, vm_name)["state"],
+                )
+
+            listing = f'"{vm_name}" {{{uuid}}}\n'
+            details = f'name="{vm_name}"\nUUID="{uuid}"\n'
+            with mock.patch.object(
+                GUARD.subprocess,
+                "run",
+                side_effect=(completed(listing), completed(details)),
+            ):
+                self.assertEqual("owned", GUARD.probe_ownership("vbox", identity, vm_name)["state"])
+
+            mismatch_listing = f'"{vm_name}" {{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}}\n'
+            with mock.patch.object(
+                GUARD.subprocess,
+                "run",
+                return_value=completed(mismatch_listing),
+            ):
+                self.assertEqual(
+                    "mismatch",
+                    GUARD.probe_ownership("vbox", identity, vm_name)["state"],
+                )
 
     def test_cluster_parallelism_matches_bounded_contract(self):
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")

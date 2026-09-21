@@ -44,15 +44,82 @@
   changed_when: true
   when: ha_single_vm_action == 'create'
 
-- name: Fail closed when fresh creation failed for anything except the bounded console wait
+- name: Preserve bounded fresh-create diagnostics
+  ansible.builtin.copy:
+    dest: "{{ ha_state }}/create-{{ ha_node.key }}-initial.json"
+    content: >-
+      {{
+        {
+          'node': ha_node.key,
+          'rc': ha_single_vm_create_initial.rc,
+          'stdout': ha_single_vm_create_initial.stdout | default(''),
+          'stderr': ha_single_vm_create_initial.stderr | default(''),
+          'cmd': ha_single_vm_create_initial.cmd | default([])
+        } | to_nice_json
+      }}
+    mode: "0600"
+  when: ha_single_vm_action == 'create'
+
+- name: Probe exact ownership after failed fresh creation
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - probe
+      - --vbox
+      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - --identity
+      - "{{ ha_windows_state_root }}/{{ ha_node.value.vm_name }}/.vagrant/machines/default/virtualbox/id"
+      - --vm-name
+      - "{{ ha_node.value.vm_name }}"
+      - --output
+      - "{{ ha_state }}/create-{{ ha_node.key }}-ownership.json"
+  changed_when: false
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_initial.rc != 0
+
+- name: Classify failed creation without broad error allowlists
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - classify-create
+      - --result
+      - "{{ ha_state }}/create-{{ ha_node.key }}-initial.json"
+      - --ownership
+      - "{{ ha_state }}/create-{{ ha_node.key }}-ownership.json"
+      - --output
+      - "{{ ha_state }}/create-{{ ha_node.key }}-decision.json"
+  changed_when: false
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_initial.rc != 0
+
+- name: Read bounded creation decision
+  ansible.builtin.slurp:
+    src: "{{ ha_state }}/create-{{ ha_node.key }}-decision.json"
+  register: ha_single_vm_create_decision_file
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_initial.rc != 0
+
+- name: Select one-shot creation resume decision
+  ansible.builtin.set_fact:
+    ha_single_vm_create_resume: >-
+      {{
+        ha_single_vm_create_initial.rc != 0
+        and (ha_single_vm_create_decision_file.content | b64decode | from_json).resume | bool
+      }}
+  when: ha_single_vm_action == 'create'
+
+- name: Fail closed when fresh creation is not an owned bounded console timeout
   ansible.builtin.assert:
     that:
       - >-
         ha_single_vm_create_initial.rc == 0
         or
-        'Timed out waiting for isolated VM console'
-        in ((ha_single_vm_create_initial.stdout | default(''))
-            ~ (ha_single_vm_create_initial.stderr | default('')))
+        ha_single_vm_create_resume | bool
     fail_msg: >-
       Fresh VM creation failed before the recognized bounded console timeout;
       refusing to resume a possibly unrelated or unsafe failure.
@@ -78,7 +145,23 @@
   when:
     - ha_single_vm_action == 'create'
     - ha_single_vm_create_initial.rc != 0
-    - >-
-      'Timed out waiting for isolated VM console'
-      in ((ha_single_vm_create_initial.stdout | default(''))
-          ~ (ha_single_vm_create_initial.stderr | default('')))
+    - ha_single_vm_create_resume | bool
+  register: ha_single_vm_create_resume_result
+
+- name: Preserve bounded one-shot resume diagnostics
+  ansible.builtin.copy:
+    dest: "{{ ha_state }}/create-{{ ha_node.key }}-resume.json"
+    content: >-
+      {{
+        {
+          'node': ha_node.key,
+          'rc': ha_single_vm_create_resume_result.rc,
+          'stdout': ha_single_vm_create_resume_result.stdout | default(''),
+          'stderr': ha_single_vm_create_resume_result.stderr | default(''),
+          'cmd': ha_single_vm_create_resume_result.cmd | default([])
+        } | to_nice_json
+      }}
+    mode: "0600"
+  when:
+    - ha_single_vm_action == 'create'
+    - ha_single_vm_create_resume | bool

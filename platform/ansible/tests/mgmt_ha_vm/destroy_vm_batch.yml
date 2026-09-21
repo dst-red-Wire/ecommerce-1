@@ -54,5 +54,20 @@
 
 - name: Accumulate cleanup results across all pairs
   ansible.builtin.set_fact:
-    ha_destroy_results: "{{ ha_destroy_results + ha_destroy_poll.results }}"
+    ha_destroy_results: >-
+      {{
+        ha_destroy_results
+        + [{
+          'node': item.item.ha_batch_node.key,
+          'ansible_job_id': item.ansible_job_id | default(item.item.ansible_job_id),
+          'finished': item.finished | default(false),
+          'rc': item.rc | default(-1),
+          'stdout': item.stdout | default(''),
+          'stderr': item.stderr | default(''),
+          'cmd': item.cmd | default([])
+        }]
+      }}
+  loop: "{{ ha_destroy_poll.results }}"
+  loop_control:
+    label: "{{ item.item.ha_batch_node.key }}"
   changed_when: false
