@@ -83,8 +83,10 @@ make rke2-local-ha-restore-bundle \
 
 The restore command refuses a dirty checkout, a relative or missing source, an
 existing destination, or a source whose `manifest.json` does not hash to the
-approved value above. It then reuses the #128 bundle assembler with
-`bundle_offline=true`: every locked byte is revalidated and the destination is
+approved value above. The digest-pinned #128 Rocky preparer image must already be
+present in the local Docker cache; the restore command verifies it with
+`docker image inspect` and never pulls it. It then reuses the #128 bundle assembler
+with `bundle_offline=true`: every locked byte is revalidated and the destination is
 published only after the independent manifest and image/RPM validation succeeds.
 No network fallback is permitted. The destination remains:
 
