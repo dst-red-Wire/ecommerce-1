@@ -31,7 +31,7 @@ if ($r.mode -eq "vagrant") {
 if ($r.mode -eq "proxy") {
   $client = [Net.Sockets.TcpClient]::new()
   $connecting = $client.ConnectAsync($r.address, 22)
-  if (-not $connecting.Wait(10000)) { $client.Dispose(); throw "Timed out connecting to owned VM SSH" }
+  if (-not $connecting.Wait([int]$r.connect_timeout_milliseconds)) { $client.Dispose(); throw "Timed out connecting to owned VM SSH" }
   $connecting.GetAwaiter().GetResult()
   $stream = $client.GetStream()
   $readTask = $stream.CopyToAsync([Console]::OpenStandardOutput())
@@ -103,6 +103,9 @@ def main() -> int:
     address = ipaddress.IPv4Address(runtime["address"])
     if not address.is_private or address.is_loopback or address.is_unspecified:
         raise ValueError("private host-only test address required")
+    connect_timeout_seconds = int(runtime["ssh_connect_timeout_seconds"])
+    if not 1 <= connect_timeout_seconds <= 60:
+        raise ValueError("bounded SSH connect timeout required")
     request = {"mode": args.mode, "name": runtime["name"]}
     if args.mode == "vagrant":
         request.update(
@@ -112,6 +115,7 @@ def main() -> int:
         )
     elif args.mode == "proxy":
         request["address"] = str(address)
+        request["connect_timeout_milliseconds"] = connect_timeout_seconds * 1000
     else:
         if args.script is None:
             raise ValueError("console guest script required")
