@@ -18,6 +18,12 @@
     ha_sources: "{{ mgmt_local_ha_contract.canonical_sources }}"
     ha_single_contract_path: "{{ ha_repo }}/{{ ha_sources.local_vm_contract }}"
     ha_single_contract: "{{ (lookup('file', ha_single_contract_path) | from_yaml).mgmt_local_vm_contract }}"
+    ha_single_runtime_sources: >-
+      {{
+        ha_single_contract.runtime_sources
+        | map('regex_replace', '^', ha_repo ~ '/')
+        | list
+      }}
     ha_bootstrap_path: "{{ ha_repo }}/{{ ha_sources.mgmt_bootstrap }}"
     ha_network_plan_path: "{{ ha_repo }}/{{ ha_sources.network_plan }}"
     ha_bundle_lock_path: "{{ ha_repo }}/{{ ha_single_contract.bundle_lock }}"
@@ -269,6 +275,12 @@
       changed_when: false
       failed_when: ha_frozen_status.stdout | trim | length > 0
 
+    - name: Fingerprint canonical shared local VM runtime sources
+      ansible.builtin.command:
+        argv: "{{ ['sha256sum', ha_single_contract_path] + ha_single_runtime_sources }}"
+      register: ha_single_source_hashes
+      changed_when: false
+
     - name: Fingerprint exact HA sources before creating machines
       ansible.builtin.command:
         argv:
@@ -307,7 +319,13 @@
     - name: Preserve exact HA source fingerprints
       ansible.builtin.copy:
         dest: "{{ ha_state }}/source.sha256"
-        content: "{{ ha_source_hashes.stdout }}\n"
+        content: >-
+          {{
+            ha_single_source_hashes.stdout
+            ~ '\n'
+            ~ ha_source_hashes.stdout
+            ~ '\n'
+          }}
         mode: "0600"
 
     - name: Create and cold-stage all six Rocky VMs from the PR 128 fixture
