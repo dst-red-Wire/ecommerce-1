@@ -99,7 +99,9 @@
               'address': vm_address, 'box_name': vm_box_name, 'box_url': vm_box_url,
               'box_sha256': vm_box_sha256,
               'vagrant_version': vm_vagrant_version,
-              'vagrant_windows': vm_vagrant_windows} | to_nice_json }}
+              'vagrant_windows': vm_vagrant_windows,
+              'ssh_connect_timeout_seconds':
+                mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds | int} | to_nice_json }}
     - name: Run native Vagrant validation
       ansible.builtin.command:
         argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, validate]
