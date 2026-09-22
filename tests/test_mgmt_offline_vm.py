@@ -22,6 +22,7 @@ RKE2 = load("rke2_probe")
 VIRTUALBOX = load("virtualbox_probe")
 TAMPER = load("tamper_artifact")
 RESTAGE = load("restage_cleanup")
+PRIVILEGE = load("privilege_probe")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
@@ -210,6 +211,57 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symbolic link"):
                 RESTAGE.clean((images,), allowed=(images,))
             self.assertEqual(sentinel.read_text(), "must survive")
+
+    def test_root_uid_proof_accepts_only_exact_direct_root_output(self):
+        for stdout in ("0", "0\n"):
+            with self.subTest(stdout=stdout):
+                self.assertTrue(
+                    PRIVILEGE.root_uid_proof(stdout, ansible_callback=False)
+                )
+        for stdout in ("1000\n", "uid=0", "foo 0", "0 foo", ""):
+            with self.subTest(stdout=stdout):
+                self.assertFalse(
+                    PRIVILEGE.root_uid_proof(stdout, ansible_callback=False)
+                )
+
+    def test_root_uid_proof_accepts_exact_ansible_callback_output(self):
+        observed = (
+            "ecommerce-mgmt-test-rke2-4g | CHANGED | rc=0 | (stdout) 0"
+        )
+        self.assertTrue(
+            PRIVILEGE.root_uid_proof(observed, ansible_callback=True)
+        )
+        self.assertTrue(
+            PRIVILEGE.root_uid_proof(
+                "host | SUCCESS | rc=0 | (stdout) 0\n",
+                ansible_callback=True,
+            )
+        )
+        for stdout in (
+            "host | CHANGED | rc=0 | (stdout) 1000",
+            "host | FAILED | rc=1 | (stdout) 0",
+            "foo 0",
+        ):
+            with self.subTest(stdout=stdout):
+                self.assertFalse(
+                    PRIVILEGE.root_uid_proof(stdout, ansible_callback=True)
+                )
+
+    def test_root_proofs_require_zero_sample_rc(self):
+        samples = {
+            "sudo_n_id": [{"rc": 0, "stdout": "0\n"}],
+            "ansible_become_id": [
+                {"rc": 1, "stdout": "host | SUCCESS | rc=0 | (stdout) 0"}
+            ],
+        }
+        self.assertFalse(PRIVILEGE.root_proofs_pass(samples))
+
+    def test_root_proofs_reject_missing_samples(self):
+        self.assertFalse(
+            PRIVILEGE.root_proofs_pass(
+                {"sudo_n_id": [], "ansible_become_id": []}
+            )
+        )
 
 
 if __name__ == "__main__":

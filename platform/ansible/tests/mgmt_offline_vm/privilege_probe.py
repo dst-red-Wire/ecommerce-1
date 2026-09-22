@@ -34,6 +34,10 @@ SECRET_VALUE = re.compile(
     r"(?:[\"'][^\"']*[\"']|\S+)"
 )
 BEARER_VALUE = re.compile(r"(?i)bearer\s+\S+")
+DIRECT_ROOT_UID = re.compile(r"0\n?\Z")
+ANSIBLE_ROOT_UID = re.compile(
+    r"[^|\r\n]+ \| (?:CHANGED|SUCCESS) \| rc=0 \| \(stdout\) 0\n?\Z"
+)
 
 
 def now() -> str:
@@ -316,12 +320,25 @@ def classify(summary: dict, stale_socket: bool) -> str:
     return "unknown"
 
 
+def root_uid_proof(stdout: str, *, ansible_callback: bool) -> bool:
+    pattern = ANSIBLE_ROOT_UID if ansible_callback else DIRECT_ROOT_UID
+    return pattern.fullmatch(stdout) is not None
+
+
 def root_proofs_pass(samples: dict[str, list[dict]]) -> bool:
-    for name in ("sudo_n_id", "ansible_become_id"):
-        for item in samples[name]:
-            if item["rc"] != 0 or re.search(r"(^|\n)0(\n|$)", item["stdout"].strip()) is None:
-                return False
-    return True
+    direct_samples = samples["sudo_n_id"]
+    ansible_samples = samples["ansible_become_id"]
+    direct_pass = all(
+        item["rc"] == 0
+        and root_uid_proof(item["stdout"], ansible_callback=False)
+        for item in direct_samples
+    )
+    ansible_pass = all(
+        item["rc"] == 0
+        and root_uid_proof(item["stdout"], ansible_callback=True)
+        for item in ansible_samples
+    )
+    return bool(direct_samples) and bool(ansible_samples) and direct_pass and ansible_pass
 
 
 def write_json(path: Path, payload: dict) -> None:
