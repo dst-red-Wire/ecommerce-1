@@ -1,0 +1,90 @@
+---
+- name: Require canonical Guest Additions lock and bundle paths
+  ansible.builtin.assert:
+    that:
+      - vm_guest_additions_lock_path is match('^' ~ (vm_repo | regex_escape) ~ '/')
+      - vm_guest_additions_bundle is match('^' ~ (vm_repo | regex_escape) ~ '/\.context/')
+      - vm_guest_additions_helper is match('^' ~ (vm_repo | regex_escape) ~ '/')
+      - vm_guest_additions_lock.virtualbox_version is match('^[0-9]+\.[0-9]+\.[0-9]+r[0-9]+$')
+      - vm_guest_additions_lock.guest_additions.version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+      - vm_guest_additions_lock.guest_additions.revision | int > 0
+
+- name: Verify exact Windows VirtualBox version before any VM mutation
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", --version]
+  register: vm_prerequisite_vbox
+  until: >-
+    vm_prerequisite_vbox.rc == 0
+    and vm_prerequisite_vbox.stdout | trim == vm_guest_additions_lock.virtualbox_version
+  retries: 3
+  delay: 2
+  changed_when: false
+  failed_when: >-
+    vm_prerequisite_vbox.rc != 0
+    or vm_prerequisite_vbox.stdout | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Verify exact Windows Vagrant version before any VM mutation
+  ansible.builtin.command:
+    argv: ["{{ vm_vagrant }}", --version]
+  register: vm_prerequisite_vagrant
+  until: >-
+    vm_prerequisite_vagrant.rc == 0
+    and vm_prerequisite_vagrant.stdout | trim == 'Vagrant ' ~ vm_vagrant_version
+  retries: 3
+  delay: 2
+  changed_when: false
+  failed_when: >-
+    vm_prerequisite_vagrant.rc != 0
+    or vm_prerequisite_vagrant.stdout | trim != 'Vagrant ' ~ vm_vagrant_version
+
+- name: Inspect pinned host Guest Additions ISO
+  ansible.builtin.stat:
+    path: "{{ vm_guest_additions_lock.guest_additions.iso.wsl_path }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: vm_prerequisite_iso
+
+- name: Refuse a missing or substituted Guest Additions ISO
+  ansible.builtin.assert:
+    that:
+      - vm_prerequisite_iso.stat.isreg | default(false)
+      - not (vm_prerequisite_iso.stat.islnk | default(false))
+      - vm_prerequisite_iso.stat.checksum == vm_guest_additions_lock.guest_additions.iso.sha256
+    fail_msg: >-
+      The host VirtualBox Guest Additions ISO is missing or differs from the canonical lock.
+
+- name: Verify existing single-stream transport prerequisites
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [tar, --version]
+    - [ssh, -V]
+  changed_when: false
+
+- name: Validate exact offline Guest Additions prerequisite bundle
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ vm_guest_additions_helper }}"
+      - validate
+      - --lock
+      - "{{ vm_guest_additions_lock_path }}"
+      - --bundle
+      - "{{ vm_guest_additions_bundle }}"
+  register: vm_prerequisite_bundle
+  changed_when: false
+
+- name: Record bounded prerequisite proof before lifecycle execution
+  ansible.builtin.copy:
+    dest: "{{ vm_repo }}/.context/guest-additions-preflight.json"
+    content: >-
+      {{
+        {
+          'schema_version': 1,
+          'vagrant_version': vm_prerequisite_vagrant.stdout | trim,
+          'virtualbox_version': vm_prerequisite_vbox.stdout | trim,
+          'iso_sha256': vm_prerequisite_iso.stat.checksum,
+          'bundle': vm_prerequisite_bundle.stdout | from_json
+        } | to_nice_json
+      }}
+    mode: '0600'

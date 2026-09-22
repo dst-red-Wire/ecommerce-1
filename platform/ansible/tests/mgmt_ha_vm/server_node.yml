@@ -1,0 +1,73 @@
+---
+- name: Invoke canonical RKE2 server role with verified offline bytes
+  ansible.builtin.include_role:
+    name: rke2_server
+  vars:
+    rke2_version: "{{ ha_rke2_version }}"
+    rke2_token: "{{ lookup('file', ha_token_file) | trim }}"
+    k8s_ip: "{{ ha_node_ip }}"
+    rke2_server_url: "{{ ha_join_url }}"
+    rke2_cluster_cidr: "{{ ha_pod_cidr }}"
+    rke2_service_cidr: "{{ ha_service_cidr }}"
+    mgmt_offline_artifacts_verified: "{{ ha_bundle_verified | bool }}"
+    rke2_offline_binary: "/var/lib/ecommerce/bootstrap/{{ ha_manifest_sha256 }}/rke2.linux-amd64"
+
+- name: Render HA-aware RKE2 server configuration
+  ansible.builtin.copy:
+    dest: /etc/rancher/rke2/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      token: "{{ lookup('file', ha_token_file) | trim }}"
+      node-name: "{{ inventory_hostname }}"
+      node-ip: "{{ ha_node_ip }}"
+      advertise-address: "{{ ha_node_ip }}"
+      tls-san:
+        - "{{ ha_node_ip }}"
+        - "{{ ha_endpoint_ip }}"
+        - "{{ ha_endpoint_dns }}"
+      write-kubeconfig-mode: "0640"
+      disable:
+        - rke2-ingress-nginx
+        - rke2-traefik
+      cni: cilium
+      cluster-cidr: "{{ ha_pod_cidr }}"
+      service-cidr: "{{ ha_service_cidr }}"
+      {% if ha_join_url | length > 0 %}
+      server: "{{ ha_join_url }}"
+      {% endif %}
+      disable-default-registry-endpoint: true
+      selinux: true
+  no_log: true
+  register: ha_server_config
+
+- name: Restart server after HA SAN reconciliation
+  ansible.builtin.systemd_service:
+    name: rke2-server
+    state: restarted
+    enabled: true
+    daemon_reload: true
+  when: ha_server_config is changed
+
+- name: Wait boundedly for RKE2 server active state
+  ansible.builtin.command:
+    argv: [systemctl, is-active, rke2-server.service]
+  register: ha_server_active
+  changed_when: false
+  until: ha_server_active.stdout | trim == 'active'
+  retries: 180
+  delay: 5
+
+- name: Release controller transfer staging after successful server start
+  ansible.builtin.file:
+    path: "/var/lib/ecommerce/bootstrap/{{ ha_manifest_sha256 }}"
+    state: absent
+
+- name: Release imported RKE2 image archives after successful server start
+  ansible.builtin.file:
+    path: "/var/lib/rancher/rke2/agent/images/{{ item }}"
+    state: absent
+  loop:
+    - rke2-images-core.linux-amd64.tar
+    - rke2-images-cilium.linux-amd64.tar

@@ -127,6 +127,7 @@
   ansible.builtin.command:
     argv: [systemctl, show, rke2-server.service, --property=Job, --value]
   register: rke2_server_job
+  become: false
   changed_when: false
   until: rke2_server_job.stdout | default('') | trim == ''
   retries: 180
@@ -136,6 +137,7 @@
   ansible.builtin.command:
     argv: [systemctl, is-active, rke2-server.service]
   register: rke2_server_active
+  become: false
   changed_when: false
   until: rke2_server_active.stdout | default('') | trim == 'active'
   retries: 180

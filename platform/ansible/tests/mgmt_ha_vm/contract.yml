@@ -1,0 +1,111 @@
+---
+mgmt_local_ha_contract:
+  schema_version: 1
+  purpose: six-node-functional-ha-qualification
+  capacity_production_claim: false
+  real_hetzner_network_claim: false
+  physical_failure_claim: false
+
+  canonical_sources:
+    local_vm_contract: platform/ansible/tests/mgmt_offline_vm/contract.yml
+    local_vm_entrypoint: platform/ansible/tests/mgmt_offline_vm/main.yml
+    mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
+    network_plan: config/infrastructure/network-plan.yaml
+    qualification_policy: config/contracts/qualification-execution-policy.yaml
+    private_firewall_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-private.xml.j2
+    egress_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2
+    egress_service_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.service.j2
+
+  controller:
+    os: wsl2
+    windows_ping: /mnt/c/Windows/System32/ping.exe
+    hostonly_adapter: VirtualBox Host-Only Ethernet Adapter
+    host_address: 192.168.22.1
+    subnet: 192.168.22.0/24
+
+  resources:
+    mode: constrained-functional-lab
+    vendor_minimum_capacity_profile: false
+    control_plane:
+      cpus: 2
+      memory_mib: 2560
+    worker:
+      cpus: 2
+      memory_mib: 1024
+
+  execution:
+    max_forks: 6
+    vm_create_parallelism: 1
+    cold_stage_parallelism: 2
+    node_validation_parallelism: 4
+    worker_join_parallelism: 2
+    cleanup_parallelism: 2
+    control_plane_parallelism: 1
+
+  nodes:
+    cp-01:
+      vm_name: ecommerce-mgmt-test-ha-cp-01
+      hostname: ha-cp-01
+      role: control-plane
+      address: 192.168.22.61
+      mac: 02EECC00A061
+    cp-02:
+      vm_name: ecommerce-mgmt-test-ha-cp-02
+      hostname: ha-cp-02
+      role: control-plane
+      address: 192.168.22.62
+      mac: 02EECC00A062
+    cp-03:
+      vm_name: ecommerce-mgmt-test-ha-cp-03
+      hostname: ha-cp-03
+      role: control-plane
+      address: 192.168.22.63
+      mac: 02EECC00A063
+    worker-01:
+      vm_name: ecommerce-mgmt-test-ha-worker-01
+      hostname: ha-worker-01
+      role: worker
+      address: 192.168.22.71
+      mac: 02EECC00A071
+    worker-02:
+      vm_name: ecommerce-mgmt-test-ha-worker-02
+      hostname: ha-worker-02
+      role: worker
+      address: 192.168.22.72
+      mac: 02EECC00A072
+    worker-03:
+      vm_name: ecommerce-mgmt-test-ha-worker-03
+      hostname: ha-worker-03
+      role: worker
+      address: 192.168.22.73
+      mac: 02EECC00A073
+
+  services:
+    dns:
+      host: worker-02
+      port: 53
+      record_name: rke2-ha.internal.test
+    ntp:
+      host: worker-03
+      port: 123
+      maximum_offset_seconds: 5
+
+  ha_endpoint:
+    implementation: haproxy
+    host: worker-03
+    dns_name: rke2-ha.internal.test
+    registration_port: 9345
+    kubernetes_api_port: 6443
+    run_as_user: 99
+    run_as_group: 99
+    image:
+      reference: docker.io/library/haproxy@sha256:37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2
+      version: 3.2.23
+      platform: linux/amd64
+      pull_policy: Never
+      cache_tar: .context/mgmt-ha-cache/haproxy-37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2.tar
+      cache_evidence: .context/mgmt-ha-cache/haproxy-37372c5ade6fc5cfb3a0c1a3dc0f77da472fce80ee8aa1294ed78af67179a3f2.json
+
+  failure_test:
+    stop_control_plane: cp-02
+    required_quorum: 2

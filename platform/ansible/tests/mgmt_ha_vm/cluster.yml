@@ -1,0 +1,953 @@
+---
+- name: Prepare all six isolated Rocky nodes for local HA traffic
+  hosts: all
+  serial: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    ha_sources: "{{ mgmt_local_ha_contract.canonical_sources }}"
+    ha_single_contract: >-
+      {{ (lookup('file', ha_repo ~ '/' ~ ha_sources.local_vm_contract)
+          | from_yaml).mgmt_local_vm_contract }}
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ ha_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_pod_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ ha_sources.network_plan) | from_yaml).kubernetes.mgmt.pod_cidr }}"
+    ha_service_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ ha_sources.network_plan) | from_yaml).kubernetes.mgmt.service_cidr }}"
+    ha_lab_cidr: "{{ mgmt_local_ha_contract.controller.subnet }}"
+    ha_dns_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.dns.host].address }}"
+    ha_ntp_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.ntp.host].address }}"
+    mgmt_private_dhcp_server: "{{ mgmt_local_ha_contract.controller.host_address }}"
+    mgmt_private_block: "{{ ha_lab_cidr }}"
+    mgmt_pod_cidr: "{{ ha_pod_cidr }}"
+    mgmt_service_cidr: "{{ ha_service_cidr }}"
+    mgmt_internal_dns:
+      - "{{ ha_dns_address }}"
+    mgmt_internal_ntp:
+      - "{{ ha_ntp_address }}"
+    mgmt_firewall_role: "{{ 'control-plane' if inventory_hostname in groups['control_planes'] else 'worker' }}"
+    mgmt_firewall_cidrs:
+      "401": "{{ ha_lab_cidr }}"
+      "402": "{{ ha_lab_cidr }}"
+      "403": "{{ ha_lab_cidr }}"
+      "404": "{{ ha_lab_cidr }}"
+      "405": "{{ ha_lab_cidr }}"
+      "406": "{{ ha_lab_cidr }}"
+  tasks:
+    - name: Set unique guest hostname before RKE2 identity is created
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Install local HA service and probe helpers
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - {src: lab_services.py, dest: /usr/local/libexec/ecommerce-ha-lab-services.py}
+        - {src: service_probe.py, dest: /usr/local/libexec/ecommerce-ha-service-probe.py}
+        - {src: ha_probe.py, dest: /usr/local/libexec/ecommerce-ha-probe.py}
+
+    - name: Discover the interface carrying the fixed host-only address
+      ansible.builtin.command:
+        argv: [ip, -o, -4, addr, show, to, "{{ ha_node_ip }}/32"]
+      register: ha_private_interface_probe
+      changed_when: false
+
+    - name: Require exactly one host-only interface
+      ansible.builtin.assert:
+        that:
+          - ha_private_interface_probe.stdout_lines | length == 1
+          - ha_private_interface_probe.stdout_lines[0].split() | length >= 2
+
+    - name: Select the observed host-only interface
+      ansible.builtin.set_fact:
+        mgmt_private_interface: "{{ ha_private_interface_probe.stdout_lines[0].split()[1].split('@')[0] }}"
+
+    - name: Render the canonical complete private firewall zone
+      ansible.builtin.template:
+        src: "{{ ha_repo }}/{{ ha_sources.private_firewall_template }}"
+        dest: /etc/firewalld/zones/mgmt-private.xml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Activate the canonical private firewall zone
+      ansible.builtin.command:
+        argv: [firewall-cmd, --reload]
+      changed_when: true
+
+    - name: Create canonical egress policy directory
+      ansible.builtin.file:
+        path: /etc/ecommerce
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render canonical egress transaction from its sole template
+      ansible.builtin.template:
+        src: "{{ ha_repo }}/{{ ha_sources.egress_template }}"
+        dest: /etc/ecommerce/mgmt-egress.nft
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Validate canonical HA nftables transaction
+      ansible.builtin.command:
+        argv: [nft, --check, --file, /etc/ecommerce/mgmt-egress.nft]
+      changed_when: false
+
+    - name: Install canonical egress service from its sole template
+      ansible.builtin.template:
+        src: "{{ ha_repo }}/{{ ha_sources.egress_service_template }}"
+        dest: /etc/systemd/system/ecommerce-mgmt-egress.service
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Activate canonical HA default-deny boundary
+      ansible.builtin.systemd_service:
+        name: ecommerce-mgmt-egress.service
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+    - name: Disable the superseded single-node disposable egress unit
+      ansible.builtin.systemd_service:
+        name: ecommerce-test-offline.service
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Inspect disposable single-node nftables table
+      ansible.builtin.command:
+        argv: [nft, list, table, inet, ecommerce_test_offline]
+      register: ha_old_table
+      changed_when: false
+      failed_when: ha_old_table.rc not in [0, 1]
+
+    - name: Remove only the superseded single-node nftables table
+      ansible.builtin.command:
+        argv: [nft, delete, table, inet, ecommerce_test_offline]
+      when: ha_old_table.rc == 0
+      changed_when: true
+
+    - name: Inspect persistent offline default route
+      ansible.builtin.command:
+        argv: [nmcli, --get-values, connection.id, connection, show, ecommerce-offline-default]
+      register: ha_offline_default
+      changed_when: false
+      failed_when: ha_offline_default.rc not in [0, 10]
+
+    - name: Create isolated dummy route connection when absent
+      ansible.builtin.command:
+        argv: [nmcli, connection, add, type, dummy, ifname, mgmt-dummy0, con-name, ecommerce-offline-default]
+      when: ha_offline_default.rc == 10
+      changed_when: true
+
+    - name: Reconcile non-forwarding default route for offline RKE2
+      ansible.builtin.command:
+        argv:
+          - nmcli
+          - connection
+          - modify
+          - ecommerce-offline-default
+          - ipv4.method
+          - manual
+          - ipv4.addresses
+          - 203.0.113.254/31
+          - ipv4.gateway
+          - 203.0.113.255
+          - ipv4.route-metric
+          - "32760"
+          - ipv4.ignore-auto-dns
+          - "yes"
+          - ipv6.method
+          - disabled
+          - connection.autoconnect
+          - "yes"
+      changed_when: true
+
+    - name: Activate isolated default route
+      ansible.builtin.command:
+        argv: [nmcli, connection, up, ecommerce-offline-default]
+      changed_when: true
+
+    - name: Revalidate every staged offline byte before HA activation
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/libexec/ecommerce-mgmt-airgap.py
+          - --rpm-metadata-check
+          - --rpm-signature-check
+          - --bundle
+          - "/var/lib/ecommerce/bootstrap/{{ ha_manifest_sha256 }}"
+          - --manifest-sha256
+          - "{{ ha_manifest_sha256 }}"
+          - --rke2-version
+          - "{{ ha_rke2_version }}"
+          - --services-json
+          - "{{ ha_single_contract.services | to_json }}"
+      register: ha_bundle_validation
+      changed_when: false
+
+    - name: Derive HA artifact trust only from immediate validation
+      ansible.builtin.set_fact:
+        ha_bundle_verified: "{{ ha_bundle_validation.rc == 0 }}"
+
+    - name: Require validated staged bundle
+      ansible.builtin.assert:
+        that: [ha_bundle_verified | bool]
+
+- name: Start simulated internal DNS
+  hosts: ha-worker-02
+  become: true
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    ha_dns_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.dns.host].address }}"
+    ha_endpoint_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+  tasks:
+    - name: Install DNS fixture service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ecommerce-ha-dns.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Local HA qualification DNS fixture
+          After=network-online.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/libexec/ecommerce-ha-lab-services.py dns \
+            --bind {{ ha_dns_address }} \
+            --port {{ mgmt_local_ha_contract.services.dns.port }} \
+            --record-name {{ mgmt_local_ha_contract.services.dns.record_name }} \
+            --record-address {{ ha_endpoint_address }}
+          Restart=on-failure
+          RestartSec=1
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start DNS fixture
+      ansible.builtin.systemd_service:
+        name: ecommerce-ha-dns.service
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+- name: Start simulated internal NTP
+  hosts: ha-worker-03
+  become: true
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    ha_ntp_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.ntp.host].address }}"
+  tasks:
+    - name: Stop chronyd on the fixture NTP host to reserve its contracted port
+      ansible.builtin.systemd_service:
+        name: chronyd
+        state: stopped
+        enabled: false
+      failed_when: false
+    - name: Install NTP fixture service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ecommerce-ha-ntp.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Local HA qualification NTP fixture
+          After=network-online.target
+          [Service]
+          Type=simple
+          ExecStart=/usr/bin/python3 /usr/local/libexec/ecommerce-ha-lab-services.py ntp \
+            --bind {{ ha_ntp_address }} \
+            --port {{ mgmt_local_ha_contract.services.ntp.port }}
+          Restart=on-failure
+          RestartSec=1
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start NTP fixture
+      ansible.builtin.systemd_service:
+        name: ecommerce-ha-ntp.service
+        state: restarted
+        enabled: true
+        daemon_reload: true
+
+- name: Bootstrap first RKE2 control plane
+  hosts: ha-cp-01
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_pod_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.pod_cidr }}"
+    ha_service_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.service_cidr }}"
+    ha_endpoint_ip: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+    ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
+    ha_join_url: ""
+  tasks:
+    - name: Start first control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
+    - name: Wait for first control plane Ready
+      ansible.builtin.command:
+        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-cp-01, --for=condition=Ready, --timeout=600s]
+      changed_when: false
+
+- name: Join second RKE2 control plane directly to the bootstrap member
+  hosts: ha-cp-02
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_pod_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.pod_cidr }}"
+    ha_service_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.service_cidr }}"
+    ha_endpoint_ip: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+    ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
+    ha_join_url: "https://{{ hostvars['ha-cp-01'].ha_node_ip }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}"
+  tasks:
+    - name: Join second control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
+
+- name: Wait for the first two control planes
+  hosts: ha-cp-01
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Require the bootstrap API and second control plane to become Ready
+      block:
+        - name: Wait for bootstrap Kubernetes API readyz after second control-plane join
+          ansible.builtin.command:
+            argv:
+              - /var/lib/rancher/rke2/bin/kubectl
+              - --kubeconfig
+              - /etc/rancher/rke2/rke2.yaml
+              - --request-timeout=5s
+              - get
+              - --raw=/readyz
+          register: ha_cp02_api_readyz
+          changed_when: false
+          until: ha_cp02_api_readyz.rc == 0
+          retries: 12
+          delay: 5
+
+        - name: Wait for second control plane Ready
+          ansible.builtin.command:
+            argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-cp-02, --for=condition=Ready, --timeout=45s]
+          register: ha_cp02_node_ready
+          changed_when: false
+          until: ha_cp02_node_ready.rc == 0
+          retries: 8
+          delay: 5
+      rescue:
+        - name: Stop after bounded cp-02 readiness failure with exact diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              cp-02 readiness gate failed;
+              stage={{ ha_cp02_failure_stage }};
+              classification={{ ha_cp02_failure_classification }};
+              rc={{ ansible_failed_result.rc | default('unavailable') }};
+              stdout={{ ansible_failed_result.stdout | default('') | to_json }};
+              stderr={{ ansible_failed_result.stderr | default('') | to_json }};
+              attempts={{ ansible_failed_result.attempts | default(1) }}
+          vars:
+            ha_cp02_failure_stage: >-
+              {{ 'api-readyz' if ansible_failed_task.name is search('API readyz') else 'node-ready' }}
+            ha_cp02_failure_text: >-
+              {{ ((ansible_failed_result.stderr | default('')) ~ '\n'
+                  ~ (ansible_failed_result.stdout | default(''))) | lower }}
+            ha_cp02_failure_classification: >-
+              {% if 'tls handshake timeout' in ha_cp02_failure_text %}
+              tls-handshake-timeout-exhausted
+              {% elif 'error loading config file' in ha_cp02_failure_text or 'no such file or directory' in ha_cp02_failure_text %}
+              kubeconfig-invalid-or-missing
+              {% elif 'x509:' in ha_cp02_failure_text or 'certificate' in ha_cp02_failure_text or 'unauthorized' in ha_cp02_failure_text %}
+              authentication-or-certificate-error
+              {% elif ('connection refused' in ha_cp02_failure_text
+                        or 'was refused' in ha_cp02_failure_text
+                        or 'unable to connect to the server' in ha_cp02_failure_text) %}
+              api-connection-refused
+              {% elif ha_cp02_failure_stage == 'api-readyz' %}
+              api-not-ready
+              {% elif 'notfound' in ha_cp02_failure_text or 'not found' in ha_cp02_failure_text %}
+              node-not-registered
+              {% else %}
+              node-not-ready
+              {% endif %}
+
+- name: Join worker-03 directly so it can host the HAProxy endpoint
+  hosts: ha-worker-03
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_join_url: "https://{{ hostvars['ha-cp-01'].ha_node_ip }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}"
+  tasks:
+    - name: Join HAProxy host worker through canonical agent tasks
+      ansible.builtin.include_tasks: agent_node.yml
+    - name: Copy pinned HAProxy image archive into worker-03
+      ansible.builtin.copy:
+        src: "{{ ha_haproxy_tar }}"
+        dest: /var/lib/rancher/rke2/agent/images/ecommerce-haproxy.tar
+        owner: root
+        group: root
+        mode: "0600"
+    - name: Import pinned HAProxy image and create digest reference in RKE2 containerd
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/ctr
+          - --address
+          - /run/k3s/containerd/containerd.sock
+          - --namespace
+          - k8s.io
+          - images
+          - import
+          - --digests
+          - --base-name
+          - "{{ mgmt_local_ha_contract.ha_endpoint.image.reference | regex_replace('@sha256:[0-9a-f]{64}$', '') }}"
+          - /var/lib/rancher/rke2/agent/images/ecommerce-haproxy.tar
+      changed_when: true
+
+    - name: List imported RKE2 containerd image references
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/ctr
+          - --address
+          - /run/k3s/containerd/containerd.sock
+          - --namespace
+          - k8s.io
+          - images
+          - list
+          - --quiet
+      register: ha_haproxy_imported_images
+      changed_when: false
+
+    - name: Require exact HAProxy digest reference after offline import
+      ansible.builtin.assert:
+        that:
+          - mgmt_local_ha_contract.ha_endpoint.image.reference in ha_haproxy_imported_images.stdout_lines
+
+- name: Deploy HAProxy in front of the control planes
+  hosts: ha-cp-01
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_registration_port: "{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}"
+    ha_api_port: "{{ mgmt_local_ha_contract.ha_endpoint.kubernetes_api_port }}"
+  tasks:
+    - name: Wait for worker-03 Ready
+      ansible.builtin.command:
+        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node/ha-worker-03, --for=condition=Ready, --timeout=600s]
+      changed_when: false
+
+    - name: Render pinned HAProxy pod and configuration
+      ansible.builtin.copy:
+        dest: /tmp/ecommerce-local-ha-haproxy.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: ecommerce-local-ha-haproxy
+            namespace: kube-system
+          data:
+            haproxy.cfg: |
+              global
+                log stdout format raw local0
+              defaults
+                mode tcp
+                log global
+                option log-health-checks
+                timeout connect 3s
+                timeout client  30s
+                timeout server  30s
+              frontend rke2_registration
+                bind *:{{ ha_registration_port }}
+                default_backend rke2_registration
+              backend rke2_registration
+                balance roundrobin
+          {% for node_id, node in mgmt_local_ha_contract.nodes.items() if node.role == 'control-plane' %}
+                server {{ node_id | replace('-', '') }} {{ node.address }}:{{ ha_registration_port }} check inter 1s rise 2 fall 2
+          {% endfor %}
+              frontend kubernetes_api
+                bind *:{{ ha_api_port }}
+                default_backend kubernetes_api
+              backend kubernetes_api
+                balance roundrobin
+          {% for node_id, node in mgmt_local_ha_contract.nodes.items() if node.role == 'control-plane' %}
+                server {{ node_id | replace('-', '') }} {{ node.address }}:{{ ha_api_port }} check inter 1s rise 2 fall 2
+          {% endfor %}
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ecommerce-local-ha-haproxy
+            namespace: kube-system
+            labels:
+              app: ecommerce-local-ha-haproxy
+          spec:
+            nodeName: {{ mgmt_local_ha_contract.nodes['worker-03'].hostname }}
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
+            restartPolicy: Always
+            containers:
+              - name: haproxy
+                image: {{ mgmt_local_ha_contract.ha_endpoint.image.reference }}
+                imagePullPolicy: Never
+                args: ["haproxy", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  runAsNonRoot: true
+                  runAsUser: {{ mgmt_local_ha_contract.ha_endpoint.run_as_user }}
+                  runAsGroup: {{ mgmt_local_ha_contract.ha_endpoint.run_as_group }}
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop: ["ALL"]
+                  seccompProfile:
+                    type: RuntimeDefault
+                readinessProbe:
+                  tcpSocket:
+                    port: {{ ha_registration_port }}
+                  initialDelaySeconds: 2
+                  periodSeconds: 2
+                volumeMounts:
+                  - name: config
+                    mountPath: /usr/local/etc/haproxy
+                    readOnly: true
+            volumes:
+              - name: config
+                configMap:
+                  name: ecommerce-local-ha-haproxy
+
+    - name: Apply HAProxy endpoint
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/kubectl
+          - --kubeconfig
+          - /etc/rancher/rke2/rke2.yaml
+          - apply
+          - -f
+          - /tmp/ecommerce-local-ha-haproxy.yaml
+      changed_when: true
+
+    - name: Wait for HAProxy pod Ready
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/kubectl
+          - --kubeconfig
+          - /etc/rancher/rke2/rke2.yaml
+          - wait
+          - pod/ecommerce-local-ha-haproxy
+          - -n
+          - kube-system
+          - --for=condition=Ready
+          - --timeout=180s
+      changed_when: false
+
+- name: Join third control plane through HAProxy
+  hosts: ha-cp-03
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_pod_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.pod_cidr }}"
+    ha_service_cidr: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.network_plan) | from_yaml).kubernetes.mgmt.service_cidr }}"
+    ha_endpoint_ip: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+    ha_endpoint_dns: "{{ mgmt_local_ha_contract.ha_endpoint.dns_name }}"
+    ha_join_url: >-
+      https://{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}
+  tasks:
+    - name: Join third control plane through canonical server tasks
+      ansible.builtin.include_tasks: server_node.yml
+
+- name: Join remaining workers through HAProxy
+  hosts: ha-worker-01,ha-worker-02
+  strategy: free
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+    ha_join_url: >-
+      https://{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}
+  pre_tasks:
+    - name: Require worker join host-set to match bounded parallelism contract
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == mgmt_local_ha_contract.execution.worker_join_parallelism
+  tasks:
+    - name: Join worker through canonical agent tasks
+      ansible.builtin.include_tasks: agent_node.yml
+
+- name: Verify DNS, NTP, SELinux and denied public egress on all six nodes
+  hosts: all
+  serial: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+  strategy: free
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_dns_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.dns.host].address }}"
+    ha_ntp_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.services.ntp.host].address }}"
+    ha_endpoint_address: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+  tasks:
+    - name: Probe simulated internal DNS and NTP
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/libexec/ecommerce-ha-service-probe.py
+          - --dns-server
+          - "{{ ha_dns_address }}"
+          - --dns-port
+          - "{{ mgmt_local_ha_contract.services.dns.port }}"
+          - --dns-name
+          - "{{ mgmt_local_ha_contract.services.dns.record_name }}"
+          - --dns-address
+          - "{{ ha_endpoint_address }}"
+          - --ntp-server
+          - "{{ ha_ntp_address }}"
+          - --ntp-port
+          - "{{ mgmt_local_ha_contract.services.ntp.port }}"
+          - --max-ntp-offset
+          - "{{ mgmt_local_ha_contract.services.ntp.maximum_offset_seconds }}"
+      register: ha_service_probe
+      changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+
+    - name: Require SELinux Enforcing
+      ansible.builtin.command:
+        argv: [getenforce]
+      register: ha_selinux
+      changed_when: false
+      failed_when: ha_selinux.stdout | trim != 'Enforcing'
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+
+    - name: Inspect active canonical HA egress boundary
+      ansible.builtin.command:
+        argv: [nft, -j, list, table, inet, ecommerce_mgmt_bootstrap]
+      register: ha_egress_policy
+      changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+
+    - name: Require output and forwarding default deny on every node
+      ansible.builtin.assert:
+        that:
+          - >-
+            (ha_egress_policy.stdout | from_json).nftables
+            | selectattr('chain', 'defined') | map(attribute='chain')
+            | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'output')
+            | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop')
+            | list | length == 1
+          - >-
+            (ha_egress_policy.stdout | from_json).nftables
+            | selectattr('chain', 'defined') | map(attribute='chain')
+            | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'forward')
+            | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop')
+            | list | length == 1
+
+    - name: Require public TCP egress to remain denied
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - >-
+            import socket;
+            s=socket.socket();s.settimeout(2);
+            ok=False;
+            try:s.connect(('1.1.1.1',443))
+            except OSError:ok=True
+            finally:s.close()
+            assert ok
+      register: ha_public_egress
+      changed_when: false
+      throttle: "{{ mgmt_local_ha_contract.execution.node_validation_parallelism }}"
+
+- name: Prove six-node HA, quorum, snapshot and recovery
+  hosts: ha-cp-01
+  become: true
+  gather_facts: false
+  vars_files: [contract.yml]
+  vars:
+    ha_expected_nodes: "{{ (groups['control_planes'] + groups['workers']) | unique | sort }}"
+    ha_control_planes: "{{ groups['control_planes'] | sort }}"
+    ha_control_plane_count: "{{ groups['control_planes'] | length }}"
+    ha_worker_count: "{{ groups['workers'] | length }}"
+    ha_node_count: "{{ ha_expected_nodes | length }}"
+    ha_direct_worker: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].hostname }}"
+    ha_workers_joined_through_endpoint: "{{ groups['workers'] | difference([ha_direct_worker]) | sort }}"
+    ha_failed_cp: >-
+      {{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.failure_test.stop_control_plane].hostname }}
+    ha_failed_backend: "{{ mgmt_local_ha_contract.failure_test.stop_control_plane | replace('-', '') }}"
+    ha_surviving_cps: "{{ ha_control_planes | difference([ha_failed_cp]) | sort }}"
+    ha_endpoint_ip: "{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}"
+    ha_registration_port: "{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}"
+    ha_api_port: "{{ mgmt_local_ha_contract.ha_endpoint.kubernetes_api_port }}"
+    ha_rke2_version: "{{ (lookup('file', ha_repo ~ '/' ~ mgmt_local_ha_contract.canonical_sources.mgmt_bootstrap) | from_yaml).rke2.version }}"
+  tasks:
+    - name: Wait for all six nodes Ready
+      ansible.builtin.command:
+        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, wait, node, --all, --for=condition=Ready, --timeout=900s]
+      changed_when: false
+
+    - name: Capture baseline six-node HA proof
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/python3', '/usr/local/libexec/ecommerce-ha-probe.py',
+              '--phase', 'baseline', '--ha-endpoint', ha_endpoint_ip,
+              '--registration-port', ha_registration_port | string,
+              '--api-port', ha_api_port | string,
+              '--head-sha', ha_head_sha,
+              '--expected-ready-count', ha_node_count | string,
+              '--expected-etcd-pods', ha_control_plane_count | string]
+             + (ha_expected_nodes | map('regex_replace', '^(.*)$', '--expected-node=\1') | list) }}
+      register: ha_baseline
+      changed_when: false
+      until: ha_baseline.rc == 0
+      retries: 60
+      delay: 5
+
+    - name: Verify three-member healthy alarm-free etcd from every control plane
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/libexec/ecommerce-ha-probe.py
+          - --etcd-local-only
+          - --expected-etcd-members
+          - "{{ ha_control_plane_count }}"
+      loop: "{{ ha_control_planes }}"
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: "{{ item }}"
+      register: ha_etcd_baseline
+      changed_when: false
+      until: ha_etcd_baseline.rc == 0
+      retries: 12
+      delay: 5
+
+    - name: Create on-demand etcd snapshot
+      ansible.builtin.command:
+        argv: [/usr/local/bin/rke2, etcd-snapshot, save, --name, "ecommerce-local-ha-{{ ha_head_sha[:12] }}"]
+      register: ha_snapshot
+      changed_when: true
+
+    - name: Find exact created snapshot
+      ansible.builtin.find:
+        paths: /var/lib/rancher/rke2/server/db/snapshots
+        patterns: "ecommerce-local-ha-{{ ha_head_sha[:12] }}*"
+        file_type: file
+        get_checksum: true
+        checksum_algorithm: sha256
+      register: ha_snapshot_files
+
+    - name: Require a non-empty etcd snapshot
+      ansible.builtin.assert:
+        that:
+          - ha_snapshot_files.matched >= 1
+          - ha_snapshot_files.files | selectattr('size', 'gt', 0) | list | length >= 1
+
+    - name: Stop one control plane deliberately
+      ansible.builtin.systemd_service:
+        name: rke2-server
+        state: stopped
+      delegate_to: "{{ ha_failed_cp }}"
+
+    - name: Give HAProxy bounded time to remove stopped backend
+      ansible.builtin.command:
+        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, logs, -n, kube-system, ecommerce-local-ha-haproxy]
+      register: ha_haproxy_down
+      changed_when: false
+      until:
+        - ha_haproxy_down.stdout is search('Server rke2_registration/' ~ ha_failed_backend ~ ' is DOWN')
+        - ha_haproxy_down.stdout is search('Server kubernetes_api/' ~ ha_failed_backend ~ ' is DOWN')
+      retries: 30
+      delay: 1
+
+    - name: Verify both surviving etcd endpoints and retained three-member identity
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/libexec/ecommerce-ha-probe.py
+          - --etcd-local-only
+          - --expected-etcd-members
+          - "{{ ha_control_plane_count }}"
+      loop: "{{ ha_surviving_cps }}"
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: "{{ item }}"
+      register: ha_etcd_degraded
+      changed_when: false
+      until: ha_etcd_degraded.rc == 0
+      retries: 12
+      delay: 5
+
+    - name: Prove API write and etcd quorum through HAProxy with one CP down
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/python3', '/usr/local/libexec/ecommerce-ha-probe.py',
+              '--phase', 'degraded', '--ha-endpoint', ha_endpoint_ip,
+              '--registration-port', ha_registration_port | string,
+              '--api-port', ha_api_port | string,
+              '--head-sha', ha_head_sha,
+              '--expected-ready-count', (ha_node_count | int - 1) | string,
+              '--expected-etcd-pods', ha_control_plane_count | string, '--write-proof']
+             + (ha_expected_nodes | map('regex_replace', '^(.*)$', '--expected-node=\1') | list) }}
+      register: ha_degraded
+      changed_when: false
+      until: ha_degraded.rc == 0
+      retries: 30
+      delay: 2
+
+    - name: Restart stopped control plane
+      ansible.builtin.systemd_service:
+        name: rke2-server
+        state: started
+      delegate_to: "{{ ha_failed_cp }}"
+
+    - name: Wait for recovered control plane Ready
+      ansible.builtin.command:
+        argv:
+          - /var/lib/rancher/rke2/bin/kubectl
+          - --kubeconfig
+          - /etc/rancher/rke2/rke2.yaml
+          - wait
+          - "node/{{ ha_failed_cp }}"
+          - --for=condition=Ready
+          - --timeout=600s
+      changed_when: false
+
+    - name: Require HAProxy to return recovered control plane to both backend pools
+      ansible.builtin.command:
+        argv: [/var/lib/rancher/rke2/bin/kubectl, --kubeconfig, /etc/rancher/rke2/rke2.yaml, logs, -n, kube-system, ecommerce-local-ha-haproxy]
+      register: ha_haproxy_recovered
+      changed_when: false
+      until:
+        - ha_haproxy_recovered.stdout is search('Server rke2_registration/' ~ ha_failed_backend ~ ' is UP')
+        - ha_haproxy_recovered.stdout is search('Server kubernetes_api/' ~ ha_failed_backend ~ ' is UP')
+      retries: 30
+      delay: 1
+
+    - name: Capture recovered three-member HA proof
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/usr/bin/python3', '/usr/local/libexec/ecommerce-ha-probe.py',
+              '--phase', 'recovered', '--ha-endpoint', ha_endpoint_ip,
+              '--registration-port', ha_registration_port | string,
+              '--api-port', ha_api_port | string,
+              '--head-sha', ha_head_sha,
+              '--expected-ready-count', ha_node_count | string,
+              '--expected-etcd-pods', ha_control_plane_count | string]
+             + (ha_expected_nodes | map('regex_replace', '^(.*)$', '--expected-node=\1') | list) }}
+      register: ha_recovered
+      changed_when: false
+      until: ha_recovered.rc == 0
+      retries: 60
+      delay: 5
+
+    - name: Reverify three-member healthy alarm-free etcd after recovery
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /usr/local/libexec/ecommerce-ha-probe.py
+          - --etcd-local-only
+          - --expected-etcd-members
+          - "{{ ha_control_plane_count }}"
+      loop: "{{ ha_control_planes }}"
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: "{{ item }}"
+      register: ha_etcd_recovered
+      changed_when: false
+      until: ha_etcd_recovered.rc == 0
+      retries: 12
+      delay: 5
+
+    - name: Assemble per-node DNS NTP SELinux and egress evidence
+      ansible.builtin.set_fact:
+        ha_service_proofs: >-
+          {{ (ha_service_proofs | default([]))
+             + [{'node': item,
+                 'services': (hostvars[item].ha_service_probe.stdout | from_json),
+                 'selinux': (hostvars[item].ha_selinux.stdout | trim),
+                 'public_egress_denied': (hostvars[item].ha_public_egress.rc == 0)}] }}
+      loop: "{{ ha_expected_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: List all running VirtualBox machines from controller
+      ansible.builtin.command:
+        argv: ["{{ ha_vbox }}", list, runningvms]
+      delegate_to: localhost
+      become: false
+      register: ha_running_vms
+      changed_when: false
+
+    - name: Require all six owned Rocky VMs simultaneously running
+      ansible.builtin.assert:
+        that:
+          - item.value.vm_name in ha_running_vms.stdout
+      loop: "{{ mgmt_local_ha_contract.nodes | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Preserve authoritative local HA evidence on controller
+      ansible.builtin.copy:
+        dest: "{{ ha_state }}/result.json"
+        mode: "0600"
+        content: >-
+          {{ {
+            'schema_version': 1,
+            'status': 'PASS',
+            'head_sha': ha_head_sha,
+            'rocky_linux_real': true,
+            'rke2_exact': ha_rke2_version,
+            'offline_installation_reused_from_pr128': true,
+            'control_planes': ha_control_plane_count,
+            'workers': ha_worker_count,
+            'six_machines_simultaneously_running': true,
+            'joins_control_plane': {'cp02': 'direct-bootstrap', 'cp03': 'haproxy'},
+            'etcd_members': ha_control_plane_count,
+            'etcd_healthy_members': ha_control_plane_count,
+            'etcd_alarms': [],
+            'quorum_required': mgmt_local_ha_contract.failure_test.required_quorum,
+            'quorum_write_pass': true,
+            'control_plane_loss_tested': ha_failed_cp,
+            'control_plane_recovered': true,
+            'ha_registration_pass': true,
+            'ha_api_read_write_pass': true,
+            'ha_endpoint': {'implementation': 'haproxy', 'address': ha_endpoint_ip,
+                            'registration_port': ha_registration_port, 'api_port': ha_api_port},
+            'snapshot_nonempty': true,
+            'snapshot_files': ha_snapshot_files.files,
+            'cilium_multinode': true,
+            'worker_join_through_ha': ha_workers_joined_through_endpoint,
+            'simulated_internal_dns': true,
+            'simulated_internal_ntp': true,
+            'simulated_service_proofs': ha_service_proofs,
+            'public_egress_denied': true,
+            'selinux_enforcing': true,
+            'capacity_production': false,
+            'real_hetzner_network': false,
+            'physical_failure': false,
+            'etcd_baseline': ha_etcd_baseline.results | map(attribute='stdout') | map('from_json') | list,
+            'etcd_degraded_survivors': ha_etcd_degraded.results | map(attribute='stdout') | map('from_json') | list,
+            'etcd_recovered': ha_etcd_recovered.results | map(attribute='stdout') | map('from_json') | list,
+            'baseline': ha_baseline.stdout | from_json,
+            'degraded': ha_degraded.stdout | from_json,
+            'recovered': ha_recovered.stdout | from_json,
+            'running_vms': ha_running_vms.stdout_lines
+          } | to_nice_json }}
+      delegate_to: localhost
+      become: false

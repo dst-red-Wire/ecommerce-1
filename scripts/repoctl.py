@@ -5094,6 +5094,70 @@ def _canonical_rke2_vagrant_ready() -> bool:
     return (result.stdout or "").strip() == expected
 
 
+def qualification_ansible_playbook() -> str:
+    """Return the fail-closed Ansible controller paired with this Python."""
+    python = Path(os.path.abspath(sys.executable))
+    environment_bin = python.parent.resolve()
+    candidate = environment_bin / "ansible-playbook"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise RuntimeError(
+            f"qualification Ansible controller is missing or not executable: {candidate}"
+        )
+
+    expected = pinned_versions()["ANSIBLE_CORE_VERSION"]
+    module_probe = subprocess.run(
+        [str(python), "-c", "import ansible; print(ansible.__version__)"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    actual = (module_probe.stdout or "").strip()
+    if module_probe.returncode != 0 or actual != expected:
+        detail = (module_probe.stderr or "").strip()
+        raise RuntimeError(
+            "qualification Python ansible-core mismatch: "
+            f"expected {expected}, actual {actual or 'unavailable'}"
+            + (f" ({detail})" if detail else "")
+        )
+
+    cli_probe = subprocess.run(
+        [str(candidate), "--version"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    first_line = (cli_probe.stdout or "").splitlines()[:1]
+    match = re.fullmatch(r"ansible-playbook \[core ([^]]+)\]", first_line[0].strip()) if first_line else None
+    cli_version = match.group(1) if match else ""
+    if cli_probe.returncode != 0 or cli_version != expected:
+        detail = (cli_probe.stderr or "").strip()
+        raise RuntimeError(
+            "qualification ansible-playbook version mismatch: "
+            f"expected {expected}, actual {cli_version or 'unavailable'}"
+            + (f" ({detail})" if detail else "")
+        )
+    if candidate.parent != environment_bin:
+        raise RuntimeError("qualification Ansible controller escaped its Python environment")
+
+    print(
+        "RKE2_CONTROLLER "
+        + json.dumps(
+            {
+                "python": str(python),
+                "ansible_playbook": str(candidate),
+                "ansible_core_expected": expected,
+                "ansible_core_actual": actual,
+            },
+            sort_keys=True,
+        )
+    )
+    return str(candidate)
+
+
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
     vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
     result = run([vbox, "list", "vms"], check=False, capture=True)
@@ -5187,9 +5251,9 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             return False
         return isinstance(payload, dict) and payload.get("git_sha") == head_sha
 
-    require("ansible-playbook")
+    ansible_playbook = qualification_ansible_playbook()
     command = [
-        "ansible-playbook",
+        ansible_playbook,
         "-i",
         "localhost,",
         "platform/ansible/tests/mgmt_offline_vm/main.yml",
@@ -5246,6 +5310,421 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             if vm_created:
                 run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source changed during execution")
+    return 0
+
+
+def _rke2_local_ha_contract() -> dict:
+    payload = ruby_yaml("platform/ansible/tests/mgmt_ha_vm/contract.yml")
+    contract = payload.get("mgmt_local_ha_contract")
+    if not isinstance(contract, dict):
+        raise RuntimeError("canonical RKE2 local HA contract is invalid")
+    return contract
+
+
+def _rke2_local_ha_evidence_matches(payload: object, head_sha: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    contract = _rke2_local_ha_contract()
+    nodes = contract.get("nodes")
+    failure_test = contract.get("failure_test")
+    if not isinstance(nodes, dict) or not isinstance(failure_test, dict):
+        return False
+    expected_nodes = {
+        item.get("hostname")
+        for item in nodes.values()
+        if isinstance(item, dict) and isinstance(item.get("hostname"), str)
+    }
+    if len(expected_nodes) != len(nodes):
+        return False
+    control_plane_count = sum(
+        isinstance(item, dict) and item.get("role") == "control-plane"
+        for item in nodes.values()
+    )
+    worker_count = sum(
+        isinstance(item, dict) and item.get("role") == "worker"
+        for item in nodes.values()
+    )
+    quorum_required = failure_test.get("required_quorum")
+    claim_fields = (
+        "capacity_production_claim",
+        "real_hetzner_network_claim",
+        "physical_failure_claim",
+    )
+    if (
+        control_plane_count <= 0
+        or worker_count <= 0
+        or not isinstance(quorum_required, int)
+        or quorum_required <= 0
+        or quorum_required >= control_plane_count
+        or any(contract.get(key) is not False for key in claim_fields)
+    ):
+        return False
+    required = {
+        "schema_version": 1,
+        "status": "PASS",
+        "head_sha": head_sha,
+        "rocky_linux_real": True,
+        "offline_installation_reused_from_pr128": True,
+        "six_machines_simultaneously_running": True,
+        "control_planes": control_plane_count,
+        "workers": worker_count,
+        "etcd_members": control_plane_count,
+        "etcd_healthy_members": control_plane_count,
+        "etcd_alarms": [],
+        "quorum_required": quorum_required,
+        "quorum_write_pass": True,
+        "control_plane_recovered": True,
+        "snapshot_nonempty": True,
+        "ha_registration_pass": True,
+        "ha_api_read_write_pass": True,
+        "cilium_multinode": True,
+        "simulated_internal_dns": True,
+        "simulated_internal_ntp": True,
+        "public_egress_denied": True,
+        "selinux_enforcing": True,
+        "capacity_production": contract.get("capacity_production_claim"),
+        "real_hetzner_network": contract.get("real_hetzner_network_claim"),
+        "physical_failure": contract.get("physical_failure_claim"),
+    }
+    if any(payload.get(key) != expected for key, expected in required.items()):
+        return False
+
+    service_proofs = payload.get("simulated_service_proofs")
+    if (
+        not isinstance(service_proofs, list)
+        or len(service_proofs) != len(expected_nodes)
+        or {item.get("node") for item in service_proofs if isinstance(item, dict)} != expected_nodes
+        or any(
+            not isinstance(item, dict)
+            or item.get("selinux") != "Enforcing"
+            or item.get("public_egress_denied") is not True
+            or not isinstance(item.get("services"), dict)
+            or not isinstance(item["services"].get("dns"), dict)
+            or not isinstance(item["services"].get("ntp"), dict)
+            for item in service_proofs
+        )
+    ):
+        return False
+
+    snapshots = payload.get("snapshot_files")
+    if (
+        not isinstance(snapshots, list)
+        or not snapshots
+        or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("size"), int)
+            or item["size"] <= 0
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("checksum", ""))) is None
+            for item in snapshots
+        )
+    ):
+        return False
+
+    for key, count in (
+        ("etcd_baseline", control_plane_count),
+        ("etcd_degraded_survivors", control_plane_count - 1),
+        ("etcd_recovered", control_plane_count),
+    ):
+        checks = payload.get(key)
+        if (
+            not isinstance(checks, list)
+            or len(checks) != count
+            or any(
+                not isinstance(item, dict)
+                or item.get("member_count") != control_plane_count
+                or item.get("local_endpoint_healthy") is not True
+                or item.get("alarms") != []
+                for item in checks
+            )
+        ):
+            return False
+
+    baseline = payload.get("baseline")
+    degraded = payload.get("degraded")
+    recovered = payload.get("recovered")
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("api_ready") is not True
+        or baseline.get("ready_count") != len(expected_nodes)
+        or baseline.get("cilium_ready") != len(expected_nodes)
+        or not isinstance(degraded, dict)
+        or degraded.get("api_ready") is not True
+        or not isinstance(degraded.get("quorum_write"), dict)
+        or not isinstance(recovered, dict)
+        or recovered.get("api_ready") is not True
+        or recovered.get("ready_count") != len(expected_nodes)
+        or recovered.get("cilium_ready") != len(expected_nodes)
+    ):
+        return False
+    return True
+
+
+def _sha256_path(path: Path) -> str | None:
+    try:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
+def _sha256_manifest_matches(manifest: Path) -> bool:
+    """Verify the recorded SHA-256 source manifest without adding a host-tool dependency."""
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        root = ROOT.resolve()
+    except OSError:
+        return False
+    if not lines:
+        return False
+
+    seen: set[Path] = set()
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if match is None:
+            return False
+        expected, raw_path = match.groups()
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            return False
+        if candidate.is_symlink() or not resolved.is_file() or resolved in seen:
+            return False
+        seen.add(resolved)
+        if _sha256_path(resolved) != expected:
+            return False
+    return True
+
+
+def _rke2_local_ha_completion_matches(state: Path, evidence: Path, head_sha: str) -> bool:
+    completion = state / "completion.json"
+    source_manifest = state / "source.sha256"
+    try:
+        payload = json.loads(completion.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    evidence_sha256 = _sha256_path(evidence)
+    source_manifest_sha256 = _sha256_path(source_manifest)
+    if (
+        payload.get("schema_version") != 1
+        or payload.get("status") != "PASS"
+        or payload.get("head_sha") != head_sha
+        or payload.get("cleanup_complete") is not True
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("evidence_sha256", ""))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(payload.get("source_manifest_sha256", ""))) is None
+        or payload.get("evidence_sha256") != evidence_sha256
+        or payload.get("source_manifest_sha256") != source_manifest_sha256
+    ):
+        return False
+    return _sha256_manifest_matches(source_manifest)
+
+
+def rke2_local_ha_restore_bundle(source_value: str) -> int:
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA bundle restore requires a clean exact-SHA worktree")
+    if not source_value.strip():
+        return fail("RKE2 local HA bundle restore requires --source pointing to the completed PR 128 bundle")
+
+    source = Path(source_value).expanduser()
+    if not source.is_absolute():
+        return fail("RKE2 local HA bundle restore source must be an absolute path")
+    source = source.resolve()
+    if not source.is_dir():
+        return fail(f"RKE2 local HA bundle restore source does not exist: {source}")
+
+    contract = _rke2_local_ha_contract()
+    canonical = contract.get("canonical_sources")
+    if not isinstance(canonical, dict):
+        return fail("RKE2 local HA canonical source registry is invalid")
+    local_contract_path = canonical.get("local_vm_contract")
+    bootstrap_path = canonical.get("mgmt_bootstrap")
+    if not isinstance(local_contract_path, str) or not isinstance(bootstrap_path, str):
+        return fail("RKE2 local HA bundle authorities are not registered")
+
+    local_contract = ruby_yaml(local_contract_path).get("mgmt_local_vm_contract", {})
+    lock_relative = local_contract.get("bundle_lock")
+    version = ruby_yaml(bootstrap_path).get("rke2", {}).get("version")
+    if not isinstance(lock_relative, str) or not isinstance(version, str):
+        return fail("RKE2 local HA bundle lock/version authorities are invalid")
+
+    lock_path = ROOT / lock_relative
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 local HA bundle lock is unreadable: {exc}")
+    approved_manifest = lock.get("approved_manifest_sha256")
+    if re.fullmatch(r"[0-9a-f]{64}", str(approved_manifest or "")) is None:
+        return fail("RKE2 local HA approved manifest SHA256 is invalid")
+    if _sha256_path(source / "manifest.json") != approved_manifest:
+        return fail("PR 128 source bundle manifest does not match the independently approved SHA256")
+
+    bundle_version = re.sub(r"[+.]", "-", version)
+    destination = ROOT / ".context" / f"rke2-offline-bundle-{bundle_version}"
+    if destination.exists():
+        return fail(
+            f"RKE2 local HA bundle destination already exists: {destination}; "
+            "refusing to overwrite existing evidence bytes"
+        )
+    if source == destination:
+        return fail("RKE2 local HA bundle restore source and destination must differ")
+
+    signing_keys = lock.get("rpm_signing_keys")
+    rpms = lock.get("rpms")
+    releases = lock.get("release_artifacts")
+    if (
+        not isinstance(signing_keys, list)
+        or not isinstance(rpms, list)
+        or not isinstance(releases, dict)
+    ):
+        return fail("RKE2 local HA bundle lock artifact collections are invalid")
+    locked_entries = [*signing_keys, *rpms, *releases.values()]
+    expected_files: dict[str, str] = {"manifest.json": approved_manifest}
+    for entry in locked_entries:
+        if not isinstance(entry, dict):
+            return fail("RKE2 local HA bundle lock contains an invalid artifact entry")
+        filename = entry.get("file")
+        checksum = entry.get("sha256")
+        if (
+            not isinstance(filename, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", filename) is None
+            or not isinstance(checksum, str)
+            or re.fullmatch(r"[0-9a-f]{64}", checksum) is None
+            or filename in expected_files
+        ):
+            return fail("RKE2 local HA bundle lock contains an invalid or duplicate artifact")
+        expected_files[filename] = checksum
+
+    source_entries = list(source.iterdir())
+    if any(entry.is_symlink() or not entry.is_file() for entry in source_entries):
+        return fail("PR 128 source bundle must contain regular files only; links/directories are forbidden")
+    source_names = {entry.name for entry in source_entries}
+    if source_names != set(expected_files):
+        return fail("PR 128 source bundle file set differs from the approved lock")
+    for filename, checksum in expected_files.items():
+        if _sha256_path(source / filename) != checksum:
+            return fail(f"PR 128 source bundle artifact digest mismatch: {filename}")
+
+    CONTEXT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="rke2-ha-restore-", dir=CONTEXT) as temporary:
+        staging = Path(temporary) / destination.name
+        staging.mkdir(mode=0o700)
+        for filename, checksum in expected_files.items():
+            shutil.copy2(source / filename, staging / filename, follow_symlinks=False)
+            if _sha256_path(staging / filename) != checksum:
+                return fail(f"restored PR 128 bundle artifact digest mismatch: {filename}")
+        os.replace(staging, destination)
+
+    restored_manifest = _sha256_path(destination / "manifest.json")
+    if restored_manifest != approved_manifest:
+        shutil.rmtree(destination, ignore_errors=True)
+        return fail("restored PR 128 bundle manifest failed final approval binding")
+
+    print(
+        f"PASS rke2-local-ha-restore-bundle source={source} "
+        f"destination={destination.relative_to(ROOT)} manifest_sha256={approved_manifest}"
+    )
+    return 0
+
+def rke2_local_ha_prepare() -> int:
+    workflow = qualification_workflow("rke2_local_ha")
+    if workflow.get("preparation") != "scripts/repoctl.py rke2-local-ha-prepare":
+        return fail("RKE2 local HA preparation entrypoint is not centrally registered")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA preparation requires a clean worktree")
+    require("ansible-playbook")
+    return run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "platform/ansible/tests/mgmt_ha_vm/prepare_haproxy.yml",
+        ],
+        check=False,
+    ).returncode
+
+
+def rke2_local_ha_qualification() -> int:
+    workflow = qualification_workflow("rke2_local_ha")
+    expected_entrypoint = "scripts/repoctl.py rke2-local-ha-qualification"
+    if workflow.get("entrypoint") != expected_entrypoint:
+        return fail("RKE2 local HA qualification entrypoint is not centrally registered")
+    if workflow.get("exact_sha_required") is not True:
+        return fail("RKE2 local HA qualification must require an exact SHA")
+    if workflow.get("clean_worktree_required") is not True:
+        return fail("RKE2 local HA qualification must require a clean worktree")
+    if workflow.get("capacity_production_claim") is not False:
+        return fail("RKE2 local HA qualification must not claim production capacity")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA qualification requires a clean exact-SHA worktree")
+    head_sha = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        return fail("RKE2 local HA qualification could not resolve the exact checkout SHA")
+    evidence_template = workflow.get("evidence", {}).get("authoritative")
+    if not isinstance(evidence_template, str) or "<sha>" not in evidence_template:
+        return fail("RKE2 local HA authoritative evidence path is invalid")
+    relative = Path(evidence_template.replace("<sha>", head_sha))
+    if relative.is_absolute() or ".." in relative.parts or not str(relative).startswith(".context/"):
+        return fail("RKE2 local HA evidence must remain under .context")
+    evidence = ROOT / relative
+    state = evidence.parent
+
+    try:
+        existing_payload = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing_payload = None
+    if (
+        _rke2_local_ha_evidence_matches(existing_payload, head_sha)
+        and _rke2_local_ha_completion_matches(state, evidence, head_sha)
+    ):
+        print(f"REUSE rke2-local-ha {head_sha[:12]} evidence={relative}")
+        return 0
+
+    (state / "completion.json").unlink(missing_ok=True)
+
+    if not _canonical_rke2_vagrant_ready():
+        return fail(
+            f"RKE2 local HA qualification requires canonical Vagrant {_canonical_rke2_vagrant_version()}"
+        )
+
+    ansible_playbook = qualification_ansible_playbook()
+    command = [
+        ansible_playbook,
+        "-i",
+        "localhost,",
+        "platform/ansible/tests/mgmt_ha_vm/main.yml",
+        "-e",
+        f"ha_repo={ROOT}",
+        "-e",
+        f"ha_head_sha={head_sha}",
+        "-e",
+        f"ha_state={state}",
+    ]
+    result = run(command, check=False)
+    if result.returncode:
+        return result.returncode
+
+    if git("rev-parse", "HEAD").strip() != head_sha:
+        return fail("RKE2 local HA source changed after qualification freeze")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("RKE2 local HA qualification modified repository sources")
+
+    try:
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 local HA evidence missing or invalid: {exc}")
+    if not _rke2_local_ha_evidence_matches(payload, head_sha):
+        return fail("RKE2 local HA evidence does not satisfy the registered exit criteria")
+    if not _rke2_local_ha_completion_matches(state, evidence, head_sha):
+        return fail(
+            "RKE2 local HA completion marker is missing, stale, source-unbound, "
+            "or cleanup was incomplete"
+        )
+    print(f"PASS rke2-local-ha {head_sha[:12]} evidence={relative}")
     return 0
 
 
@@ -5661,6 +6140,13 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    restore_ha = sub.add_parser("rke2-local-ha-restore-bundle")
+    restore_ha.add_argument(
+        "--source",
+        default=os.environ.get("RKE2_PR128_BUNDLE_SOURCE", ""),
+    )
+    sub.add_parser("rke2-local-ha-prepare")
+    sub.add_parser("rke2-local-ha-qualification")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -5816,6 +6302,12 @@ def main() -> int:
             return qualification_proof(args.base)
         if args.cmd == "rke2-local-virtualbox-qualification":
             return rke2_local_virtualbox_qualification(args.inputs)
+        if args.cmd == "rke2-local-ha-restore-bundle":
+            return rke2_local_ha_restore_bundle(args.source)
+        if args.cmd == "rke2-local-ha-prepare":
+            return rke2_local_ha_prepare()
+        if args.cmd == "rke2-local-ha-qualification":
+            return rke2_local_ha_qualification()
         if args.cmd == "perf-campaign":
             return performance_campaign(args.base, args.output)
         if args.cmd == "diff-context":

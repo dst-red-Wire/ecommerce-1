@@ -5,6 +5,19 @@ mgmt_local_vm_contract:
   schema_version: 1
   vagrant:
     version: 2.4.9
+    windows_executable: 'C:\Program Files\Vagrant\bin\vagrant.exe'
+    wsl_executable: /mnt/c/Program Files/Vagrant/bin/vagrant.exe
+  virtualbox:
+    windows_executable: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
+    guest_additions_lock: config/artifacts/virtualbox-guest-additions-7.2.18-rocky-9.8.lock.json
+    guest_additions_bundle: .context/virtualbox-guest-additions-7.2.18-rocky-9.8
+    metrics:
+      period_seconds: 1
+      retained_samples: 60
+      names:
+        - Guest/RAM/Usage/Total
+        - Guest/RAM/Usage/Free
+        - Guest/RAM/Usage/Cache
   rocky_box:
     name: ecommerce/rocky-9.8-20260525.0
     url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-Vagrant-Vbox-9.8-20260525.0.x86_64.vagrant.virtualbox.box
@@ -20,6 +33,25 @@ mgmt_local_vm_contract:
     rke2_server:
       cpus: 4
       memory_mib: 4096
+  transport:
+    ssh:
+      connect_timeout_seconds: 3
+      connection_attempts: 1
+      readiness_timeout_seconds: 300
+      readiness_sleep_seconds: 3
+  runtime_sources:
+    - platform/ansible/tests/mgmt_offline_vm/main.yml
+    - platform/ansible/tests/mgmt_offline_vm/create.yml
+    - platform/ansible/tests/mgmt_offline_vm/preflight.yml
+    - platform/ansible/tests/mgmt_offline_vm/guest_additions.yml
+    - platform/ansible/tests/mgmt_offline_vm/guest_additions_bundle.py
+    - platform/ansible/tests/mgmt_offline_vm/test.yml
+    - platform/ansible/tests/mgmt_offline_vm/server.yml
+    - platform/ansible/tests/mgmt_offline_vm/destroy.yml
+    - platform/ansible/tests/mgmt_offline_vm/transport.py
+    - platform/ansible/tests/mgmt_offline_vm/role_timing.py
+    - platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py
+    - platform/ansible/tests/mgmt_offline_vm/guest_probe.py
   services:
     dns: ['10.243.1.2']
     ntp: ['10.243.1.3']

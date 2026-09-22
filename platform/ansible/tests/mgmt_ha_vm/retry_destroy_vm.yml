@@ -1,0 +1,92 @@
+---
+- name: Probe ownership after failed parallel cleanup
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - probe
+      - --vbox
+      - "{{ ha_vbox }}"
+      - --identity
+      - "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
+      - --vm-name
+      - "{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}"
+      - --output
+      - "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-ownership.json"
+  register: ha_cleanup_ownership_probe
+  until: ha_cleanup_ownership_probe.rc == 0
+  retries: 3
+  delay: 2
+  changed_when: false
+
+- name: Classify failed cleanup without masking its original return code
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - classify-cleanup
+      - --result
+      - "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-initial.json"
+      - --ownership
+      - "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-ownership.json"
+      - --output
+      - "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-decision.json"
+  changed_when: false
+
+- name: Read bounded cleanup reconciliation decision
+  ansible.builtin.slurp:
+    src: "{{ ha_state }}/cleanup-{{ ha_failed_destroy.node }}-decision.json"
+  register: ha_cleanup_decision_file
+
+- name: Select bounded cleanup reconciliation decision
+  ansible.builtin.set_fact:
+    ha_cleanup_decision: "{{ ha_cleanup_decision_file.content | b64decode | from_json }}"
+  changed_when: false
+
+- name: Remove only a proven stale Vagrant identity
+  ansible.builtin.file:
+    path: "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
+    state: absent
+  when: ha_cleanup_decision.resolution == 'already-absent'
+
+- name: Retry only the proven owned transient cleanup once and sequentially
+  ansible.builtin.command:
+    argv:
+      - "{{ ansible_playbook_python }}"
+      - "{{ ha_lifecycle_guard }}"
+      - destroy-owned
+      - --vbox
+      - "{{ ha_vbox }}"
+      - --identity
+      - "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
+      - --vm-name
+      - "{{ mgmt_local_ha_contract.nodes[ha_failed_destroy.node].vm_name }}"
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  register: ha_destroy_retry
+  failed_when: false
+  changed_when: true
+  when: ha_cleanup_decision.resolution == 'retry'
+
+- name: Accumulate the single final outcome for this failed cleanup
+  ansible.builtin.set_fact:
+    ha_destroy_retry_results: >-
+      {{
+        ha_destroy_retry_results
+        + [{
+          'node': ha_failed_destroy.node,
+          'initial_ansible_job_id': ha_failed_destroy.ansible_job_id,
+          'resolution': ha_cleanup_decision.resolution,
+          'classification': ha_cleanup_decision.classification,
+          'finished': true,
+          'rc': (
+            ha_destroy_retry.rc | default(-1)
+            if ha_cleanup_decision.resolution == 'retry'
+            else (0 if ha_cleanup_decision.resolution == 'already-absent' else ha_failed_destroy.rc)
+          ),
+          'stdout': ha_destroy_retry.stdout | default(''),
+          'stderr': ha_destroy_retry.stderr | default(''),
+          'cmd': ha_destroy_retry.cmd | default([])
+        }]
+      }}
+  changed_when: false

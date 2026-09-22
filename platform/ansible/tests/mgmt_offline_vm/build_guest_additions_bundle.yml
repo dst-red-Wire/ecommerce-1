@@ -1,0 +1,46 @@
+---
+- name: Build the separately locked VirtualBox Guest Additions prerequisite bundle
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - contract.yml
+  vars:
+    bundle_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
+    bundle_lock: "{{ bundle_repo }}/{{ mgmt_local_vm_contract.virtualbox.guest_additions_lock }}"
+    bundle_output: "{{ bundle_repo }}/{{ mgmt_local_vm_contract.virtualbox.guest_additions_bundle }}"
+    bundle_cache: "{{ bundle_repo }}/.context/virtualbox-guest-additions-download-cache"
+    bundle_python: "{{ ansible_playbook_python }}"
+    bundle_offline: false
+  tasks:
+    - name: Require ignored repository-local Guest Additions paths
+      ansible.builtin.assert:
+        that:
+          - bundle_output is match('^' ~ (bundle_repo | regex_escape) ~ '/\.context/')
+          - bundle_cache is match('^' ~ (bundle_repo | regex_escape) ~ '/\.context/')
+
+    - name: Create ignored Guest Additions output and cache parents
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ bundle_output | dirname }}"
+        - "{{ bundle_cache }}"
+
+    - name: Assemble and validate every locked Guest Additions prerequisite
+      ansible.builtin.command:
+        argv: >-
+          {{
+            [bundle_python, playbook_dir ~ '/guest_additions_bundle.py', 'build',
+             '--lock', bundle_lock, '--bundle', bundle_output, '--cache', bundle_cache]
+            + (['--offline'] if bundle_offline | bool else [])
+          }}
+      register: bundle_build
+      changed_when: true
+
+    - name: Record bounded Guest Additions bundle result outside Git
+      ansible.builtin.copy:
+        dest: "{{ bundle_repo }}/.context/guest-additions-bundle-result.json"
+        content: "{{ bundle_build.stdout_lines[-1] }}\n"
+        mode: '0600'

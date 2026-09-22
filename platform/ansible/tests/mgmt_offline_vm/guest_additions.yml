@@ -1,0 +1,294 @@
+---
+- name: Read fresh Rocky kernel for Guest Additions prerequisite selection
+  ansible.builtin.command:
+    argv: [uname, -r]
+  register: vm_guest_additions_kernel_release
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+
+- name: Require fresh Rocky kernel to match the pinned Guest Additions prerequisite closure
+  ansible.builtin.assert:
+    that:
+      - vm_guest_additions_kernel_release.stdout | trim == vm_guest_additions_lock.target.kernel_release
+    fail_msg: >-
+      The Rocky kernel differs from the exact offline kernel-devel package; refusing compilation.
+
+- name: Probe already installed Guest Additions version
+  ansible.builtin.command:
+    argv: [VBoxService, --version]
+  register: vm_guest_additions_existing
+  failed_when: false
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+
+- name: Remove only invocation-owned partial Guest Additions staging
+  ansible.builtin.file:
+    path: "/var/lib/ecommerce/guest-additions/{{ vm_guest_additions_lock.approved_manifest_sha256 }}"
+    state: absent
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Create digest-specific Guest Additions prerequisite directory
+  ansible.builtin.file:
+    path: "/var/lib/ecommerce/guest-additions/{{ vm_guest_additions_lock.approved_manifest_sha256 }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Stream locked Guest Additions prerequisite closure over existing private SSH
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ vm_guest_additions_helper }}"
+      - stream
+      - --lock
+      - "{{ vm_guest_additions_lock_path }}"
+      - --bundle
+      - "{{ vm_guest_additions_bundle }}"
+      - --ssh-config
+      - "{{ vm_state }}/ssh_config"
+      - --host
+      - "{{ vm_name }}"
+      - --destination
+      - "/var/lib/ecommerce/guest-additions/{{ vm_guest_additions_lock.approved_manifest_sha256 }}"
+  register: vm_guest_additions_stream
+  changed_when: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Transfer canonical Guest Additions lock separately from its artifact set
+  ansible.builtin.copy:
+    src: "{{ vm_guest_additions_lock_path }}"
+    dest: /var/lib/ecommerce/guest-additions/lock.json
+    owner: root
+    group: root
+    mode: '0600'
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Verify transferred prerequisite bytes, RPM metadata and isolated signatures
+  ansible.builtin.command:
+    argv:
+      - python3
+      - '-'
+      - validate
+      - --lock
+      - /var/lib/ecommerce/guest-additions/lock.json
+      - --bundle
+      - "/var/lib/ecommerce/guest-additions/{{ vm_guest_additions_lock.approved_manifest_sha256 }}"
+      - --rpm-metadata-check
+      - --rpm-signature-check
+    stdin: "{{ lookup('file', vm_guest_additions_helper) }}"
+  register: vm_guest_additions_bundle_proof
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Import only the verified Rocky signing key for the offline DNF transaction
+  ansible.builtin.rpm_key:
+    key: >-
+      /var/lib/ecommerce/guest-additions/{{ vm_guest_additions_lock.approved_manifest_sha256 }}/{{ vm_guest_additions_lock.rpm_signing_key.file }}
+    fingerprint: "{{ vm_guest_additions_lock.rpm_signing_key.fingerprint }}"
+    state: present
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Install exact offline Guest Additions build prerequisites
+  ansible.builtin.dnf:
+    name: >-
+      {{
+        vm_guest_additions_lock.rpms
+        | map(attribute='file')
+        | map('regex_replace', '^', '/var/lib/ecommerce/guest-additions/'
+              ~ vm_guest_additions_lock.approved_manifest_sha256 ~ '/')
+        | list
+      }}
+    state: present
+    disablerepo: '*'
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Inspect attached Guest Additions optical media label
+  ansible.builtin.command:
+    argv: [lsblk, -dn, -o, LABEL, /dev/sr0]
+  register: vm_guest_additions_iso_label
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Require exact attached Guest Additions media
+  ansible.builtin.assert:
+    that:
+      - "vm_guest_additions_iso_label.stdout | trim == ('VBox_GAs_' ~ vm_guest_additions_lock.guest_additions.version)"
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Create read-only Guest Additions mount point
+  ansible.builtin.file:
+    path: /mnt/vbox-guest-additions
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Check whether exact Guest Additions media is already mounted
+  ansible.builtin.command:
+    argv: [mountpoint, -q, /mnt/vbox-guest-additions]
+  register: vm_guest_additions_mounted
+  failed_when: false
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Mount exact Guest Additions media read-only
+  ansible.builtin.command:
+    argv: [mount, -o, ro, /dev/sr0, /mnt/vbox-guest-additions]
+  changed_when: true
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when:
+    - vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+    - vm_guest_additions_mounted.rc != 0
+
+- name: Read embedded Guest Additions installer identity
+  ansible.builtin.command:
+    argv: [sh, /mnt/vbox-guest-additions/VBoxLinuxAdditions.run, --info]
+  register: vm_guest_additions_installer_info
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Require exact embedded Guest Additions version before installation
+  ansible.builtin.assert:
+    that:
+      - >-
+        ('Identification: VirtualBox ' ~ vm_guest_additions_lock.guest_additions.version
+         ~ ' Guest Additions for Linux') in vm_guest_additions_installer_info.stdout
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Install exact Guest Additions without desktop components
+  ansible.builtin.command:
+    argv: [sh, /mnt/vbox-guest-additions/VBoxLinuxAdditions.run, --nox11]
+  register: vm_guest_additions_install
+  changed_when: true
+  delegate_to: "{{ vm_name }}"
+  become: true
+  when: vm_guest_additions_existing.stdout | default('') | trim != vm_guest_additions_lock.virtualbox_version
+
+- name: Verify Guest Additions kernel modules
+  ansible.builtin.command:
+    argv: [rcvboxadd, status-kernel]
+  register: vm_guest_additions_kernel
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  become: true
+
+- name: Verify Guest Additions user service
+  ansible.builtin.command:
+    argv: [rcvboxadd, status-user]
+  register: vm_guest_additions_user
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+  become: true
+
+- name: Read installed Guest Additions version
+  ansible.builtin.command:
+    argv: [VBoxService, --version]
+  register: vm_guest_additions_version
+  changed_when: false
+  delegate_to: "{{ vm_name }}"
+
+- name: Require exact running Guest Additions version
+  ansible.builtin.assert:
+    that:
+      - vm_guest_additions_version.stdout | trim == vm_guest_additions_lock.virtualbox_version
+      - >-
+        (vm_guest_additions_lock.guest_additions.version ~ ' r'
+         ~ (vm_guest_additions_lock.guest_additions.revision | string))
+        in vm_guest_additions_kernel.stdout
+      - >-
+        (vm_guest_additions_lock.guest_additions.version ~ ' r'
+         ~ (vm_guest_additions_lock.guest_additions.revision | string))
+        in vm_guest_additions_user.stdout
+
+- name: Read host-observed Guest Additions version
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", guestproperty, get, "{{ vm_uuid }}", /VirtualBox/GuestAdd/Version]
+  register: vm_guest_additions_host_version
+  changed_when: false
+
+- name: Read host-observed Guest Additions revision
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", guestproperty, get, "{{ vm_uuid }}", /VirtualBox/GuestAdd/Revision]
+  register: vm_guest_additions_host_revision
+  changed_when: false
+
+- name: Enable bounded VirtualBox guest RAM metrics
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_vbox }}"
+      - metrics
+      - setup
+      - --period
+      - "{{ mgmt_local_vm_contract.virtualbox.metrics.period_seconds | string }}"
+      - --samples
+      - "{{ mgmt_local_vm_contract.virtualbox.metrics.retained_samples | string }}"
+      - "{{ vm_uuid }}"
+      - "{{ mgmt_local_vm_contract.virtualbox.metrics.names | join(',') }}"
+  changed_when: true
+
+- name: Wait briefly for first Guest Additions RAM sample
+  ansible.builtin.pause:
+    seconds: 2
+
+- name: Query Guest Additions RAM metrics
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_vbox }}"
+      - metrics
+      - query
+      - "{{ vm_uuid }}"
+      - "{{ mgmt_local_vm_contract.virtualbox.metrics.names | join(',') }}"
+  register: vm_guest_additions_metrics
+  changed_when: false
+
+- name: Require exact host identity and non-empty guest RAM metrics
+  ansible.builtin.assert:
+    that:
+      - "vm_guest_additions_host_version.stdout | trim == ('Value: ' ~ vm_guest_additions_lock.guest_additions.version)"
+      - "vm_guest_additions_host_revision.stdout | trim == ('Value: ' ~ (vm_guest_additions_lock.guest_additions.revision | string))"
+      - vm_guest_additions_metrics.stdout is regex('(?m)Guest/RAM/Usage/Total\s+[0-9]+ kB')
+      - vm_guest_additions_metrics.stdout is regex('(?m)Guest/RAM/Usage/Free\s+[0-9]+ kB')
+      - vm_guest_additions_metrics.stdout is regex('(?m)Guest/RAM/Usage/Cache\s+[0-9]+ kB')
+
+- name: Record bounded Guest Additions and RAM metric proof
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/guest-additions.json"
+    content: >-
+      {{
+        {
+          'schema_version': 1,
+          'version': vm_guest_additions_lock.guest_additions.version,
+          'revision': vm_guest_additions_lock.guest_additions.revision,
+          'kernel_release': vm_guest_additions_lock.target.kernel_release,
+          'bundle': (
+            vm_guest_additions_bundle_proof.stdout
+            | default(vm_prerequisite_bundle.stdout)
+            | from_json
+          ),
+          'metrics': vm_guest_additions_metrics.stdout_lines
+        } | to_nice_json
+      }}
+    mode: '0600'

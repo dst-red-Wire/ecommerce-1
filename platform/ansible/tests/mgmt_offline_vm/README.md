@@ -8,12 +8,20 @@ by `architecture.lock.yaml`, `config/infrastructure/mgmt-bootstrap.yaml` and
 
 The supported controller is WSL2 with Windows VirtualBox and native Windows Vagrant.
 The fixture contract in `contract.yml` pins Vagrant 2.4.9, the official Rocky 9.8
-box and its SHA256, and the accepted local resource bounds. The validated host used
-VirtualBox 7.2.18. The authoritative launcher requires the canonical Windows Vagrant
+box and its SHA256, and the accepted local resource bounds. The Guest Additions lock
+pins VirtualBox `7.2.18r175117`, Guest Additions `7.2.18`, the host ISO SHA256 and the
+complete Rocky build dependency closure. The authoritative launcher requires the canonical Windows Vagrant
 installation at `C:\\Program Files\\Vagrant\\bin\\vagrant.exe` and verifies that
 it reports exactly Vagrant 2.4.9 before the lifecycle starts. Caller-controlled
 Vagrant executable overrides are rejected. The repository's qualified Python/Ansible
 environment and locked collections must already be prepared.
+
+SSH readiness is also contract-driven from `contract.yml`: connect timeout,
+connection attempts, total readiness window and retry sleep are defined once under
+`mgmt_local_vm_contract.transport.ssh`. The same contract also owns the shared
+fixture `runtime_sources` list consumed by HA exact-SHA fingerprinting, so the mono-VM
+and six-node workflows do not carry independent copies of transport policy or shared
+source dependencies.
 
 ## Rebuild the offline bundle
 
@@ -46,6 +54,31 @@ PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost,
 The command writes only a bounded result to
 `.context/mgmt-airgap-bundle-result.json`. The manifest digest must be
 `738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad`.
+
+## Prepare pinned Guest Additions prerequisites
+
+`config/artifacts/virtualbox-guest-additions-7.2.18-rocky-9.8.lock.json` is the
+single authority for the host/guest versions, ISO identity, exact Rocky kernel,
+signing key and all 78 RPM digests. Prepare its ignored offline bundle once on a
+connected controller:
+
+```console
+PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook \
+  -i localhost, platform/ansible/tests/mgmt_offline_vm/build_guest_additions_bundle.yml
+```
+
+Use `-e bundle_offline=true` to prove that an already populated cache is complete.
+Every non-cleanup VM action validates the exact VirtualBox version, ISO SHA256,
+transport commands and complete bundle before Vagrant runs. `destroy` deliberately
+remains available when prerequisites are broken so cleanup cannot be blocked.
+
+Each fresh Rocky VM receives the dependency closure over one private SSH tar stream.
+The guest revalidates the manifest, every SHA256, RPM metadata and every RPM signature
+before importing the approved Rocky key and invoking DNF with every repository
+disabled. The mounted ISO identity is checked before installation. Provisioning then
+requires the exact kernel/user service versions and enables bounded
+`Guest/RAM/Usage/{Total,Free,Cache}` sampling. Evidence is written to
+`.context/mgmt-offline-vm/<name>/guest-additions.json`.
 
 ## Create and test the VM
 

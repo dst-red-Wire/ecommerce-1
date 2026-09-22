@@ -14,12 +14,17 @@
     vm_box_url: "{{ mgmt_local_vm_contract.rocky_box.url }}"
     vm_box_sha256: "{{ mgmt_local_vm_contract.rocky_box.sha256 }}"
     vm_vagrant_version: "{{ mgmt_local_vm_contract.vagrant.version }}"
-    vm_vbox: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
-    vm_vagrant_windows: C:\Program Files\Vagrant\bin\vagrant.exe
+    vm_vagrant: "{{ mgmt_local_vm_contract.vagrant.wsl_executable }}"
+    vm_vbox: "{{ mgmt_local_vm_contract.virtualbox.windows_executable }}"
+    vm_vagrant_windows: "{{ mgmt_local_vm_contract.vagrant.windows_executable }}"
     vm_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
     vm_state: "{{ vm_repo }}/.context/mgmt-offline-vm/{{ vm_name }}"
     vm_python: "{{ ansible_playbook_python }}"
     vm_bridge: "{{ playbook_dir }}/transport.py"
+    vm_guest_additions_lock_path: "{{ vm_repo }}/{{ mgmt_local_vm_contract.virtualbox.guest_additions_lock }}"
+    vm_guest_additions_lock: "{{ lookup('file', vm_guest_additions_lock_path) | from_json }}"
+    vm_guest_additions_bundle: "{{ vm_repo }}/{{ mgmt_local_vm_contract.virtualbox.guest_additions_bundle }}"
+    vm_guest_additions_helper: "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/guest_additions_bundle.py"
     vm_dns_fixture: "{{ mgmt_local_vm_contract.services.dns }}"
     vm_ntp_fixture: "{{ mgmt_local_vm_contract.services.ntp }}"
   tasks:
@@ -59,6 +64,9 @@
           - "{{ vm_address }}"
           - "{{ vm_host_address }}"
       changed_when: false
+    - name: Verify all pinned host and Guest Additions prerequisites before lifecycle execution
+      ansible.builtin.include_tasks: preflight.yml
+      when: vm_action != 'destroy'
     - name: Discover Windows user temporary artifact root without changing host settings
       ansible.builtin.command:
         argv:
@@ -90,6 +98,7 @@
         src: Vagrantfile
         dest: "{{ vm_windows_state }}/Vagrantfile"
         mode: '0600'
+      when: vm_action != 'destroy'
     - name: Record non-secret runtime parameters for native Windows transports
       ansible.builtin.copy:
         dest: "{{ vm_windows_state }}/runtime.json"
@@ -99,11 +108,16 @@
               'address': vm_address, 'box_name': vm_box_name, 'box_url': vm_box_url,
               'box_sha256': vm_box_sha256,
               'vagrant_version': vm_vagrant_version,
-              'vagrant_windows': vm_vagrant_windows} | to_nice_json }}
+              'vagrant_windows': vm_vagrant_windows,
+              'guest_additions_iso_windows': vm_guest_additions_lock.guest_additions.iso.windows_path,
+              'ssh_connect_timeout_seconds':
+                mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds | int} | to_nice_json }}
+      when: vm_action != 'destroy'
     - name: Run native Vagrant validation
       ansible.builtin.command:
         argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, validate]
       changed_when: false
+      when: vm_action != 'destroy'
     - name: Execute requested lifecycle and always clean a complete qualification attempt
       block:
         - name: Start without authority to clean a previously existing VM
@@ -136,3 +150,8 @@
             path: "{{ vm_control_path.path }}"
             state: absent
           when: vm_control_path.path is defined
+        - name: Remove invocation-owned RKE2 controller sockets after success or failure
+          ansible.builtin.file:
+            path: "{{ vm_server_control_path.path }}"
+            state: absent
+          when: vm_server_control_path.path is defined
