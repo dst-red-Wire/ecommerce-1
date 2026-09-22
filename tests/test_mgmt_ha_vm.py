@@ -383,6 +383,30 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn("vm_dns_fixture=", source)
         self.assertNotIn("vm_ntp_fixture=", source)
 
+    def test_ha_fingerprints_shared_local_vm_sources_from_canonical_contract(self):
+        contract = MOD.ruby_yaml(
+            str(ROOT / "platform/ansible/tests/mgmt_offline_vm/contract.yml")
+        )["mgmt_local_vm_contract"]
+        main = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+
+        runtime_sources = contract["runtime_sources"]
+        self.assertIn(
+            "platform/ansible/tests/mgmt_offline_vm/create.yml",
+            runtime_sources,
+        )
+        self.assertIn(
+            "platform/ansible/tests/mgmt_offline_vm/transport.py",
+            runtime_sources,
+        )
+        self.assertIn("ha_single_contract.runtime_sources", main)
+        self.assertIn("ha_single_runtime_sources", main)
+        self.assertIn("ha_single_source_hashes.stdout", main)
+        self.assertNotIn(
+            '"{{ ha_repo }}/platform/ansible/tests/mgmt_offline_vm/create.yml"',
+            main,
+        )
+
+
     def test_address_collision_probe_is_bound_to_windows_host_only_source(self):
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
         source = (FIXTURE / "main.yml").read_text(encoding="utf-8")
