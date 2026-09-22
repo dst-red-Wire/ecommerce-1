@@ -184,8 +184,8 @@
         IdentitiesOnly yes
         UserKnownHostsFile {{ vm_state }}/known_hosts
         StrictHostKeyChecking yes
-        ConnectTimeout 3
-        ConnectionAttempts 1
+        ConnectTimeout {{ mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds }}
+        ConnectionAttempts {{ mgmt_local_vm_contract.transport.ssh.connection_attempts }}
         ProxyCommand {{ vm_python | quote }} {{ vm_bridge | quote }} proxy --state {{ vm_windows_state | quote }}
 - name: Register isolated guest for native Ansible connection checks
   ansible.builtin.add_host:
@@ -196,9 +196,9 @@
     ansible_ssh_common_args: "-F {{ vm_state }}/ssh_config"
 - name: Wait boundedly for the isolated guest SSH transport
   ansible.builtin.wait_for_connection:
-    timeout: 300
-    connect_timeout: 3
-    sleep: 3
+    timeout: "{{ mgmt_local_vm_contract.transport.ssh.readiness_timeout_seconds }}"
+    connect_timeout: "{{ mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds }}"
+    sleep: "{{ mgmt_local_vm_contract.transport.ssh.readiness_sleep_seconds }}"
   delegate_to: "{{ vm_name }}"
   become: false
 - name: Gather real guest facts after SSH is available
