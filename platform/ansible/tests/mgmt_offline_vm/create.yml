@@ -184,16 +184,35 @@
         IdentitiesOnly yes
         UserKnownHostsFile {{ vm_state }}/known_hosts
         StrictHostKeyChecking yes
-        ConnectTimeout 10
+        ConnectTimeout 3
+        ConnectionAttempts 1
         ProxyCommand {{ vm_python | quote }} {{ vm_bridge | quote }} proxy --state {{ vm_windows_state | quote }}
-- name: Wait for SSH and require real enforcing guest kernel
-  ansible.builtin.command:
-    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", getenforce]
-  register: vm_ssh_ready
-  changed_when: false
-  until: vm_ssh_ready.rc == 0 and vm_ssh_ready.stdout | trim == 'Enforcing'
-  retries: 24
-  delay: 3
+- name: Register isolated guest for native Ansible connection checks
+  ansible.builtin.add_host:
+    name: "{{ vm_name }}"
+    ansible_connection: ssh
+    ansible_user: vagrant
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_common_args: "-F {{ vm_state }}/ssh_config"
+- name: Wait boundedly for the isolated guest SSH transport
+  ansible.builtin.wait_for_connection:
+    timeout: 300
+    connect_timeout: 3
+    sleep: 3
+  delegate_to: "{{ vm_name }}"
+  become: false
+- name: Gather real guest facts after SSH is available
+  ansible.builtin.setup:
+  delegate_to: "{{ vm_name }}"
+  become: false
+  register: vm_guest_facts
+- name: Require a real enforcing non-container guest kernel
+  ansible.builtin.assert:
+    that:
+      - vm_guest_facts.ansible_facts.ansible_virtualization_type != 'docker'
+      - vm_guest_facts.ansible_facts.ansible_kernel is defined
+      - vm_guest_facts.ansible_facts.ansible_selinux.status == 'enabled'
+      - vm_guest_facts.ansible_facts.ansible_selinux.mode == 'enforcing'
 - name: Probe independent kernel and denied Internet before package installation
   ansible.builtin.command:
     argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n, python3, '-', --before]
