@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,9 +24,34 @@ VIRTUALBOX = load("virtualbox_probe")
 TAMPER = load("tamper_artifact")
 RESTAGE = load("restage_cleanup")
 PRIVILEGE = load("privilege_probe")
+ROLE_TIMING = load("role_timing")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
+    def role_log(self):
+        events = (
+            ("2026-09-22 10:00:00,000", "Validate controller bundle before transfer"),
+            ("2026-09-22 10:00:05,000", "Create digest-specific node artifact directory"),
+            ("2026-09-22 10:00:06,000", "Transfer approved bundle over existing SSH access"),
+            ("2026-09-22 10:00:16,000", "Create local validator directory"),
+            ("2026-09-22 10:00:17,000", "Verify transferred bytes before package installation"),
+            ("2026-09-22 10:00:21,000", "Verify every local RPM signature against isolated approved keys"),
+            ("2026-09-22 10:00:27,000", "Import only manifest-approved offline RPM signing keys"),
+            ("2026-09-22 10:00:29,000", "Install complete local RPM set with all repositories disabled"),
+            ("2026-09-22 10:00:37,000", "Require SELinux enforcement and installed RKE2 policy"),
+            ("2026-09-22 10:00:38,000", "Record verified offline artifacts for subsequent RKE2 plays"),
+        )
+        lines = [
+            f"{timestamp} p=123 u=dev n=ansible INFO| "
+            f"TASK [mgmt_offline_artifacts : {name}] *****"
+            for timestamp, name in events
+        ]
+        lines.append(
+            "2026-09-22 10:00:40,000 p=123 u=dev n=ansible INFO| "
+            "PLAY RECAP *****"
+        )
+        return "\n".join(lines) + "\n"
+
     def nft_document(self, output_policy="drop", forward_policy="drop"):
         return {"nftables": [
             {"chain": {"family": "inet", "table": RKE2.EGRESS_TABLE,
@@ -261,6 +287,122 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             PRIVILEGE.root_proofs_pass(
                 {"sudo_n_id": [], "ansible_become_id": []}
             )
+        )
+
+    def test_role_timing_extracts_exact_phase_and_total_durations(self):
+        timing = ROLE_TIMING.parse_role_timing(self.role_log())
+        self.assertEqual(40.0, timing["role_total_seconds"])
+        self.assertEqual(
+            {
+                "controller_validation_seconds": 5.0,
+                "transfer_seconds": 10.0,
+                "post_transfer_validation_seconds": 4.0,
+                "rpm_signature_validation_seconds": 6.0,
+                "rpm_key_import_seconds": 2.0,
+                "dnf_install_seconds": 8.0,
+            },
+            timing["phases"],
+        )
+
+    def test_role_timing_distinguishes_absent_task_from_zero_duration(self):
+        log = self.role_log().replace(
+            "2026-09-22 10:00:06,000 p=123 u=dev n=ansible INFO| "
+            "TASK [mgmt_offline_artifacts : Transfer approved bundle over existing SSH access] *****\n",
+            "",
+        )
+        timing = ROLE_TIMING.parse_role_timing(log)
+        self.assertIsNone(timing["phases"]["transfer_seconds"])
+
+        zero_log = self.role_log().replace(
+            "2026-09-22 10:00:16,000 p=123 u=dev n=ansible INFO| "
+            "TASK [mgmt_offline_artifacts : Create local validator directory] *****",
+            "2026-09-22 10:00:06,000 p=123 u=dev n=ansible INFO| "
+            "TASK [mgmt_offline_artifacts : Create local validator directory] *****",
+        )
+        zero_timing = ROLE_TIMING.parse_role_timing(zero_log)
+        self.assertEqual(0.0, zero_timing["phases"]["transfer_seconds"])
+
+    def test_role_timing_rejects_ambiguous_target_task(self):
+        duplicate = self.role_log().replace(
+            "2026-09-22 10:00:40,000 p=123 u=dev n=ansible INFO| PLAY RECAP *****",
+            "2026-09-22 10:00:39,000 p=123 u=dev n=ansible INFO| "
+            "TASK [mgmt_offline_artifacts : Transfer approved bundle over existing SSH access] *****\n"
+            "2026-09-22 10:00:40,000 p=123 u=dev n=ansible INFO| PLAY RECAP *****",
+        )
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            ROLE_TIMING.parse_role_timing(duplicate)
+
+    def test_role_timing_requires_log_and_rejects_bundle_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(FileNotFoundError):
+                ROLE_TIMING.parse_log(root / "missing.log")
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "payload").write_bytes(b"approved")
+            (bundle / "link").symlink_to(bundle / "payload")
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                ROLE_TIMING.bundle_inventory(bundle)
+
+    def test_transport_metrics_use_real_log_path_and_canonical_runtime_source(self):
+        contract = (FIXTURE / "contract.yml").read_text(encoding="utf-8")
+        role_test = (FIXTURE / "test.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "platform/ansible/tests/mgmt_offline_vm/role_timing.py",
+            contract,
+        )
+        self.assertIn("role_timing.py", role_test)
+        self.assertIn("actual-role-live.log", role_test)
+        self.assertIn("transport-metrics.json", role_test)
+        self.assertIn("transport-metrics-replay.json", role_test)
+        self.assertIn("test-attempt.json", role_test)
+        self.assertIn(".cold_trial", role_test)
+        self.assertNotIn("mgmt_offline_transport_metrics is defined", role_test)
+
+    def test_transport_measurement_preserves_offline_cryptographic_gates(self):
+        role = (
+            ROOT / "platform/ansible/roles/mgmt_offline_artifacts/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        for task_name in ROLE_TIMING.PHASE_TASKS.values():
+            self.assertIn(task_name, role)
+        self.assertIn("Transfer approved bundle over existing SSH access", role)
+        self.assertLess(
+            role.index("Transfer approved bundle over existing SSH access"),
+            role.index("Verify transferred bytes before package installation"),
+        )
+        self.assertIn("--manifest-sha256", role)
+        self.assertIn("--rpm-metadata-check", role)
+        self.assertIn("--rpm-signature-check", role)
+        self.assertIn("disablerepo: '*'", role)
+        self.assertIn("disable_gpg_check: false", role)
+
+    def test_role_timing_metrics_are_bounded_and_dependency_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "one").write_bytes(b"123")
+            nested = bundle / "nested"
+            nested.mkdir()
+            (nested / "two").write_bytes(b"4567")
+            metrics = ROLE_TIMING.build_metrics(self.role_log(), bundle)
+        self.assertEqual(1, metrics["schema_version"])
+        self.assertEqual({"file_count": 2, "bytes": 7}, metrics["bundle"])
+        self.assertAlmostEqual(
+            round(7 / (1024 * 1024) / 10, 6),
+            metrics["transfer_mib_per_second"],
+        )
+        self.assertEqual(25.0, metrics["transfer_share_percent"])
+        self.assertEqual(
+            {
+                "schema_version",
+                "role_total_seconds",
+                "bundle",
+                "phases",
+                "transfer_mib_per_second",
+                "transfer_share_percent",
+            },
+            set(json.loads(json.dumps(metrics))),
         )
 
 

@@ -150,6 +150,10 @@
       log_path = {{ vm_state }}/actual-role-live.log
       [ssh_connection]
       pipelining = True
+- name: Remove a previous live role log before this measured invocation
+  ansible.builtin.file:
+    path: "{{ vm_state }}/actual-role-live.log"
+    state: absent
 - name: Render actual role invocation with explicit fixture services
   ansible.builtin.copy:
     dest: "{{ vm_state }}/controller/platform/ansible/test.yml"
@@ -176,15 +180,6 @@
             ansible.builtin.command: dnf clean all
         roles:
           - {{ (vm_repo ~ '/platform/ansible/roles/mgmt_offline_artifacts') | to_json }}
-        post_tasks:
-          - name: Preserve optional measured offline transport phases
-            ansible.builtin.copy:
-              dest: {{ (vm_state ~ '/transport-metrics.json') | to_json }}
-              content: '{{ "{{ mgmt_offline_transport_metrics | to_nice_json }}" }}'
-              mode: '0600'
-            delegate_to: localhost
-            become: false
-            when: mgmt_offline_transport_metrics is defined
 - name: Resolve canonical verified collection generation
   ansible.builtin.command:
     argv:
@@ -227,6 +222,27 @@
     dest: "{{ vm_state }}/actual-role.log"
     content: "{{ vm_role.stdout }}\n{{ vm_role.stderr }}\n"
     mode: '0600'
+- name: Extract deterministic timings from the native Ansible role log
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ playbook_dir }}/role_timing.py"
+      - --log
+      - "{{ vm_state }}/actual-role-live.log"
+      - --bundle
+      - "{{ mgmt_offline_bundle_dir }}"
+      - --output
+      - "{{ vm_transport_metrics_output }}"
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  vars:
+    vm_transport_metrics_output: >-
+      {{ vm_state }}/{{
+        'transport-metrics.json'
+        if (lookup('file', vm_state ~ '/test-attempt.json') | from_json).cold_trial
+        else 'transport-metrics-replay.json'
+      }}
+  changed_when: true
 - name: Preserve measured invocation and exact input hashes even on failure
   ansible.builtin.copy:
     dest: "{{ vm_state }}/role-result.json"

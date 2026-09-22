@@ -33,6 +33,7 @@ mgmt_local_vm_contract:
     - platform/ansible/tests/mgmt_offline_vm/server.yml
     - platform/ansible/tests/mgmt_offline_vm/destroy.yml
     - platform/ansible/tests/mgmt_offline_vm/transport.py
+    - platform/ansible/tests/mgmt_offline_vm/role_timing.py
     - platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py
     - platform/ansible/tests/mgmt_offline_vm/guest_probe.py
   services:
