@@ -87,6 +87,7 @@
     argv:
       - sha256sum
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/server.yml"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/privilege_probe.py"
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/rke2_probe.py"
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py"
       - "{{ vm_repo }}/platform/ansible/roles/rke2_server/tasks/main.yml"
@@ -123,6 +124,13 @@
     creates: "{{ vm_state }}/rke2-token"
   no_log: true
 
+- name: Allocate a short invocation-owned RKE2 controller socket directory
+  ansible.builtin.tempfile:
+    state: directory
+    path: /tmp
+    prefix: ecommerce-rke2-
+  register: vm_server_control_path
+
 - name: Write single-target runtime inventory
   ansible.builtin.copy:
     dest: "{{ vm_state }}/server-inventory.json"
@@ -133,6 +141,7 @@
             'ansible_user': 'vagrant',
             'ansible_become': true,
             'ansible_python_interpreter': '/usr/bin/python3',
+            'ansible_control_path_dir': vm_server_control_path.path,
             'ansible_ssh_common_args': '-F ' ~ (vm_state ~ '/ssh_config') | quote}}},
           'access_gateways': {'hosts': {
             'fixture-gateway': {'mgmt_ip': vm_host_address}}}
@@ -148,6 +157,45 @@
       retry_files_enabled = False
       [ssh_connection]
       pipelining = True
+
+- name: Measure SSH, non-interactive sudo and Ansible become before RKE2
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/privilege_probe.py"
+      - --phase
+      - before
+      - --vm
+      - "{{ vm_name }}"
+      - --ssh-config
+      - "{{ vm_state }}/ssh_config"
+      - --inventory
+      - "{{ vm_state }}/server-inventory.json"
+      - --ansible-config
+      - "{{ vm_state }}/server-ansible.cfg"
+      - --ansible
+      - "{{ vm_python | dirname }}/ansible"
+      - --control-path-dir
+      - "{{ vm_server_control_path.path }}"
+      - --output
+      - "{{ vm_state }}/transport-before.json"
+      - --repetitions
+      - '10'
+      - --command-timeout
+      - '15'
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  register: vm_server_transport_before
+  failed_when: false
+  changed_when: false
+  when: vm_server_install_required | bool
+
+- name: Require pre-RKE2 SSH and privilege probes to pass
+  ansible.builtin.assert:
+    that:
+      - vm_server_transport_before.rc == 0
+    fail_msg: Inspect transport-before.json; no password-based fallback is permitted.
+  when: vm_server_install_required | bool
 
 - name: Render actual canonical RKE2 server invocation
   ansible.builtin.copy:
@@ -321,6 +369,41 @@
   register: vm_server_collections
   changed_when: false
 
+- name: Launch bounded transport probes for the RKE2 activating window
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/privilege_probe.py"
+      - --phase
+      - activating
+      - --vm
+      - "{{ vm_name }}"
+      - --ssh-config
+      - "{{ vm_state }}/ssh_config"
+      - --inventory
+      - "{{ vm_state }}/server-inventory.json"
+      - --ansible-config
+      - "{{ vm_state }}/server-ansible.cfg"
+      - --ansible
+      - "{{ vm_python | dirname }}/ansible"
+      - --control-path-dir
+      - "{{ vm_server_control_path.path }}"
+      - --output
+      - "{{ vm_state }}/transport-activating.json"
+      - --repetitions
+      - '10'
+      - --command-timeout
+      - '15'
+      - --wait-timeout
+      - '600'
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  async: 900
+  poll: 0
+  register: vm_server_transport_activating_job
+  changed_when: false
+  when: vm_server_install_required | bool
+
 - name: Execute canonical RKE2 server role through native Ansible SSH
   ansible.builtin.command:
     argv:
@@ -343,13 +426,69 @@
   failed_when: false
   changed_when: true
 
+- name: Await bounded transport probes from the RKE2 activating window
+  ansible.builtin.async_status:
+    jid: "{{ vm_server_transport_activating_job.ansible_job_id }}"
+  register: vm_server_transport_activating
+  until: vm_server_transport_activating.finished | bool
+  retries: 180
+  delay: 5
+  failed_when: false
+  changed_when: false
+  when: vm_server_install_required | bool
+
+- name: Collect bounded controller and guest diagnostics after RKE2 transport failure
+  ansible.builtin.command:
+    argv:
+      - "{{ vm_python }}"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/privilege_probe.py"
+      - --phase
+      - failure
+      - --vm
+      - "{{ vm_name }}"
+      - --ssh-config
+      - "{{ vm_state }}/ssh_config"
+      - --inventory
+      - "{{ vm_state }}/server-inventory.json"
+      - --ansible-config
+      - "{{ vm_state }}/server-ansible.cfg"
+      - --ansible
+      - "{{ vm_python | dirname }}/ansible"
+      - --control-path-dir
+      - "{{ vm_server_control_path.path }}"
+      - --output
+      - "{{ vm_state }}/transport-failure.json"
+      - --repetitions
+      - '1'
+      - --command-timeout
+      - '15'
+  environment:
+    PYTHONDONTWRITEBYTECODE: '1'
+  register: vm_server_transport_failure
+  failed_when: false
+  changed_when: false
+  when: vm_server_role.rc != 0
+
 - name: Preserve RKE2 role output before evaluating it
   ansible.builtin.copy:
     dest: "{{ vm_state }}/rke2-server.log"
     content: "{{ vm_server_role.stdout }}\n{{ vm_server_role.stderr }}\n"
     mode: '0600'
 
+- name: Remove invocation-owned RKE2 controller sockets after measurement
+  ansible.builtin.file:
+    path: "{{ vm_server_control_path.path }}"
+    state: absent
+
 - name: Require complete canonical RKE2 server success
   ansible.builtin.assert:
     that: [vm_server_role.rc == 0]
     fail_msg: Inspect the ignored rke2-server.log; no network or SELinux gate was bypassed.
+
+- name: Require activating-window SSH and privilege probes to pass
+  ansible.builtin.assert:
+    that:
+      - vm_server_transport_activating.finished | bool
+      - vm_server_transport_activating.rc == 0
+    fail_msg: Inspect transport-activating.json for bounded SSH, sudo and Ansible evidence.
+  when: vm_server_install_required | bool

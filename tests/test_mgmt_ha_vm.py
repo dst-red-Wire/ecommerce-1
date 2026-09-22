@@ -21,6 +21,13 @@ GUARD_SPEC = importlib.util.spec_from_file_location("mgmt_ha_lifecycle_guard", F
 assert GUARD_SPEC and GUARD_SPEC.loader
 GUARD = importlib.util.module_from_spec(GUARD_SPEC)
 GUARD_SPEC.loader.exec_module(GUARD)
+OFFLINE_FIXTURE = ROOT / "platform/ansible/tests/mgmt_offline_vm"
+PRIVILEGE_SPEC = importlib.util.spec_from_file_location(
+    "mgmt_offline_privilege_probe", OFFLINE_FIXTURE / "privilege_probe.py"
+)
+assert PRIVILEGE_SPEC and PRIVILEGE_SPEC.loader
+PRIVILEGE = importlib.util.module_from_spec(PRIVILEGE_SPEC)
+PRIVILEGE_SPEC.loader.exec_module(PRIVILEGE)
 
 
 class MgmtHaVmTests(unittest.TestCase):
@@ -122,6 +129,97 @@ class MgmtHaVmTests(unittest.TestCase):
             source = (ROOT / "platform/ansible/tests/mgmt_offline_vm" / relative).read_text(encoding="utf-8")
             with self.subTest(relative=relative):
                 self.assertIn("'ansible_python_interpreter': '/usr/bin/python3'", source)
+
+    def test_rke2_read_only_polls_drop_become_while_mutations_remain_privileged(self):
+        role = (ROOT / "platform/ansible/roles/rke2_server/tasks/main.yml").read_text(
+            encoding="utf-8"
+        )
+
+        def task(name: str) -> str:
+            match = re.search(
+                rf"(?ms)^- name: {re.escape(name)}\n(.*?)(?=^- name: |\Z)",
+                role,
+            )
+            self.assertIsNotNone(match, name)
+            return match.group(0)
+
+        for name in (
+            "Wait boundedly for the queued native RKE2 service job",
+            "Wait boundedly for the native RKE2 service readiness notification",
+        ):
+            with self.subTest(name=name):
+                self.assertIn("become: false", task(name))
+
+        for name in (
+            "Install pinned offline RKE2 binary",
+            "Install native RKE2 server systemd unit",
+            "Render RKE2 server configuration",
+            "Enable RKE2 server",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn("become: false", task(name))
+
+        server = (OFFLINE_FIXTURE / "server.yml").read_text(encoding="utf-8")
+        self.assertRegex(
+            server,
+            r"hosts: \{\{ vm_name \| to_json \}\}\n\s+become: true",
+        )
+
+    def test_single_vm_privilege_probes_are_bounded_noninteractive_and_cleaned(self):
+        server = (OFFLINE_FIXTURE / "server.yml").read_text(encoding="utf-8")
+        main = (OFFLINE_FIXTURE / "main.yml").read_text(encoding="utf-8")
+        helper = (OFFLINE_FIXTURE / "privilege_probe.py").read_text(encoding="utf-8")
+        for phase in ("before", "activating", "failure"):
+            self.assertRegex(server, rf"(?m)^\s+- {phase}$")
+        self.assertIn("path: /tmp", server)
+        self.assertIn("prefix: ecommerce-rke2-", server)
+        self.assertIn("'ansible_control_path_dir': vm_server_control_path.path", server)
+        self.assertNotIn("vm_state ~ '/server-control-path'", server)
+        self.assertIn("{{ vm_python | dirname }}/ansible", server)
+        self.assertIn("--repetitions", server)
+        self.assertIn("--command-timeout", server)
+        self.assertNotIn("ansible_ssh_timeout", server)
+        self.assertNotRegex(server, r"(?m)^\s*timeout\s*=")
+        self.assertIn('"sudo_n_true": ssh_command', helper)
+        self.assertIn('"sudo_n_id": ssh_command', helper)
+        self.assertIn("sudo -n /usr/bin/true", helper)
+        self.assertIn("sudo -n /usr/bin/id -u", helper)
+        self.assertNotIn("--ask-become-pass", helper)
+        self.assertNotIn("ansible_become_password", helper)
+        self.assertIn('path: "{{ vm_server_control_path.path }}"', main)
+        self.assertIn("when: vm_server_control_path.path is defined", main)
+        self.assertIn("Remove invocation-owned RKE2 controller sockets after success or failure", main)
+
+    def test_privilege_probe_statistics_and_classification_are_deterministic(self):
+        samples = [
+            {"rc": 0, "duration_seconds": value}
+            for value in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+        ]
+        summary = PRIVILEGE.summarize(samples)
+        self.assertEqual(10, summary["count"])
+        self.assertEqual(0, summary["failures"])
+        self.assertEqual(0.55, summary["median_seconds"])
+        self.assertEqual(1.0, summary["p95_seconds"])
+        self.assertEqual(1.0, summary["max_seconds"])
+
+        all_pass = {name: {"failures": 0} for name in PRIVILEGE.SUMMARY_PROBES}
+        become_failure = {name: dict(value) for name, value in all_pass.items()}
+        become_failure["ansible_become"] = {"failures": 1}
+        self.assertEqual(
+            "ansible-become-only-timeout",
+            PRIVILEGE.classify(become_failure, stale_socket=False),
+        )
+        no_become_failure = {name: dict(value) for name, value in all_pass.items()}
+        no_become_failure["ansible_no_become"] = {"failures": 1}
+        self.assertEqual(
+            "controlpersist-stale",
+            PRIVILEGE.classify(no_become_failure, stale_socket=True),
+        )
+        sanitized = PRIVILEGE.sanitize(
+            'token=abc password: xyz "secret": "value" Authorization=Bearer-value Bearer raw'
+        )
+        for value in ("abc", "xyz", "value", "Bearer-value", "raw"):
+            self.assertNotIn(value, sanitized)
 
     def test_both_authoritative_rke2_launchers_use_bound_controller(self):
         tree = ast.parse((ROOT / "scripts/repoctl.py").read_text(encoding="utf-8"))

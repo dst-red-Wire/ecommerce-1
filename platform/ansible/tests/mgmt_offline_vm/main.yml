@@ -136,3 +136,8 @@
             path: "{{ vm_control_path.path }}"
             state: absent
           when: vm_control_path.path is defined
+        - name: Remove invocation-owned RKE2 controller sockets after success or failure
+          ansible.builtin.file:
+            path: "{{ vm_server_control_path.path }}"
+            state: absent
+          when: vm_server_control_path.path is defined
