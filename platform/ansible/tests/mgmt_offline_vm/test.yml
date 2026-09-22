@@ -147,6 +147,7 @@
       [defaults]
       forks = 1
       retry_files_enabled = False
+      log_path = {{ vm_state }}/actual-role-live.log
       [ssh_connection]
       pipelining = True
 - name: Render actual role invocation with explicit fixture services
@@ -198,7 +199,7 @@
       - "{{ vm_repo }}"
   register: vm_collections
   changed_when: false
-- name: Execute exact repository role through native Ansible SSH
+- name: Execute exact repository offline-artifact role through native Ansible SSH
   ansible.builtin.command:
     argv:
       - "{{ vm_python }}"
