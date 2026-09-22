@@ -15,6 +15,13 @@ it reports exactly Vagrant 2.4.9 before the lifecycle starts. Caller-controlled
 Vagrant executable overrides are rejected. The repository's qualified Python/Ansible
 environment and locked collections must already be prepared.
 
+SSH readiness is also contract-driven from `contract.yml`: connect timeout,
+connection attempts, total readiness window and retry sleep are defined once under
+`mgmt_local_vm_contract.transport.ssh`. The same contract also owns the shared
+fixture `runtime_sources` list consumed by HA exact-SHA fingerprinting, so the mono-VM
+and six-node workflows do not carry independent copies of transport policy or shared
+source dependencies.
+
 ## Rebuild the offline bundle
 
 `config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json` is the single source
