@@ -1,0 +1,28 @@
+# Ansible owns only this table. Loading the transaction also removes stale rules.
+add table inet ecommerce_mgmt_bootstrap
+flush table inet ecommerce_mgmt_bootstrap
+add chain inet ecommerce_mgmt_bootstrap output { type filter hook output priority -150; policy drop; }
+add chain inet ecommerce_mgmt_bootstrap forward { type filter hook forward priority -150; policy drop; }
+add rule inet ecommerce_mgmt_bootstrap output oifname "lo" accept
+add rule inet ecommerce_mgmt_bootstrap output ct state established,related ct direction reply accept
+# Provider DHCP renewal only; no metadata HTTP or Internet gateway exception.
+add rule inet ecommerce_mgmt_bootstrap output oifname "{{ mgmt_private_interface }}" ip daddr { 255.255.255.255, {{ mgmt_private_dhcp_server }} } udp sport 68 udp dport 67 accept
+{% for address in mgmt_internal_dns %}
+add rule inet ecommerce_mgmt_bootstrap output ip daddr {{ address }} udp dport 53 accept
+add rule inet ecommerce_mgmt_bootstrap output ip daddr {{ address }} tcp dport 53 accept
+{% endfor %}
+{% for address in mgmt_internal_ntp %}
+add rule inet ecommerce_mgmt_bootstrap output ip daddr {{ address }} udp dport 123 accept
+{% endfor %}
+# Host DNS/NTP is limited to the explicitly configured internal servers.
+add rule inet ecommerce_mgmt_bootstrap output udp dport { 53, 123 } drop
+add rule inet ecommerce_mgmt_bootstrap output tcp dport 53 drop
+# Pod DNS reaches CoreDNS through canonical pod/service routes; network-policy
+# qualification still owns workload service permissions after bootstrap.
+# Canonical cluster/private transport remains independent of external access.
+{% for cidr in [mgmt_private_block, mgmt_pod_cidr, mgmt_service_cidr] %}
+add rule inet ecommerce_mgmt_bootstrap output ip daddr {{ cidr }} accept
+add rule inet ecommerce_mgmt_bootstrap forward ip daddr {{ cidr }} accept
+{% endfor %}
+add rule inet ecommerce_mgmt_bootstrap forward ct state established,related ct direction reply accept
+# IPv4 and IPv6 destinations not covered above are denied by chain policy.

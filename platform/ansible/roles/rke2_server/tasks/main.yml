@@ -17,21 +17,89 @@
     group: root
     mode: "0750"
 
-- name: Download RKE2 installer
-  ansible.builtin.get_url:
-    url: "{{ rke2_install_script_url }}"
-    dest: /usr/local/src/install-rke2.sh
+- name: Require verified offline artifacts before RKE2 installation
+  ansible.builtin.assert:
+    that:
+      - mgmt_offline_artifacts_verified | default(false) | bool
+      - rke2_offline_binary | length > 0
+    fail_msg: "Verified controller-delivered binary, images and SELinux RPMs are required."
+
+- name: Require active persistent bootstrap egress boundary before RKE2 activation
+  ansible.builtin.command:
+    argv: [/usr/sbin/nft, -j, list, table, inet, ecommerce_mgmt_bootstrap]
+  register: rke2_bootstrap_egress
+  changed_when: false
+
+- name: Require output and forwarding default deny in the active dual-stack table
+  ansible.builtin.assert:
+    that:
+      - >-
+        (rke2_bootstrap_egress.stdout | from_json).nftables
+        | selectattr('chain', 'defined') | map(attribute='chain')
+        | selectattr('family', 'equalto', 'inet')
+        | selectattr('table', 'equalto', 'ecommerce_mgmt_bootstrap')
+        | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'output')
+        | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop') | list | length == 1
+      - >-
+        (rke2_bootstrap_egress.stdout | from_json).nftables
+        | selectattr('chain', 'defined') | map(attribute='chain')
+        | selectattr('family', 'equalto', 'inet')
+        | selectattr('table', 'equalto', 'ecommerce_mgmt_bootstrap')
+        | selectattr('hook', 'defined') | selectattr('hook', 'equalto', 'forward')
+        | selectattr('policy', 'defined') | selectattr('policy', 'equalto', 'drop') | list | length == 1
+    fail_msg: "RKE2 activation requires an active default-deny IPv4/IPv6 bootstrap boundary."
+
+- name: Install pinned offline RKE2 binary
+  ansible.builtin.copy:
+    src: "{{ rke2_offline_binary }}"
+    dest: /usr/local/bin/rke2
+    remote_src: true
     owner: root
     group: root
     mode: "0755"
+  notify: Restart rke2-server
 
-- name: Install pinned RKE2 server
+- name: Restore the installed RKE2 binary SELinux file context
   ansible.builtin.command:
-    cmd: /usr/local/src/install-rke2.sh
-    creates: /usr/local/bin/rke2
-  environment:
-    INSTALL_RKE2_VERSION: "{{ rke2_version }}"
-    INSTALL_RKE2_TYPE: server
+    argv: [/usr/sbin/restorecon, /usr/local/bin/rke2]
+  changed_when: false
+
+- name: Verify installed RKE2 version matches canonical inventory
+  ansible.builtin.command:
+    argv: [/usr/local/bin/rke2, --version]
+  register: rke2_installed_version
+  changed_when: false
+  failed_when: "('rke2 version ' + rke2_version + ' ') not in (rke2_installed_version.stdout + ' ')"
+
+- name: Install native RKE2 server systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/rke2-server.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=RKE2 server (verified offline bootstrap)
+      Wants=network-online.target
+      Requires=ecommerce-mgmt-egress.service
+      After=network-online.target ecommerce-mgmt-egress.service
+      [Service]
+      Type=notify
+      Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+      ExecStartPre=-/sbin/modprobe br_netfilter
+      ExecStartPre=-/sbin/modprobe overlay
+      ExecStart=/usr/local/bin/rke2 server
+      KillMode=process
+      Delegate=yes
+      LimitNOFILE=1048576
+      LimitNPROC=infinity
+      LimitCORE=infinity
+      TasksMax=infinity
+      TimeoutStartSec=0
+      Restart=always
+      RestartSec=5s
+      [Install]
+      WantedBy=multi-user.target
   notify: Restart rke2-server
 
 - name: Render RKE2 server configuration
@@ -48,3 +116,5 @@
   ansible.builtin.systemd_service:
     name: rke2-server
     enabled: true
+    state: started
+    daemon_reload: true

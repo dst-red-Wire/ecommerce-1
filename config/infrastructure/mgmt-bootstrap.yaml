@@ -1,5 +1,5 @@
 version: 1
-status: static-ready-for-real-provisioning
+status: offline-path-implemented-real-six-node-validation-pending
 milestone: M2-5-persistent-mgmt-bootstrap
 authority: architecture.lock.yaml
 scope:
@@ -127,3 +127,39 @@ cost_inventory:
   public_ipv4: 1
   public_ipv6: 1
   billable_classes: [servers, public-ip-addresses]
+
+# Bootstrap transport exists before Kubernetes. No dependency on cluster Harbor,
+# Istio Egress Gateway, Internet NAT through wg-01 or public package repositories.
+offline_installation:
+  owner: M2-5-persistent-mgmt-bootstrap
+  source: independently-approved-controller-local-bundle
+  delivery: ansible-copy-over-existing-governed-ssh
+  source_available_before_kubernetes: required
+  manifest_authorization: independently-supplied-sha256
+  target: rocky-9-amd64
+  inventory:
+    os_packages: full-rpm-dependency-closure-with-nevra-sha256-and-signature-checks
+    required_packages_source: scripts/mgmt_airgap.py#REQUIRED_RPMS
+    runtime: rke2-embedded-containerd
+    binary: canonical-rke2-version-and-sha256
+    images: canonical-rke2-core-and-cilium-image-archives
+    image_identities: required-in-validated-archive-manifests
+    rpm_signing_keys: manifest-bound-offline-input
+  network:
+    artifact_downloads_from_nodes: forbidden
+    dns: explicit-internal-ipv4-runtime-input
+    ntp: explicit-internal-ipv4-runtime-input
+    private_cluster_routes: canonical-network-plan-only
+    default_route: isolated-dummy-no-internet-forwarding
+    internet_ipv4_ipv6: default-deny-output-and-forward
+    wireguard_internet_nat: forbidden
+  installation:
+    package_repositories: all-disabled
+    missing_artifact: fail-before-installation
+    integrity_failure: fail-before-installation
+    registry_default_endpoint_fallback: disabled
+    selinux: enabled-with-offline-policy-rpms
+  evidence:
+    local_container: installation-subset-and-egress-isolation-only
+    six_node_rocky_rke2: pending-real-target-and-service-inputs
+    provisioning_authorization: separate-human-gate-required

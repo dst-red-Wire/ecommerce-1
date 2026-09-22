@@ -86,6 +86,8 @@ access_gateways.each do |name, node|
   hostvars[name] = transport_vars(transport_hosts, name, node.fetch("mgmt_ip")).merge({
     "mgmt_ip" => node.fetch("mgmt_ip"),
     "wireguard_listen_port" => network_plan.dig("wireguard", "mgmt", "endpoint", "listen_port"),
+    "wireguard_operator_pool" => network_plan.dig("wireguard", "mgmt", "operator_pool"),
+    "wireguard_break_glass_pool" => network_plan.dig("wireguard", "mgmt", "break_glass_pool"),
     "wireguard_tunnel_cidr" => network_plan.dig("wireguard", "mgmt", "tunnel_cidr"),
     "wireguard_gateway_tunnel_ip" => network_plan.dig("wireguard", "mgmt", "gateway_tunnel_ip"),
     "wireguard_allowed_routes" => network_plan.dig("wireguard", "mgmt", "allowed_routes"),
@@ -98,7 +100,12 @@ end
 inventory = {
   "_meta" => { "hostvars" => hostvars },
   "all" => {
-    "children" => %w[access_gateways rke2_servers rke2_agents]
+    "children" => %w[access_gateways rke2_servers rke2_agents],
+    "vars" => {
+      "mgmt_private_block" => network_plan.dig("address_domains", "mgmt"),
+      "mgmt_pod_cidr" => network_plan.dig("kubernetes", "mgmt", "pod_cidr"),
+      "mgmt_service_cidr" => network_plan.dig("kubernetes", "mgmt", "service_cidr")
+    }
   },
   "rke2_servers" => {
     "hosts" => control_planes.keys

@@ -111,6 +111,20 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
         errors.append("M2.5 must depend only on M1")
     if deps.get("M3-preprod-infrastructure") != ["M2-5-persistent-mgmt-bootstrap"]:
         errors.append("M3 must depend on M2.5")
+    offline = bootstrap.get("offline_installation", {})
+    if offline.get("source") != "independently-approved-controller-local-bundle":
+        errors.append("bootstrap artifact source must exist independently before Kubernetes")
+    if offline.get("manifest_authorization") != "independently-supplied-sha256":
+        errors.append("offline manifest requires independent digest authorization")
+    net = offline.get("network", {})
+    if net.get("artifact_downloads_from_nodes") != "forbidden" or net.get("wireguard_internet_nat") != "forbidden":
+        errors.append("node downloads and WireGuard Internet NAT remain forbidden")
+    install = offline.get("installation", {})
+    if (
+        install.get("package_repositories") != "all-disabled"
+        or install.get("registry_default_endpoint_fallback") != "disabled"
+    ):
+        errors.append("offline installation must not fall back to external repositories")
     return errors
 
 

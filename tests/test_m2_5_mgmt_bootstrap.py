@@ -43,6 +43,23 @@ class M25BootstrapContractTests(unittest.TestCase):
         self.assertEqual([], self.validate())
         self.assertEqual([], validator.validate_repository_text())
 
+    def test_offline_bootstrap_contract_fails_closed_on_external_fallback(self):
+        for section, key, value in (
+            (None, "source", "cluster-hosted-harbor"),
+            (None, "manifest_authorization", "self-approved"),
+            ("network", "artifact_downloads_from_nodes", "allowed"),
+            ("network", "wireguard_internet_nat", "allowed"),
+            ("installation", "package_repositories", "default"),
+            ("installation", "registry_default_endpoint_fallback", "enabled"),
+        ):
+            mutated = copy.deepcopy(self.bootstrap)
+            target = mutated["offline_installation"]
+            if section:
+                target = target[section]
+            target[key] = value
+            with self.subTest(key=key):
+                self.assertTrue(self.validate(bootstrap=mutated))
+
     def test_control_plane_removal_fails_closed(self):
         mutated = copy.deepcopy(self.inventory)
         mutated["control_planes"].pop("cp-03")

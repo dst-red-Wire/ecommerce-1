@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policy target="DROP" priority="-100">
+  <ingress-zone name="wg-mgmt"/>
+  <egress-zone name="ANY"/>
+{% for peer in wireguard_validated_material.peers %}
+{% for route in wireguard_allowed_routes %}
+  <rule family="ipv4">
+    <source address="{{ peer.allowed_ip }}"/>
+    <destination address="{{ route }}"/>
+    <log prefix="WGMG-FLOW " level="info"><limit value="1/s"/></log>
+    <accept/>
+  </rule>
+{% endfor %}
+{% endfor %}
+</policy>

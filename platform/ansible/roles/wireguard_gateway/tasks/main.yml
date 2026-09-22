@@ -8,6 +8,17 @@
       - wireguard_allowed_routes | length > 0
     fail_msg: "WireGuard reconciliation requires Rocky 9 and an explicit governed authority phase."
 
+- name: Inspect permanent secret authority before permitting bootstrap
+  ansible.builtin.stat:
+    path: "{{ wireguard_authority_marker }}"
+  register: wireguard_authority_state
+
+- name: Refuse to restore bootstrap after OpenBao transition
+  ansible.builtin.assert:
+    that:
+      - wireguard_secret_mode != 'bootstrap-local' or not wireguard_authority_state.stat.exists
+    fail_msg: "OpenBao authority is permanent; bootstrap rollback is forbidden."
+
 - name: Install WireGuard and firewalld before any WireGuard hook or service action
   ansible.builtin.dnf:
     name: [wireguard-tools, firewalld]
@@ -116,7 +127,7 @@
     url: "{{ wireguard_openbao_addr }}/v1/kv/data/{{ wireguard_openbao_peers_path }}/{{ item }}"
     headers: {X-Vault-Token: "{{ wireguard_openbao_token }}"}
     return_content: true
-  loop: "{{ wireguard_openbao_peer_list.json.data.keys }}"
+  loop: "{{ wireguard_openbao_peer_list['json']['data']['keys'] }}"
   register: wireguard_openbao_peer_records
   when: wireguard_secret_mode == 'runtime-openbao-read'
   no_log: true
@@ -151,6 +162,77 @@
          if wireguard_secret_mode == 'bootstrap-local'
          else wireguard_openbao_peer_records.results | map(attribute='json.data.data') | list }}
   no_log: true
+
+- name: Validate keys and separately authorized peer assignments before rendering
+  ansible.builtin.set_fact:
+    wireguard_validated_material: >-
+      {{ {'private_key': wireguard_private_key, 'peers': wireguard_peers}
+         | mgmt_wireguard_material(wireguard_operator_pool, wireguard_break_glass_pool,
+                                   wireguard_break_glass_authorized | bool) }}
+  no_log: true
+
+- name: Retain identity correlation for pre-SNAT flow audit
+  ansible.builtin.copy:
+    content: "{{ wireguard_validated_material.peers | to_json }}\n"
+    dest: /etc/wireguard/peer-identities.json
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Persist public peer identity correlation
+  no_log: true
+
+- name: Create persistent journal storage
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [/etc/systemd/journald.conf.d, /var/log/journal]
+
+- name: Bound persistent flow and identity audit storage
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/60-wireguard-audit.conf
+    content: "[Journal]\nStorage=persistent\nSystemMaxUse=200M\nMaxRetentionSec=30day\n"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart persistent journal
+
+- name: Create persistent firewall configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [/etc/firewalld/zones, /etc/firewalld/policies]
+
+- name: Query public WireGuard UDP listener allowance
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--query-port={{ wireguard_listen_port }}/udp"]
+  register: wireguard_udp_query
+  changed_when: false
+  failed_when: wireguard_udp_query.rc not in [0, 1]
+
+- name: Permit the governed WireGuard UDP listener
+  ansible.builtin.command:
+    argv: [firewall-cmd, --permanent, "--add-port={{ wireguard_listen_port }}/udp"]
+  when: wireguard_udp_query.rc == 1
+  changed_when: true
+  notify: Reload firewalld
+
+- name: Reconcile the dedicated WireGuard zone and forwarding policy completely
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - {src: wg-zone.xml.j2, dest: /etc/firewalld/zones/wg-mgmt.xml}
+    - {src: wg-policy.xml.j2, dest: /etc/firewalld/policies/wg-to-mgmt.xml}
+  notify: Reload firewalld
 
 - name: Enable IPv4 forwarding persistently
   ansible.builtin.copy:
@@ -207,6 +289,13 @@
   changed_when: true
   notify: Reload firewalld
 
+- name: Record the earliest acceptable live rotation handshake
+  ansible.builtin.command:
+    argv: [date, '+%s']
+  register: wireguard_rotation_epoch
+  changed_when: false
+  when: wireguard_secret_mode == 'runtime-openbao-read'
+
 - name: Render fail-closed WireGuard gateway configuration
   ansible.builtin.template:
     src: wg0.conf.j2
@@ -222,6 +311,47 @@
     name: wg-quick@wg0
     enabled: true
     state: started
+
+- name: Activate forwarding and rotated WireGuard before authority cleanup
+  ansible.builtin.meta: flush_handlers
+
+- name: Derive expected public key without exposing private material
+  ansible.builtin.command:
+    argv: [wg, pubkey]
+    stdin: "{{ wireguard_validated_material.private_key }}"
+  register: wireguard_expected_public_key
+  changed_when: false
+  when: wireguard_secret_mode == 'runtime-openbao-read'
+  no_log: true
+
+- name: Read active gateway public key
+  ansible.builtin.command:
+    argv: [wg, show, wg0, public-key]
+  register: wireguard_active_public_key
+  changed_when: false
+  when: wireguard_secret_mode == 'runtime-openbao-read'
+  no_log: true
+
+- name: Verify the replacement key is active before cleanup
+  ansible.builtin.assert:
+    that:
+      - wireguard_active_public_key.stdout == wireguard_expected_public_key.stdout
+  when: wireguard_secret_mode == 'runtime-openbao-read'
+  no_log: true
+
+- name: Require a fresh authenticated peer handshake on the activated tunnel
+  ansible.builtin.command:
+    argv: [wg, show, wg0, latest-handshakes]
+  register: wireguard_live_handshakes
+  changed_when: false
+  until: >-
+    wireguard_live_handshakes.stdout
+    | mgmt_wireguard_fresh_handshake(wireguard_validated_material.peers,
+                                    wireguard_rotation_epoch.stdout | int)
+  retries: 60
+  delay: 5
+  when: wireguard_secret_mode == 'runtime-openbao-read'
+  no_log: true
 
 - name: Record completed OpenBao authority rotation
   ansible.builtin.copy:

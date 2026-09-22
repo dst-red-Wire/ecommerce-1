@@ -6,4 +6,4 @@ rke2_cluster_cidr: ""
 rke2_service_cidr: ""
 rke2_config_dir: /etc/rancher/rke2
 rke2_config_file: /etc/rancher/rke2/config.yaml
-rke2_install_script_url: https://get.rke2.io
+rke2_offline_binary: ""

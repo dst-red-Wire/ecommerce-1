@@ -65,6 +65,17 @@ variable "location" {
   type = string
 }
 
+variable "ssh_key_ids" {
+  description = "Existing provider SSH public-key IDs; private keys are never managed here."
+  type        = list(number)
+  validation {
+    condition = length(var.ssh_key_ids) > 0 && alltrue([
+      for key_id in var.ssh_key_ids : key_id > 0 && floor(key_id) == key_id
+    ])
+    error_message = "A nonempty list of existing positive integer SSH public-key IDs is required."
+  }
+}
+
 variable "image" {
   type = string
 }
@@ -94,7 +105,16 @@ variable "wireguard_listen_port" { type = number }
 variable "management_cidr" { type = string }
 variable "kubernetes_cidr" { type = string }
 variable "bootstrap_ssh_enabled" { type = bool }
-variable "bootstrap_ssh_allowed_cidrs" { type = list(string) }
+variable "bootstrap_ssh_allowed_cidrs" {
+  type = list(string)
+  validation {
+    condition = alltrue([
+      for cidr in var.bootstrap_ssh_allowed_cidrs :
+      can(cidrhost(cidr, 0)) && try(tonumber(split("/", cidr)[1]) > 0, false)
+    ])
+    error_message = "Bootstrap SSH requires valid non-global IPv4 or IPv6 source CIDRs."
+  }
+}
 variable "bootstrap_ssh_human_gate_confirmed" { type = bool }
 variable "wireguard_udp_enabled" { type = bool }
 variable "wireguard_udp_human_gate_confirmed" { type = bool }
@@ -122,6 +142,7 @@ resource "hcloud_server" "node" {
   location    = var.location
   image       = var.image
   server_type = var.server_types[each.value.profile]
+  ssh_keys    = var.ssh_key_ids
 
   public_net {
     ipv4_enabled = false
@@ -142,6 +163,7 @@ resource "hcloud_server" "access_gateway" {
   location    = var.location
   image       = var.image
   server_type = var.access_server_types[each.value.profile]
+  ssh_keys    = var.ssh_key_ids
   labels = {
     project    = "ecommerce-1"
     site       = "mgmt"
@@ -197,6 +219,13 @@ resource "hcloud_firewall" "internal_nodes" {
     port        = "6443-9345"
     source_ips  = [var.kubernetes_cidr]
     description = "RKE2 control traffic remains private"
+  }
+  rule {
+    direction   = "in"
+    protocol    = "tcp"
+    port        = "6443"
+    source_ips  = [for gateway in values(var.access_gateways) : "${gateway.mgmt_ip}/32"]
+    description = "Kubernetes API from the exact WireGuard SNAT gateway only"
   }
   apply_to { label_selector = "project=ecommerce-1,site=mgmt" }
 }

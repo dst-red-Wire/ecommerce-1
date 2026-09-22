@@ -12,6 +12,16 @@ There is intentionally no committed backend block that would make first creation
 depend on MGMT itself.
 
 Required runtime inputs are the provider location/network zone, a pinned Rocky
-Linux 9 image, and explicit reviewed mappings from canonical compute profiles to
+Linux 9 image, existing provider SSH public-key IDs (`hcloud_ssh_key_ids`), and
+explicit reviewed mappings from canonical compute profiles to
 Hetzner server types. No defaults guess provider identifiers or silently resize
 the canonical intent.
+
+The SSH key IDs are a nonempty list of positive provider identifiers for keys
+already registered by the operator. Both the gateway and private nodes receive
+these public keys at creation so that the governed ProxyJump bootstrap works.
+Terraform neither generates nor receives private SSH key material.
+
+`terraform test` uses a mock provider and plan-only runs to check the canonical
+node set, restricted SSH CIDRs (including rejection of host-bit `/0` spellings),
+and required SSH key IDs. These tests create no cloud resources.

@@ -1,6 +1,7 @@
 module "hcloud_mgmt" {
   source = "../../modules/hcloud-mgmt"
 
+  ssh_key_ids  = var.hcloud_ssh_key_ids
   nodes        = local.nodes
   vm_profiles  = local.vm_profiles
   network_cidr = local.mgmt_private_block

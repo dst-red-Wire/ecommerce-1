@@ -20,7 +20,19 @@
   # Hosts are intentionally independent; no task uses run_once in this play.
   strategy: free  # noqa: run-once[play]
 
+  vars:
+    mgmt_offline_bundle_dir: "{{ lookup('ansible.builtin.env', 'MGMT_OFFLINE_BUNDLE_DIR') }}"
+    mgmt_offline_manifest_sha256: "{{ lookup('ansible.builtin.env', 'MGMT_OFFLINE_MANIFEST_SHA256') }}"
+    mgmt_internal_dns: "{{ lookup('ansible.builtin.env', 'MGMT_INTERNAL_DNS_JSON') | from_json }}"
+    mgmt_internal_ntp: "{{ lookup('ansible.builtin.env', 'MGMT_INTERNAL_NTP_JSON') | from_json }}"
+
   tasks:
+    - name: Verify and install controller-delivered offline prerequisites
+      ansible.builtin.include_role:
+        name: mgmt_offline_artifacts
+        apply:
+          throttle: 10
+
     - name: Apply Rocky baseline with bounded host concurrency
       ansible.builtin.include_role:
         name: rocky_baseline

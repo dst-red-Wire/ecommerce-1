@@ -92,7 +92,21 @@ class TerraformNetworkChecksTest(unittest.TestCase):
             'resource "hcloud_server" "access_gateway"', 1
         )[0]
         self.assertNotIn('port        = "22"', node_resource)
-        self.assertIn('["0.0.0.0/0", "::/0"]', variables)
+        self.assertIn('try(tonumber(split("/", cidr)[1]) > 0, false)', variables)
+
+    def test_existing_public_ssh_key_ids_reach_both_host_classes(self):
+        module = MODULE_MAIN.read_text()
+        self.assertIn("ssh_key_ids  = var.hcloud_ssh_key_ids", ENV_MAIN.read_text())
+        self.assertEqual(2, module.count("ssh_keys    = var.ssh_key_ids"))
+        for text, variable in ((ENV_VARIABLES.read_text(), "hcloud_ssh_key_ids"), (module, "ssh_key_ids")):
+            self.assertIn(f"length(var.{variable}) > 0", text)
+            self.assertIn("key_id > 0 && floor(key_id) == key_id", text)
+        self.assertNotIn('resource "tls_private_key"', module)
+
+    def test_provider_api_rule_uses_gateway_host_route(self):
+        module = MODULE_MAIN.read_text()
+        self.assertIn('source_ips  = [for gateway in values(var.access_gateways) : "${gateway.mgmt_ip}/32"]', module)
+        self.assertIn('port        = "6443"', module)
 
     def test_runtime_transport_keeps_private_nodes_and_gateway_explicit(self):
         module = MODULE_MAIN.read_text(encoding="utf-8")
