@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import ipaddress
+import os
 import re
 import tempfile
 import unittest
@@ -23,6 +24,126 @@ GUARD_SPEC.loader.exec_module(GUARD)
 
 
 class MgmtHaVmTests(unittest.TestCase):
+    def test_qualification_ansible_controller_is_bound_to_repoctl_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment_bin = Path(directory) / ".venv" / "qualification" / "bin"
+            environment_bin.mkdir(parents=True)
+            python = environment_bin / "python"
+            controller = environment_bin / "ansible-playbook"
+            python.touch(mode=0o755)
+            controller.touch(mode=0o755)
+
+            def probe(command, **kwargs):
+                stdout = "2.20.3\n" if command[0] == str(python) else "ansible-playbook [core 2.20.3]\n"
+                return MOD.subprocess.CompletedProcess(command, 0, stdout, "")
+
+            with (
+                mock.patch.object(MOD.sys, "executable", str(python)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"ANSIBLE_CORE_VERSION": "2.20.3"}),
+                mock.patch.object(MOD.subprocess, "run", side_effect=probe),
+            ):
+                self.assertEqual(str(controller), MOD.qualification_ansible_playbook())
+
+    def test_qualification_ansible_controller_missing_has_no_path_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            python = Path(directory) / ".venv" / "qualification" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.touch(mode=0o755)
+            with (
+                mock.patch.object(MOD.sys, "executable", str(python)),
+                mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ansible-playbook") as which,
+                self.assertRaisesRegex(RuntimeError, "missing or not executable"),
+            ):
+                MOD.qualification_ansible_playbook()
+            which.assert_not_called()
+
+    def test_qualification_ansible_controller_rejects_wrong_core_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment_bin = Path(directory) / ".venv" / "qualification" / "bin"
+            environment_bin.mkdir(parents=True)
+            python = environment_bin / "python"
+            controller = environment_bin / "ansible-playbook"
+            python.touch(mode=0o755)
+            controller.touch(mode=0o755)
+            wrong = MOD.subprocess.CompletedProcess([], 0, "2.16.3\n", "")
+            with (
+                mock.patch.object(MOD.sys, "executable", str(python)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"ANSIBLE_CORE_VERSION": "2.20.3"}),
+                mock.patch.object(MOD.subprocess, "run", return_value=wrong),
+                self.assertRaisesRegex(RuntimeError, "expected 2.20.3, actual 2.16.3"),
+            ):
+                MOD.qualification_ansible_playbook()
+
+    def test_qualification_ansible_controller_rejects_wrong_cli_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment_bin = Path(directory) / ".venv" / "qualification" / "bin"
+            environment_bin.mkdir(parents=True)
+            python = environment_bin / "python"
+            controller = environment_bin / "ansible-playbook"
+            python.touch(mode=0o755)
+            controller.touch(mode=0o755)
+            probes = [
+                MOD.subprocess.CompletedProcess([], 0, "2.20.3\n", ""),
+                MOD.subprocess.CompletedProcess([], 0, "ansible-playbook [core 2.16.3]\n", ""),
+            ]
+            with (
+                mock.patch.object(MOD.sys, "executable", str(python)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"ANSIBLE_CORE_VERSION": "2.20.3"}),
+                mock.patch.object(MOD.subprocess, "run", side_effect=probes),
+                self.assertRaisesRegex(RuntimeError, "expected 2.20.3, actual 2.16.3"),
+            ):
+                MOD.qualification_ansible_playbook()
+
+    def test_qualification_ansible_controller_ignores_hostile_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            environment_bin = Path(directory) / ".venv" / "qualification" / "bin"
+            environment_bin.mkdir(parents=True)
+            python = environment_bin / "python"
+            controller = environment_bin / "ansible-playbook"
+            python.touch(mode=0o755)
+            controller.touch(mode=0o755)
+
+            def probe(command, **kwargs):
+                stdout = "2.20.3\n" if command[0] == str(python) else "ansible-playbook [core 2.20.3]\n"
+                return MOD.subprocess.CompletedProcess(command, 0, stdout, "")
+
+            with (
+                mock.patch.object(MOD.sys, "executable", str(python)),
+                mock.patch.dict(os.environ, {"PATH": "/usr/bin"}),
+                mock.patch.object(MOD, "pinned_versions", return_value={"ANSIBLE_CORE_VERSION": "2.20.3"}),
+                mock.patch.object(MOD.subprocess, "run", side_effect=probe),
+                mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ansible-playbook") as which,
+            ):
+                self.assertEqual(str(controller), MOD.qualification_ansible_playbook())
+            which.assert_not_called()
+
+    def test_rocky_inventory_keeps_system_python_interpreter(self):
+        for relative in ("test.yml", "server.yml"):
+            source = (ROOT / "platform/ansible/tests/mgmt_offline_vm" / relative).read_text(encoding="utf-8")
+            with self.subTest(relative=relative):
+                self.assertIn("'ansible_python_interpreter': '/usr/bin/python3'", source)
+
+    def test_both_authoritative_rke2_launchers_use_bound_controller(self):
+        tree = ast.parse((ROOT / "scripts/repoctl.py").read_text(encoding="utf-8"))
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for name in (
+            "rke2_local_virtualbox_qualification",
+            "rke2_local_ha_qualification",
+        ):
+            calls = [
+                node
+                for node in ast.walk(functions[name])
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "qualification_ansible_playbook"
+            ]
+            with self.subTest(name=name):
+                self.assertEqual(1, len(calls))
+
     def test_contract_locks_six_node_topology_and_non_capacity_boundary(self):
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
         nodes = contract["nodes"]

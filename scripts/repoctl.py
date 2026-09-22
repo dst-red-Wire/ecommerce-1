@@ -5094,6 +5094,70 @@ def _canonical_rke2_vagrant_ready() -> bool:
     return (result.stdout or "").strip() == expected
 
 
+def qualification_ansible_playbook() -> str:
+    """Return the fail-closed Ansible controller paired with this Python."""
+    python = Path(os.path.abspath(sys.executable))
+    environment_bin = python.parent.resolve()
+    candidate = environment_bin / "ansible-playbook"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise RuntimeError(
+            f"qualification Ansible controller is missing or not executable: {candidate}"
+        )
+
+    expected = pinned_versions()["ANSIBLE_CORE_VERSION"]
+    module_probe = subprocess.run(
+        [str(python), "-c", "import ansible; print(ansible.__version__)"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    actual = (module_probe.stdout or "").strip()
+    if module_probe.returncode != 0 or actual != expected:
+        detail = (module_probe.stderr or "").strip()
+        raise RuntimeError(
+            "qualification Python ansible-core mismatch: "
+            f"expected {expected}, actual {actual or 'unavailable'}"
+            + (f" ({detail})" if detail else "")
+        )
+
+    cli_probe = subprocess.run(
+        [str(candidate), "--version"],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    first_line = (cli_probe.stdout or "").splitlines()[:1]
+    match = re.fullmatch(r"ansible-playbook \[core ([^]]+)\]", first_line[0].strip()) if first_line else None
+    cli_version = match.group(1) if match else ""
+    if cli_probe.returncode != 0 or cli_version != expected:
+        detail = (cli_probe.stderr or "").strip()
+        raise RuntimeError(
+            "qualification ansible-playbook version mismatch: "
+            f"expected {expected}, actual {cli_version or 'unavailable'}"
+            + (f" ({detail})" if detail else "")
+        )
+    if candidate.parent != environment_bin:
+        raise RuntimeError("qualification Ansible controller escaped its Python environment")
+
+    print(
+        "RKE2_CONTROLLER "
+        + json.dumps(
+            {
+                "python": str(python),
+                "ansible_playbook": str(candidate),
+                "ansible_core_expected": expected,
+                "ansible_core_actual": actual,
+            },
+            sort_keys=True,
+        )
+    )
+    return str(candidate)
+
+
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
     vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
     result = run([vbox, "list", "vms"], check=False, capture=True)
@@ -5187,9 +5251,9 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             return False
         return isinstance(payload, dict) and payload.get("git_sha") == head_sha
 
-    require("ansible-playbook")
+    ansible_playbook = qualification_ansible_playbook()
     command = [
-        "ansible-playbook",
+        ansible_playbook,
         "-i",
         "localhost,",
         "platform/ansible/tests/mgmt_offline_vm/main.yml",
@@ -5627,9 +5691,9 @@ def rke2_local_ha_qualification() -> int:
             f"RKE2 local HA qualification requires canonical Vagrant {_canonical_rke2_vagrant_version()}"
         )
 
-    require("ansible-playbook")
+    ansible_playbook = qualification_ansible_playbook()
     command = [
-        "ansible-playbook",
+        ansible_playbook,
         "-i",
         "localhost,",
         "platform/ansible/tests/mgmt_ha_vm/main.yml",

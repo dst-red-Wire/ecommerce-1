@@ -672,8 +672,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(
+                    MOD,
+                    "qualification_ansible_playbook",
+                    return_value="/qualification/bin/ansible-playbook",
+                ),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
-                mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
@@ -704,11 +708,17 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         ansible_calls = [
             call
             for call in run.call_args_list
-            if call.args and call.args[0] and call.args[0][0] == "ansible-playbook"
+            if call.args
+            and call.args[0]
+            and Path(call.args[0][0]).name == "ansible-playbook"
         ]
         self.assertEqual(10, len(ansible_calls))
         for call in ansible_calls:
             command = call.args[0]
+            self.assertEqual(
+                Path("/qualification/bin/ansible-playbook"),
+                Path(command[0]),
+            )
             self.assertIn(f"vm_repo={root}", command)
             self.assertIn(f"vm_state={state}", command)
             self.assertIn(frozen_inputs, command)
@@ -875,11 +885,15 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                     mock.patch.object(
                         MOD,
+                        "qualification_ansible_playbook",
+                        return_value="/qualification/bin/ansible-playbook",
+                    ),
+                    mock.patch.object(
+                        MOD,
                         "_rke2_registered_vm_identity",
                         side_effect=[before, after],
                     ),
                     mock.patch.object(MOD, "git", side_effect=clean_git),
-                    mock.patch.object(MOD, "require"),
                     mock.patch.object(MOD, "run", side_effect=fake_run) as run,
                 ):
                     self.assertEqual(
@@ -1054,8 +1068,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(
+                    MOD,
+                    "qualification_ansible_playbook",
+                    return_value="/qualification/bin/ansible-playbook",
+                ),
                 mock.patch.object(MOD, "git", side_effect=clean_git),
-                mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
@@ -1206,12 +1224,17 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_rke2_local_ha_contract", return_value=ha_contract),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
+                mock.patch.object(
+                    MOD,
+                    "qualification_ansible_playbook",
+                    return_value="/qualification/bin/ansible-playbook",
+                ),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
-                mock.patch.object(MOD, "require"),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(0, MOD.rke2_local_ha_qualification())
                 command = run.call_args.args[0]
+                self.assertEqual("/qualification/bin/ansible-playbook", command[0])
                 self.assertIn("platform/ansible/tests/mgmt_ha_vm/main.yml", command)
                 self.assertIn(f"ha_repo={root}", command)
                 self.assertIn(f"ha_head_sha={head}", command)
