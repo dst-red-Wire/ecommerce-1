@@ -98,6 +98,36 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
         self.assertIn('content: \'{{ "{{ rke2_probe.stdout }}" }}\'', server)
         self.assertNotIn(r"rke2_probe.stdout }}\n", server)
 
+    def test_create_uses_bounded_native_ansible_ssh_readiness(self):
+        create = (FIXTURE / "create.yml").read_text()
+
+        self.assertIn("ConnectTimeout 3", create)
+        self.assertIn("ConnectionAttempts 1", create)
+        self.assertIn(
+            "Register isolated guest for native Ansible connection checks",
+            create,
+        )
+        self.assertIn("ansible.builtin.wait_for_connection:", create)
+        self.assertIn("timeout: 300", create)
+        self.assertIn("connect_timeout: 3", create)
+        self.assertIn("sleep: 3", create)
+        self.assertIn("Gather real guest facts after SSH is available", create)
+        self.assertIn("ansible.builtin.setup:", create)
+        self.assertIn("Require a real enforcing non-container guest kernel", create)
+        self.assertIn(
+            "vm_guest_facts.ansible_facts.ansible_virtualization_type != 'docker'",
+            create,
+        )
+        self.assertIn(
+            "vm_guest_facts.ansible_facts.ansible_selinux.mode == 'enforcing'",
+            create,
+        )
+        self.assertNotIn("Wait for SSH and require real enforcing guest kernel", create)
+        self.assertNotIn(
+            'argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", getenforce]',
+            create,
+        )
+
     def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
