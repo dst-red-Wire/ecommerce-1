@@ -151,6 +151,36 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
         )
         self.assertNotIn("Wait for SSH and require real enforcing guest kernel", create)
 
+    def test_windows_proxy_uses_canonical_ssh_timeout_and_role_has_live_log(self):
+        contract = (FIXTURE / "contract.yml").read_text()
+        main = (FIXTURE / "main.yml").read_text()
+        transport = (FIXTURE / "transport.py").read_text()
+        role_test = (FIXTURE / "test.yml").read_text()
+
+        self.assertIn("connect_timeout_seconds: 3", contract)
+        self.assertIn("'ssh_connect_timeout_seconds':", main)
+        self.assertIn(
+            "mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds | int",
+            main,
+        )
+        self.assertIn(
+            'request["connect_timeout_milliseconds"] = connect_timeout_seconds * 1000',
+            transport,
+        )
+        self.assertIn(
+            "$connecting.Wait([int]$r.connect_timeout_milliseconds)",
+            transport,
+        )
+        self.assertNotIn("$connecting.Wait(10000)", transport)
+        self.assertIn(
+            "log_path = {{ vm_state }}/actual-role-live.log",
+            role_test,
+        )
+        self.assertIn(
+            "Execute exact repository offline-artifact role through native Ansible SSH",
+            role_test,
+        )
+
     def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
