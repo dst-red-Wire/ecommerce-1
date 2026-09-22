@@ -33,7 +33,7 @@
 - name: Inspect exact VM state before repairing only the failed host-only attach
   ansible.builtin.command:
     argv:
-      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - "{{ ha_vbox }}"
       - showvminfo
       - "{{ ha_create_repair_ownership.uuid }}"
       - --machinereadable
@@ -67,7 +67,7 @@
 - name: Repair only the demonstrated WSL-interrupted host-only attach
   ansible.builtin.command:
     argv:
-      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - "{{ ha_vbox }}"
       - controlvm
       - "{{ ha_create_repair_ownership.uuid }}"
       - nic1
@@ -82,7 +82,7 @@
 - name: Restart only the exact recovered VM to realize the delayed host-only attachment
   ansible.builtin.command:
     argv:
-      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - "{{ ha_vbox }}"
       - controlvm
       - "{{ ha_create_repair_ownership.uuid }}"
       - reset
@@ -144,6 +144,20 @@
   ansible.builtin.assert:
     that:
       - (ha_create_repair_preflight.stdout | from_json).online_cpus == ha_single_vm_common.vm_cpus | int
+
+- name: Install and prove pinned Guest Additions after exact attach recovery
+  ansible.builtin.include_tasks: ../mgmt_offline_vm/guest_additions.yml
+  vars:
+    vm_name: "{{ ha_node.value.vm_name }}"
+    vm_state: "{{ ha_create_repair_state }}"
+    vm_uuid: "{{ ha_create_repair_ownership.uuid }}"
+    vm_vbox: "{{ ha_vbox }}"
+    vm_python: "{{ ansible_playbook_python }}"
+    vm_guest_additions_lock_path: "{{ ha_guest_additions_lock_path }}"
+    vm_guest_additions_lock: "{{ ha_guest_additions_lock }}"
+    vm_guest_additions_bundle: "{{ ha_guest_additions_bundle }}"
+    vm_guest_additions_helper: "{{ ha_guest_additions_helper }}"
+    mgmt_local_vm_contract: "{{ ha_single_contract }}"
 
 - name: Preserve bounded host-only attach repair diagnostics
   ansible.builtin.copy:

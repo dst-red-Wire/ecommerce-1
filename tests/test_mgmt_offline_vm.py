@@ -25,6 +25,7 @@ TAMPER = load("tamper_artifact")
 RESTAGE = load("restage_cleanup")
 PRIVILEGE = load("privilege_probe")
 ROLE_TIMING = load("role_timing")
+GUEST_ADDITIONS = load("guest_additions_bundle")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
@@ -177,6 +178,101 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             create,
         )
         self.assertNotIn("Wait for SSH and require real enforcing guest kernel", create)
+
+    def test_guest_additions_are_centrally_pinned_preflighted_and_provisioned(self):
+        contract = (FIXTURE / "contract.yml").read_text(encoding="utf-8")
+        main = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        preflight = (FIXTURE / "preflight.yml").read_text(encoding="utf-8")
+        create = (FIXTURE / "create.yml").read_text(encoding="utf-8")
+        install = (FIXTURE / "guest_additions.yml").read_text(encoding="utf-8")
+        vagrant = (FIXTURE / "Vagrantfile").read_text(encoding="utf-8")
+        lock = json.loads((ROOT / "config/artifacts/virtualbox-guest-additions-7.2.18-rocky-9.8.lock.json").read_text())
+
+        self.assertEqual("7.2.18r175117", lock["virtualbox_version"])
+        self.assertEqual("7.2.18", lock["guest_additions"]["version"])
+        self.assertEqual(175117, lock["guest_additions"]["revision"])
+        self.assertEqual(
+            "346ea2b9ed47bb954464af83835b14bd8afa5fc1864f34e2561ed923fb74981c",
+            lock["guest_additions"]["iso"]["sha256"],
+        )
+        self.assertEqual("5.14.0-687.10.1.el9_8.0.1.x86_64", lock["target"]["kernel_release"])
+        self.assertEqual(78, len(lock["rpms"]))
+        self.assertIn("windows_executable: 'C:\\Program Files\\Vagrant\\bin\\vagrant.exe'", contract)
+        self.assertIn("wsl_executable: /mnt/c/Program Files/Vagrant/bin/vagrant.exe", contract)
+        self.assertIn("guest_additions_lock:", contract)
+        self.assertNotIn("version: 7.2.18", contract)
+        self.assertIn("Verify exact Windows Vagrant version before any VM mutation", preflight)
+        self.assertIn("'Vagrant ' ~ vm_vagrant_version", preflight)
+        self.assertIn("include_tasks: preflight.yml", main)
+        self.assertNotIn("vm_vagrant_windows: C:\\Program Files", main)
+        self.assertIn("when: vm_action != 'destroy'", main)
+        self.assertLess(main.index("include_tasks: preflight.yml"), main.index("Run native Vagrant validation"))
+        self.assertIn("guest_additions_iso_windows", main)
+        self.assertIn("runtime.fetch(\"guest_additions_iso_windows\")", vagrant)
+        self.assertIn("SATA Controller", vagrant)
+        self.assertIn("include_tasks: guest_additions.yml", create)
+        self.assertIn("disablerepo: '*'", install)
+        self.assertIn("--rpm-signature-check", install)
+        self.assertIn("rcvboxadd", install)
+        self.assertIn("Guest/RAM/Usage/Total", install)
+        self.assertIn("Guest/RAM/Usage/Free", install)
+        self.assertIn("guest-additions.json", install)
+        self.assertNotRegex(preflight + install, r"\bcurl\b|\bwget\b")
+
+    def test_guest_additions_bundle_validation_rejects_missing_or_mutated_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "fixture-1.0-1.el9.noarch.rpm"
+            key = root / "rocky.asc"
+            artifact.write_bytes(b"rpm")
+            key.write_bytes(b"key")
+            lock = {
+                "schema_version": 1,
+                "virtualbox_version": "7.2.18r175117",
+                "target": {
+                    "architecture": "x86_64",
+                    "os": "rocky-9.8",
+                    "kernel_release": "5.14.0-fixture.x86_64",
+                },
+                "guest_additions": {
+                    "version": "7.2.18",
+                    "revision": 175117,
+                    "iso": {
+                        "file": "VBoxGuestAdditions_7.2.18.iso",
+                        "sha256": "a" * 64,
+                        "url": "https://download.virtualbox.org/virtualbox/7.2.18/VBoxGuestAdditions_7.2.18.iso",
+                        "windows_path": r"C:\Program Files\Oracle\VirtualBox\VBoxGuestAdditions.iso",
+                        "wsl_path": "/mnt/c/Program Files/Oracle/VirtualBox/VBoxGuestAdditions.iso",
+                    },
+                },
+                "rocky_repositories": {
+                    "AppStream": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages"
+                },
+                "rpm_signing_key": {
+                    "file": "rocky.asc",
+                    "fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+                    "sha256": GUEST_ADDITIONS.digest(key),
+                    "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9",
+                },
+                "required_packages": ["fixture"],
+                "rpms": [{
+                    "file": artifact.name,
+                    "repository": "AppStream",
+                    "sha256": GUEST_ADDITIONS.digest(artifact),
+                }],
+            }
+            manifest = GUEST_ADDITIONS.manifest_from_lock(lock)
+            manifest_path = root / "manifest.json"
+            GUEST_ADDITIONS.write_json(manifest_path, manifest)
+            lock["approved_manifest_sha256"] = GUEST_ADDITIONS.digest(manifest_path)
+            checked = GUEST_ADDITIONS.checked_lock(lock)
+            self.assertEqual(1, GUEST_ADDITIONS.validate_bundle(root, checked)["rpm_count"])
+            artifact.write_bytes(b"mutated")
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                GUEST_ADDITIONS.validate_bundle(root, checked)
+            artifact.unlink()
+            with self.assertRaisesRegex(ValueError, "member"):
+                GUEST_ADDITIONS.validate_bundle(root, checked)
 
     def test_windows_proxy_uses_canonical_ssh_timeout_and_role_has_live_log(self):
         contract = (FIXTURE / "contract.yml").read_text()

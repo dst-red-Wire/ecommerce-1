@@ -21,6 +21,7 @@ The authoritative campaign targets exactly six simultaneously running Rocky VMs:
 - a digest-pinned HAProxy endpoint on worker-03, fronting TCP/9345 and TCP/6443;
 - simulated internal DNS on worker-02 and NTP on worker-03;
 - SELinux Enforcing and denied public egress on every node.
+- pinned VirtualBox Guest Additions 7.2.18 and guest RAM metrics on every node.
 
 It does **not** prove production capacity, Hetzner networking, provider failure domains,
 or physical-machine failure.
@@ -37,6 +38,11 @@ The current local host contract is:
 
 No Vagrant plugin is required. The #128 Windows bridge sets `VAGRANT_NO_PLUGINS=1`
 when Vagrant is invoked.
+
+VirtualBox and Guest Additions values are not duplicated here. The HA entrypoint
+loads the canonical mono-VM contract and Guest Additions lock, validates all host and
+offline RPM prerequisites before campaign state changes, and each node creation
+reuses the same installation task. The attach-recovery path invokes that same task.
 
 Before VM creation, collision checks are scoped to the selected VirtualBox host-only
 segment. They use Windows `ping.exe` with source address `192.168.22.1` instead

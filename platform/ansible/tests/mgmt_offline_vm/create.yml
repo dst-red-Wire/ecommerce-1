@@ -227,3 +227,5 @@
 - name: Require the fresh guest to expose the requested CPU count
   ansible.builtin.assert:
     that: [(vm_preflight.stdout | from_json).online_cpus == vm_cpus | int]
+- name: Install and prove pinned VirtualBox Guest Additions with RAM metrics
+  ansible.builtin.include_tasks: guest_additions.yml

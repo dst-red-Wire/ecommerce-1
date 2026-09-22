@@ -30,6 +30,13 @@ Vagrant.configure("2") do |config|
     vm.customize ["modifyvm", :id, "--ioapic", "on"]
     # A disconnected adapter exists for later host-only attachment. No NAT boot.
     vm.customize ["modifyvm", :id, "--nic1", "null", "--macaddress1", runtime.fetch("mac")]
+    # The exact host-installed ISO is checksum-validated before Vagrant executes.
+    vm.customize ["storagectl", :id, "--name", "SATA Controller", "--portcount", "2"]
+    vm.customize [
+      "storageattach", :id, "--storagectl", "SATA Controller", "--port", "1",
+      "--device", "0", "--type", "dvddrive", "--medium",
+      runtime.fetch("guest_additions_iso_windows")
+    ]
     (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
     vm.customize ["modifyvm", :id, "--uart1", "0x3F8", "4", "--uartmode1", "server", "\\\\.\\pipe\\#{name}"]
     vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]

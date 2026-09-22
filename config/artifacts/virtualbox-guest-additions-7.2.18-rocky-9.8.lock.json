@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "approved_manifest_sha256": "4bff1d125a59683875ed37771a831ce087b36d283cebed6e2c4de181b0dd8988",
+  "virtualbox_version": "7.2.18r175117",
+  "target": {
+    "architecture": "x86_64",
+    "os": "rocky-9.8",
+    "kernel_release": "5.14.0-687.10.1.el9_8.0.1.x86_64"
+  },
+  "guest_additions": {
+    "version": "7.2.18",
+    "revision": 175117,
+    "iso": {
+      "file": "VBoxGuestAdditions_7.2.18.iso",
+      "sha256": "346ea2b9ed47bb954464af83835b14bd8afa5fc1864f34e2561ed923fb74981c",
+      "url": "https://download.virtualbox.org/virtualbox/7.2.18/VBoxGuestAdditions_7.2.18.iso",
+      "windows_path": "C:\\Program Files\\Oracle\\VirtualBox\\VBoxGuestAdditions.iso",
+      "wsl_path": "/mnt/c/Program Files/Oracle/VirtualBox/VBoxGuestAdditions.iso"
+    }
+  },
+  "rocky_repositories": {
+    "BaseOS": "https://dl.rockylinux.org/pub/rocky/9.8/BaseOS/x86_64/os/Packages",
+    "AppStream": "https://dl.rockylinux.org/pub/rocky/9.8/AppStream/x86_64/os/Packages"
+  },
+  "rpm_signing_key": {
+    "file": "rocky-9-public.asc",
+    "fingerprint": "21CB256AE16FC54C6E652949702D426D350D275D",
+    "sha256": "3a66e521e7a4abac9768d889c7cd60a8250f59512b275cf576c8a10ff34624c1",
+    "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-9"
+  },
+  "required_packages": [
+    "gcc",
+    "make",
+    "perl-interpreter",
+    "kernel-devel",
+    "kernel-headers",
+    "elfutils-libelf-devel"
+  ],
+  "rpms": [
+    {
+      "file": "bison-3.7.4-5.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "e8417ab812872ee138f8a74543964f3c06e6bcc12531aefd3fe0a3f2ffb96637"
+    },
+    {
+      "file": "cpp-11.5.0-14.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "fea4e62dcf15758a9a05a09efa86198912e92e1decf54275beaa0aaa434ce1f1"
+    },
+    {
+      "file": "elfutils-libelf-devel-0.194-1.el9.rocky.0.1.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "4bd7b0627af1ea7d5fa6455b44e0f9b46a2654ff33eb1a1702c6ae8b2360c3a1"
+    },
+    {
+      "file": "flex-2.6.4-9.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "4a2a543e1419723dc825cfef657802f99ab3b8e231843d34c0c822b16339a78b"
+    },
+    {
+      "file": "gcc-11.5.0-14.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "0e4d6f4d055b8e3bf99d20319f934db15ade3f37c6e56512150af5022cfc16ee"
+    },
+    {
+      "file": "glibc-devel-2.34-266.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "ac23e84c8aa460291a5b6199aee9e41a05c26b39598ec3c13abcfac3322ed505"
+    },
+    {
+      "file": "glibc-headers-2.34-266.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "9f23c32462d75b11f86b296aee5ea31a37254fd8bda2763690b9244a40198049"
+    },
+    {
+      "file": "groff-base-1.22.4-10.el9.0.1.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "46731a989fb41fe6170bf9b1d2d0329f58d28180d918ac3e4b8a24e62da0c1e8"
+    },
+    {
+      "file": "kernel-devel-5.14.0-687.10.1.el9_8.0.1.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "15c744b8d76e837904bfa464ea7399517ddfe314b24b1c789a409fcc955e7e7a"
+    },
+    {
+      "file": "kernel-headers-5.14.0-687.10.1.el9_8.0.1.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "d854c22acc19b4b8d8363c04070c92b84d5227ba44c48fc8c062ff1d3c0aec00"
+    },
+    {
+      "file": "libmpc-1.2.1-4.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "c4def74fc686113748590ce9bc8591092947be804650ef56aa161e049660273e"
+    },
+    {
+      "file": "libpkgconf-1.7.3-10.el9.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "85df83111841ea9501653408fd86828da263365f8152ac56d92f01940e38519e"
+    },
+    {
+      "file": "libxcrypt-devel-4.4.18-3.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "f98951be16cb84133ac14201348a202c9884f8958f908b6040fb5db12e4dba81"
+    },
+    {
+      "file": "libzstd-devel-1.5.5-1.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "d3b2e2ceac6862c2157836fe37f5739a007a51a842d183c40daf149ef9c41975"
+    },
+    {
+      "file": "m4-1.4.19-1.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "6cc4fdba2bd8de8300ac0ed0917598fe178f56e7a26b05b8ee5a26b7e5e7a860"
+    },
+    {
+      "file": "make-4.3-8.el9.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "5940dfcf00ba780f0c7e18dc169574fac4b78a0c1ca039747c15869920b4ec08"
+    },
+    {
+      "file": "ncurses-6.2-12.20210508.el9.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "ab12764bd659da7e88d77bfeb6533f0edcfe78b72daac1751d7700c4cb49787f"
+    },
+    {
+      "file": "openssl-devel-3.5.5-2.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "a366633d200770f60606fc6d37a05def805e16a4f016e7e5ac27ee350b0150df"
+    },
+    {
+      "file": "perl-AutoLoader-5.74-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "adc6c5a195f52545a8d325836bbb7204eb68cd2334f13a2bc7016cab2bdc4aa5"
+    },
+    {
+      "file": "perl-B-1.80-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "e189d98bbbb4e9fccf5750d7a5fb6a647bd80a3304d2ebaf7a3a4656d81e250b"
+    },
+    {
+      "file": "perl-base-2.27-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "b1d6f9baa66121252e6b4afcedde1fbd25c4ce4d745970b3a91d67aa31f61d05"
+    },
+    {
+      "file": "perl-Carp-1.50-460.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "4b478fdd6ecbc67f38ca35d44dff2a9c5c09ea5d766d772d9981d78e5de2b2c1"
+    },
+    {
+      "file": "perl-Class-Struct-0.66-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "31a5611cd20d5853b86e989acced81e6cb4d904e134dfbcbb8a58d82fd9ffa53"
+    },
+    {
+      "file": "perl-constant-1.33-461.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "ba8b8b3283012ccf9ba28b5c2262055ac0f7785008e9e92d095d21d0590bbfe0"
+    },
+    {
+      "file": "perl-Data-Dumper-2.174-462.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "9de98b2b4bff63d413158a65bba5334d8536c6eb1b3398d76f024e0e9f74ce75"
+    },
+    {
+      "file": "perl-Digest-1.19-4.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "e5ecc001ae26339fc6aa161cad8d223ec775bf2a2fcaa129ab489d1650a3d636"
+    },
+    {
+      "file": "perl-Digest-MD5-2.58-4.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "b1f4db8af3cab8814a4fea1c773a0f2e4c7d011fddaad24b1c28f2bfd0ddb144"
+    },
+    {
+      "file": "perl-Encode-3.08-462.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "e82e31795bc9935d931f3a3d1e6c047a53bad58639a5416ba6dc109f9bf7d21b"
+    },
+    {
+      "file": "perl-Errno-1.30-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "3533b7880d1561a2c3ed93b91c3e48d29705480b242602e14a4ba8ab4b4cd124"
+    },
+    {
+      "file": "perl-Exporter-5.74-461.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "561a49eff3da57f0b88fc3251691998077d34555af431695525babc6aac09dae"
+    },
+    {
+      "file": "perl-Fcntl-1.13-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "01c946344a243752f24e7944ed54c7a640e47c59c36ae20c64becaf37de49040"
+    },
+    {
+      "file": "perl-File-Basename-2.85-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "94de69678b47a48cb96bfc08d906d2056411766b8be21f4023c6334beef195a3"
+    },
+    {
+      "file": "perl-File-Path-2.18-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "8d47e85b8f150481c64cdad38199cb527b3f4e0aaa18f7c04157f08ccc6b44ea"
+    },
+    {
+      "file": "perl-File-stat-1.09-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "7af8f85a8b01fea18230f48169f304b97b317ddc5896dcff5e94a66a166514e9"
+    },
+    {
+      "file": "perl-File-Temp-0.231.100-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "ac408a99cdc94ae249761fa5f1ac9b0db794267527e07df78d36515b09c2a1a0"
+    },
+    {
+      "file": "perl-FileHandle-2.03-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "4571a2ae1b20e6263915857aa2c9fa914cd50a6d53f98ceddf6502cc267582d3"
+    },
+    {
+      "file": "perl-Getopt-Long-2.52-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "073ab80a2867bff161163125c13ac9433488681ed27aabaa784021c0f423518e"
+    },
+    {
+      "file": "perl-Getopt-Std-1.12-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "4bf4db56f0be79382a4fbefaa2364a8eaca19e9c1760d4420277c2ebd77a8127"
+    },
+    {
+      "file": "perl-HTTP-Tiny-0.076-462.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "4d7badc2339ef6f35c53fe221d5d6830588ad144957d0f93e6c9bf8b7519821a"
+    },
+    {
+      "file": "perl-if-0.60.800-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "f10f002ac87ccbded66bdc90df620aa24ff89b3dcec99d4139df4e3f76320082"
+    },
+    {
+      "file": "perl-interpreter-5.32.1-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "cb05c1fc9b5a8ed0d8dc72a6167e28f6cad9010d8874381473b57cf5b7ba2cb8"
+    },
+    {
+      "file": "perl-IO-1.43-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "f6f6f3bd1d972a5bb6fc38ce0ff304c881efb5fa2a1865c4a0a842d241ec707d"
+    },
+    {
+      "file": "perl-IO-Socket-IP-0.41-5.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "ffb4b46f1ed518b2275bdf732212082387a6f3021e1a7cd3b1c6ec6e6ea7ce09"
+    },
+    {
+      "file": "perl-IO-Socket-SSL-2.073-2.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "d6aaf5d0d4aa4bd716956767bdbe75996c1c9f99c2e5b41440a8b92e92ba678e"
+    },
+    {
+      "file": "perl-IPC-Open3-1.21-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "8b760cfe93a0395d7aac152358c77b88f49975e7615386d3b998325ed39a96f2"
+    },
+    {
+      "file": "perl-libnet-3.13-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "e369b44b80d60ade095dda03c59d3eb7fa5fb2632f60e593bdefdac7b84eb02f"
+    },
+    {
+      "file": "perl-libs-5.32.1-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "18e528a1e8beb62e08b04dff3edece793b440a3bc7084b3e8bf10bf17c08ceef"
+    },
+    {
+      "file": "perl-MIME-Base64-3.16-4.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "5c45dad965abc4f062efcf37bb260d28cf38b4b7f79f02308f5526d5de3874fe"
+    },
+    {
+      "file": "perl-Mozilla-CA-20200520-6.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "c0c93096a5ce0448ec12a8bb04a6180844d1e133dab824953aa332404a6af81e"
+    },
+    {
+      "file": "perl-mro-1.23-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "e839ef044b26741860fd654558da0c41e3e9889165a9c53133389b48dbaac1a1"
+    },
+    {
+      "file": "perl-Net-SSLeay-1.94-3.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "8025bce9f4da6d6e0cbf82f740d1009c21aeaf35417e87eb729a56a685546139"
+    },
+    {
+      "file": "perl-overload-1.31-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "126d7ef640b4d9ef2001a98db9c5ed8c0d4916d1904e1392e910690d118071ed"
+    },
+    {
+      "file": "perl-overloading-0.02-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "0f8507ab4ad941187e5c36ffc95274757a57f0d040d17a1d3eb9790cf2f0da47"
+    },
+    {
+      "file": "perl-parent-0.238-460.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "3a66910d2ab5c5b5e574b5377dede0fbaa87012bcd7130d66027d3f6117df03b"
+    },
+    {
+      "file": "perl-PathTools-3.78-461.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "463e8e1704053e1cbd984c15d47ca12dbab1dc6cc774df014f1ac0e52009adfc"
+    },
+    {
+      "file": "perl-Pod-Escapes-1.07-460.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "cdba24881e11e5b16226d839fb4c2755c99d8e2bf0f14bd1cfe6912c74c40754"
+    },
+    {
+      "file": "perl-Pod-Perldoc-3.28.01-461.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "4bc4888efc7cc0b39aea13267e621d245d35e8e808603ca0f3a9434fce8d2e8b"
+    },
+    {
+      "file": "perl-Pod-Simple-3.42-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "aaac71076e517a13ca7459918761c66a460f0fd993cb510644af7e5978d2fbcc"
+    },
+    {
+      "file": "perl-Pod-Usage-2.01-4.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "cab7aea2d5686233dea13aa7ae4de48a9b6cc9a81f73f6f1448558f8e6423862"
+    },
+    {
+      "file": "perl-podlators-4.14-460.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "781851647ddeb42c8691f8ee569153092542415cc6f2c88df6360911abf8ecf8"
+    },
+    {
+      "file": "perl-POSIX-1.94-484.el9_8.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "bcb562e007801f4c823995d00faa0efc46bf0c1d79dd86036e36989b320e7413"
+    },
+    {
+      "file": "perl-Scalar-List-Utils-1.56-462.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "3c28f6e6e2610c33cab2282fe4db7e0d0316537e81ab33c70d9571ef4daf5db6"
+    },
+    {
+      "file": "perl-SelectSaver-1.02-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "b49177230459941d3b3c956e9781742036525ed452c8a245561cb71d10d0175b"
+    },
+    {
+      "file": "perl-Socket-2.031-4.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "1f21b37d47f95b550e26db0c0b5f257db65123b3846cacbed9bc3c36b9b65a8f"
+    },
+    {
+      "file": "perl-Storable-3.21-460.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "98f0b75a6a7de6aab4821e60f78596fae47b29d4b93e6a2ae4dddf5c626368a7"
+    },
+    {
+      "file": "perl-subs-1.03-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "ad7551cc735975f9e32a34c10f8dab52e0a0bd757995fd60f5603d47e8c291f4"
+    },
+    {
+      "file": "perl-Symbol-1.08-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "1225f6dd6015d68a8d6706a883191e170ef13138d8cd2ef330034bbd449b5d2d"
+    },
+    {
+      "file": "perl-Term-ANSIColor-5.01-461.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "dc31dd230d18b070688b0d168c9dd42fbd7a74a5ed5265f319c7c5246b1518b5"
+    },
+    {
+      "file": "perl-Term-Cap-1.17-460.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "81e4fb85f1d3e5f790fe29b7b2c82d590993393987e91625e7a74ddc8f24c5cf"
+    },
+    {
+      "file": "perl-Text-ParseWords-3.30-460.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "f42e27499c2060ed69355d0a9ebf3d65e15dca452a15620ca68c53442bc4d7f8"
+    },
+    {
+      "file": "perl-Text-Tabs+Wrap-2013.0523-460.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "777a7ad7dda07f83c9aacf277c34c0dc410893fec1f986d8c9e586c51682a9d8"
+    },
+    {
+      "file": "perl-Time-Local-1.300-7.el9.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "d989488e3beff23f6209ca8de9fa16e6f0f61ed0343acbd44b21292c3fc028be"
+    },
+    {
+      "file": "perl-URI-5.09-3.el9.0.1.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "519c6f78063626c957d09e7c47ce2c5ec1fc116dd371096530e4c374a6dcbba8"
+    },
+    {
+      "file": "perl-vars-1.05-484.el9_8.noarch.rpm",
+      "repository": "AppStream",
+      "sha256": "fc4ee1cc932375beabef439e5b0d46cf1e0754aa87dee26d25747385f782429a"
+    },
+    {
+      "file": "pkgconf-1.7.3-10.el9.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "6a5ee8580ea3fb5edf1722c7a3941c1a5a431040a251dbff0e34f85c8352c93a"
+    },
+    {
+      "file": "pkgconf-m4-1.7.3-10.el9.noarch.rpm",
+      "repository": "BaseOS",
+      "sha256": "ac0ab185f11a413f08f645b6225aa67f4542b23e293cbc7af78d71e0259d7389"
+    },
+    {
+      "file": "pkgconf-pkg-config-1.7.3-10.el9.x86_64.rpm",
+      "repository": "BaseOS",
+      "sha256": "c7e4569fe2d676e76dc689a751884541bcd6595616e8c9fb00bc198bce642031"
+    },
+    {
+      "file": "zlib-devel-1.2.11-40.el9.x86_64.rpm",
+      "repository": "AppStream",
+      "sha256": "d8c5dbf10127e177c6f9b4b90a0aed2941bfe5fee259bda91ec3abfe7d1e6335"
+    }
+  ]
+}

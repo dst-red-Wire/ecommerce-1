@@ -18,6 +18,11 @@
     ha_sources: "{{ mgmt_local_ha_contract.canonical_sources }}"
     ha_single_contract_path: "{{ ha_repo }}/{{ ha_sources.local_vm_contract }}"
     ha_single_contract: "{{ (lookup('file', ha_single_contract_path) | from_yaml).mgmt_local_vm_contract }}"
+    ha_vbox: "{{ ha_single_contract.virtualbox.windows_executable }}"
+    ha_guest_additions_lock_path: "{{ ha_repo }}/{{ ha_single_contract.virtualbox.guest_additions_lock }}"
+    ha_guest_additions_lock: "{{ lookup('file', ha_guest_additions_lock_path) | from_json }}"
+    ha_guest_additions_bundle: "{{ ha_repo }}/{{ ha_single_contract.virtualbox.guest_additions_bundle }}"
+    ha_guest_additions_helper: "{{ ha_repo }}/platform/ansible/tests/mgmt_offline_vm/guest_additions_bundle.py"
     ha_single_runtime_sources: >-
       {{
         ha_single_contract.runtime_sources
@@ -58,6 +63,21 @@
           - mgmt_local_ha_contract.nodes | length == 6
           - mgmt_local_ha_contract.capacity_production_claim is false
 
+    - name: Verify all pinned host and Guest Additions prerequisites before HA execution
+      ansible.builtin.include_tasks: ../mgmt_offline_vm/preflight.yml
+      vars:
+        vm_action: qualify
+        vm_repo: "{{ ha_repo }}"
+        vm_vagrant: "{{ ha_single_contract.vagrant.wsl_executable }}"
+        vm_vagrant_version: "{{ ha_single_contract.vagrant.version }}"
+        vm_vbox: "{{ ha_vbox }}"
+        mgmt_local_vm_contract: "{{ ha_single_contract }}"
+        vm_python: "{{ ansible_playbook_python }}"
+        vm_guest_additions_lock_path: "{{ ha_guest_additions_lock_path }}"
+        vm_guest_additions_lock: "{{ ha_guest_additions_lock }}"
+        vm_guest_additions_bundle: "{{ ha_guest_additions_bundle }}"
+        vm_guest_additions_helper: "{{ ha_guest_additions_helper }}"
+
     - name: Create bounded HA evidence directory
       ansible.builtin.file:
         path: "{{ ha_state }}"
@@ -81,21 +101,6 @@
         fail_msg: >-
           Missing {{ ha_bundle_dir }}. Rebuild the already-qualified PR 128 bundle explicitly
           before HA qualification; this workflow never widens PR 128 by downloading implicitly.
-
-    - name: Verify exact Windows VirtualBox version
-      ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - "{{ ha_lifecycle_guard }}"
-          - run-windows
-          - --
-          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
-          - --version
-      register: ha_vbox_version
-      changed_when: false
-      failed_when: >-
-        ha_vbox_version.rc != 0
-        or ha_vbox_version.stdout | trim != mgmt_local_ha_contract.controller.virtualbox_version
 
     - name: Discover Windows fixture state root without changing host settings
       ansible.builtin.command:
@@ -177,7 +182,7 @@
           - "{{ ha_lifecycle_guard }}"
           - run-windows
           - --
-          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+          - "{{ ha_vbox }}"
           - list
           - hostonlyifs
       register: ha_hostonly
@@ -219,7 +224,7 @@
           - "{{ ha_lifecycle_guard }}"
           - run-windows
           - --
-          - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+          - "{{ ha_vbox }}"
           - list
           - vms
       register: ha_registered_vms
@@ -522,7 +527,7 @@
 
         - name: List VirtualBox registrations after every cleanup attempt
           ansible.builtin.command:
-            argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, vms]
+            argv: ["{{ ha_vbox }}", list, vms]
           register: ha_registered_vms_after_cleanup
           until: ha_registered_vms_after_cleanup.rc == 0
           retries: 3

@@ -6,7 +6,7 @@
       - "{{ ha_lifecycle_guard }}"
       - probe
       - --vbox
-      - "{{ mgmt_local_ha_contract.controller.virtualbox_windows }}"
+      - "{{ ha_vbox }}"
       - --identity
       - "{{ ha_windows_state_root }}/{{ mgmt_local_ha_contract.nodes[ha_failed_cold_stage.node].vm_name }}/.vagrant/machines/default/virtualbox/id"
       - --vm-name

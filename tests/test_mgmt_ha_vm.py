@@ -398,6 +398,10 @@ class MgmtHaVmTests(unittest.TestCase):
             "platform/ansible/tests/mgmt_offline_vm/transport.py",
             runtime_sources,
         )
+        self.assertIn(
+            "platform/ansible/tests/mgmt_offline_vm/guest_additions_bundle.py",
+            runtime_sources,
+        )
         self.assertIn("ha_single_contract.runtime_sources", main)
         self.assertIn("ha_single_runtime_sources", main)
         self.assertIn("ha_single_source_hashes.stdout", main)
@@ -406,6 +410,25 @@ class MgmtHaVmTests(unittest.TestCase):
             main,
         )
 
+    def test_ha_reuses_canonical_virtualbox_and_guest_additions_contract(self):
+        local_contract = MOD.ruby_yaml(
+            str(ROOT / "platform/ansible/tests/mgmt_offline_vm/contract.yml")
+        )["mgmt_local_vm_contract"]
+        ha_contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
+        main = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        repair = (FIXTURE / "complete_vm_creation.yml").read_text(encoding="utf-8")
+
+        self.assertIn("virtualbox", local_contract)
+        self.assertIn("guest_additions_lock", local_contract["virtualbox"])
+        self.assertNotIn("virtualbox_windows", ha_contract["controller"])
+        self.assertNotIn("virtualbox_version", ha_contract["controller"])
+        self.assertIn("ha_single_contract.virtualbox.windows_executable", main)
+        self.assertIn("ha_guest_additions_lock", main)
+        self.assertIn("include_tasks: ../mgmt_offline_vm/preflight.yml", main)
+        self.assertIn("ha_single_contract.vagrant.wsl_executable", main)
+        self.assertIn('mgmt_local_vm_contract: "{{ ha_single_contract }}"', main)
+        self.assertIn("include_tasks: ../mgmt_offline_vm/guest_additions.yml", repair)
+
 
     def test_address_collision_probe_is_bound_to_windows_host_only_source(self):
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
@@ -413,7 +436,8 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual("/mnt/c/Windows/System32/ping.exe", contract["controller"]["windows_ping"])
         self.assertIn("mgmt_local_ha_contract.controller.windows_ping", source)
         self.assertIn("ansible_playbook_python", source)
-        self.assertGreaterEqual(source.count("run-windows"), 5)
+        self.assertGreaterEqual(source.count("run-windows"), 4)
+        self.assertIn("../mgmt_offline_vm/preflight.yml", source)
         self.assertIn("ha_lifecycle_guard", source)
         self.assertIn("-S", source)
         self.assertIn("selected VirtualBox", source)

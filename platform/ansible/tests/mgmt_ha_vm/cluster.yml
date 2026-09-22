@@ -888,7 +888,7 @@
 
     - name: List all running VirtualBox machines from controller
       ansible.builtin.command:
-        argv: ["{{ mgmt_local_ha_contract.controller.virtualbox_windows }}", list, runningvms]
+        argv: ["{{ ha_vbox }}", list, runningvms]
       delegate_to: localhost
       become: false
       register: ha_running_vms
