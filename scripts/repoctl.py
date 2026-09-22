@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -1196,7 +1197,8 @@ def repository_authority_check() -> int:
         if (
             value.lower() in floating_tokens
             or value.endswith(".x")
-            or any(marker in value for marker in ("<", ">", "^", "~", "*"))
+            or any(marker in value for marker in ("<", ">", "^", "*"))
+            or value.startswith("~")
         ):
             raise RuntimeError(f"{key}: floating tool version is forbidden: {value}")
 
@@ -1549,7 +1551,34 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "docker" in wanted:
         docker = shutil.which("docker")
-        if not docker or run([docker, "info"], check=False, capture=True).returncode != 0:
+        if not docker:
+            return False
+        version = run([docker, "--version"], check=False, capture=True)
+        security = run(
+            [docker, "info", "--format", "{{json .SecurityOptions}}"],
+            check=False,
+            capture=True,
+        )
+        if (
+            version.returncode
+            or f"Docker version {pins.get('DOCKER_ENGINE_VERSION', '')}," not in version.stdout
+            or security.returncode
+            or "name=rootless" not in security.stdout
+        ):
+            return False
+    if "kind" in wanted:
+        kind = shutil.which("kind")
+        if not kind:
+            return False
+        got = run([kind, "version"], check=False, capture=True)
+        if got.returncode or pins.get("KIND_VERSION", "") not in got.stdout:
+            return False
+    if "kubectl" in wanted:
+        kubectl = shutil.which("kubectl")
+        if not kubectl:
+            return False
+        got = run([kubectl, "version", "--client"], check=False, capture=True)
+        if got.returncode or pins.get("KUBECTL_VERSION", "") not in got.stdout:
             return False
     return True
 
@@ -2443,27 +2472,467 @@ def service_check(service: str) -> int:
     if static_rc:
         return static_rc
 
-    # Runtime capability must never be content-cached. Check it before starting any
-    # Testcontainers-aware test suite so incapable hosts fail fast.
+    # Runtime capability must never be content-cached. Rootless Docker is started
+    # on demand and stopped even when a Testcontainers-aware test fails.
+    runtime_managed = False
     if needs_containers:
+        _reconcile_rootless_docker("started")
+        runtime_managed = True
+        rootless_env = _rootless_docker_environment()
+        env.update(
+            {
+                key: rootless_env[key]
+                for key in ("DOCKER_HOST", "XDG_RUNTIME_DIR")
+            }
+        )
         docker = shutil.which("docker")
-        forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
-        docker_ready = bool(docker) and run([docker, "info"], check=False, capture=True).returncode == 0
-        if not docker_ready or forwarding.returncode or forwarding.stdout.strip() != "1":
+        security = (
+            run(
+                [docker, "info", "--format", "{{json .SecurityOptions}}"],
+                env=env,
+                check=False,
+                capture=True,
+            )
+            if docker
+            else None
+        )
+        docker_ready = bool(security) and security.returncode == 0 and "name=rootless" in security.stdout
+        if not docker_ready:
+            _reconcile_rootless_docker("stopped")
             return fail(
-                "PLATFORM NOT CAPABLE: container integration requires Docker user/daemon access "
-                "and net.ipv4.ip_forward=1",
+                "PLATFORM NOT CAPABLE: container integration requires rootless Docker access",
                 2,
             )
+        _ensure_pinned_ryuk_image(docker, env)
 
-    run(["go", "test", "-race", "./..."], cwd=module, env=env)
-    if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        run(
-            ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
-            cwd=module,
-            env=env,
-        )
+    try:
+        run(["go", "test", "-race", "./..."], cwd=module, env=env)
+        if (module / "internal" / "infrastructure" / "postgres").is_dir():
+            run(
+                ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
+                cwd=module,
+                env=env,
+            )
+    finally:
+        if runtime_managed:
+            _reconcile_rootless_docker("stopped")
     print(f"PASS {service} service checks completed")
+    return 0
+
+
+def _rootless_docker_environment() -> dict[str, str]:
+    runtime_dir = f"/run/user/{os.getuid()}"
+    return {
+        **os.environ,
+        "DOCKER_HOST": f"unix://{runtime_dir}/docker.sock",
+        "XDG_RUNTIME_DIR": runtime_dir,
+        "KIND_EXPERIMENTAL_PROVIDER": "docker",
+    }
+
+
+def _reconcile_rootless_docker(state: str, *, include_tools: bool = False) -> None:
+    if state not in {"started", "stopped"}:
+        raise ValueError(f"unsupported rootless Docker state: {state}")
+    require("ansible-playbook")
+    tags = "docker,kind,kubectl" if include_tools else "docker_runtime"
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "-e",
+            f"developer_workstation_docker_rootless_service_state={state}",
+            "--tags",
+            tags,
+        ]
+    )
+
+
+def _windows_available_memory_mib() -> int:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        raise RuntimeError("powershell.exe is required for Windows memory measurement")
+    command = [
+        powershell,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[long][Math]::Floor((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024)",
+    ]
+    for attempt in range(3):
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip().isdigit():
+            return int(result.stdout.strip())
+        if attempt < 2:
+            time.sleep(0.25)
+    raise RuntimeError("Windows available-memory measurement failed after 3 attempts")
+
+
+def _linux_memory_snapshot(phase: str) -> dict[str, int | float | str]:
+    meminfo: dict[str, int] = {}
+    for raw in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+        if ":" not in raw:
+            continue
+        name, value = raw.split(":", 1)
+        fields = value.split()
+        if fields and fields[0].isdigit():
+            meminfo[name] = int(fields[0]) // 1024
+
+    runtime_names = {
+        "containerd",
+        "containerd-shim",
+        "dockerd",
+        "rootlesskit",
+        "slirp4netns",
+    }
+    runtime_rss_mib = 0
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            name = (process / "comm").read_text(encoding="utf-8").strip()
+            if name not in runtime_names and not name.startswith("containerd-shim"):
+                continue
+            for line in (process / "status").read_text(encoding="utf-8").splitlines():
+                if line.startswith("VmRSS:"):
+                    runtime_rss_mib += int(line.split()[1]) // 1024
+                    break
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+            continue
+    return {
+        "timestamp_epoch": round(time.time(), 3),
+        "phase": phase,
+        "wsl_available_mib": meminfo.get("MemAvailable", 0),
+        "wsl_used_mib": max(0, meminfo.get("MemTotal", 0) - meminfo.get("MemAvailable", 0)),
+        "runtime_process_rss_mib": runtime_rss_mib,
+    }
+
+
+def _memory_snapshot(phase: str) -> dict[str, int | float | str]:
+    snapshot = _linux_memory_snapshot(phase)
+    snapshot["windows_available_mib"] = _windows_available_memory_mib()
+    return snapshot
+
+
+def _summarize_memory(samples: list[dict[str, int | float | str]]) -> dict[str, dict[str, int]]:
+    summaries: dict[str, dict[str, int]] = {}
+    phases = sorted({str(sample["phase"]) for sample in samples})
+    for phase in phases:
+        selected = [sample for sample in samples if sample["phase"] == phase]
+        summaries[phase] = {
+            "sample_count": len(selected),
+            "minimum_windows_available_mib": min(int(sample["windows_available_mib"]) for sample in selected),
+            "minimum_wsl_available_mib": min(int(sample["wsl_available_mib"]) for sample in selected),
+            "maximum_wsl_used_mib": max(int(sample["wsl_used_mib"]) for sample in selected),
+            "maximum_runtime_process_rss_mib": max(
+                int(sample["runtime_process_rss_mib"]) for sample in selected
+            ),
+        }
+    return summaries
+
+
+def _wait_for_zero_containers(docker: str, env: dict[str, str], timeout: float = 45.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = run([docker, "ps", "-aq"], env=env, check=False, capture=True)
+        if result.returncode == 0 and not result.stdout.strip():
+            return True
+        time.sleep(1)
+    return False
+
+
+def _ensure_pinned_ryuk_image(docker: str, env: dict[str, str]) -> str:
+    """Make Testcontainers' fixed Ryuk tag resolve to the centrally pinned digest."""
+    exact_image = pinned_versions()["TESTCONTAINERS_RYUK_IMAGE"]
+    match = re.fullmatch(r"(.+):([^:@]+)@(sha256:[0-9a-f]{64})", exact_image)
+    if not match:
+        raise RuntimeError("central Testcontainers Ryuk image is not tag-and-digest pinned")
+    mutable_name = f"{match.group(1)}:{match.group(2)}"
+    inspect_exact = run(
+        [docker, "image", "inspect", exact_image, "--format", "{{.Id}}"],
+        env=env,
+        check=False,
+        capture=True,
+    )
+    if inspect_exact.returncode:
+        pulled = run([docker, "pull", exact_image], env=env, check=False)
+        if pulled.returncode:
+            raise RuntimeError("checksum-pinned Testcontainers Ryuk image pull failed")
+        inspect_exact = run(
+            [docker, "image", "inspect", exact_image, "--format", "{{.Id}}"],
+            env=env,
+            check=False,
+            capture=True,
+        )
+    if inspect_exact.returncode or not inspect_exact.stdout.strip():
+        raise RuntimeError("checksum-pinned Testcontainers Ryuk image is unavailable")
+    tagged = run([docker, "tag", exact_image, mutable_name], env=env, check=False)
+    if tagged.returncode:
+        raise RuntimeError("failed to bind Testcontainers Ryuk tag to its central digest")
+    inspect_tag = run(
+        [docker, "image", "inspect", mutable_name, "--format", "{{.Id}}"],
+        env=env,
+        check=False,
+        capture=True,
+    )
+    if inspect_tag.returncode or inspect_tag.stdout.strip() != inspect_exact.stdout.strip():
+        raise RuntimeError("Testcontainers Ryuk tag does not resolve to its central digest")
+    return exact_image
+
+
+def _retire_docker_desktop_after_parity() -> None:
+    require("ansible-playbook")
+    run(
+        [
+            "ansible-playbook",
+            "-i",
+            "localhost,",
+            "-c",
+            "local",
+            "platform/ansible/developer.yml",
+            "-e",
+            f"repo_root={ROOT}",
+            "-e",
+            "developer_workstation_docker_rootless_parity_verified=true",
+            "--tags",
+            "docker_desktop_retire",
+        ]
+    )
+
+
+def container_runtime_qualification(output: str, retire_docker_desktop: bool) -> int:
+    """Qualify pinned rootless Docker, Testcontainers cleanup and kind with RAM sampling."""
+    report_path = (ROOT / output).resolve() if not Path(output).is_absolute() else Path(output).resolve()
+    try:
+        report_path.relative_to((ROOT / ".context").resolve())
+    except ValueError:
+        return fail("container runtime measurement output must stay under .context")
+
+    env = _rootless_docker_environment()
+    samples: list[dict[str, int | float | str]] = []
+    failures: list[str] = []
+    checks: dict[str, str] = {}
+    phase = ["idle-started"]
+    stop_sampling = threading.Event()
+    sample_errors: list[str] = []
+    sampler: threading.Thread | None = None
+    docker = str(managed_bin_dirs()[0] / "docker")
+    kind = str(managed_bin_dirs()[0] / "kind")
+    kubectl = str(managed_bin_dirs()[0] / "kubectl")
+    cluster_name = "ecommerce-rootless-parity"
+    cluster_create_attempted = False
+    runtime_owned = False
+    cleanup_complete = False
+    pins = pinned_versions()
+    ryuk_image = pins["TESTCONTAINERS_RYUK_IMAGE"]
+    kind_node_image = pins["KIND_NODE_IMAGE"]
+    postgres_image = pins["TESTCONTAINERS_POSTGRES_IMAGE"]
+
+    def collect() -> None:
+        while not stop_sampling.is_set():
+            try:
+                samples.append(_memory_snapshot(phase[0]))
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                sample_errors.append(str(exc))
+                stop_sampling.set()
+                return
+            stop_sampling.wait(1.0)
+
+    try:
+        service = run(
+            ["systemctl", "--user", "is-active", "docker.service"],
+            check=False,
+            capture=True,
+        )
+        if service.stdout.strip() != "inactive":
+            raise RuntimeError("rootless Docker user service must be inactive before qualification")
+        samples.append(_memory_snapshot("idle-stopped-before"))
+        runtime_owned = True
+        _reconcile_rootless_docker("started", include_tools=True)
+
+        version = run(
+            [docker, "version", "--format", "client={{.Client.Version}} server={{.Server.Version}}"],
+            env=env,
+            check=False,
+            capture=True,
+        )
+        expected = pinned_versions()["DOCKER_ENGINE_VERSION"]
+        if version.returncode or version.stdout.strip() != f"client={expected} server={expected}":
+            raise RuntimeError("Docker client/server version is not the exact central pin")
+        security = run(
+            [docker, "info", "--format", "{{json .SecurityOptions}}"],
+            env=env,
+            check=False,
+            capture=True,
+        )
+        if security.returncode or "name=rootless" not in security.stdout:
+            raise RuntimeError("Docker Engine did not prove rootless mode")
+        checks["docker_info_rootless"] = "PASS"
+
+        existing = run([docker, "ps", "-aq"], env=env, check=False, capture=True)
+        if existing.returncode or existing.stdout.strip():
+            raise RuntimeError("rootless Docker must contain zero containers before parity qualification")
+        clusters = run([kind, "get", "clusters"], env=env, check=False, capture=True)
+        if clusters.returncode or cluster_name in clusters.stdout.splitlines():
+            raise RuntimeError(f"reserved kind cluster already exists: {cluster_name}")
+        _ensure_pinned_ryuk_image(docker, env)
+
+        samples.append(_memory_snapshot("idle-started"))
+        sampler = threading.Thread(target=collect, name="container-memory-sampler", daemon=True)
+        sampler.start()
+
+        phase[0] = "testcontainers-postgresql"
+        test_started = int(time.time()) - 1
+        go = str(managed_bin_dirs()[0] / "go")
+        test_env = dict(env, CGO_ENABLED="1")
+        test_env.pop("GOROOT", None)
+        test_env.pop("GOTOOLDIR", None)
+        test = run(
+            [
+                go,
+                "test",
+                "-race",
+                "-tags=integration",
+                "./internal/infrastructure/postgres",
+                "-count=1",
+            ],
+            cwd=ROOT / "services/product",
+            env=test_env,
+            check=False,
+        )
+        if test.returncode:
+            raise RuntimeError("Testcontainers PostgreSQL qualification failed")
+        test_finished = int(time.time())
+        if not _wait_for_zero_containers(docker, env):
+            raise RuntimeError("Testcontainers/Ryuk cleanup did not reach zero containers")
+        events = run(
+            [
+                docker,
+                "events",
+                "--since",
+                str(test_started),
+                "--until",
+                str(test_finished),
+                "--filter",
+                "type=container",
+                "--filter",
+                "event=create",
+                "--format",
+                "{{json .}}",
+            ],
+            env=env,
+            check=False,
+            capture=True,
+        )
+        if events.returncode or "testcontainers/ryuk" not in events.stdout:
+            raise RuntimeError("Testcontainers run did not prove Ryuk creation")
+        checks["testcontainers_postgresql"] = "PASS"
+        checks["ryuk_zero_container_cleanup"] = "PASS"
+
+        phase[0] = "kind-single-node"
+        cluster_create_attempted = True
+        create = run(
+            [
+                kind,
+                "create",
+                "cluster",
+                "--name",
+                cluster_name,
+                "--image",
+                kind_node_image,
+                "--wait",
+                "180s",
+            ],
+            env=env,
+            check=False,
+        )
+        if create.returncode:
+            raise RuntimeError("rootless Docker kind smoke creation failed")
+        nodes = run(
+            [kubectl, "--context", f"kind-{cluster_name}", "get", "nodes", "-o", "json"],
+            env=env,
+            check=False,
+            capture=True,
+        )
+        if nodes.returncode:
+            raise RuntimeError("kind smoke node query failed")
+        payload = json.loads(nodes.stdout)
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        if not items or any(
+            not any(
+                condition.get("type") == "Ready" and condition.get("status") == "True"
+                for condition in item.get("status", {}).get("conditions", [])
+            )
+            for item in items
+        ):
+            raise RuntimeError("kind smoke cluster contains a non-ready node")
+        checks["kind_single_node_smoke"] = "PASS"
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+        failures.append(str(exc))
+    finally:
+        stop_sampling.set()
+        if sampler is not None:
+            sampler.join(timeout=20)
+        if cluster_create_attempted:
+            deleted = run(
+                [kind, "delete", "cluster", "--name", cluster_name],
+                env=env,
+                check=False,
+            )
+            if deleted.returncode:
+                failures.append("invocation-owned kind cluster cleanup failed")
+        if runtime_owned and Path(docker).is_file():
+            cleanup_complete = _wait_for_zero_containers(docker, env, timeout=15.0)
+            if not cleanup_complete:
+                failures.append("container cleanup did not reach zero")
+        if runtime_owned:
+            try:
+                _reconcile_rootless_docker("stopped")
+                samples.append(_memory_snapshot("idle-stopped-after"))
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                failures.append(f"rootless Docker stop failed: {exc}")
+        if sample_errors:
+            failures.extend(f"memory sampler: {error}" for error in sorted(set(sample_errors)))
+
+    report = {
+        "schema_version": 1,
+        "status": "PASS" if not failures and cleanup_complete else "FAIL",
+        "scope": "ubuntu-wsl2-developer-container-runtime",
+        "source_head": git("rev-parse", "HEAD").strip(),
+        "source_tree": worktree_tree_sha(),
+        "runtime": "docker-engine-rootless",
+        "docker_version": pinned_versions()["DOCKER_ENGINE_VERSION"],
+        "images": {
+            "kind_node": kind_node_image,
+            "testcontainers_postgresql": postgres_image,
+            "testcontainers_ryuk": ryuk_image,
+        },
+        "checks": checks,
+        "cleanup_complete": cleanup_complete,
+        "measurements": _summarize_memory(samples) if samples else {},
+        "failures": failures,
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    if report["status"] != "PASS":
+        return fail(f"container runtime parity failed; measurement: {report_path.relative_to(ROOT)}", 1)
+    if retire_docker_desktop:
+        _retire_docker_desktop_after_parity()
+    print(f"PASS rootless Docker parity and RAM measurement: {report_path.relative_to(ROOT)}")
     return 0
 
 
@@ -5636,16 +6105,28 @@ def rke2_local_ha_prepare() -> int:
         return fail("RKE2 local HA preparation entrypoint is not centrally registered")
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("RKE2 local HA preparation requires a clean worktree")
-    require("ansible-playbook")
-    return run(
-        [
-            "ansible-playbook",
-            "-i",
-            "localhost,",
-            "platform/ansible/tests/mgmt_ha_vm/prepare_haproxy.yml",
-        ],
+    service = run(
+        ["systemctl", "--user", "is-active", "docker.service"],
         check=False,
-    ).returncode
+        capture=True,
+    )
+    if service.stdout.strip() != "inactive":
+        return fail("rootless Docker user service must be inactive before HAProxy preparation")
+    controller = qualification_ansible_playbook()
+    try:
+        _reconcile_rootless_docker("started")
+        return run(
+            [
+                controller,
+                "-i",
+                "localhost,",
+                "platform/ansible/tests/mgmt_ha_vm/prepare_haproxy.yml",
+            ],
+            env=_rootless_docker_environment(),
+            check=False,
+        ).returncode
+    finally:
+        _reconcile_rootless_docker("stopped")
 
 
 def rke2_local_ha_qualification() -> int:
@@ -6147,6 +6628,15 @@ def main() -> int:
     )
     sub.add_parser("rke2-local-ha-prepare")
     sub.add_parser("rke2-local-ha-qualification")
+    runtime = sub.add_parser("container-runtime-qualification")
+    runtime.add_argument(
+        "--output",
+        default=os.environ.get(
+            "CONTAINER_RUNTIME_MEASUREMENT",
+            ".context/runtime/docker-rootless-parity.json",
+        ),
+    )
+    runtime.add_argument("--retire-docker-desktop", action="store_true")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -6308,6 +6798,8 @@ def main() -> int:
             return rke2_local_ha_prepare()
         if args.cmd == "rke2-local-ha-qualification":
             return rke2_local_ha_qualification()
+        if args.cmd == "container-runtime-qualification":
+            return container_runtime_qualification(args.output, args.retire_docker_desktop)
         if args.cmd == "perf-campaign":
             return performance_campaign(args.base, args.output)
         if args.cmd == "diff-context":

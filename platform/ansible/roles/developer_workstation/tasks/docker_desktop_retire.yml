@@ -1,0 +1,83 @@
+---
+- name: Require successful rootless Docker parity before retirement
+  ansible.builtin.assert:
+    that:
+      - developer_workstation_docker_rootless_parity_verified | bool
+    fail_msg: Docker Desktop retirement requires a successful in-process parity qualification.
+
+- name: Detect installed Docker Desktop package
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - >-
+        $output = & winget.exe list --id {{ developer_workstation_docker_desktop_package_id }} --exact
+        --accept-source-agreements --disable-interactivity 2>$null | Out-String;
+        if ($output -match '{{ developer_workstation_docker_desktop_package_id | regex_escape }}') { exit 0 };
+        exit 1
+  register: developer_workstation_docker_desktop_installed
+  changed_when: false
+  failed_when: false
+
+- name: Uninstall Docker Desktop after parity
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - >-
+        & winget.exe uninstall --id {{ developer_workstation_docker_desktop_package_id }} --exact --silent
+        --accept-source-agreements --disable-interactivity;
+        exit $LASTEXITCODE
+  when: developer_workstation_docker_desktop_installed.rc == 0
+  changed_when: true
+
+- name: Remove residual Docker Desktop WSL distributions after parity
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - >-
+        $targets = @('docker-desktop', 'docker-desktop-data');
+        $installed = (& wsl.exe --list --quiet 2>$null | Out-String);
+        $changed = $false;
+        foreach ($target in $targets) {
+          if ($installed -match ('(?m)^\s*' + [regex]::Escape($target) + '\s*$')) {
+            & wsl.exe --unregister $target;
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE };
+            $changed = $true;
+          };
+        };
+        if ($changed) { exit 0 };
+        exit 2
+  register: developer_workstation_docker_desktop_distros_removed
+  changed_when: developer_workstation_docker_desktop_distros_removed.rc == 0
+  failed_when: developer_workstation_docker_desktop_distros_removed.rc not in [0, 2]
+
+- name: Verify Docker Desktop package and WSL distribution are absent
+  ansible.builtin.command:
+    argv:
+      - powershell.exe
+      - -NoLogo
+      - -NoProfile
+      - -NonInteractive
+      - -Command
+      - >-
+        $package = & winget.exe list --id {{ developer_workstation_docker_desktop_package_id }} --exact
+        --accept-source-agreements --disable-interactivity 2>$null | Out-String;
+        $distros = (& wsl.exe --list --quiet 2>$null | Out-String);
+        $processes = @(Get-Process -Name 'Docker Desktop','com.docker.backend','com.docker.build'
+        -ErrorAction SilentlyContinue);
+        if ($package -match '{{ developer_workstation_docker_desktop_package_id | regex_escape }}' -or
+        $distros -match '(?m)^\s*docker-desktop(?:-data)?\s*$' -or
+        $processes.Count -gt 0) { exit 1 };
+        exit 0
+  changed_when: false

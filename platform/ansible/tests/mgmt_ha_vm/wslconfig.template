@@ -1,0 +1,11 @@
+[wsl2]
+memory=2GB
+processors=2
+swap=4GB
+networkingMode=nat
+dnsTunneling=true
+autoProxy=true
+firewall=true
+
+[experimental]
+autoMemoryReclaim=dropCache

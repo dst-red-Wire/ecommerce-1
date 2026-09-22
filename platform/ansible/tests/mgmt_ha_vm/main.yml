@@ -39,6 +39,9 @@
     ha_single_fixture: "{{ ha_repo }}/{{ ha_sources.local_vm_entrypoint }}"
     ha_ansible_playbook: "{{ ansible_playbook_python | dirname }}/ansible-playbook"
     ha_lifecycle_guard: "{{ playbook_dir }}/lifecycle_guard.py"
+    ha_host_preflight_helper: "{{ playbook_dir }}/host_preflight.py"
+    ha_host_contract: "{{ mgmt_local_ha_contract.qualification_host }}"
+    ha_wslconfig_template: "{{ ha_repo }}/{{ ha_sources[ha_host_contract.wsl2.projection] }}"
     ha_nodes: "{{ mgmt_local_ha_contract.nodes | dict2items }}"
     ha_cold_stage_batches: >-
       {{
@@ -62,6 +65,58 @@
           - ha_head_sha == (lookup('pipe', 'git -C ' ~ (ha_repo | quote) ~ ' rev-parse HEAD') | trim)
           - mgmt_local_ha_contract.nodes | length == 6
           - mgmt_local_ha_contract.capacity_production_claim is false
+          - ha_host_contract.scope == 'windows-wsl2-virtualbox-local-ha-test-only'
+          - ha_host_contract.applies_to_preprod is false
+          - ha_host_contract.pagefile.required is true
+          - ha_host_contract.pagefile.automatic_management_required is true
+          - ha_host_contract.docker_desktop.required_state == 'stopped'
+          - ha_host_contract.linux_container_runtime.required_state == 'stopped'
+          - ha_host_contract.virtualbox.campaign_vm_registration == 'forbidden'
+
+    - name: Evaluate fail-closed Windows lab capacity before any HA campaign mutation
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_host_preflight_helper }}"
+          - --powershell
+          - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+          - --vbox
+          - "{{ ha_vbox }}"
+          - --wslconfig-template
+          - "{{ ha_wslconfig_template }}"
+          - --expected-wslconfig-json
+          - "{{ ha_host_contract.wsl2.sections | to_json }}"
+          - --minimum-available-mib
+          - "{{ ha_host_contract.windows_memory.minimum_available_mib }}"
+          - --minimum-commit-headroom-mib
+          - "{{ ha_host_contract.windows_memory.minimum_commit_headroom_mib }}"
+          - --campaign-vm-names-json
+          - "{{ ha_nodes | map(attribute='value.vm_name') | list | to_json }}"
+          - --forbidden-docker-processes-json
+          - "{{ ha_host_contract.docker_desktop.forbidden_processes | to_json }}"
+          - --forbidden-docker-distributions-json
+          - "{{ ha_host_contract.docker_desktop.forbidden_running_wsl_distributions | to_json }}"
+      register: ha_host_preflight_result
+      changed_when: false
+      failed_when: false
+
+    - name: Decode deterministic Windows lab capacity result
+      ansible.builtin.set_fact:
+        ha_host_preflight: "{{ ha_host_preflight_result.stdout | from_json }}"
+      changed_when: false
+
+    - name: Refuse six-VM campaign unless every Windows lab prerequisite passes
+      ansible.builtin.assert:
+        that:
+          - ha_host_preflight_result.rc == 0
+          - ha_host_preflight.status == 'PASS'
+          - ha_host_preflight.scope == ha_host_contract.scope
+          - ha_host_preflight.applies_to_preprod is false
+        fail_msg: >-
+          Local Windows HA preflight failed: {{ ha_host_preflight.failures | join(', ') }}.
+          Apply the repository-pinned test .wslconfig, shut WSL down, stop Docker Desktop
+          and rootless Docker, remove stale campaign VMs, and restore the required Windows
+          memory/pagefile state.
 
     - name: Verify all pinned host and Guest Additions prerequisites before HA execution
       ansible.builtin.include_tasks: ../mgmt_offline_vm/preflight.yml
@@ -84,6 +139,12 @@
         state: directory
         mode: "0700"
 
+    - name: Preserve passed Windows lab preflight evidence
+      ansible.builtin.copy:
+        dest: "{{ ha_state }}/host-preflight.json"
+        content: "{{ ha_host_preflight | to_nice_json }}"
+        mode: "0600"
+
     - name: Remove stale HA completion marker before any state-changing campaign
       ansible.builtin.file:
         path: "{{ ha_completion }}"
@@ -101,6 +162,28 @@
         fail_msg: >-
           Missing {{ ha_bundle_dir }}. Rebuild the already-qualified PR 128 bundle explicitly
           before HA qualification; this workflow never widens PR 128 by downloading implicitly.
+
+    - name: Verify every pinned RKE2 bundle byte before creating any VM
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ ha_repo }}/scripts/mgmt_airgap.py"
+          - --bundle
+          - "{{ ha_bundle_dir }}"
+          - --manifest-sha256
+          - "{{ ha_manifest_sha256 }}"
+          - --rke2-version
+          - "{{ ha_rke2_version }}"
+          - --services-json
+          - "{{ ha_single_contract.services | to_json }}"
+      register: ha_bundle_preflight
+      changed_when: false
+
+    - name: Preserve passed RKE2 bundle integrity evidence
+      ansible.builtin.copy:
+        dest: "{{ ha_state }}/bundle-preflight.json"
+        content: "{{ ha_bundle_preflight.stdout | trim }}\n"
+        mode: "0600"
 
     - name: Discover Windows fixture state root without changing host settings
       ansible.builtin.command:
@@ -144,8 +227,8 @@
           - ha_haproxy_tar_stat.stat.isreg | default(false)
           - ha_haproxy_evidence_stat.stat.isreg | default(false)
         fail_msg: >-
-          Run 'make rke2-local-ha-prepare' while Docker Desktop is available,
-          then Docker Desktop may be closed before the six-VM qualification.
+          Run 'make rke2-local-ha-prepare' to prepare the image with rootless Docker.
+          The preparation command stops Docker before six-VM qualification.
 
     - name: Read HAProxy preparation evidence
       ansible.builtin.slurp:
@@ -217,28 +300,6 @@
           - >-
             mgmt_local_ha_contract.ha_endpoint.host in mgmt_local_ha_contract.nodes
 
-    - name: List registered VirtualBox machines before HA creation
-      ansible.builtin.command:
-        argv:
-          - "{{ ansible_playbook_python }}"
-          - "{{ ha_lifecycle_guard }}"
-          - run-windows
-          - --
-          - "{{ ha_vbox }}"
-          - list
-          - vms
-      register: ha_registered_vms
-      changed_when: false
-
-    - name: Refuse collisions with owned HA VM names
-      ansible.builtin.assert:
-        that:
-          - item.value.vm_name not in ha_registered_vms.stdout
-        fail_msg: "VirtualBox already contains {{ item.value.vm_name }}; cleanup is required before HA qualification."
-      loop: "{{ ha_nodes }}"
-      loop_control:
-        label: "{{ item.key }}"
-
     - name: Probe fixed HA addresses on the selected Windows host-only segment before VM creation
       ansible.builtin.command:
         argv:
@@ -299,6 +360,8 @@
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/destroy_vm_batch.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/retry_destroy_vm.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/lifecycle_guard.py"
+          - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/host_preflight.py"
+          - "{{ ha_wslconfig_template }}"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/cluster.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/server_node.yml"
           - "{{ ha_repo }}/platform/ansible/tests/mgmt_ha_vm/agent_node.yml"
@@ -358,7 +421,7 @@
           vars:
             ha_single_vm_action: create
 
-        - name: Cold-stage the approved PR 128 bundle two VMs at a time
+        - name: Cold-stage the approved PR 128 bundle with contract-bounded batches
           ansible.builtin.include_tasks: cold_stage_batch.yml
           loop: "{{ ha_cold_stage_batches }}"
           loop_control:

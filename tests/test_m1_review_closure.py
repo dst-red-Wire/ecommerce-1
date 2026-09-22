@@ -81,7 +81,14 @@ class M1ReviewClosureTests(unittest.TestCase):
         completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
         def successful_run(command, **_kwargs):
-            stdout = "1\n" if command[0] == "sysctl" else ""
+            if command[0] == "sysctl":
+                stdout = "1\n"
+            elif "info" in command:
+                stdout = '["name=rootless"]\n'
+            elif "image" in command and "inspect" in command:
+                stdout = "sha256:7c1a8a9a47c780ed0f983770a662f80deb115d95cce3e2daa3d12115b8cd28f0\n"
+            else:
+                stdout = ""
             return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
         def passthrough_cache(_name, _options, producer):
@@ -100,6 +107,7 @@ class M1ReviewClosureTests(unittest.TestCase):
                     return_value={"sql": [{"gen": {"go": {"out": "internal/infrastructure/postgres/sqlcgen"}}}]},
                 ),
                 mock.patch.object(REPOCTL, "run", side_effect=successful_run),
+                mock.patch.object(REPOCTL, "_reconcile_rootless_docker"),
                 mock.patch.object(REPOCTL.shutil, "which", return_value="/bin/docker"),
             ):
                 self.assertEqual(0, REPOCTL.service_check(service))

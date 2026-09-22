@@ -15,6 +15,7 @@ mgmt_local_ha_contract:
     private_firewall_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-private.xml.j2
     egress_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2
     egress_service_template: platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.service.j2
+    windows_lab_wslconfig: platform/ansible/tests/mgmt_ha_vm/wslconfig.template
 
   controller:
     os: wsl2
@@ -33,12 +34,53 @@ mgmt_local_ha_contract:
       cpus: 2
       memory_mib: 1024
 
+  qualification_host:
+    scope: windows-wsl2-virtualbox-local-ha-test-only
+    applies_to_preprod: false
+    windows_memory:
+      minimum_available_mib: 12288
+      minimum_commit_headroom_mib: 16384
+    pagefile:
+      required: true
+      automatic_management_required: true
+    docker_desktop:
+      required_state: stopped
+      forbidden_processes:
+        - Docker Desktop
+        - com.docker.backend
+        - com.docker.build
+      forbidden_running_wsl_distributions:
+        - docker-desktop
+    linux_container_runtime:
+      required_state: stopped
+      forbidden_processes:
+        - dockerd
+        - containerd
+        - containerd-shim
+        - rootlesskit
+        - slirp4netns
+    virtualbox:
+      campaign_vm_registration: forbidden
+    wsl2:
+      projection: windows_lab_wslconfig
+      sections:
+        wsl2:
+          memory: 2GB
+          processors: "2"
+          swap: 4GB
+          networkingMode: nat
+          dnsTunneling: "true"
+          autoProxy: "true"
+          firewall: "true"
+        experimental:
+          autoMemoryReclaim: dropCache
+
   execution:
-    max_forks: 6
+    max_forks: 3
     vm_create_parallelism: 1
-    cold_stage_parallelism: 2
-    node_validation_parallelism: 4
-    worker_join_parallelism: 2
+    cold_stage_parallelism: 1
+    node_validation_parallelism: 2
+    worker_join_parallelism: 1
     cleanup_parallelism: 2
     control_plane_parallelism: 1
 

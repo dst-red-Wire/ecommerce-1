@@ -259,7 +259,12 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
 
     def test_exact_managed_go_pair_is_detected_without_ansible(self):
-        pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
+        pins = {
+            "NODE_VERSION": "24.20.0",
+            "GO_VERSION": "1.26.6",
+            "SQLC_VERSION": "1.31.1",
+            "DOCKER_ENGINE_VERSION": "29.8.1",
+        }
         commands = {
             "node": "/bin/node",
             "corepack": "/bin/corepack",
@@ -279,7 +284,12 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             if cmd[0] == "/bin/sqlc":
                 return subprocess.CompletedProcess(cmd, 0, "v1.31.1\n", "")
             if cmd[0] == "/bin/docker":
-                return subprocess.CompletedProcess(cmd, 0, "", "")
+                output = (
+                    "Docker version 29.8.1, build test\n"
+                    if cmd[1] == "--version"
+                    else '["name=rootless"]\n'
+                )
+                return subprocess.CompletedProcess(cmd, 0, output, "")
             raise AssertionError(cmd)
 
         with tempfile.TemporaryDirectory() as home:

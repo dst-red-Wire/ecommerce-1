@@ -1,0 +1,46 @@
+---
+developer_workstation_versions_file: "{{ repo_root }}/config/toolchain/versions.env"
+developer_workstation_docker_engine_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_ENGINE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_engine_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_ENGINE_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_containerd_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_CONTAINERD_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_apt_gpg_sha256: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_APT_GPG_SHA256', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_uidmap_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_UIDMAP_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_dbus_user_session_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_DBUS_USER_SESSION_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_slirp4netns_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_SLIRP4NETNS_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_fuse_overlayfs_package_version: >-
+  {{ lookup('ansible.builtin.ini', 'DOCKER_FUSE_OVERLAYFS_PACKAGE_VERSION', type='properties', file=developer_workstation_versions_file) }}
+developer_workstation_docker_rootless_user: "{{ ansible_facts.user_id }}"
+developer_workstation_docker_rootless_uid: "{{ ansible_facts.user_uid }}"
+developer_workstation_docker_rootless_home: "{{ ansible_facts.user_dir }}"
+developer_workstation_docker_rootless_runtime_dir: >-
+  /run/user/{{ developer_workstation_docker_rootless_uid }}
+developer_workstation_docker_rootless_socket: >-
+  {{ developer_workstation_docker_rootless_runtime_dir }}/docker.sock
+developer_workstation_docker_rootless_service_state: started
+developer_workstation_docker_rootless_packages:
+  - "docker-ce={{ developer_workstation_docker_engine_package_version }}"
+  - "docker-ce-cli={{ developer_workstation_docker_engine_package_version }}"
+  - "docker-ce-rootless-extras={{ developer_workstation_docker_engine_package_version }}"
+  - "containerd.io={{ developer_workstation_docker_containerd_package_version }}"
+  - "uidmap={{ developer_workstation_docker_uidmap_package_version }}"
+  - "dbus-user-session={{ developer_workstation_docker_dbus_user_session_package_version }}"
+  - "slirp4netns={{ developer_workstation_docker_slirp4netns_package_version }}"
+  - "fuse-overlayfs={{ developer_workstation_docker_fuse_overlayfs_package_version }}"
+developer_workstation_docker_rootless_held_packages:
+  - docker-ce
+  - docker-ce-cli
+  - docker-ce-rootless-extras
+  - containerd.io
+  - uidmap
+  - dbus-user-session
+  - slirp4netns
+  - fuse-overlayfs
+developer_workstation_docker_desktop_package_id: Docker.DockerDesktop
+developer_workstation_docker_rootless_parity_verified: false

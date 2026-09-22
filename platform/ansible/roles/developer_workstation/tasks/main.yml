@@ -205,46 +205,17 @@
   changed_when: false
   tags: [workstation, git]
 
-- name: Probe Docker daemon
-  ansible.builtin.command:
-    argv: [docker, info]
-  register: docker_probe
-  changed_when: false
-  failed_when: false
-  tags: [workstation, docker]
+- name: Reconcile pinned rootless Docker Engine
+  ansible.builtin.import_tasks: docker_rootless.yml
+  tags: [docker, docker_client]
 
-- name: Start Docker Desktop through the supported Windows Docker CLI
-  ansible.builtin.command:
-    argv: [docker.exe, desktop, start]
-  register: docker_desktop_start
-  changed_when: true
-  failed_when: false
-  when: docker_probe.rc != 0
-  tags: [workstation, docker]
+- name: Reconcile rootless Docker runtime state
+  ansible.builtin.import_tasks: docker_rootless_state.yml
+  tags: [docker, docker_runtime]
 
-- name: Fall back to the official Docker Desktop executable through PowerShell
-  ansible.builtin.command:
-    argv:
-      - powershell.exe
-      - -NoLogo
-      - -NoProfile
-      - -NonInteractive
-      - -Command
-      - "$p = Join-Path $Env:ProgramFiles 'Docker\\Docker\\Docker Desktop.exe'; if (Test-Path $p) { Start-Process -FilePath $p; exit 0 } else { exit 1 }"
-  when: docker_probe.rc != 0 and docker_desktop_start.rc != 0
-  changed_when: true
-  tags: [workstation, docker]
-
-- name: Wait until Docker daemon is reachable
-  ansible.builtin.command:
-    argv: [docker, info]
-  register: docker_ready
-  changed_when: false
-  retries: 30
-  delay: 2
-  until: docker_ready.rc == 0
-  when: docker_probe.rc != 0
-  tags: [workstation, docker]
+- name: Retire Docker Desktop only after parity qualification
+  ansible.builtin.import_tasks: docker_desktop_retire.yml
+  tags: [docker_desktop_retire]
 
 - name: Install repository pre-commit hooks
   ansible.builtin.command:

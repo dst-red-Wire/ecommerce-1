@@ -675,12 +675,3 @@
     state: link
     force: true
   tags: [kind]
-
-- name: Install distribution-provided Docker client
-  ansible.builtin.apt:
-    name: docker.io
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
-  become: true
-  tags: [docker_client]

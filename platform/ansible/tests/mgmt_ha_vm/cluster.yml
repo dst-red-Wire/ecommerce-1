@@ -575,7 +575,7 @@
 
 - name: Join remaining workers through HAProxy
   hosts: ha-worker-01,ha-worker-02
-  strategy: free
+  serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"
   become: true
   gather_facts: false
   vars_files: [contract.yml]
@@ -584,10 +584,10 @@
     ha_join_url: >-
       https://{{ mgmt_local_ha_contract.nodes[mgmt_local_ha_contract.ha_endpoint.host].address }}:{{ mgmt_local_ha_contract.ha_endpoint.registration_port }}
   pre_tasks:
-    - name: Require worker join host-set to match bounded parallelism contract
+    - name: Require worker join batch to match bounded parallelism contract
       ansible.builtin.assert:
         that:
-          - ansible_play_hosts_all | length == mgmt_local_ha_contract.execution.worker_join_parallelism
+          - ansible_play_batch | length <= mgmt_local_ha_contract.execution.worker_join_parallelism
   tasks:
     - name: Join worker through canonical agent tasks
       ansible.builtin.include_tasks: agent_node.yml

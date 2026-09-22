@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import importlib.util
 import ipaddress
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +23,13 @@ GUARD_SPEC = importlib.util.spec_from_file_location("mgmt_ha_lifecycle_guard", F
 assert GUARD_SPEC and GUARD_SPEC.loader
 GUARD = importlib.util.module_from_spec(GUARD_SPEC)
 GUARD_SPEC.loader.exec_module(GUARD)
+sys.modules["lifecycle_guard"] = GUARD
+HOST_PREFLIGHT_SPEC = importlib.util.spec_from_file_location(
+    "mgmt_ha_host_preflight", FIXTURE / "host_preflight.py"
+)
+assert HOST_PREFLIGHT_SPEC and HOST_PREFLIGHT_SPEC.loader
+HOST_PREFLIGHT = importlib.util.module_from_spec(HOST_PREFLIGHT_SPEC)
+HOST_PREFLIGHT_SPEC.loader.exec_module(HOST_PREFLIGHT)
 OFFLINE_FIXTURE = ROOT / "platform/ansible/tests/mgmt_offline_vm"
 PRIVILEGE_SPEC = importlib.util.spec_from_file_location(
     "mgmt_offline_privilege_probe", OFFLINE_FIXTURE / "privilege_probe.py"
@@ -273,11 +282,11 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual(10752, calculated_memory)
         self.assertEqual(
             {
-                "max_forks": 6,
+                "max_forks": 3,
                 "vm_create_parallelism": 1,
-                "cold_stage_parallelism": 2,
-                "node_validation_parallelism": 4,
-                "worker_join_parallelism": 2,
+                "cold_stage_parallelism": 1,
+                "node_validation_parallelism": 2,
+                "worker_join_parallelism": 1,
                 "cleanup_parallelism": 2,
                 "control_plane_parallelism": 1,
             },
@@ -287,6 +296,106 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertFalse(contract["capacity_production_claim"])
         self.assertFalse(contract["real_hetzner_network_claim"])
         self.assertFalse(contract["physical_failure_claim"])
+
+    def test_windows_capacity_gate_is_test_only_pinned_and_fail_closed(self):
+        contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
+        host = contract["qualification_host"]
+        self.assertEqual("windows-wsl2-virtualbox-local-ha-test-only", host["scope"])
+        self.assertFalse(host["applies_to_preprod"])
+        self.assertEqual(12288, host["windows_memory"]["minimum_available_mib"])
+        self.assertEqual(16384, host["windows_memory"]["minimum_commit_headroom_mib"])
+        self.assertTrue(host["pagefile"]["required"])
+        self.assertTrue(host["pagefile"]["automatic_management_required"])
+        self.assertEqual("stopped", host["docker_desktop"]["required_state"])
+        self.assertEqual("stopped", host["linux_container_runtime"]["required_state"])
+        self.assertEqual("forbidden", host["virtualbox"]["campaign_vm_registration"])
+
+        projection = ROOT / contract["canonical_sources"][host["wsl2"]["projection"]]
+        parsed = HOST_PREFLIGHT.parse_wslconfig(projection.read_text(encoding="utf-8"))
+        expected = {
+            section.casefold(): {
+                key.casefold(): str(value).casefold() for key, value in settings.items()
+            }
+            for section, settings in host["wsl2"]["sections"].items()
+        }
+        self.assertEqual(expected, parsed)
+
+        template = projection.read_text(encoding="utf-8")
+        windows = {
+            "available_memory_mib": 12288,
+            "commit_headroom_mib": 16384,
+            "automatic_managed_pagefile": True,
+            "pagefile_count": 1,
+            "pagefile_allocated_mib": 4096,
+            "process_names": ["explorer"],
+            "running_wsl_distributions": ["Ubuntu-24.04"],
+        }
+        arguments = {
+            "windows": windows,
+            "wsl_runtime": {"memory_mib": 1984, "processors": 2, "swap_mib": 4096},
+            "expected_wslconfig": template,
+            "actual_wslconfig": template,
+            "registered_vms": [],
+            "campaign_vm_names": [node["vm_name"] for node in contract["nodes"].values()],
+            "minimum_available_mib": 12288,
+            "minimum_commit_headroom_mib": 16384,
+            "forbidden_docker_processes": host["docker_desktop"]["forbidden_processes"],
+            "forbidden_docker_distributions": host["docker_desktop"][
+                "forbidden_running_wsl_distributions"
+            ],
+            "linux_container_runtime": {
+                "daemon_reachable": False,
+                "running_container_count": 0,
+                "process_names": [],
+                "user_docker_service_active": False,
+                "system_docker_service_active": False,
+                "system_containerd_service_active": False,
+            },
+        }
+        self.assertEqual("PASS", HOST_PREFLIGHT.evaluate(**arguments)["status"])
+
+        failures = {
+            "windows_available_memory": lambda changed: changed["windows"].update(
+                available_memory_mib=12287
+            ),
+            "windows_commit_headroom": lambda changed: changed["windows"].update(
+                commit_headroom_mib=16383
+            ),
+            "windows_pagefile": lambda changed: changed["windows"].update(
+                automatic_managed_pagefile=False
+            ),
+            "docker_desktop_stopped": lambda changed: changed["windows"].update(
+                process_names=["com.docker.backend"]
+            ),
+            "linux_container_runtime_stopped": lambda changed: changed[
+                "linux_container_runtime"
+            ].update(daemon_reachable=True),
+            "campaign_vms_absent": lambda changed: changed.update(
+                registered_vms=[arguments["campaign_vm_names"][0]]
+            ),
+            "wslconfig_projection": lambda changed: changed.update(
+                actual_wslconfig=template.replace("memory=2GB", "memory=4GB")
+            ),
+            "wsl_runtime_limits": lambda changed: changed["wsl_runtime"].update(
+                memory_mib=4096
+            ),
+        }
+        for check, mutate in failures.items():
+            with self.subTest(check=check):
+                changed = copy.deepcopy(arguments)
+                mutate(changed)
+                result = HOST_PREFLIGHT.evaluate(**changed)
+                self.assertEqual("FAIL", result["status"])
+                self.assertIn(check, result["failures"])
+
+        main = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        preflight = main.index("Evaluate fail-closed Windows lab capacity")
+        artifacts = main.index("Verify every pinned RKE2 bundle byte")
+        mutation = main.index("Create each Rocky VM sequentially")
+        self.assertLess(preflight, artifacts)
+        self.assertLess(artifacts, mutation)
+        self.assertIn("host-preflight.json", main)
+        self.assertIn("bundle-preflight.json", main)
 
     def test_haproxy_is_digest_pinned_and_hosted_outside_control_plane(self):
         contract = MOD.ruby_yaml(str(FIXTURE / "contract.yml"))["mgmt_local_ha_contract"]
@@ -348,6 +457,7 @@ class MgmtHaVmTests(unittest.TestCase):
             "private_firewall_template",
             "egress_template",
             "egress_service_template",
+            "windows_lab_wslconfig",
         ):
             with self.subTest(source=key):
                 self.assertTrue((ROOT / sources[key]).is_file())
@@ -436,7 +546,8 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertEqual("/mnt/c/Windows/System32/ping.exe", contract["controller"]["windows_ping"])
         self.assertIn("mgmt_local_ha_contract.controller.windows_ping", source)
         self.assertIn("ansible_playbook_python", source)
-        self.assertGreaterEqual(source.count("run-windows"), 4)
+        self.assertGreaterEqual(source.count("run-windows"), 3)
+        self.assertIn("ha_host_preflight_helper", source)
         self.assertIn("../mgmt_offline_vm/preflight.yml", source)
         self.assertIn("ha_lifecycle_guard", source)
         self.assertIn("-S", source)
@@ -501,7 +612,7 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertIn("ha_single_vm_action: create", source)
         self.assertNotIn("ha_single_vm_action: test", source)
 
-        self.assertIn("Cold-stage the approved PR 128 bundle two VMs at a time", source)
+        self.assertIn("Cold-stage the approved PR 128 bundle with contract-bounded batches", source)
         self.assertIn("ansible.builtin.include_tasks: cold_stage_batch.yml", source)
         self.assertIn("ha_cold_stage_batches", source)
         self.assertIn(
@@ -779,13 +890,12 @@ class MgmtHaVmTests(unittest.TestCase):
             source,
         )
         self.assertIn("hosts: ha-worker-01,ha-worker-02", cluster)
-        self.assertIn("strategy: free", cluster)
         self.assertIn(
-            "Require worker join host-set to match bounded parallelism contract",
+            "Require worker join batch to match bounded parallelism contract",
             cluster,
         )
         self.assertIn(
-            "ansible_play_hosts_all | length == mgmt_local_ha_contract.execution.worker_join_parallelism",
+            "ansible_play_batch | length <= mgmt_local_ha_contract.execution.worker_join_parallelism",
             cluster,
         )
         self.assertNotIn(
@@ -796,7 +906,7 @@ class MgmtHaVmTests(unittest.TestCase):
             'serial: "{{ mgmt_local_ha_contract.execution.control_plane_parallelism }}"',
             cluster,
         )
-        self.assertNotIn(
+        self.assertIn(
             'serial: "{{ mgmt_local_ha_contract.execution.worker_join_parallelism }}"',
             cluster,
         )
@@ -997,7 +1107,7 @@ class MgmtHaVmTests(unittest.TestCase):
         self.assertNotIn(":latest", source)
 
     def test_fixture_python_helpers_parse(self):
-        for name in ("lab_services.py", "service_probe.py", "ha_probe.py"):
+        for name in ("host_preflight.py", "lab_services.py", "service_probe.py", "ha_probe.py"):
             with self.subTest(name=name):
                 ast.parse((FIXTURE / name).read_text(encoding="utf-8"), filename=name)
 

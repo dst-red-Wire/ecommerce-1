@@ -29,12 +29,6 @@ resources:
       source: winget
       useLatest: true
   - type: Microsoft.WinGet/Package
-    name: DockerDesktop
-    properties:
-      id: Docker.DockerDesktop
-      source: winget
-      useLatest: true
-  - type: Microsoft.WinGet/Package
     name: GitHubCLI
     properties:
       id: GitHub.cli

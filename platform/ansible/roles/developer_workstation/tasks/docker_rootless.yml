@@ -1,0 +1,163 @@
+---
+- name: Require the contracted rootless Docker platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version == '24.04'
+      - ansible_facts.architecture == 'x86_64'
+      - ansible_facts.user_uid | int >= 1000
+      - developer_workstation_docker_rootless_service_state in ['started', 'stopped']
+    fail_msg: Rootless Docker provisioning supports Ubuntu 24.04 amd64 WSL2 only.
+
+- name: Create Docker APT keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  become: true
+
+- name: Install checksum-pinned Docker APT signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    checksum: "sha256:{{ developer_workstation_docker_apt_gpg_sha256 }}"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+
+- name: Project the exact Docker Ubuntu repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.list
+    content: >-
+      deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu noble stable
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+
+- name: Remove packages conflicting with the contracted Docker repository
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose
+      - docker-compose-v2
+      - docker-doc
+      - podman-docker
+      - containerd
+      - runc
+    state: absent
+  become: true
+
+- name: Install exact rootless Docker Engine packages
+  ansible.builtin.apt:
+    name: "{{ developer_workstation_docker_rootless_packages }}"
+    state: present
+    allow_downgrade: true
+    allow_change_held_packages: true
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+
+- name: Disable the rootful Docker and containerd services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - docker.service
+    - docker.socket
+    - containerd.service
+  become: true
+
+- name: Remove the disabled rootful Docker socket
+  ansible.builtin.file:
+    path: /var/run/docker.sock
+    state: absent
+  become: true
+
+- name: Probe user lingering
+  ansible.builtin.command:
+    argv: [loginctl, show-user, "{{ developer_workstation_docker_rootless_user }}", --property=Linger, --value]
+  register: developer_workstation_docker_linger_probe
+  changed_when: false
+
+- name: Enable user lingering for on-demand rootless Docker control
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, "{{ developer_workstation_docker_rootless_user }}"]
+  changed_when: true
+  when: developer_workstation_docker_linger_probe.stdout | trim != 'yes'
+  become: true
+
+- name: Create rootless Docker user systemd directory
+  ansible.builtin.file:
+    path: "{{ developer_workstation_docker_rootless_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ developer_workstation_docker_rootless_user }}"
+    mode: '0700'
+
+- name: Inspect rootless Docker user unit
+  ansible.builtin.stat:
+    path: "{{ developer_workstation_docker_rootless_home }}/.config/systemd/user/docker.service"
+  register: developer_workstation_docker_rootless_unit
+
+- name: Install rootless Docker user unit
+  ansible.builtin.command:
+    argv: [dockerd-rootless-setuptool.sh, install]
+  environment:
+    HOME: "{{ developer_workstation_docker_rootless_home }}"
+    PATH: "/usr/bin:/usr/sbin:/bin:/sbin"
+    XDG_RUNTIME_DIR: "{{ developer_workstation_docker_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path={{ developer_workstation_docker_rootless_runtime_dir }}/bus
+  when: not developer_workstation_docker_rootless_unit.stat.exists
+  changed_when: true
+
+- name: Inspect rootless Docker CLI context
+  ansible.builtin.command:
+    argv: [/usr/bin/docker, context, inspect, rootless]
+  register: developer_workstation_docker_rootless_context
+  changed_when: false
+  failed_when: false
+
+- name: Create rootless Docker CLI context
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/docker
+      - context
+      - create
+      - rootless
+      - --docker
+      - "host=unix://{{ developer_workstation_docker_rootless_socket }}"
+  when: developer_workstation_docker_rootless_context.rc != 0
+  changed_when: true
+
+- name: Inspect selected Docker CLI context
+  ansible.builtin.command:
+    argv: [/usr/bin/docker, context, show]
+  register: developer_workstation_docker_selected_context
+  changed_when: false
+
+- name: Select rootless Docker CLI context
+  ansible.builtin.command:
+    argv: [/usr/bin/docker, context, use, rootless]
+  when: developer_workstation_docker_selected_context.stdout | trim != 'rootless'
+  changed_when: true
+
+- name: Link the contracted Docker CLI into the managed user path
+  ansible.builtin.file:
+    src: /usr/bin/docker
+    dest: "{{ developer_workstation_docker_rootless_home }}/.local/bin/docker"
+    state: link
+    force: true
+
+- name: Hold exact Docker Engine packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: "{{ developer_workstation_docker_rootless_held_packages }}"
+  become: true

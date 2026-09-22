@@ -440,15 +440,18 @@
       "version_args": [
         "--version"
       ],
+      "version_key": "DOCKER_ENGINE_VERSION",
       "provision_requires": [
         "ansible-playbook"
       ],
       "provision": {
         "type": "ansible",
-        "tags": "docker_client"
+        "tags": "docker"
       },
-      "classification": "platform-provided",
-      "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
       "requirement": "optional-runtime"
     },
     {
@@ -691,6 +694,7 @@
     "oxlint": "ansible",
     "oxfmt": "ansible",
     "ruff": "ansible",
+    "docker-client-installed": "ansible",
     "kubectl": "ansible",
     "helm": "ansible",
     "cosign": "ansible",
@@ -753,6 +757,10 @@
     {
       "command": "unzip",
       "justification": "Archive primitive owned by supported platform bootstrap."
+    },
+    {
+      "command": "systemctl",
+      "justification": "WSL2 systemd primitive used to verify on-demand rootless Docker service ownership."
     }
   ],
   "gate_requirements": {
@@ -831,7 +839,8 @@
       "sqlc",
       "diff",
       "cc",
-      "docker"
+      "docker",
+      "systemctl"
     ],
     "tekton-trigger-readiness": [
       "python3",

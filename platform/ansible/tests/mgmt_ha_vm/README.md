@@ -28,13 +28,16 @@ or physical-machine failure.
 
 ## Host contract
 
-The current local host contract is:
+This host contract applies only to the disposable Windows/WSL2/VirtualBox HA test.
+It is neither a PREPROD sizing policy nor a PREPROD prerequisite. The current local
+host contract is:
 
 - WSL2 as controller;
 - native Windows Vagrant 2.4.9;
 - native Windows VirtualBox 7.2.18r175117;
 - existing `VirtualBox Host-Only Ethernet Adapter` at `192.168.22.1/24`, DHCP off;
-- Docker Desktop available from WSL for preparing the pinned HAProxy image.
+- rootless Docker available on demand for preparing the pinned HAProxy image;
+- rootless Docker and Docker Desktop stopped during the six-VM qualification.
 
 No Vagrant plugin is required. The #128 Windows bridge sets `VAGRANT_NO_PLUGINS=1`
 when Vagrant is invoked.
@@ -50,6 +53,49 @@ of an unbound WSL ping, so an overlapping RFC1918 route exposed through a VPN/LA
 cannot be mistaken for a host on the VirtualBox network. A reply sourced through the
 selected host-only adapter still fails closed.
 
+### Fail-closed Windows capacity gate
+
+Every qualification attempt evaluates the following conditions before it creates a VM:
+
+- Windows available physical memory is at least 12288 MiB;
+- Windows commit headroom is at least 16384 MiB;
+- a pagefile exists, is allocated and Windows automatic pagefile management is enabled;
+- Docker Desktop processes and its WSL distribution are stopped;
+- none of the six fixed campaign VM names is registered in VirtualBox;
+- `%UserProfile%\.wslconfig` semantically matches the repository projection;
+- the running WSL instance reflects its 2 GiB memory ceiling, two processors and
+  4 GiB swap allocation;
+- pinned Vagrant, VirtualBox, Guest Additions, RKE2 bundle and HAProxy prerequisites
+  pass their existing integrity checks.
+
+Any failed or unreadable probe aborts the campaign. The passed capacity result is retained
+as `host-preflight.json`; the complete RKE2 bundle verification is retained as
+`bundle-preflight.json` beside the exact-SHA campaign evidence. The gate never changes
+Windows, WSL, VirtualBox or PREPROD state.
+
+The exact test-only WSL projection is
+`platform/ansible/tests/mgmt_ha_vm/wslconfig.template`:
+
+```ini
+[wsl2]
+memory=2GB
+processors=2
+swap=4GB
+networkingMode=nat
+dnsTunneling=true
+autoProxy=true
+firewall=true
+
+[experimental]
+autoMemoryReclaim=dropCache
+```
+
+Install that file as `%UserProfile%\.wslconfig`, enable **Automatically manage paging
+file size for all drives** in Windows, then run `wsl.exe --shutdown` from Windows before
+starting the campaign. The shutdown is deliberately not automated because it terminates
+the controller running the qualification. A stale WSL instance therefore fails closed
+instead of silently using the former limits.
+
 ## Resource boundary
 
 The six-VM profile is intentionally a constrained functional laboratory profile:
@@ -64,18 +110,18 @@ therefore cannot be used as capacity evidence. VM creation is sequential and fai
 the next node is not started until the current node has completed its console bootstrap.
 If the already-qualified #128 console transport hits its bounded 180-second wait, the
 wrapper may resume that exact owned VM once; unrelated creation failures are never
-retried. The campaign is still allowed to fail closed under host memory pressure.
+retried. The campaign refuses to start under host memory pressure.
 
 ## Bounded parallelism
 
 The functional lab uses a contract-driven parallelism ceiling instead of making every
 phase concurrent:
 
-- global Ansible ceiling: 6 forks;
+- global Ansible ceiling: 3 forks;
 - VM creation and console bootstrap: 1 VM at a time, fail-fast;
-- PR 128 cold-stage: 2 VMs at a time;
-- worker-01 and worker-02 join through HAProxy in parallel;
-- DNS/NTP/SELinux/egress validation: at most 4 hosts at a time;
+- PR 128 cold-stage: 1 VM at a time;
+- worker-01 and worker-02 join through HAProxy sequentially;
+- DNS/NTP/SELinux/egress validation: at most 2 hosts at a time;
 - cleanup: 2 owned VMs at a time while still attempting all six;
 - CP-01, CP-02, CP-03, etcd/quorum and HAProxy dependency phases: structurally
   single-host, therefore concurrency 1 without a play-level templated `serial`.
@@ -181,7 +227,7 @@ The write/read during the one-server outage is the functional quorum proof.
 
 ## Run
 
-Prepare HAProxy once while Docker Desktop is available:
+Prepare HAProxy once with rootless Docker:
 
 ```console
 make rke2-local-ha-prepare
@@ -189,7 +235,9 @@ make rke2-local-ha-prepare
 
 The preparation step pulls the immutable digest, exports the archive below
 `.context/mgmt-ha-cache`, records its SHA-256 and source reference, and then exits.
-Docker Desktop may be closed after this step to free RAM.
+The preparation command stops rootless Docker after this step. The qualification
+gate rejects a running Linux container runtime, Docker Desktop process or
+`docker-desktop` WSL distribution.
 
 Then use the registered qualification entrypoint from a clean exact-SHA checkout:
 

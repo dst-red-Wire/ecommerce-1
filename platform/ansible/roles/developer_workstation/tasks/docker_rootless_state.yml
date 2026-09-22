@@ -1,0 +1,48 @@
+---
+- name: Require a supported rootless Docker runtime state
+  ansible.builtin.assert:
+    that:
+      - developer_workstation_docker_rootless_service_state in ['started', 'stopped']
+    fail_msg: Rootless Docker runtime state must be started or stopped.
+
+- name: Reconcile rootless Docker user service state
+  ansible.builtin.systemd_service:
+    name: docker.service
+    scope: user
+    daemon_reload: true
+    enabled: false
+    state: "{{ developer_workstation_docker_rootless_service_state }}"
+  environment:
+    XDG_RUNTIME_DIR: "{{ developer_workstation_docker_rootless_runtime_dir }}"
+    DBUS_SESSION_BUS_ADDRESS: >-
+      unix:path={{ developer_workstation_docker_rootless_runtime_dir }}/bus
+
+- name: Verify exact rootless Docker client and server
+  ansible.builtin.command:
+    argv:
+      - "{{ developer_workstation_docker_rootless_home }}/.local/bin/docker"
+      - version
+      - --format
+      - "client={{ '{{.Client.Version}}' }} server={{ '{{.Server.Version}}' }}"
+  register: developer_workstation_docker_rootless_version
+  changed_when: false
+  when: developer_workstation_docker_rootless_service_state == 'started'
+  failed_when: >-
+    developer_workstation_docker_rootless_version.rc != 0 or
+    developer_workstation_docker_rootless_version.stdout | trim !=
+    'client=' + developer_workstation_docker_engine_version +
+    ' server=' + developer_workstation_docker_engine_version
+
+- name: Verify Docker Engine is rootless
+  ansible.builtin.command:
+    argv:
+      - "{{ developer_workstation_docker_rootless_home }}/.local/bin/docker"
+      - info
+      - --format
+      - "{{ '{{json .SecurityOptions}}' }}"
+  register: developer_workstation_docker_rootless_security
+  changed_when: false
+  when: developer_workstation_docker_rootless_service_state == 'started'
+  failed_when: >-
+    developer_workstation_docker_rootless_security.rc != 0 or
+    'name=rootless' not in developer_workstation_docker_rootless_security.stdout

@@ -52,14 +52,4 @@ winget.exe configure validate -f $cfg --disable-interactivity
 winget.exe configure test -f $cfg @configureCommon | Out-Host
 winget.exe configure -f $cfg @configureCommon
 
-# Docker Desktop is controlled through its supported CLI when available.
-$docker = Get-Command docker.exe -ErrorAction SilentlyContinue
-if ($docker) {
-  try {
-    $status = (& docker.exe desktop status 2>$null | Out-String).Trim()
-    if ($status -notmatch 'running') { & docker.exe desktop start | Out-Host }
-  } catch {
-    Write-Host 'SKIP Docker Desktop CLI control: desktop subcommand unavailable; WSL-side validation will decide readiness.'
-  }
-}
-Write-Host 'PASS Windows/WSL desired state reconciled. WSL networking changes take effect on the next WSL restart.'
+Write-Host 'PASS Windows/WSL desired state reconciled. Rootless Docker is provisioned inside Ubuntu by Ansible.'

@@ -70,7 +70,13 @@ terraform: ## Validate Terraform/OpenTofu sources when present
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory rke2-local-ha-restore-bundle rke2-local-ha-prepare rke2-local-ha-qualification
+.PHONY: mgmt-runtime-inventory rke2-local-ha-restore-bundle rke2-local-ha-prepare rke2-local-ha-qualification container-runtime-bootstrap container-runtime-qualification
+
+container-runtime-bootstrap: ## Provision exact rootless Docker Engine and keep Docker Desktop untouched
+	@$(PYTHON) scripts/repoctl.py reconcile --tags docker
+
+container-runtime-qualification: ## Qualify rootless Docker/Testcontainers/kind and optionally retire Desktop
+	@$(PYTHON) scripts/repoctl.py container-runtime-qualification $(if $(RETIRE_DOCKER_DESKTOP),--retire-docker-desktop,)
 
 rke2-local-ha-restore-bundle: ## Restore the exact PR 128 bundle offline from SOURCE=/absolute/path
 	@$(PYTHON) scripts/repoctl.py rke2-local-ha-restore-bundle --source "$(SOURCE)"

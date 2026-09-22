@@ -23,6 +23,32 @@ wsl2:
     dnsTunneling: "true"
     autoProxy: "true"
 
+container_runtime:
+  provider: docker-engine-rootless
+  scope: ubuntu-wsl2-developer-tests
+  version_authority: config/contracts/toolchain-lock.json
+  provisioning_owner: platform/ansible/roles/developer_workstation
+  api_socket: /run/user/%UID%/docker.sock
+  image_pins:
+    kind_node: KIND_NODE_IMAGE
+    testcontainers_postgresql: TESTCONTAINERS_POSTGRES_IMAGE
+    testcontainers_ryuk: TESTCONTAINERS_RYUK_IMAGE
+  lifecycle:
+    startup: on-demand
+    enabled_at_login: false
+    stop_after_qualification: required
+    ha_campaign_state: stopped
+  security:
+    rootful_daemon: disabled
+    tcp_socket: forbidden
+    ryuk_cleanup: required
+  qualification:
+    - docker-info-rootless
+    - testcontainers-postgresql
+    - ryuk-zero-container-cleanup
+    - kind-single-node-smoke
+    - memory-before-during-after
+
 winget:
   projection: .config/configuration.winget
   processor: dscv3
@@ -39,9 +65,6 @@ winget:
       source: winget
     VSCode:
       id: Microsoft.VisualStudioCode
-      source: winget
-    DockerDesktop:
-      id: Docker.DockerDesktop
       source: winget
     GitHubCLI:
       id: GitHub.cli
