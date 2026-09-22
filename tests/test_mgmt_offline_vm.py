@@ -98,19 +98,46 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
         self.assertIn('content: \'{{ "{{ rke2_probe.stdout }}" }}\'', server)
         self.assertNotIn(r"rke2_probe.stdout }}\n", server)
 
-    def test_create_uses_bounded_native_ansible_ssh_readiness(self):
+    def test_create_uses_canonical_bounded_native_ansible_ssh_readiness(self):
+        contract = (FIXTURE / "contract.yml").read_text()
         create = (FIXTURE / "create.yml").read_text()
 
-        self.assertIn("ConnectTimeout 3", create)
-        self.assertIn("ConnectionAttempts 1", create)
+        for value in (
+            "connect_timeout_seconds: 3",
+            "connection_attempts: 1",
+            "readiness_timeout_seconds: 300",
+            "readiness_sleep_seconds: 3",
+        ):
+            self.assertIn(value, contract)
+
+        self.assertIn(
+            "ConnectTimeout {{ mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds }}",
+            create,
+        )
+        self.assertIn(
+            "ConnectionAttempts {{ mgmt_local_vm_contract.transport.ssh.connection_attempts }}",
+            create,
+        )
+        self.assertIn(
+            'timeout: "{{ mgmt_local_vm_contract.transport.ssh.readiness_timeout_seconds }}"',
+            create,
+        )
+        self.assertIn(
+            'connect_timeout: "{{ mgmt_local_vm_contract.transport.ssh.connect_timeout_seconds }}"',
+            create,
+        )
+        self.assertIn(
+            'sleep: "{{ mgmt_local_vm_contract.transport.ssh.readiness_sleep_seconds }}"',
+            create,
+        )
+        self.assertNotIn("ConnectTimeout 3", create)
+        self.assertNotIn("ConnectionAttempts 1", create)
+        self.assertNotIn("timeout: 300", create)
         self.assertIn(
             "Register isolated guest for native Ansible connection checks",
             create,
         )
         self.assertIn("ansible.builtin.wait_for_connection:", create)
-        self.assertIn("timeout: 300", create)
-        self.assertIn("connect_timeout: 3", create)
-        self.assertIn("sleep: 3", create)
         self.assertIn("Gather real guest facts after SSH is available", create)
         self.assertIn("ansible.builtin.setup:", create)
         self.assertIn("Require a real enforcing non-container guest kernel", create)
@@ -123,10 +150,6 @@ class MgmtOfflineVmMutationTests(unittest.TestCase):
             create,
         )
         self.assertNotIn("Wait for SSH and require real enforcing guest kernel", create)
-        self.assertNotIn(
-            'argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", getenforce]',
-            create,
-        )
 
     def test_restage_cleanup_refuses_state_outside_explicit_roots(self):
         with tempfile.TemporaryDirectory() as directory:
