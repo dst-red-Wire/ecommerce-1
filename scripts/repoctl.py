@@ -105,6 +105,41 @@ class MissingRunnerPrerequisite(RuntimeError):
     """A runner-owned primitive is absent; repository code must not install it."""
 
 
+def _runtime_api():
+    # Kept lazy so the completed #128 proof's bounded module-prefix snapshot is
+    # not invalidated by an unrelated runtime-orchestration implementation.
+    import runtime_orchestration
+
+    return runtime_orchestration
+
+
+def _runtime_requirement_names(declaration: object) -> list[str]:
+    if declaration is None:
+        return []
+    if isinstance(declaration, dict):
+        if declaration == {"inherit_from_selected_gates": True}:
+            return []
+        raise RuntimeError("runtime capability inheritance declaration is invalid")
+    if not isinstance(declaration, list):
+        raise TypeError("runtime capabilities must be a list or selected-gate inheritance")
+    names: list[str] = []
+    for item in declaration:
+        if isinstance(item, str):
+            name = item
+        elif isinstance(item, dict):
+            name = item.get("name")
+            if not isinstance(item.get("parameters", {}), dict) or not isinstance(item.get("when", {}), dict):
+                raise TypeError("runtime capability parameters/condition must be mappings")
+        else:
+            raise TypeError("runtime capability declaration contains an invalid entry")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError("runtime capability declaration has no name")
+        names.append(name)
+    if len(names) != len(set(names)):
+        raise RuntimeError("runtime capability declaration contains duplicates")
+    return names
+
+
 def fail(message: str, code: int = 2) -> int:
     print(f"FAIL {message}", file=sys.stderr)
     return code
@@ -414,6 +449,18 @@ def qualification_execution_policy() -> dict:
         gates = policy.get("gates")
         if not isinstance(gates, dict) or not gates:
             raise RuntimeError("qualification execution policy must declare gates")
+        runtime_policy = policy.get("runtime_orchestration")
+        if not isinstance(runtime_policy, dict):
+            raise RuntimeError("qualification execution policy must declare runtime_orchestration")
+        _runtime_api().validate_runtime_policy(runtime_policy)
+        capability_names = set(runtime_policy["capabilities"])
+        for gate_name, gate in gates.items():
+            if not isinstance(gate, dict):
+                continue
+            referenced = set(_runtime_requirement_names(gate.get("runtime_capabilities")))
+            unknown = sorted(referenced - capability_names)
+            if unknown:
+                raise RuntimeError(f"gate {gate_name} references unknown runtime capabilities: {unknown}")
         global_gate_order = execution.get("global_gate_order")
         executable_globals = {
             name
@@ -551,6 +598,12 @@ def qualification_execution_policy() -> dict:
                 raise RuntimeError(f"qualification workflow {workflow_name} exit_criteria are invalid")
             if not isinstance(evidence, dict) or not evidence:
                 raise RuntimeError(f"qualification workflow {workflow_name} evidence contract is invalid")
+            referenced = set(_runtime_requirement_names(workflow.get("runtime_capabilities")))
+            unknown = sorted(referenced - capability_names)
+            if unknown:
+                raise RuntimeError(
+                    f"qualification workflow {workflow_name} references unknown runtime capabilities: {unknown}"
+                )
             for evidence_name, evidence_path in evidence.items():
                 if not isinstance(evidence_name, str) or not evidence_name:
                     raise RuntimeError(f"qualification workflow {workflow_name} evidence key is invalid")
@@ -767,6 +820,20 @@ def _resolved_gate_policy(name: str) -> dict:
             for token, replacement in replacements.items():
                 value = value.replace(token, replacement)
             resolved["requires_path"] = value
+        runtime_capabilities = resolved.get("runtime_capabilities")
+        if isinstance(runtime_capabilities, list):
+            def replace_tokens(value):
+                if isinstance(value, str):
+                    for token, replacement in replacements.items():
+                        value = value.replace(token, replacement)
+                    return value
+                if isinstance(value, list):
+                    return [replace_tokens(item) for item in value]
+                if isinstance(value, dict):
+                    return {key: replace_tokens(item) for key, item in value.items()}
+                return value
+
+            resolved["runtime_capabilities"] = replace_tokens(runtime_capabilities)
     resolved["_policy_name"] = pattern_name
     mode = resolved.get("cache_mode")
     if mode not in {"content-pass", "native-only", "fresh", "forbidden", "composed"}:
@@ -776,6 +843,7 @@ def _resolved_gate_policy(name: str) -> dict:
     dependencies = resolved.get("dependencies", [])
     if not isinstance(dependencies, list) or any(not isinstance(item, str) or not item for item in dependencies):
         raise RuntimeError(f"gate {name} has invalid dependencies")
+    _runtime_requirement_names(resolved.get("runtime_capabilities"))
     command = resolved.get("command")
     if command is not None:
         if not isinstance(command, dict) or not isinstance(command.get("action"), str) or not command["action"].strip():
@@ -2465,9 +2533,6 @@ def service_check(service: str) -> int:
     capabilities = ["go", "cgo"]
     if (module / "sqlc.yaml").is_file():
         capabilities.append("sqlc")
-    selected_tests = list(module.rglob("*_test.go"))
-    needs_containers = any("testcontainers" in path.read_text(encoding="utf-8") for path in selected_tests)
-
     # Capability reconciliation is always fresh. Content cache only covers deterministic
     # source checks after the required pinned tools are proven available.
     ensure_developer(",".join(capabilities))
@@ -2514,19 +2579,6 @@ def service_check(service: str) -> int:
     static_rc = _run_cached_gate(f"service-static:{service}", {}, static_checks)
     if static_rc:
         return static_rc
-
-    # Runtime capability must never be content-cached. Check it before starting any
-    # Testcontainers-aware test suite so incapable hosts fail fast.
-    if needs_containers:
-        docker = shutil.which("docker")
-        forwarding = run(["sysctl", "-n", "net.ipv4.ip_forward"], check=False, capture=True)
-        docker_ready = bool(docker) and run([docker, "info"], check=False, capture=True).returncode == 0
-        if not docker_ready or forwarding.returncode or forwarding.stdout.strip() != "1":
-            return fail(
-                "PLATFORM NOT CAPABLE: container integration requires Docker user/daemon access "
-                "and net.ipv4.ip_forward=1",
-                2,
-            )
 
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
@@ -3096,6 +3148,7 @@ def qualification_identity() -> str:
     digest = hashlib.sha256()
     for relative in (
         "scripts/repoctl.py",
+        "scripts/runtime_orchestration.py",
         "scripts/ci-affected.rb",
         "config/contracts/ci-evidence.yaml",
         "config/contracts/ci-topology.yaml",
@@ -3581,9 +3634,206 @@ def build_execution_plan(
                 "parallel_safe": bool(policy.get("parallel_safe")),
                 "dependencies": list(policy.get("dependencies", [])),
                 "ci_fanout": bool(policy.get("ci_fanout")),
+                "runtime_capabilities": copy.deepcopy(policy.get("runtime_capabilities", [])),
             }
         )
     return plan
+
+
+def _runtime_condition_matches(condition: dict) -> bool:
+    if not condition:
+        return True
+    path_glob = condition.get("path_glob")
+    contains = condition.get("contains")
+    if not isinstance(path_glob, str) or not path_glob or not isinstance(contains, str) or not contains:
+        raise RuntimeError("runtime capability condition must declare path_glob and contains")
+    return any(
+        path.is_file() and contains in path.read_text(encoding="utf-8")
+        for path in ROOT.glob(path_glob)
+    )
+
+
+def _runtime_parameters(raw: object, context: dict[str, object]) -> dict[str, object]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise TypeError("runtime capability parameters must be a mapping")
+    resolved: dict[str, object] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict) and set(value) == {"context"}:
+            context_name = value["context"]
+            if not isinstance(context_name, str) or context_name not in context:
+                raise RuntimeError(f"runtime capability parameter context is missing: {context_name!r}")
+            resolved[str(key)] = context[context_name]
+        else:
+            resolved[str(key)] = value
+    return resolved
+
+
+def _runtime_requests(
+    plan: list[dict],
+    *,
+    workflow_capabilities: object = None,
+    context: dict[str, object] | None = None,
+) -> list[object]:
+    runtime = _runtime_api()
+    values: list[object] = []
+    capability_context = context or {}
+    for entry in plan:
+        if entry.get("action") not in {"run", "fresh"}:
+            continue
+        declaration = entry.get("runtime_capabilities", [])
+        if not isinstance(declaration, list):
+            raise TypeError(f"gate {entry.get('gate')} runtime capabilities must be a list")
+        values.extend(declaration)
+    if isinstance(workflow_capabilities, list):
+        values.extend(workflow_capabilities)
+    elif workflow_capabilities not in (None, {"inherit_from_selected_gates": True}):
+        raise RuntimeError("workflow runtime capabilities declaration is invalid")
+
+    requests: list[object] = []
+    for value in values:
+        if isinstance(value, str):
+            requests.append(runtime.CapabilityRequest(value))
+            continue
+        if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+            raise TypeError("runtime capability request is invalid")
+        condition = value.get("when", {})
+        if not isinstance(condition, dict) or not _runtime_condition_matches(condition):
+            continue
+        requests.append(
+            runtime.CapabilityRequest(
+                value["name"],
+                _runtime_parameters(value.get("parameters"), capability_context),
+            )
+        )
+    return requests
+
+
+def _runtime_source(head: str) -> tuple[str, str]:
+    source_sha = git("rev-parse", "HEAD").strip()
+    return ("worktree", source_sha) if head == "WORKTREE" else ("exact-sha", source_sha)
+
+
+def _execute_with_runtime(
+    plan: list[dict],
+    callback,
+    *,
+    workflow: str,
+    head: str,
+    environment: dict[str, str],
+    workflow_capabilities: object = None,
+    capability_context: dict[str, object] | None = None,
+    authoritative: bool = False,
+    records: list[dict] | None = None,
+) -> int:
+    if environment.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
+        return callback(environment)
+    runtime = _runtime_api()
+    requests = _runtime_requests(
+        plan,
+        workflow_capabilities=workflow_capabilities,
+        context=capability_context,
+    )
+    source_kind, source_sha = _runtime_source(head)
+    executor = runtime.RuntimeExecutor(
+        ROOT,
+        qualification_execution_policy()["runtime_orchestration"],
+        driver=runtime.BuiltinCapabilityDriver(environment),
+    )
+    result = executor.execute(
+        requests,
+        callback,
+        workflow=workflow,
+        source_kind=source_kind,
+        source_sha=source_sha,
+        selected_gates=[str(entry["gate"]) for entry in plan],
+        base_environment=environment,
+        authoritative=authoritative,
+        gate_results=(lambda: copy.deepcopy(records or [])),
+    )
+    if result.evidence_path is not None:
+        print(
+            f"RUNTIME_ORCHESTRATION {result.status} "
+            f"evidence={result.evidence_path.relative_to(ROOT)}"
+        )
+    return result.exit_code
+
+
+def _execute_direct_gate_with_runtime(
+    gate: str,
+    child_args: list[str],
+    *,
+    head: str = "WORKTREE",
+    authoritative: bool = False,
+) -> int:
+    policy = _resolved_gate_policy(gate)
+    records: list[dict] = []
+    plan = [
+        {
+            "gate": gate,
+            "scope": policy.get("scope"),
+            "action": "fresh" if policy.get("cache_mode") == "fresh" else "run",
+            "runtime_capabilities": copy.deepcopy(policy.get("runtime_capabilities", [])),
+        }
+    ]
+    env = os.environ.copy()
+    def execute(runtime_env: dict[str, str]) -> int:
+        result = run(_controller_command(*child_args), check=False, env=runtime_env)
+        records.append(
+            {"gate": gate, "status": "PASS" if result.returncode == 0 else "FAIL", "exit_code": result.returncode}
+        )
+        return result.returncode
+
+    return _execute_with_runtime(
+        plan,
+        execute,
+        workflow=f"gate:{gate}",
+        head=head,
+        environment=env,
+        authoritative=authoritative,
+        records=records,
+    )
+
+
+def _execute_workflow_with_runtime(
+    workflow_name: str,
+    child_args: list[str],
+    *,
+    capability_context: dict[str, object] | None = None,
+) -> int:
+    workflow = qualification_workflow(workflow_name)
+    head = git("rev-parse", "HEAD").strip()
+    if workflow.get("clean_worktree_required") is True and git(
+        "status", "--porcelain", "--untracked-files=all"
+    ).strip():
+        return fail(f"{workflow_name} requires a clean exact-SHA worktree before runtime preparation")
+    plan: list[dict] = []
+    env = os.environ.copy()
+    records: list[dict] = []
+
+    def execute(runtime_env: dict[str, str]) -> int:
+        result = run(_controller_command(*child_args), check=False, env=runtime_env)
+        records.append(
+            {
+                "gate": f"workflow:{workflow_name}",
+                "status": "PASS" if result.returncode == 0 else "FAIL",
+                "exit_code": result.returncode,
+            }
+        )
+        return result.returncode
+
+    return _execute_with_runtime(
+        plan,
+        execute,
+        workflow=workflow_name,
+        head=head,
+        environment=env,
+        workflow_capabilities=workflow.get("runtime_capabilities"),
+        capability_context=capability_context,
+        authoritative=workflow.get("merge_authoritative") is True,
+        records=records,
+    )
 
 
 def _execute_plan_scope(
@@ -4151,45 +4401,68 @@ def verify_change(base: str, head: str) -> int:
         for entry in plan
     ]
 
-    for scope in ("global", "component"):
-        before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
-        if not _execute_plan_scope(plan, scope, records, env, parent_sha, parent_evidence):
-            write_evidence(base, head, paths, components, records, verification)
-            return 1
+    def execute_selected(runtime_env: dict[str, str]) -> int:
+        for scope in ("global", "component"):
+            before_tree = worktree_tree_sha() if head == "WORKTREE" else ""
+            if not _execute_plan_scope(plan, scope, records, runtime_env, parent_sha, parent_evidence):
+                return 1
+            if head == "WORKTREE":
+                after_tree = worktree_tree_sha()
+                if after_tree != before_tree:
+                    mutated_paths = git("diff", "--name-only", before_tree, after_tree).splitlines()
+                    records.append(
+                        {
+                            "gate": "worktree-stability",
+                            "status": "FAIL",
+                            "exit_code": 1,
+                            "duration_seconds": 0.0,
+                            "execution": "fresh",
+                            "reason": f"{scope} execution-plan batch mutated worktree",
+                            "mutated_paths": mutated_paths,
+                        }
+                    )
+                    return fail(f"{scope} execution-plan batch mutated worktree: {mutated_paths}", 1)
+
         if head == "WORKTREE":
-            after_tree = worktree_tree_sha()
-            if after_tree != before_tree:
-                mutated_paths = git("diff", "--name-only", before_tree, after_tree).splitlines()
+            final_tree_sha = worktree_tree_sha()
+            verification["final_tree_sha"] = final_tree_sha
+            verification["tree_stable"] = final_tree_sha == source_tree_sha
+            if final_tree_sha != source_tree_sha:
                 records.append(
                     {
                         "gate": "worktree-stability",
                         "status": "FAIL",
                         "exit_code": 1,
                         "duration_seconds": 0.0,
-                        "execution": "fresh",
-                        "reason": f"{scope} execution-plan batch mutated worktree",
-                        "mutated_paths": mutated_paths,
+                        "reason": "tracked/untracked commit tree changed during verification",
                     }
                 )
-                write_evidence(base, head, paths, components, records, verification)
-                return fail(f"{scope} execution-plan batch mutated worktree: {mutated_paths}", 1)
+                return fail("worktree changed during verification; evidence is not promotable", 1)
+        return 0
 
-    if head == "WORKTREE":
-        final_tree_sha = worktree_tree_sha()
-        verification["final_tree_sha"] = final_tree_sha
-        verification["tree_stable"] = final_tree_sha == source_tree_sha
-        if final_tree_sha != source_tree_sha:
+    runtime_rc = _execute_with_runtime(
+        plan,
+        execute_selected,
+        workflow="verify-change",
+        head=head,
+        environment=env,
+        authoritative=head != "WORKTREE",
+        records=records,
+    )
+    if runtime_rc:
+        if not records:
             records.append(
                 {
-                    "gate": "worktree-stability",
-                    "status": "FAIL",
-                    "exit_code": 1,
+                    "gate": "runtime-orchestration",
+                    "status": "BLOCKED_RUNTIME" if runtime_rc == 2 else "FAIL",
+                    "exit_code": runtime_rc,
                     "duration_seconds": 0.0,
-                    "reason": "tracked/untracked commit tree changed during verification",
+                    "execution": "fresh",
+                    "reason": "runtime transaction did not reach gate execution",
                 }
             )
-            write_evidence(base, head, paths, components, records, verification)
-            return fail("worktree changed during verification; evidence is not promotable", 1)
+        write_evidence(base, head, paths, components, records, verification)
+        return runtime_rc
 
     ev = write_evidence(base, head, paths, components, records, verification)
     if head != "WORKTREE" and git("status", "--porcelain", "--untracked-files=all").strip():
@@ -4213,8 +4486,19 @@ def global_check(base: str, head: str) -> int:
     )
     plan = build_execution_plan(base, head, ["global"])
     before = worktree_tree_sha() if head == "WORKTREE" else ""
-    if not _execute_plan_scope(plan, "global", records, env, None, None):
-        return 1
+    runtime_rc = _execute_with_runtime(
+        plan,
+        lambda runtime_env: 0
+        if _execute_plan_scope(plan, "global", records, runtime_env, None, None)
+        else 1,
+        workflow="global-check",
+        head=head,
+        environment=env,
+        authoritative=head != "WORKTREE",
+        records=records,
+    )
+    if runtime_rc:
+        return runtime_rc
     if head == "WORKTREE" and worktree_tree_sha() != before:
         return fail("global-check mutated worktree", 1)
     print(f"PASS global-check gates={len(records)}")
@@ -5237,11 +5521,6 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         return fail(
             "RKE2 local qualification inputs must use the canonical approved manifest digest"
         )
-    if not _canonical_rke2_vagrant_ready():
-        return fail(
-            f"RKE2 local qualification requires canonical Vagrant {_canonical_rke2_vagrant_version()}"
-        )
-
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
     frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
 
@@ -5866,6 +6145,10 @@ def main() -> int:
         if args.cmd == "security":
             return security()
         if args.cmd == "terraform":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_direct_gate_with_runtime(
+                    "platform:terraform", ["terraform"]
+                )
             # Availability/provider identity must be checked fresh; deterministic
             # validation work may then be reused by content identity.
             terraform_root = ROOT / "platform" / "terraform"
@@ -5881,6 +6164,10 @@ def main() -> int:
                 validate_terraform_lockfile_projections(terraform_provider_lock_contract())
             return _run_cached_gate("platform:terraform", {}, terraform_check)
         if args.cmd == "ansible":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_direct_gate_with_runtime(
+                    "platform:ansible", ["ansible"]
+                )
             return ansible_check()
         if args.cmd == "system":
             return system_check()
@@ -5895,6 +6182,15 @@ def main() -> int:
         if args.cmd == "product-benchmark":
             return product_benchmark()
         if args.cmd == "service":
+            if (
+                re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", args.service or "") is None
+                or args.service not in canonical_services()
+            ):
+                return service_check(args.service)
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_direct_gate_with_runtime(
+                    f"service:{args.service}", ["service", args.service]
+                )
             return service_check(args.service)
         if args.cmd == "affected":
             comps = affected(args.base, args.head)
@@ -5907,6 +6203,27 @@ def main() -> int:
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
         if args.cmd == "rke2-local-virtualbox-qualification":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                input_path = Path(args.inputs)
+                if not input_path.is_absolute():
+                    input_path = ROOT / input_path
+                try:
+                    input_values = json.loads(input_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    input_values = {}
+                contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
+                resources = contract["mgmt_local_vm_contract"]["resources"]
+                defaults = resources["artifact_default"]
+                capability_context = {
+                    "vm_memory": input_values.get("vm_memory", defaults["memory_mib"]),
+                    "vm_cpus": input_values.get("vm_cpus", defaults["cpus"]),
+                    "vagrant_expected_stdout": f"Vagrant {contract['mgmt_local_vm_contract']['vagrant']['version']}",
+                }
+                return _execute_workflow_with_runtime(
+                    "rke2_local_virtualbox",
+                    ["rke2-local-virtualbox-qualification", "--inputs", args.inputs],
+                    capability_context=capability_context,
+                )
             return rke2_local_virtualbox_qualification(args.inputs)
         if args.cmd == "perf-campaign":
             return performance_campaign(args.base, args.output)
@@ -5938,6 +6255,21 @@ def main() -> int:
         if args.cmd == "resource-candidate":
             return resource_candidate(args.evidence)
         if args.cmd == "tekton-proof":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_workflow_with_runtime(
+                    "tekton_proof",
+                    [
+                        "tekton-proof",
+                        "--runtime-config",
+                        args.runtime_config,
+                        "--base-sha",
+                        args.base_sha,
+                        "--parent-sha",
+                        args.parent_sha,
+                        "--head-sha",
+                        args.head_sha,
+                    ],
+                )
             return tekton_proof(args.runtime_config, args.base_sha, args.parent_sha, args.head_sha)
         if args.cmd == "doctor":
             return doctor()
@@ -5968,8 +6300,42 @@ def main() -> int:
         if args.cmd == "source-check":
             return source_check(args.head)
         if args.cmd == "ci-global":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_direct_gate_with_runtime(
+                    args.gate,
+                    [
+                        "ci-global",
+                        "--gate",
+                        args.gate,
+                        "--base",
+                        args.base,
+                        "--head",
+                        args.head,
+                        "--record-dir",
+                        args.record_dir,
+                    ],
+                    head=args.head,
+                    authoritative=True,
+                )
             return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":
+            if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+                return _execute_direct_gate_with_runtime(
+                    args.component,
+                    [
+                        "ci-component",
+                        "--component",
+                        args.component,
+                        "--base",
+                        args.base,
+                        "--head",
+                        args.head,
+                        "--record-dir",
+                        args.record_dir,
+                    ],
+                    head=args.head,
+                    authoritative=True,
+                )
             return ci_component(args.component, args.base, args.head, args.record_dir)
         if args.cmd == "ci-finalize":
             return ci_finalize(args.base, args.head, args.record_dir)
@@ -5986,7 +6352,7 @@ def main() -> int:
     except MissingRunnerPrerequisite as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 1
-    except (RuntimeError, KeyError, ValueError, json.JSONDecodeError) as exc:
+    except (RuntimeError, TypeError, KeyError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc), 1)
     return 2
 

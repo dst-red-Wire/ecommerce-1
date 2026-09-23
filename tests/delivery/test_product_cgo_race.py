@@ -1,5 +1,7 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -13,16 +15,27 @@ class ProductCgoRaceContract(unittest.TestCase):
 
     def test_static_service_work_is_cached_but_runtime_tests_stay_fresh(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('service-static:{service}', text)
-        self.assertLess(text.index('docker_ready ='), text.index('["go", "test", "-race", "./..."]'))
+        policy = yaml.safe_load(
+            (ROOT / "config/contracts/qualification-execution-policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn("service-static:{service}", text)
         static_start = text.index("def static_checks()")
         runtime_test = text.index('["go", "test", "-race", "./..."]')
         self.assertLess(static_start, runtime_test)
         self.assertIn('run(["go", "vet", "./..."]', text[static_start:runtime_test])
         self.assertIn('run(["go", "build", "./..."]', text[static_start:runtime_test])
+        declaration = policy["gates"]["service:*"]["runtime_capabilities"]
+        self.assertEqual("testcontainers", declaration[0]["name"])
+        self.assertEqual(
+            "forbidden", policy["runtime_orchestration"]["rules"]["dynamic_state_cache"]
+        )
 
     def test_cgo_compiler_is_reconciled_by_ansible(self):
-        text = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        text = (
+            ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml"
+        ).read_text(encoding="utf-8")
         self.assertIn("build-essential", text)
         self.assertRegex(text, r"tags: \[[^\]]*go[^\]]*cgo[^\]]*\]")
 
