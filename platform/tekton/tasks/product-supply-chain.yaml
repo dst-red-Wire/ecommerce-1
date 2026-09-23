@@ -1,0 +1,174 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-product-build-push
+spec:
+  params:
+    - {name: runner-image, type: string}
+    - {name: buildah-image, type: string}
+    - {name: skopeo-image, type: string}
+    - {name: head, type: string}
+    - {name: image-repository, type: string}
+    - {name: registry-auth-secret, type: string}
+  results:
+    - name: image-digest
+      description: Immutable digest resolved from Harbor after the push.
+  workspaces:
+    - name: source
+  steps:
+    - name: verify-exact-source
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args: [source-check, --head, $(params.head)]
+    - name: build-multi-arch
+      image: $(params.buildah-image)
+      workingDir: $(workspaces.source.path)
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - {name: STORAGE_DRIVER, value: vfs}
+        - {name: REGISTRY_AUTH_FILE, value: /var/run/registry/config.json}
+      command: [buildah]
+      args:
+        - --root=$(workspaces.source.path)/.context/buildah-root
+        - --runroot=$(workspaces.source.path)/.context/buildah-runroot
+        - bud
+        - --isolation=chroot
+        - --storage-driver=vfs
+        - --platform=linux/amd64,linux/arm64
+        - --manifest=$(params.image-repository):sha-$(params.head)
+        - --build-arg=SOURCE_REVISION=$(params.head)
+        - --file=services/product/Containerfile
+        - services/product
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+    - name: push-multi-arch
+      image: $(params.buildah-image)
+      workingDir: $(workspaces.source.path)
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      env:
+        - {name: STORAGE_DRIVER, value: vfs}
+        - {name: REGISTRY_AUTH_FILE, value: /var/run/registry/config.json}
+      command: [buildah]
+      args: [--root=$(workspaces.source.path)/.context/buildah-root, --runroot=$(workspaces.source.path)/.context/buildah-runroot, manifest, push, --all, --storage-driver=vfs, $(params.image-repository):sha-$(params.head), docker://$(params.image-repository):sha-$(params.head)]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+    - name: resolve-immutable-digest
+      image: $(params.skopeo-image)
+      env:
+        - {name: REGISTRY_AUTH_FILE, value: /var/run/registry/config.json}
+      command: [skopeo]
+      args: [inspect, --format, "{{.Digest}}", docker://$(params.image-repository):sha-$(params.head)]
+      stdoutConfig:
+        path: $(results.image-digest.path)
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+  volumes:
+    - name: registry-auth
+      secret:
+        secretName: $(params.registry-auth-secret)
+        items:
+          - {key: .dockerconfigjson, path: config.json}
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-product-scan-sbom
+spec:
+  params:
+    - {name: trivy-image, type: string}
+    - {name: syft-image, type: string}
+    - {name: image-reference, type: string}
+    - {name: head, type: string}
+    - {name: registry-auth-secret, type: string}
+  workspaces:
+    - name: source
+  steps:
+    - name: trivy
+      image: $(params.trivy-image)
+      workingDir: $(workspaces.source.path)
+      env:
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+      command: [trivy]
+      args: [image, --exit-code, "1", --ignore-unfixed, --severity, HIGH,CRITICAL, --format, json, --output, .context/product-trivy-$(params.head).json, $(params.image-reference)]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+    - name: syft
+      image: $(params.syft-image)
+      workingDir: $(workspaces.source.path)
+      env:
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+      command: [syft]
+      args: [$(params.image-reference), --output, spdx-json=.context/product-sbom-$(params.head).spdx.json]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+  volumes:
+    - name: registry-auth
+      secret:
+        secretName: $(params.registry-auth-secret)
+        items:
+          - {key: .dockerconfigjson, path: config.json}
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: ecommerce-product-sign-attest
+spec:
+  params:
+    - {name: cosign-image, type: string}
+    - {name: image-reference, type: string}
+    - {name: head, type: string}
+    - {name: signing-secret, type: string}
+    - {name: registry-auth-secret, type: string}
+  workspaces:
+    - name: source
+  steps:
+    - name: sign
+      image: $(params.cosign-image)
+      workingDir: $(workspaces.source.path)
+      env:
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+        - name: COSIGN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.signing-secret)
+              key: password
+      command: [cosign]
+      args: [sign, --yes, --key, /var/run/cosign/cosign.key, $(params.image-reference)]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+        - {name: signing-key, mountPath: /var/run/cosign, readOnly: true}
+    - name: attest-sbom
+      image: $(params.cosign-image)
+      workingDir: $(workspaces.source.path)
+      env:
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+        - name: COSIGN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.signing-secret)
+              key: password
+      command: [cosign]
+      args: [attest, --yes, --key, /var/run/cosign/cosign.key, --type, spdxjson, --predicate, .context/product-sbom-$(params.head).spdx.json, $(params.image-reference)]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+        - {name: signing-key, mountPath: /var/run/cosign, readOnly: true}
+  volumes:
+    - name: registry-auth
+      secret:
+        secretName: $(params.registry-auth-secret)
+        items:
+          - {key: .dockerconfigjson, path: config.json}
+    - name: signing-key
+      secret:
+        secretName: $(params.signing-secret)
+        items:
+          - {key: cosign.key, path: cosign.key}

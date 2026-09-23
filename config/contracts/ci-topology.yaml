@@ -65,6 +65,7 @@ pipelines:
   global: platform/tekton/pipelines/global.yaml
   frontend: platform/tekton/pipelines/frontend.yaml
   go_service: platform/tekton/pipelines/go-service.yaml
+  product_release: platform/tekton/pipelines/product-release.yaml
   platform: platform/tekton/pipelines/platform.yaml
   affected: platform/tekton/pipelines/affected.yaml
 
