@@ -28,6 +28,11 @@
     mgmt_internal_ntp: "{{ lookup('ansible.builtin.env', 'MGMT_INTERNAL_NTP_JSON') | from_json }}"
 
   tasks:
+    - name: Assign the runtime hostname from the canonical inventory identity
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+        use: systemd
+
     - name: Verify and install controller-delivered offline prerequisites
       ansible.builtin.include_role:
         name: mgmt_offline_artifacts

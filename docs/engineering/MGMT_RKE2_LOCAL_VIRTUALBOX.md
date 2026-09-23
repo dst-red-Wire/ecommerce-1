@@ -1,6 +1,9 @@
 # MGMT RKE2 local VirtualBox evidence
 
-This page records the bounded local result obtained on 2026-09-20 and points to
+This page is superseded Rocky 9.8 evidence retained for audit history. The active
+Rocky 10.2 image authority is `config/contracts/machine-image-lock.yaml`.
+
+It records the bounded local result obtained on 2026-09-20 and points to
 the Git-owned reproduction path. It is evidence for the local functional fixture,
 not acceptance of the six real MGMT nodes.
 

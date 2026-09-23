@@ -48,7 +48,7 @@ class OfflineBundleTests(unittest.TestCase):
         self.manifest = {
             'schema_version': 1,
             'rke2_version': VERSION,
-            'os': 'rocky-9',
+            'os': 'rocky-10.2',
             'architecture': 'amd64',
             'rpm_dependency_closure': 'complete',
             'image_inventory': {'rke2_version': VERSION, 'archives': image_inventory},

@@ -5,7 +5,7 @@ metadata:
 spec:
   params:
     - {name: runner-image, type: string}
-    - {name: buildah-image, type: string}
+    - {name: buildkit-image, type: string}
     - {name: skopeo-image, type: string}
     - {name: head, type: string}
     - {name: image-repository, type: string}
@@ -21,8 +21,8 @@ spec:
       workingDir: $(workspaces.source.path)
       command: [python3, scripts/repoctl.py]
       args: [source-check, --head, $(params.head)]
-    - name: build-multi-arch
-      image: $(params.buildah-image)
+    - name: build-and-push-multi-arch
+      image: $(params.buildkit-image)
       workingDir: $(workspaces.source.path)
       securityContext:
         runAsNonRoot: true
@@ -30,35 +30,19 @@ spec:
         capabilities:
           drop: ["ALL"]
       env:
-        - {name: STORAGE_DRIVER, value: vfs}
-        - {name: REGISTRY_AUTH_FILE, value: /var/run/registry/config.json}
-      command: [buildah]
+        - {name: HOME, value: /home/user}
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+        - {name: BUILDKITD_FLAGS, value: --oci-worker-no-process-sandbox}
+      command: [buildctl-daemonless.sh]
       args:
-        - --root=$(workspaces.source.path)/.context/buildah-root
-        - --runroot=$(workspaces.source.path)/.context/buildah-runroot
-        - bud
-        - --isolation=chroot
-        - --storage-driver=vfs
-        - --platform=linux/amd64,linux/arm64
-        - --manifest=$(params.image-repository):sha-$(params.head)
-        - --build-arg=SOURCE_REVISION=$(params.head)
-        - --file=services/product/Containerfile
-        - services/product
-      volumeMounts:
-        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
-    - name: push-multi-arch
-      image: $(params.buildah-image)
-      workingDir: $(workspaces.source.path)
-      securityContext:
-        runAsNonRoot: true
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-      env:
-        - {name: STORAGE_DRIVER, value: vfs}
-        - {name: REGISTRY_AUTH_FILE, value: /var/run/registry/config.json}
-      command: [buildah]
-      args: [--root=$(workspaces.source.path)/.context/buildah-root, --runroot=$(workspaces.source.path)/.context/buildah-runroot, manifest, push, --all, --storage-driver=vfs, $(params.image-repository):sha-$(params.head), docker://$(params.image-repository):sha-$(params.head)]
+        - build
+        - --frontend=dockerfile.v0
+        - --local=context=services/product
+        - --local=dockerfile=services/product
+        - --opt=filename=Containerfile
+        - --opt=platform=linux/amd64,linux/arm64
+        - --opt=build-arg:SOURCE_REVISION=$(params.head)
+        - --output=type=image,name=$(params.image-repository):sha-$(params.head),push=true
       volumeMounts:
         - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
     - name: resolve-immutable-digest

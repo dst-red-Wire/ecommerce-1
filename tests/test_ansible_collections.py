@@ -30,7 +30,6 @@ class AnsibleCollectionResolutionTest(unittest.TestCase):
                 "community.docker": "3.7.0",
                 "community.crypto": "2.17.1",
                 "community.sops": "1.6.7",
-                "containers.podman": "1.11.0",
                 "hetzner.hcloud": "2.4.1",
                 "kubernetes.core": "2.4.0",
             },

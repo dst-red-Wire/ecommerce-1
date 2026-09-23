@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: product-migrate
+  labels:
+    {{- include "product.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database-migration
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "product.labels" . | nindent 8 }}
+        app.kubernetes.io/component: database-migration
+    spec:
+      serviceAccountName: product
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: "{{ required "image.repository is required" .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: [/product-migrate]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PRODUCT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.runtime.secretName }}
+                  key: database-url
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}

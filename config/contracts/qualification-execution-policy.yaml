@@ -12,6 +12,317 @@ principles:
   exact_sha_evidence_remains_authoritative: true
   dynamic_state_must_be_fresh: true
 
+runtime_orchestration:
+  enabled: true
+  single_authority: true
+  lifecycle:
+    - resolve
+    - capture
+    - preflight
+    - prepare
+    - verify
+    - execute
+    - restore
+    - verify_restore
+    - evidence
+  rules:
+    preflight_before_mutation: required
+    capture_initial_state: required
+    bounded_mutations: required
+    restore_on_success: required
+    restore_on_failure: required
+    restore_on_interrupt: required
+    restore_verification: required
+    fail_on_restore_failure: required
+    tracked_source_mutation_for_evidence: forbidden
+    evidence_root: .context
+    secrets_in_evidence: forbidden
+    dynamic_state_cache: forbidden
+  mutation_classes:
+    - none
+    - local-ephemeral
+    - local-virtualization
+    - external-governed
+    - production-governed
+  external_paid_resources:
+    implicit_creation: forbidden
+  production:
+    implicit_mutation: forbidden
+    prepare_default: readonly
+  lock:
+    scope: host-user-global
+    runtime_directory_env: XDG_RUNTIME_DIR
+    runtime_relative_path: ecommerce-1/qualification-orchestration.lock
+    fallback_relative_path: .cache/ecommerce-1/runtime/qualification-orchestration.lock
+    timeout_seconds: 30
+    tracked: false
+    crash_safety: operating-system-advisory-lock
+    owner: current-user
+    directory_mode: "0700"
+    file_mode: "0600"
+  mutation_executor:
+    owner: ansible
+    playbook: platform/ansible/runtime-capability.yml
+    persistence: forbidden
+    direct_python_host_mutation: forbidden
+  stale_state:
+    detect_prior_incomplete_evidence: required
+    recapture_current_state: required
+    restore_from_prior_session: forbidden
+  capabilities:
+    docker-runtime:
+      handler: docker-rootless
+      requires: [ansible-runtime]
+      mutation_class: local-ephemeral
+      timeout_seconds: 30
+      privilege: user-systemd
+      global_lock: true
+      operations:
+        detector: docker-info-and-user-service
+        preflight: non-mutating-rootless-ownership-check
+        prepare: ansible-start-rootless-user-service-if-stopped
+        verify: docker-info
+        restore: ansible-restore-captured-user-service-state
+        verify_restore: compare-captured-user-service-state
+      evidence_fields: [satisfied, runtime, docker_host, endpoint_source, service_active, service_state, service_loaded, manager_reachable, socket_present]
+    ip-forward:
+      handler: ip-forward
+      requires: [ansible-runtime]
+      mutation_class: local-ephemeral
+      timeout_seconds: 10
+      privilege: root-or-sudo-noninteractive
+      global_lock: true
+      operations:
+        detector: sysctl-read
+        preflight: noninteractive-privilege-check-when-change-required
+        prepare: ansible-set-one-if-required
+        verify: sysctl-read-one
+        restore: ansible-restore-captured-value
+        verify_restore: compare-captured-value
+      evidence_fields: [satisfied, value, readable]
+    testcontainers:
+      handler: dependency
+      requires: [docker-runtime, ip-forward]
+      mutation_class: none
+      timeout_seconds: 1
+      privilege: none
+      global_lock: false
+      operations:
+        detector: dependency-closure
+        preflight: dependency-closure
+        prepare: none
+        verify: dependency-closure
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied]
+    virtualbox-runtime-available:
+      handler: command
+      requires: [wsl-windows-interop]
+      mutation_class: local-virtualization
+      timeout_seconds: 15
+      privilege: none
+      global_lock: true
+      parameters:
+        command: [/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe, --version]
+      operations:
+        detector: version-probe
+        preflight: read-only-availability
+        prepare: none
+        verify: version-probe
+        restore: no-host-resource-created
+        verify_restore: no-host-resource-created
+      evidence_fields: [satisfied, command, exit_code, output_matches]
+    vagrant-runtime:
+      handler: command
+      requires: [virtualbox-runtime-available]
+      mutation_class: none
+      timeout_seconds: 15
+      privilege: none
+      global_lock: false
+      parameters:
+        command: [/mnt/c/Program Files/Vagrant/bin/vagrant.exe, --version]
+      operations:
+        detector: exact-version-probe
+        preflight: read-only-availability
+        prepare: none
+        verify: exact-version-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code, output_matches]
+    wsl-windows-interop:
+      handler: wsl-interop
+      requires: []
+      mutation_class: none
+      timeout_seconds: 10
+      privilege: none
+      global_lock: false
+      operations:
+        detector: windows-process-probe
+        preflight: read-only-availability
+        prepare: none
+        verify: windows-process-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, wsl]
+    memory-capacity:
+      handler: memory
+      requires: []
+      mutation_class: none
+      timeout_seconds: 2
+      privilege: none
+      global_lock: false
+      operations:
+        detector: proc-meminfo-physical-memory
+        preflight: minimum-available-memory
+        prepare: none
+        verify: none
+        restore: none
+        verify_restore: none
+      evidence_fields: [total_mib, available_mib]
+    cpu-capacity:
+      handler: cpu
+      requires: []
+      mutation_class: none
+      timeout_seconds: 2
+      privilege: none
+      global_lock: false
+      operations:
+        detector: logical-cpu-count
+        preflight: minimum-cpu-count
+        prepare: none
+        verify: none
+        restore: none
+        verify_restore: none
+      evidence_fields: [available_count]
+    disk-capacity:
+      handler: disk
+      requires: []
+      mutation_class: none
+      timeout_seconds: 2
+      privilege: none
+      global_lock: false
+      operations:
+        detector: filesystem-free-space
+        preflight: minimum-free-space
+        prepare: none
+        verify: none
+        restore: none
+        verify_restore: none
+      evidence_fields: [path, available_mib]
+    ansible-runtime:
+      handler: command
+      requires: []
+      mutation_class: none
+      timeout_seconds: 15
+      privilege: none
+      global_lock: false
+      parameters:
+        command: [ansible-playbook, --version]
+      operations:
+        detector: version-probe
+        preflight: read-only-availability
+        prepare: none
+        verify: version-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    terraform-runtime:
+      handler: command
+      requires: []
+      mutation_class: none
+      timeout_seconds: 15
+      privilege: none
+      global_lock: false
+      parameters:
+        commands:
+          - [tofu, version]
+          - [terraform, version]
+      operations:
+        detector: version-probe
+        preflight: read-only-availability
+        prepare: none
+        verify: version-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    kubernetes-context:
+      handler: kubernetes-context
+      requires: []
+      mutation_class: external-governed
+      timeout_seconds: 15
+      privilege: authenticated-client
+      global_lock: false
+      parameters:
+        command: [kubectl, config, current-context]
+      operations:
+        detector: current-context-read
+        preflight: authenticated-read-only-check
+        prepare: readonly
+        verify: current-context-read
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    container-registry-auth:
+      handler: command
+      requires: []
+      mutation_class: external-governed
+      timeout_seconds: 15
+      privilege: authenticated-client
+      global_lock: false
+      operations:
+        detector: caller-supplied-read-only-probe
+        preflight: authenticated-read-only-check
+        prepare: readonly
+        verify: caller-supplied-read-only-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    harbor-readiness:
+      handler: command
+      requires: [container-registry-auth]
+      mutation_class: external-governed
+      timeout_seconds: 20
+      privilege: authenticated-client
+      global_lock: false
+      operations:
+        detector: caller-supplied-read-only-probe
+        preflight: authenticated-read-only-check
+        prepare: readonly
+        verify: caller-supplied-read-only-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    tekton-readiness:
+      handler: command
+      requires: [kubernetes-context]
+      mutation_class: external-governed
+      timeout_seconds: 20
+      privilege: authenticated-client
+      global_lock: false
+      operations:
+        detector: caller-supplied-read-only-probe
+        preflight: authenticated-read-only-check
+        prepare: readonly
+        verify: caller-supplied-read-only-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+    production-context:
+      handler: command
+      requires: [kubernetes-context]
+      mutation_class: production-governed
+      timeout_seconds: 15
+      privilege: authenticated-readonly-client
+      global_lock: false
+      operations:
+        detector: caller-supplied-read-only-probe
+        preflight: authenticated-read-only-check
+        prepare: readonly
+        verify: caller-supplied-read-only-probe
+        restore: none
+        verify_restore: none
+      evidence_fields: [satisfied, command, exit_code]
+
 qualification_lifecycle:
   applies_to: every-qualification-workflow
   single_authority: config/contracts/qualification-execution-policy.yaml
@@ -106,6 +417,7 @@ gates:
       - tests/test_architecture_authority.py
       - tests/test_qualification_cache.py
       - tests/test_qualification_execution_policy.py
+      - tests/test_runtime_orchestration.py
       - tests/architecture_validator_test.rb
       - tests/observability_topology_test.rb
       - tests/ci_authority_test.rb
@@ -137,6 +449,7 @@ gates:
       - scripts/validate-observability.rb
       - tests/test_architecture_authority.py
       - tests/test_qualification_cache.py
+      - tests/test_runtime_orchestration.py
       - tests/architecture_validator_test.rb
       - tests/observability_topology_test.rb
       - tests/ci_authority_test.rb
@@ -361,6 +674,8 @@ gates:
       - scripts/qualification_cache.py
     fresh_prechecks:
       - project-owned-collection-version-reconciliation
+    runtime_capabilities:
+      - ansible-runtime
   platform:terraform:
     scope: component
     parallel_safe: true
@@ -384,6 +699,8 @@ gates:
     fresh_prechecks:
       - approved-terraform-executable-availability
       - canonical-provider-lock-contract
+    runtime_capabilities:
+      - terraform-runtime
   "frontend:*":
     scope: component
     parallel_safe: true
@@ -433,8 +750,11 @@ gates:
       - go.work
       - architecture.lock.yaml
       - config/contracts/toolchain-lock.json
-    fresh_prechecks:
-      - docker-runtime-when-testcontainers-are-used
+    runtime_capabilities:
+      - name: testcontainers
+        when:
+          path_glob: services/<service>/**/*_test.go
+          contains: testcontainers
 
 
 workflows:
@@ -454,6 +774,8 @@ workflows:
     performance_audit_output: .context/performance/<sha>.json
     performance_campaign_required: false
     merge_authoritative: true
+    runtime_capabilities:
+      inherit_from_selected_gates: true
   rke2_local_virtualbox:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary
@@ -476,7 +798,21 @@ workflows:
       artifact: .context/mgmt-offline-vm/<name>/role-result.json
       tamper: .context/mgmt-offline-vm/<name>/tamper-result.json
     merge_authoritative: true
-    completion:
+    runtime_capabilities:
+      - name: memory-capacity
+        parameters:
+          minimum_mib:
+            context: vm_memory
+      - name: cpu-capacity
+        parameters:
+          minimum_count:
+            context: vm_cpus
+      - name: vagrant-runtime
+        parameters:
+          expected_stdout:
+            context: vagrant_expected_stdout
+    superseded_completion:
+      superseded_by: rocky-10.2-packer-image-migration
       status: complete
       criteria_status: PASS
       proof_registration: existing-proof-no-rerun
@@ -599,6 +935,8 @@ workflows:
     merge_authoritative: false
     state_changing: true
     completion_requires_remote_readback: true
+    runtime_capabilities:
+      - ansible-runtime
   performance_campaign:
     owner: quality-engineering
     purpose: non-merge-authoritative performance characterization
@@ -611,6 +949,8 @@ workflows:
     repetitions: 3
     merge_authoritative: false
     blocking_for_campaign_result: true
+    runtime_capabilities:
+      inherit_from_selected_gates: true
 
 performance:
   baselines_seconds:

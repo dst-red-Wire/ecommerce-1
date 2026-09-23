@@ -34,7 +34,7 @@ wireguard_authority:
 
 rke2:
   version: v1.37.0+rke2r1
-  os: rocky-linux-9
+  os: rocky-linux-10.2
   cni: cilium
   token_source: runtime-secret-input
   bootstrap_server: cp-01
@@ -136,7 +136,7 @@ offline_installation:
   delivery: ansible-copy-over-existing-governed-ssh
   source_available_before_kubernetes: required
   manifest_authorization: independently-supplied-sha256
-  target: rocky-9-amd64
+  target: rocky-10.2-amd64
   inventory:
     os_packages: full-rpm-dependency-closure-with-nevra-sha256-and-signature-checks
     required_packages_source: scripts/mgmt_airgap.py#REQUIRED_RPMS

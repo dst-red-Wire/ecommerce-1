@@ -76,7 +76,10 @@ All retry, lease, polling, delivery, and shutdown durations are externalized wit
 
 ## REST and gRPC
 
-REST writes require a valid OIDC bearer token in the configured admin audience. The mesh remains authoritative for internal gRPC caller identity and authorization.
+REST writes and gRPC mutation methods require a valid OIDC bearer token in the
+configured admin audience through the same application authorizer. Internal gRPC
+query methods remain available to read-only workloads; transport identity and
+network admission remain governed by the mesh.
 
 ```sh
 curl --fail-with-body \

@@ -39,8 +39,8 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
     for value in addresses:
         if ipaddress.ip_address(value) not in ipaddress.ip_network(inventory["private_block"]):
             errors.append(f"node IP outside MGMT block: {value}")
-    if architecture.get("platform", {}).get("node_os") != "rocky-linux-9":
-        errors.append("MGMT node OS must be Rocky Linux 9")
+    if architecture.get("platform", {}).get("node_os") != "rocky-linux-10.2":
+        errors.append("MGMT node OS must be Rocky Linux 10.2")
     services = bootstrap.get("platform_bootstrap", {}).get("services", {})
     required = {
         "gitea",

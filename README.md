@@ -118,7 +118,7 @@ Le contrat `contracts/openapi/product.v1.yaml` possède maintenant un premier ru
 
 ## Plateforme
 
-- RKE2 sur Rocky Linux 9.x.
+- RKE2 sur l'image Packer Rocky Linux 10.2 verrouillée.
 - Cilium + Hubble, LB IPAM, BGP vers FRR, Maglev.
 - Istio mTLS STRICT.
 - SPIFFE/SPIRE pour l'identité workload.

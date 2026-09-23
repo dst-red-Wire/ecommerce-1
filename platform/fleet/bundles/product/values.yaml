@@ -28,3 +28,14 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 6
   targetCPUUtilizationPercentage: 70
+
+migration:
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+      ephemeral-storage: 16Mi
+    limits:
+      memory: 64Mi
+      ephemeral-storage: 32Mi

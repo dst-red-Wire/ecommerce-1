@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
+import subprocess
+import sys
 import tempfile
+import types
 from contextlib import redirect_stdout
 from pathlib import Path
 import unittest
@@ -24,6 +28,181 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def test_runtime_restore_failures_always_add_a_failed_evidence_record(self):
+        class FakeExecutor:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def execute(self, *_args, **_kwargs):
+                return types.SimpleNamespace(
+                    status=runtime_status,
+                    exit_code=1,
+                    evidence_path=None,
+                )
+
+        for runtime_status in ("FAIL_RESTORE", "FAIL_VERIFY_RESTORE"):
+            with self.subTest(runtime_status=runtime_status):
+                records = [{"gate": "governance", "status": "PASS", "exit_code": 0}]
+                api = types.SimpleNamespace(
+                    RuntimeExecutor=FakeExecutor,
+                    BuiltinCapabilityDriver=lambda _environment: object(),
+                )
+                with (
+                    mock.patch.object(MOD, "_runtime_api", return_value=api),
+                    mock.patch.object(MOD, "_runtime_requests", return_value=[]),
+                    mock.patch.object(
+                        MOD, "_runtime_source", return_value=("worktree", "a" * 40)
+                    ),
+                    mock.patch.object(
+                        MOD,
+                        "qualification_execution_policy",
+                        return_value={"runtime_orchestration": {}},
+                    ),
+                ):
+                    rc = MOD._execute_with_runtime(
+                        [{"gate": "governance"}],
+                        lambda _environment: 0,
+                        workflow="verify-change",
+                        head="WORKTREE",
+                        environment={},
+                        records=records,
+                    )
+                self.assertEqual(1, rc)
+                self.assertEqual("PASS", records[0]["status"])
+                self.assertEqual("FAIL", records[-1]["status"])
+                self.assertEqual(runtime_status, records[-1]["runtime_status"])
+
+    def test_failed_runtime_evidence_cannot_be_reused_as_exact_pass(self):
+        head = "a" * 40
+        base = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            evidence_dir = context / "evidence"
+            evidence_dir.mkdir()
+            evidence = evidence_dir / f"{head}.json"
+            evidence.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 5,
+                        "status": "FAIL",
+                        "exact_commit_evidence": True,
+                        "head_sha": head,
+                        "base_sha": base,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_git(*args, check=True):
+                if args[:2] == ("rev-parse", "HEAD"):
+                    return head + "\n"
+                if args[:2] == ("rev-parse", head):
+                    return head + "\n"
+                if args[0] == "status":
+                    return ""
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "CONTEXT", context),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+                mock.patch.object(MOD, "_supported_evidence_schema", return_value=True),
+            ):
+                self.assertIsNone(MOD._valid_exact_evidence("origin/main", head))
+
+    def test_final_evidence_is_not_pass_when_gates_pass_but_restore_fails(self):
+        head = "a" * 40
+        base = "b" * 40
+        records = [
+            {"gate": "governance", "status": "PASS", "exit_code": 0},
+            {
+                "gate": "runtime-orchestration",
+                "status": "FAIL",
+                "runtime_status": "FAIL_RESTORE",
+                "exit_code": 1,
+            },
+        ]
+
+        def fake_git(*args, check=True):
+            if args == ("rev-parse", "origin/main"):
+                return base + "\n"
+            if args == ("rev-parse", "HEAD"):
+                return head + "\n"
+            if args[0] == "status":
+                return " M scripts/repoctl.py\n"
+            raise AssertionError(args)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(MOD, "ROOT", Path(directory)),
+            mock.patch.object(MOD, "CONTEXT", Path(directory)),
+            mock.patch.object(MOD, "git", side_effect=fake_git),
+            mock.patch.object(MOD, "worktree_tree_sha", return_value="c" * 40),
+            mock.patch.object(MOD, "qualification_identity", return_value="identity"),
+        ):
+            evidence = MOD.write_evidence(
+                "origin/main", "WORKTREE", [], [], records
+            )
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+        self.assertEqual("FAIL", payload["status"])
+
+    def test_ci_component_none_skips_before_runtime_policy_resolution(self):
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            argv = [
+                "repoctl.py",
+                "ci-component",
+                "--component",
+                "none",
+                "--base",
+                "origin/main",
+                "--head",
+                head,
+                "--record-dir",
+                directory,
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    MOD, "_require_clean_exact_checkout", return_value=(head, head)
+                ),
+                mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,
+            ):
+                self.assertEqual(0, MOD.main())
+            runtime.assert_not_called()
+            record = json.loads(
+                (Path(directory) / "component-none.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("SKIP", record["records"][0]["status"])
+
+    def test_empty_terraform_area_skips_before_runtime_requirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "platform" / "terraform").mkdir(parents=True)
+            with (
+                mock.patch.object(sys, "argv", ["repoctl.py", "terraform"]),
+                mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(0, MOD.main())
+            runtime.assert_not_called()
+            self.assertIn("SKIP terraform: no Terraform files found", output.getvalue())
+
+    def test_qualification_identity_handles_stopped_docker_deterministically(self):
+        unavailable = subprocess.CompletedProcess(
+            ["docker", "info"], 1, "", "daemon stopped\n"
+        )
+        probes = {(('docker', 'info'), True)}
+        with (
+            mock.patch.object(MOD, "_qualification_toolchain", return_value=({}, probes)),
+            mock.patch.object(MOD.shutil, "which", return_value=sys.executable),
+            mock.patch.object(MOD, "run", return_value=unavailable),
+        ):
+            first = MOD.qualification_identity()
+            second = MOD.qualification_identity()
+        self.assertEqual(first, second)
+        self.assertRegex(first, r"^[0-9a-f]{64}$")
+
     def test_policy_is_registered_under_architecture_root(self):
         lock = MOD.ruby_yaml("architecture.lock.yaml")
         self.assertEqual(
@@ -137,93 +316,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_campaign["exact_sha_required"])
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
-        completion = rke2["completion"]
-        self.assertEqual("complete", completion["status"])
-        self.assertEqual("PASS", completion["criteria_status"])
-        self.assertEqual("existing-proof-no-rerun", completion["proof_registration"])
-        self.assertEqual(
-            "84cf01601aa336f0cdd2d1899d764437294fbfe6",
-            completion["qualified_source_sha"],
-        )
-        self.assertEqual(128, completion["merged_by_pr"])
-        self.assertEqual(
-            "088b576dac43cb17e304967e3e58433499760fa9",
-            completion["merge_commit_sha"],
-        )
-        self.assertEqual(
-            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746",
-            completion["provenance"]["code_review"],
-        )
-        self.assertEqual(
-            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831",
-            completion["provenance"]["security_review"],
-        )
-        self.assertEqual(
-            "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
-            completion["provenance"]["approved_manifest_sha256"],
-        )
-        self.assertIn(
-            "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json",
-            completion["invalidation_inputs"],
-        )
-        runtime_fixture_inputs = [
-            "platform/ansible/tests/mgmt_offline_vm/Vagrantfile",
-            "platform/ansible/tests/mgmt_offline_vm/contract.yml",
-            "platform/ansible/tests/mgmt_offline_vm/create.yml",
-            "platform/ansible/tests/mgmt_offline_vm/destroy.yml",
-            "platform/ansible/tests/mgmt_offline_vm/main.yml",
-            "platform/ansible/tests/mgmt_offline_vm/server.yml",
-            "platform/ansible/tests/mgmt_offline_vm/test.yml",
-            "platform/ansible/tests/mgmt_offline_vm/transport.py",
-        ]
-        for path in runtime_fixture_inputs:
-            self.assertIn(path, completion["invalidation_inputs"])
-        self.assertNotIn(
-            "platform/ansible/tests/mgmt_offline_vm/README.md",
-            completion["invalidation_inputs"],
-        )
-        self.assertEqual(
-            set(completion["invalidation_inputs"]),
-            set(completion["invalidation_object_ids"]),
-        )
-        self.assertTrue(
-            all(
-                __import__("re").fullmatch(r"[0-9a-f]{40}", object_id)
-                for object_id in completion["invalidation_object_ids"].values()
-            )
-        )
-        toolchain_inputs = [
-            "platform/ansible/requirements.yml",
-            "config/python/requirements.lock",
-        ]
-        for path in toolchain_inputs:
-            self.assertIn(path, completion["invalidation_inputs"])
-            with self.subTest(invalidation_input=path):
-                expected = completion["invalidation_object_ids"][path]
-                changed = MOD.subprocess.CompletedProcess([], 0, "f" * 40 + "\n", "")
-                with mock.patch.object(MOD, "run", return_value=changed):
-                    self.assertFalse(
-                        MOD._completed_proof_inputs_unchanged(
-                            completion["qualified_source_sha"],
-                            [path],
-                            {path: expected},
-                        )
-                    )
-        for developer_only_input in (
-            "config/contracts/toolchain-lock.json",
-            "config/toolchain/versions.env",
-            "config/toolchain/capabilities.json",
-        ):
-            self.assertNotIn(developer_only_input, completion["invalidation_inputs"])
-        semantic = completion["invalidation_semantic_functions"]
-        self.assertIn("scripts/repoctl.py", semantic)
-        self.assertIn("scripts/capability_bootstrap.py", semantic)
-        self.assertIn("ansible_collections_ready", semantic["scripts/repoctl.py"])
-        self.assertIn(
-            "validate_toolchain_projections",
-            semantic["scripts/capability_bootstrap.py"],
-        )
-        self.assertTrue(MOD._semantic_function_snapshot_unchanged(semantic))
+        self.assertNotIn("completion", rke2)
+        superseded = rke2["superseded_completion"]
+        self.assertEqual("rocky-10.2-packer-image-migration", superseded["superseded_by"])
+        self.assertEqual("84cf01601aa336f0cdd2d1899d764437294fbfe6", superseded["qualified_source_sha"])
+        self.assertEqual("complete", superseded["status"])
+        self.assertEqual("PASS", superseded["criteria_status"])
         self.assertEqual(
             ".context/mgmt-offline-vm/<name>/rke2-result.json",
             rke2["evidence"]["runtime"],
@@ -1198,8 +1296,9 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_system_tests_are_owned_once_and_dynamic_cache_targets_exact_file(self):
         owners = MOD._dedicated_test_owners()
-        self.assertEqual(11, len(owners))
+        self.assertEqual(12, len(owners))
         self.assertEqual("governance", owners["tests/test_architecture_authority.py"])
+        self.assertEqual("governance", owners["tests/test_runtime_orchestration.py"])
         self.assertEqual("contracts", owners["tests/openapi_validator_test.rb"])
         self.assertEqual("runtime-efficiency", owners["tests/runtime_efficiency_test.rb"])
 
@@ -1245,7 +1344,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIn("governance:validator:scripts/validate-architecture.rb", names)
         self.assertIn("governance:test:tests/test_architecture_authority.py", names)
         self.assertIn("governance:test:tests/test_qualification_execution_policy.py", names)
-        self.assertEqual(15, len(names))
+        self.assertIn("governance:test:tests/test_runtime_orchestration.py", names)
+        self.assertEqual(16, len(names))
         self.assertIn(
             "governance:test:tests/test_architecture_authority.py",
             [name for name, _producer in captured["internal"]],

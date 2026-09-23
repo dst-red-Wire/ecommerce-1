@@ -14,7 +14,7 @@ variable "hcloud_network_zone" {
 }
 
 variable "hcloud_image" {
-  description = "Pinned Rocky Linux 9 image identifier/name."
+  description = "Pinned Rocky Linux 10.2 Packer image identifier/name."
   type        = string
 }
 

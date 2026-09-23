@@ -1,0 +1,42 @@
+---
+- name: Reconcile one temporary local qualification capability
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    runtime_capability_allowed:
+      docker-runtime: [started, stopped]
+      ip-forward: ["0", "1"]
+  tasks:
+    - name: Validate the bounded runtime capability request
+      ansible.builtin.assert:
+        that:
+          - runtime_capability is defined
+          - runtime_target_state is defined
+          - runtime_capability in runtime_capability_allowed
+          - runtime_target_state in runtime_capability_allowed[runtime_capability]
+        fail_msg: Unsupported runtime capability reconciliation request
+
+    - name: Reconcile the temporary rootless Docker user service
+      ansible.builtin.systemd_service:
+        name: docker.service
+        scope: user
+        state: "{{ runtime_target_state }}"
+      when: runtime_capability == 'docker-runtime'
+
+    - name: Read live IPv4 forwarding before temporary reconciliation
+      ansible.builtin.command:
+        argv: [sysctl, -n, net.ipv4.ip_forward]
+      register: runtime_ip_forward_before
+      changed_when: false
+      when: runtime_capability == 'ip-forward'
+
+    - name: Reconcile temporary live IPv4 forwarding
+      ansible.builtin.command:
+        argv: [sysctl, -w, "net.ipv4.ip_forward={{ runtime_target_state }}"]
+      become: true
+      become_flags: -n
+      changed_when: true
+      when:
+        - runtime_capability == 'ip-forward'
+        - runtime_ip_forward_before.stdout != runtime_target_state

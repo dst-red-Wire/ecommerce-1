@@ -1,0 +1,243 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: rocky-10.2-golden-images
+
+packer_image:
+  id: rocky-10.2-base
+  os:
+    distribution: rocky
+    version: "10.2"
+    architecture: x86_64-v3
+
+  source:
+    iso: Rocky-10.2-x86_64-dvd1.iso
+    url: https://download.rockylinux.org/pub/rocky/10.2/isos/x86_64/Rocky-10.2-x86_64-dvd1.iso
+    sha256: 16ca9c96cdb221ba6e1f68579f21bd69fd8da81c6a921d9068949796f91c8feb
+    mutable_aliases: forbidden
+
+  packages:
+    lock: config/artifacts/rocky-10.2-base-packages.lock.json
+    projection_from: packer_image.profiles.*.rpm_packages
+    schema: profile-separated-rpm-closure-v2
+    single_definition_for_all_outputs: true
+    sources:
+      rocky:
+        repositories:
+          baseos: https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/
+          appstream: https://download.rockylinux.org/pub/rocky/10.2/AppStream/x86_64/os/
+          extras: https://download.rockylinux.org/pub/rocky/10.2/extras/x86_64/os/
+        signing_key:
+          category: rpm-signing-key
+          file: rocky-10-public.asc
+          fingerprint: FC226859C0860BF0DDB95B085B106C736FEDFC85
+          sha256: be8c4f070b696e64d8ce40e59a95a57e8b5c776f0015c2fd64e14b896622bdb4
+          url: https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-10
+      epel:
+        repository: https://dl.fedoraproject.org/pub/epel/10.2/Everything/x86_64/
+        signing_key:
+          category: rpm-signing-key
+          file: epel-10-public.asc
+          fingerprint: 7D8D15CBFC4E62688591FB2633D98517E37ED158
+          sha256: de390fc168eae5ab2852e9e93d34a0b9ddf05cf9ce90ee28d97de26a4b1f6b93
+          url: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-10
+
+  external_tools:
+    registry: config/contracts/toolchain-lock.json#tools
+    staging: checksum-verified-before-packer
+    network_during_packer: forbidden
+
+  profiles:
+    base:
+      kind: shared-component
+      rpm_packages:
+        - openssh-server
+        - sudo
+        - python3
+        - ca-certificates
+        - bash-completion
+        - which
+        - file
+        - less
+        - tree
+        - curl
+        - tar
+        - gzip
+        - xz
+        - zstd
+        - rsync
+        - zip
+        - unzip
+        - acl
+        - attr
+        - procps-ng
+        - util-linux
+        - openssl
+        - NetworkManager
+        - iproute
+        - iputils
+        - ethtool
+        - bind-utils
+        - lsof
+        - socat
+        - tcpdump
+        - nmap-ncat
+        - chrony
+        - nftables
+        - iptables-nft
+        - conntrack-tools
+        - policycoreutils
+        - libselinux-utils
+        - container-selinux
+        - kernel
+        - kernel-modules
+        - kernel-modules-extra
+        - fzf
+        - jq
+        - bat
+        - tmux
+      external_tools: [ripgrep, fd, yq]
+      compatibility_substitutions:
+        curl-minimal:
+          resolved_package: curl
+          reason: unavailable-in-locked-rocky-10.2-repositories
+    rke2:
+      kind: build-profile
+      extends: base
+      rpm_packages: []
+      external_tools: []
+      forbidden_tools: [gh, git, strace, sysstat, mtr, shellcheck, shfmt]
+    admin-qualification:
+      kind: build-profile
+      extends: base
+      rpm_packages: [git, strace, sysstat, mtr, ShellCheck]
+      external_tools: [gh, shfmt]
+      required_tools: [git, gh, strace, sysstat, mtr, shellcheck, shfmt]
+
+  hypervisors:
+    virtualbox:
+      base_agent: none
+      guest_additions: disabled
+    qemu_kvm:
+      rpm_packages: [qemu-guest-agent]
+
+  kernel:
+    nevra: kernel-0:6.12.0-211.56.1.el10_2.0.1.x86_64
+    modules_extra: required
+    required_modules: [br_netfilter, nf_conntrack, overlay, vxlan]
+
+  security:
+    selinux: enforcing
+    container_selinux: required
+    firewall_backend: nftables
+    firewalld: absent
+    ssh_root_login: forbidden
+    ssh_password_authentication: forbidden
+    ssh_empty_passwords: forbidden
+    kernel_redirect_acceptance: disabled
+    core_dumps: restricted
+
+  networking:
+    manager: NetworkManager
+    ipv4_forwarding: prepared
+    static_ip: forbidden
+
+  services:
+    enabled: [NetworkManager, chronyd, sshd]
+    disabled: [firewalld]
+
+  kubernetes_prerequisites:
+    swap: disabled
+    cgroup: v2
+    bpffs: required
+    rke2_selinux: supplied-by-locked-rke2-bundle
+
+  build:
+    packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
+    credential:
+      type: runtime-injected-temporary-ssh-key
+      committed_private_key: forbidden
+      committed_password_or_hash: forbidden
+      password_authentication: forbidden
+      authorized_key_removed_before_export: required
+      build_user_final_state: locked-nologin
+    virtualbox:
+      version: 7.2.18
+      plugin:
+        source: github.com/hashicorp/virtualbox
+        version: 1.1.5
+    qemu_kvm:
+      plugin:
+        source: github.com/hashicorp/qemu
+        version: 1.1.6
+    vagrant_post_processor:
+      plugin:
+        source: github.com/hashicorp/vagrant
+        version: 1.1.7
+
+  outputs:
+    logical_base: rocky-10.2-base
+    rke2:
+      virtualbox: rocky-10.2-rke2-virtualbox.box
+      qemu_kvm: rocky-10.2-rke2-kvm.qcow2
+    admin_qualification:
+      virtualbox: rocky-10.2-admin-qualification-virtualbox.box
+      qemu_kvm: rocky-10.2-admin-qualification-kvm.qcow2
+
+  clone_hygiene:
+    hostname: rocky-10-2-base
+    machine_id: cleaned-before-export
+    ssh_host_keys: regenerate-on-first-boot
+    private_keys: forbidden
+    build_authorized_keys: removed-before-export
+    build_user: locked-nologin
+    secrets: forbidden
+    rke2_token: forbidden
+
+  evidence:
+    sbom: required
+    sha256: required
+    package_manifest: required
+    profile_inventory: required
+
+  qualification:
+    os_release: rocky-10.2
+    cgroup_filesystem: cgroup2fs
+    swap: disabled
+    selinux: enforcing
+    firewall_backend: nftables
+    github_credentials: forbidden
+    gh:
+      profile: admin-qualification
+      version: 2.101.0
+      offline_help_capabilities: [--paginate, --slurp]
+
+responsibility_boundary:
+  packer:
+    - immutable-os-base
+    - kernel-and-modules
+    - common-package-set
+    - common-os-hardening
+  ansible:
+    - ip-addresses
+    - hostname
+    - control-plane-worker-role
+    - rke2-token
+    - rke2-cluster-init-and-join
+    - haproxy
+    - cilium
+    - dns
+    - cluster-network-and-security-policies
+  rke2_bundle:
+    - exact-rke2
+    - exact-cilium-images
+    - rke2-selinux
+    - complete-runtime-rpm-closure
+
+rules:
+  packer_may_invoke_ansible: forbidden
+  cluster_identity_in_image: forbidden
+  runtime_secrets_in_image: forbidden
+  rke2_token_in_image: forbidden
+  network_identity_in_image: forbidden
+  generated_images_in_git: forbidden

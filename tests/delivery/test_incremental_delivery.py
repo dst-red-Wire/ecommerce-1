@@ -107,6 +107,11 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+                mock.patch.object(
+                    REPOCTL,
+                    "_execute_with_runtime",
+                    side_effect=lambda _plan, callback, **kwargs: callback(kwargs["environment"]),
+                ),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 
@@ -260,6 +265,11 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "write_evidence", side_effect=fake_write),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+                mock.patch.object(
+                    REPOCTL,
+                    "_execute_with_runtime",
+                    side_effect=lambda _plan, callback, **kwargs: callback(kwargs["environment"]),
+                ),
             ):
                 self.assertEqual(0, REPOCTL.verify_change("origin/main", "feature-head"))
 

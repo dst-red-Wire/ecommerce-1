@@ -55,6 +55,7 @@ V5_ROOT_KEYS = frozenset(
         "observability",
         "mlops",
         "supply_chain",
+        "tooling",
         "topology_contracts",
         "machine_contracts",
         "developer_platform",
@@ -130,6 +131,19 @@ V5_SECTION_KEYS = {
             "event_driven_pods",
             "certified_nodes",
             "preprod_perf_burst",
+        }
+    ),
+    "tooling": frozenset(
+        {
+            "registry",
+            "registry_scope",
+            "architecture_scope",
+            "container",
+            "machine_images",
+            "security",
+            "secrets",
+            "performance",
+            "forbidden_authorities",
         }
     ),
     "management_plane": frozenset(

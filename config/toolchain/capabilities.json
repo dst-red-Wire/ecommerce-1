@@ -510,6 +510,29 @@
       "requirement": "optional-runtime"
     },
     {
+      "name": "docker-buildx",
+      "requires": [],
+      "command": "docker-buildx",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "DOCKER_BUILDX_VERSION",
+      "version_parser": "first_semver_release",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "docker_buildx"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "DOCKER_BUILDX_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
       "name": "kubectl",
       "requires": [],
       "command": "kubectl",
@@ -576,6 +599,110 @@
       ],
       "classification": "managed",
       "checksum_key": "COSIGN_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "skopeo",
+      "requires": [],
+      "command": "skopeo",
+      "version_args": ["--version"],
+      "version_key": "SKOPEO_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "skopeo"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "SKOPEO_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "packer",
+      "requires": [],
+      "command": "packer",
+      "version_args": ["version"],
+      "version_key": "PACKER_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "packer"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "PACKER_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "trivy",
+      "requires": [],
+      "command": "trivy",
+      "version_args": ["--version"],
+      "version_key": "TRIVY_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "trivy"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "TRIVY_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "gosec",
+      "requires": [],
+      "command": "gosec",
+      "version_args": ["-version"],
+      "version_key": "GOSEC_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "gosec"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "GOSEC_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "govulncheck",
+      "requires": ["go"],
+      "command": "govulncheck",
+      "version_args": ["-version"],
+      "version_key": "GOVULNCHECK_VERSION",
+      "version_parser": "govulncheck",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "govulncheck"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
+      "name": "kube-bench",
+      "requires": [],
+      "command": "kube-bench",
+      "version_args": ["version"],
+      "version_key": "KUBE_BENCH_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "kube_bench"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "KUBE_BENCH_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "sops",
+      "requires": ["age"],
+      "command": "sops",
+      "version_args": ["--version"],
+      "version_key": "SOPS_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "sops"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "SOPS_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "age",
+      "requires": [],
+      "command": "age",
+      "version_args": ["--version"],
+      "version_key": "AGE_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "age"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "AGE_SHA256_LINUX_AMD64",
       "requirement": "required-static"
     },
     {
@@ -714,6 +841,15 @@
     "kubectl": "ansible",
     "helm": "ansible",
     "cosign": "ansible",
+    "docker-buildx": "ansible",
+    "skopeo": "ansible",
+    "packer": "ansible",
+    "trivy": "ansible",
+    "gosec": "ansible",
+    "govulncheck": "ansible",
+    "kube-bench": "ansible",
+    "sops": "ansible",
+    "age": "ansible",
     "terraform": "ansible",
     "kustomize": "ansible",
     "kind": "ansible",

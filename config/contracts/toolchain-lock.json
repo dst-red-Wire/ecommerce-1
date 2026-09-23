@@ -19,6 +19,15 @@
     "CHECKOV_VERSION": "3.3.16",
     "SEMGREP_VERSION": "1.176.1",
     "CVE_BIN_TOOL_VERSION": "3.4",
+    "DOCKER_BUILDX_VERSION": "0.37.1",
+    "DOCKER_BUILDX_SHA256_LINUX_AMD64": "9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b",
+    "SKOPEO_VERSION": "1.13.3",
+    "SKOPEO_PACKAGE_VERSION": "1.13.3+ds1-2ubuntu0.24.04.3",
+    "SKOPEO_SHA256_LINUX_AMD64": "d908a86538f6d4bc49ea9c7423e5fb279a5c8cfc1f9bc7bd505f8bfe25d29be3",
+    "PACKER_VERSION": "1.16.1",
+    "PACKER_SHA256_LINUX_AMD64": "af38a9e93e4ed1b9ca68206ae969c64c300c82a3dde46a780dfa629f0867f651",
+    "TRIVY_VERSION": "0.74.0",
+    "TRIVY_SHA256_LINUX_AMD64": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
     "COSIGN_VERSION": "3.1.3",
     "COSIGN_SHA256_LINUX_AMD64": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
     "ORAS_VERSION": "1.3.3",
@@ -31,6 +40,9 @@
     "FD_SHA256_LINUX_AMD64": "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
     "YQ_VERSION": "4.53.6",
     "YQ_SHA256_LINUX_AMD64": "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385",
+    "GH_SHA256_LINUX_AMD64_RPM": "72ef6dcd0ee459645cda485f2e55f18eca7b9252fce85a3be4c2446ae7627f36",
+    "SHFMT_VERSION": "3.14.1",
+    "SHFMT_SHA256_LINUX_AMD64": "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf",
     "AST_GREP_VERSION": "0.45.0",
     "AST_GREP_SHA256_LINUX_AMD64": "78931ae35ebac33d9a72b3aecea3e3d62d6e5b0b718ac8bbedfbe69d68421e41",
     "GO_VERSION": "1.26.6",
@@ -62,6 +74,15 @@
     "RUFF_SHA256_LINUX_AMD64": "0696335ef16615d8c7445ad438750eb0f55b3da6f153df21265a7c6d5750254f",
     "GITLEAKS_VERSION": "8.30.1",
     "GITLEAKS_SHA256_LINUX_AMD64": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+    "GOSEC_VERSION": "2.29.0",
+    "GOSEC_SHA256_LINUX_AMD64": "6431b119741c1f4a50fdfcf94e782e16b9e642afc8c7fa9b5d39d48bf3003095",
+    "GOVULNCHECK_VERSION": "1.8.0",
+    "KUBE_BENCH_VERSION": "0.16.0",
+    "KUBE_BENCH_SHA256_LINUX_AMD64": "82dbc7e598740dc9344d41f8ad0b8210d57c4c00bdb2c5f1d8a69a2b98baddcf",
+    "SOPS_VERSION": "3.13.3",
+    "SOPS_SHA256_LINUX_AMD64": "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b",
+    "AGE_VERSION": "1.3.2",
+    "AGE_SHA256_LINUX_AMD64": "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10",
     "KUBECTL_VERSION": "1.37.0",
     "KUBECTL_SHA256_LINUX_AMD64": "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f",
     "HELM_VERSION": "4.2.4",
@@ -80,9 +101,256 @@
     "community.docker": "3.7.0",
     "community.crypto": "2.17.1",
     "community.sops": "1.6.7",
-    "containers.podman": "1.11.0",
     "hetzner.hcloud": "2.4.1",
     "kubernetes.core": "2.4.0"
+  },
+  "tools": {
+    "ripgrep": {
+      "version_ref": "RIPGREP_VERSION",
+      "source": "https://github.com/BurntSushi/ripgrep",
+      "artifact": {
+        "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+        "filename": "ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz"
+      },
+      "sha256_ref": "RIPGREP_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "archive", "binary_relative": "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg"},
+      "binary": "rg",
+      "version_command": ["rg", "--version"],
+      "capability": "recursive-text-search"
+    },
+    "fd": {
+      "version_ref": "FD_VERSION",
+      "source": "https://github.com/sharkdp/fd",
+      "artifact": {
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz",
+        "filename": "fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz"
+      },
+      "sha256_ref": "FD_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "archive", "binary_relative": "fd-v10.4.2-x86_64-unknown-linux-musl/fd"},
+      "binary": "fd",
+      "version_command": ["fd", "--version"],
+      "capability": "filesystem-search"
+    },
+    "yq": {
+      "version_ref": "YQ_VERSION",
+      "source": "https://github.com/mikefarah/yq",
+      "artifact": {
+        "url": "https://github.com/mikefarah/yq/releases/download/v4.53.6/yq_linux_amd64",
+        "filename": "yq_linux_amd64"
+      },
+      "sha256_ref": "YQ_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "binary"},
+      "binary": "yq",
+      "version_command": ["yq", "--version"],
+      "capability": "yaml-query-and-transformation"
+    },
+    "gh": {
+      "version_ref": "GH_VERSION",
+      "source": "https://github.com/cli/cli",
+      "artifact": {
+        "url": "https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_amd64.rpm",
+        "filename": "gh_2.101.0_linux_amd64.rpm"
+      },
+      "sha256_ref": "GH_SHA256_LINUX_AMD64_RPM",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-admin-qualification"],
+      "install": {"type": "rpm", "package": "gh", "offline": true},
+      "binary": "gh",
+      "version_command": ["gh", "--version"],
+      "qualification": {
+        "command": ["gh", "api", "--help"],
+        "stdout_contains": ["--paginate", "--slurp"],
+        "network": "forbidden"
+      },
+      "capability": "github-api-qualification"
+    },
+    "shfmt": {
+      "version_ref": "SHFMT_VERSION",
+      "source": "https://github.com/mvdan/sh",
+      "artifact": {
+        "url": "https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64",
+        "filename": "shfmt_v3.14.1_linux_amd64"
+      },
+      "sha256_ref": "SHFMT_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-admin-qualification"],
+      "install": {"type": "binary"},
+      "binary": "shfmt",
+      "version_command": ["shfmt", "--version"],
+      "capability": "shell-format-qualification"
+    },
+    "docker-buildx": {
+      "version_ref": "DOCKER_BUILDX_VERSION",
+      "source": "https://github.com/docker/buildx",
+      "artifact": {
+        "url": "https://github.com/docker/buildx/releases/download/v0.37.1/buildx-v0.37.1.linux-amd64",
+        "filename": "buildx-v0.37.1.linux-amd64"
+      },
+      "sha256_ref": "DOCKER_BUILDX_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "binary", "docker_cli_plugin": true},
+      "binary": "docker-buildx",
+      "version_command": ["docker", "buildx", "version"],
+      "capability": "docker-buildkit-oci-image-builder"
+    },
+    "skopeo": {
+      "version_ref": "SKOPEO_VERSION",
+      "source": "https://github.com/containers/skopeo",
+      "artifact": {
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/s/skopeo/skopeo_1.13.3%2bds1-2ubuntu0.24.04.3_amd64.deb",
+        "filename": "skopeo_1.13.3+ds1-2ubuntu0.24.04.3_amd64.deb",
+        "package_version_ref": "SKOPEO_PACKAGE_VERSION"
+      },
+      "sha256_ref": "SKOPEO_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "deb", "package": "skopeo", "system_dependency": true},
+      "binary": "/usr/bin/skopeo",
+      "version_command": ["skopeo", "--version"],
+      "capability": "oci-image-transport-inspection-copy"
+    },
+    "packer": {
+      "version_ref": "PACKER_VERSION",
+      "source": "https://developer.hashicorp.com/packer",
+      "artifact": {
+        "url": "https://releases.hashicorp.com/packer/1.16.1/packer_1.16.1_linux_amd64.zip",
+        "filename": "packer_1.16.1_linux_amd64.zip"
+      },
+      "sha256_ref": "PACKER_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "packer"},
+      "binary": "packer",
+      "version_command": ["packer", "version"],
+      "capability": "machine-golden-image-builder"
+    },
+    "trivy": {
+      "version_ref": "TRIVY_VERSION",
+      "source": "https://github.com/aquasecurity/trivy",
+      "artifact": {
+        "url": "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz",
+        "filename": "trivy_0.74.0_Linux-64bit.tar.gz"
+      },
+      "sha256_ref": "TRIVY_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "trivy"},
+      "binary": "trivy",
+      "version_command": ["trivy", "--version"],
+      "capability": "container-filesystem-configuration-vulnerability-scan"
+    },
+    "gitleaks": {
+      "version_ref": "GITLEAKS_VERSION",
+      "source": "https://github.com/gitleaks/gitleaks",
+      "artifact": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+        "filename": "gitleaks_8.30.1_linux_x64.tar.gz"
+      },
+      "sha256_ref": "GITLEAKS_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "gitleaks"},
+      "binary": "gitleaks",
+      "version_command": ["gitleaks", "version"],
+      "capability": "secret-detection"
+    },
+    "gosec": {
+      "version_ref": "GOSEC_VERSION",
+      "source": "https://github.com/securego/gosec",
+      "artifact": {
+        "url": "https://github.com/securego/gosec/releases/download/v2.29.0/gosec_2.29.0_linux_amd64.tar.gz",
+        "filename": "gosec_2.29.0_linux_amd64.tar.gz"
+      },
+      "sha256_ref": "GOSEC_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "gosec"},
+      "binary": "gosec",
+      "version_command": ["gosec", "-version"],
+      "capability": "go-security-static-analysis"
+    },
+    "govulncheck": {
+      "version_ref": "GOVULNCHECK_VERSION",
+      "source": "https://go.dev/security/vuln",
+      "artifact": {
+        "url": "https://proxy.golang.org/golang.org/x/vuln/@v/v1.8.0.zip",
+        "module": "golang.org/x/vuln/cmd/govulncheck"
+      },
+      "integrity": "go-checksum-database",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "go-module"},
+      "binary": "govulncheck",
+      "version_command": ["govulncheck", "-version"],
+      "capability": "reachable-go-vulnerability-analysis"
+    },
+    "kube-bench": {
+      "version_ref": "KUBE_BENCH_VERSION",
+      "source": "https://github.com/aquasecurity/kube-bench",
+      "artifact": {
+        "url": "https://github.com/aquasecurity/kube-bench/releases/download/v0.16.0/kube-bench_0.16.0_linux_amd64.tar.gz",
+        "filename": "kube-bench_0.16.0_linux_amd64.tar.gz"
+      },
+      "sha256_ref": "KUBE_BENCH_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "kube-bench"},
+      "binary": "kube-bench",
+      "version_command": ["kube-bench", "version"],
+      "capability": "kubernetes-rke2-cis-control"
+    },
+    "cosign": {
+      "version_ref": "COSIGN_VERSION",
+      "source": "https://github.com/sigstore/cosign",
+      "artifact": {
+        "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+        "filename": "cosign-linux-amd64"
+      },
+      "sha256_ref": "COSIGN_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "binary"},
+      "binary": "cosign",
+      "version_command": ["cosign", "version"],
+      "capability": "oci-supply-chain-signature-verification"
+    },
+    "sops": {
+      "version_ref": "SOPS_VERSION",
+      "source": "https://github.com/getsops/sops",
+      "artifact": {
+        "url": "https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.linux.amd64",
+        "filename": "sops-v3.13.3.linux.amd64"
+      },
+      "sha256_ref": "SOPS_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "binary"},
+      "binary": "sops",
+      "version_command": ["sops", "--version"],
+      "capability": "static-secret-file-encryption-orchestration"
+    },
+    "age": {
+      "version_ref": "AGE_VERSION",
+      "source": "https://github.com/FiloSottile/age",
+      "artifact": {
+        "url": "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz",
+        "filename": "age-v1.3.2-linux-amd64.tar.gz"
+      },
+      "sha256_ref": "AGE_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "archive", "binary_relative": "age/age"},
+      "binary": "age",
+      "version_command": ["age", "--version"],
+      "capability": "static-secret-recipient-cryptography"
+    }
+  },
+  "rejected_tools": {
+    "hyperfine": {
+      "reason": "duplicate-with-existing-go-benchmark-and-central-qualification-wall-time",
+      "install": "forbidden-until-a-distinct-consumer-is-contracted"
+    }
   },
   "language_contracts": {
     "go": {
@@ -170,9 +438,13 @@
     "managed_provision_types": [
       "ansible"
     ],
-    "managed_bin_subdirectories": [
-      ".local/bin"
-    ],
+    "managed_install_root": {
+      "environment": "ECOMMERCE_TOOL_HOME",
+      "fallback": "~/.local",
+      "bin_subdirectory": "bin",
+      "share_subdirectory": "share/ecommerce-1",
+      "cache_subdirectory": "~/.cache/ecommerce-1"
+    },
     "command_capabilities": {
       "ansible": "ansible-core",
       "gofmt": "go",

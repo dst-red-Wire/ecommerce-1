@@ -7,7 +7,7 @@ metadata:
 spec:
   params:
     - {name: runner-image, type: string}
-    - {name: buildah-image, type: string}
+    - {name: buildkit-image, type: string}
     - {name: skopeo-image, type: string}
     - {name: trivy-image, type: string}
     - {name: syft-image, type: string}
@@ -49,7 +49,7 @@ spec:
         name: ecommerce-product-build-push
       params:
         - {name: runner-image, value: $(params.runner-image)}
-        - {name: buildah-image, value: $(params.buildah-image)}
+        - {name: buildkit-image, value: $(params.buildkit-image)}
         - {name: skopeo-image, value: $(params.skopeo-image)}
         - {name: head, value: $(params.head)}
         - {name: image-repository, value: $(params.image-repository)}

@@ -1,8 +1,15 @@
 ---
 versions_file: "{{ repo_root }}/config/toolchain/versions.env"
-local_bin: "{{ ansible_env.HOME }}/.local/bin"
-local_share: "{{ ansible_env.HOME }}/.local/share/ecommerce-1"
-local_cache: "{{ ansible_env.HOME }}/.cache/ecommerce-1"
+toolchain_lock_file: "{{ repo_root }}/config/contracts/toolchain-lock.json"
+toolchain_lock: "{{ lookup('ansible.builtin.file', toolchain_lock_file) | from_json }}"
+managed_tools: "{{ toolchain_lock.tools }}"
+managed_install_root: >-
+  {{ lookup('ansible.builtin.env', toolchain_lock.capability_policy.managed_install_root.environment)
+     | default(ansible_env.HOME + '/.local', true) }}
+local_bin: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.bin_subdirectory }}"
+local_share: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.share_subdirectory }}"
+local_cache: "{{ toolchain_lock.capability_policy.managed_install_root.cache_subdirectory | regex_replace('^~', ansible_env.HOME) }}"
+docker_cli_plugin_dir: "{{ ansible_env.HOME }}/.docker/cli-plugins"
 node_version: "{{ lookup('ansible.builtin.ini', 'NODE_VERSION', type='properties', file=versions_file) }}"
 node_sha256: "{{ lookup('ansible.builtin.ini', 'NODE_SHA256_LINUX_X64', type='properties', file=versions_file) }}"
 pnpm_version: "{{ lookup('ansible.builtin.ini', 'PNPM_VERSION', type='properties', file=versions_file) }}"

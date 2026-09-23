@@ -9,7 +9,7 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, cosign, gitleaks, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, kube_bench, cosign, sops, age, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -349,21 +349,132 @@
   failed_when: gh_api_help.rc != 0 or '--slurp' not in gh_api_help.stdout
   tags: [toolchain, agent_tools, gh]
 
-- name: Download pinned Cosign binary
+- name: Download registry-managed archive tools
   ansible.builtin.get_url:
-    url: "https://github.com/sigstore/cosign/releases/download/v{{ cosign_version }}/cosign-linux-amd64"
-    dest: "{{ local_share }}/tools/cosign-{{ cosign_version }}"
-    checksum: "sha256:{{ cosign_sha256 }}"
-    mode: '0755'
-  tags: [cosign]
+    url: "{{ item.value.artifact.url }}"
+    dest: "{{ local_cache }}/{{ item.value.artifact.filename }}"
+    checksum: "sha256:{{ toolchain_lock.versions[item.value.sha256_ref] }}"
+    mode: '0644'
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
 
-- name: Link Cosign into the user path
+- name: Create registry-managed archive tool directories
   ansible.builtin.file:
-    src: "{{ local_share }}/tools/cosign-{{ cosign_version }}"
-    dest: "{{ local_bin }}/cosign"
+    path: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}"
+    state: directory
+    mode: '0755'
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+
+- name: Extract registry-managed archive tools
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/{{ item.value.artifact.filename }}"
+    dest: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}"
+    remote_src: true
+    creates: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}/{{ item.value.install.binary_relative }}"
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+
+- name: Link registry-managed archive tools into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}/{{ item.value.install.binary_relative }}"
+    dest: "{{ local_bin }}/{{ item.value.binary }}"
     state: link
     force: true
-  tags: [cosign]
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+
+- name: Download registry-managed standalone binaries
+  ansible.builtin.get_url:
+    url: "{{ item.value.artifact.url }}"
+    dest: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}"
+    checksum: "sha256:{{ toolchain_lock.versions[item.value.sha256_ref] }}"
+    mode: '0755'
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'binary') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, docker_buildx, cosign, sops]
+
+- name: Link registry-managed standalone binaries into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}"
+    dest: "{{ local_bin }}/{{ item.value.binary }}"
+    state: link
+    force: true
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'binary') }}"
+  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
+  tags: [toolchain, docker_buildx, cosign, sops]
+
+- name: Create the user-local Docker CLI plugin directory
+  ansible.builtin.file:
+    path: "{{ docker_cli_plugin_dir }}"
+    state: directory
+    mode: '0755'
+  tags: [toolchain, docker_buildx]
+
+- name: Link the pinned Buildx binary as a Docker CLI plugin
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/docker-buildx-{{ toolchain_lock.versions[managed_tools['docker-buildx'].version_ref] }}"
+    dest: "{{ docker_cli_plugin_dir }}/docker-buildx"
+    state: link
+    force: true
+  tags: [toolchain, docker_buildx]
+
+- name: Validate the pinned Docker Buildx CLI plugin
+  ansible.builtin.command:
+    argv: [docker, buildx, version]
+  register: docker_buildx_current
+  changed_when: false
+  failed_when: >-
+    docker_buildx_current.rc != 0 or
+    ('v' ~ toolchain_lock.versions[managed_tools['docker-buildx'].version_ref]) not in
+    (docker_buildx_current.stdout ~ docker_buildx_current.stderr)
+  tags: [toolchain, docker_buildx]
+
+- name: Download the exact Skopeo distribution package
+  ansible.builtin.get_url:
+    url: "{{ managed_tools.skopeo.artifact.url }}"
+    dest: "{{ local_cache }}/{{ managed_tools.skopeo.artifact.filename }}"
+    checksum: "sha256:{{ toolchain_lock.versions[managed_tools.skopeo.sha256_ref] }}"
+    mode: '0644'
+  tags: [toolchain, skopeo]
+
+- name: Install Skopeo with its declared system dependencies
+  ansible.builtin.apt:
+    deb: "{{ local_cache }}/{{ managed_tools.skopeo.artifact.filename }}"
+    state: present
+  become: true
+  tags: [toolchain, skopeo]
+
+- name: Detect registry-managed govulncheck
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/govulncheck", -version]
+  register: govulncheck_current
+  failed_when: false
+  changed_when: false
+  tags: [toolchain, govulncheck]
+
+- name: Install registry-managed govulncheck through the pinned Go toolchain
+  ansible.builtin.command:
+    argv:
+      - "{{ local_share }}/toolchains/go/{{ go_version }}/go/bin/go"
+      - install
+      - "{{ managed_tools.govulncheck.artifact.module }}@v{{ toolchain_lock.versions[managed_tools.govulncheck.version_ref] }}"
+  environment:
+    GOBIN: "{{ local_bin }}"
+    GOROOT: ""
+    GOSUMDB: sum.golang.org
+    GOPROXY: https://proxy.golang.org
+    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
+  when: >-
+    govulncheck_current.rc != 0 or
+    ('govulncheck@v' ~ toolchain_lock.versions[managed_tools.govulncheck.version_ref]) not in
+    (govulncheck_current.stdout ~ govulncheck_current.stderr)
+  changed_when: true
+  tags: [toolchain, govulncheck]
 
 - name: Download pinned Bazelisk
   ansible.builtin.get_url:
@@ -627,11 +738,6 @@
     checksum: "sha256:{{ item.checksum }}"
     mode: '0644'
   loop:
-    - name: gitleaks
-      url: "https://github.com/gitleaks/gitleaks/releases/download/v{{ gitleaks_version }}/gitleaks_{{ gitleaks_version }}_linux_x64.tar.gz"
-      archive: "gitleaks-{{ gitleaks_version }}.tar.gz"
-      checksum: "{{ gitleaks_sha256 }}"
-      tag: gitleaks
     - name: helm
       url: "https://get.helm.sh/helm-v{{ helm_version }}-linux-amd64.tar.gz"
       archive: "helm-{{ helm_version }}.tar.gz"
@@ -649,7 +755,7 @@
       checksum: "{{ kustomize_sha256 }}"
       tag: kustomize
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [gitleaks, helm, terraform, kustomize]
+  tags: [helm, terraform, kustomize]
 
 - name: Create standalone gate tool directories
   ansible.builtin.file:
@@ -657,12 +763,11 @@
     state: directory
     mode: '0755'
   loop:
-    - {name: gitleaks, version: "{{ gitleaks_version }}", tag: gitleaks}
     - {name: helm, version: "{{ helm_version }}", tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [gitleaks, helm, terraform, kustomize]
+  tags: [helm, terraform, kustomize]
 
 - name: Extract pinned standalone gate tools
   ansible.builtin.unarchive:
@@ -671,12 +776,11 @@
     remote_src: true
     creates: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}/{{ item.creates }}"
   loop:
-    - {name: gitleaks, version: "{{ gitleaks_version }}", archive: "gitleaks-{{ gitleaks_version }}.tar.gz", creates: gitleaks, tag: gitleaks}
     - {name: helm, version: "{{ helm_version }}", archive: "helm-{{ helm_version }}.tar.gz", creates: linux-amd64/helm, tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", archive: "terraform-{{ terraform_version }}.zip", creates: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", archive: "kustomize-{{ kustomize_version }}.tar.gz", creates: kustomize, tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [gitleaks, helm, terraform, kustomize]
+  tags: [helm, terraform, kustomize]
 
 - name: Link standalone gate tools into the user path
   ansible.builtin.file:
@@ -685,12 +789,11 @@
     state: link
     force: true
   loop:
-    - {name: gitleaks, version: "{{ gitleaks_version }}", relative: gitleaks, tag: gitleaks}
     - {name: helm, version: "{{ helm_version }}", relative: linux-amd64/helm, tag: helm}
     - {name: terraform, version: "{{ terraform_version }}", relative: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", relative: kustomize, tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [gitleaks, helm, terraform, kustomize]
+  tags: [helm, terraform, kustomize]
 
 - name: Download pinned kubectl
   ansible.builtin.get_url:

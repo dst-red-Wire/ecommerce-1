@@ -33,10 +33,15 @@ STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("classifications", []))
 REQUIREMENTS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("requirements", []))
 MANAGED_PROVISION_TYPES = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_provision_types", []))
-MANAGED_BIN_DIRS = tuple(
-    Path.home() / relative
-    for relative in _BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_bin_subdirectories", [".local/bin"])
+_MANAGED_INSTALL_ROOT = _BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_install_root", {})
+_MANAGED_ROOT_ENVIRONMENT = _MANAGED_INSTALL_ROOT.get("environment", "ECOMMERCE_TOOL_HOME")
+_MANAGED_ROOT_CONFIGURED = os.environ.get(_MANAGED_ROOT_ENVIRONMENT, "").strip()
+_MANAGED_ROOT = (
+    Path(_MANAGED_ROOT_CONFIGURED).expanduser()
+    if _MANAGED_ROOT_CONFIGURED
+    else Path(_MANAGED_INSTALL_ROOT.get("fallback", "~/.local")).expanduser()
 )
+MANAGED_BIN_DIRS = (_MANAGED_ROOT / _MANAGED_INSTALL_ROOT.get("bin_subdirectory", "bin"),)
 COMMAND_WRAPPERS = {"require", "require_command"}
 SEMVER = re.compile(r"(?<![0-9.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?![0-9A-Za-z.-])")
 
@@ -86,6 +91,32 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
         raise ValueError("toolchain lock must declare capability_policy")
     if not policy.get("classifications") or not policy.get("requirements"):
         raise ValueError("toolchain lock capability policy must declare classifications and requirements")
+
+    tools = contract.get("tools")
+    if not isinstance(tools, dict) or not tools:
+        raise ValueError("toolchain registry must contain approved repository tools")
+    for name, tool in tools.items():
+        version_ref = tool.get("version_ref")
+        if version_ref not in versions or versions[version_ref].lower() == "latest":
+            raise ValueError(f"{name}: missing exact central version")
+        artifact = tool.get("artifact")
+        if not isinstance(artifact, dict) or not str(artifact.get("url", "")).startswith("https://"):
+            raise ValueError(f"{name}: deterministic HTTPS artifact is required")
+        if "latest" in artifact["url"].lower():
+            raise ValueError(f"{name}: floating artifact URL is forbidden")
+        checksum_ref = tool.get("sha256_ref")
+        integrity = tool.get("integrity")
+        if checksum_ref is None and integrity != "go-checksum-database":
+            raise ValueError(f"{name}: artifact integrity authority is required")
+        if checksum_ref is not None and not re.fullmatch(r"[0-9a-f]{64}", versions.get(checksum_ref, "")):
+            raise ValueError(f"{name}: invalid central SHA256")
+        if tool.get("platforms") != ["linux/amd64"]:
+            raise ValueError(f"{name}: unsupported platform contract")
+        if not tool.get("install") or not tool.get("binary") or not tool.get("version_command"):
+            raise ValueError(f"{name}: install and version verification contract is incomplete")
+    rejected = contract.get("rejected_tools", {})
+    if rejected.get("hyperfine", {}).get("install") != "forbidden-until-a-distinct-consumer-is-contracted":
+        raise ValueError("hyperfine must remain rejected while qualification timing owns the capability")
     return contract
 
 
@@ -476,6 +507,9 @@ class Auditor:
     @staticmethod
     def installed_version(output: str, parser: str = "first_semver") -> str | None:
         """Parse the reported installed version, never an arbitrary substring."""
+        if parser == "govulncheck":
+            match = re.search(r"govulncheck@v([0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z.-]+)?)", output)
+            return match.group(1) if match else None
         if parser not in {"first_semver", "first_semver_release"}:
             raise ValueError(f"unsupported version parser: {parser}")
         match = SEMVER.search(output)
