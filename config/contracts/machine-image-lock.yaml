@@ -1,0 +1,116 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: rke2-node-golden-image
+
+packer_image:
+  id: rocky-10.2-base
+  os:
+    distribution: rocky
+    version: "10.2"
+    architecture: x86_64-v3
+
+  source:
+    iso: Rocky-10.2-x86_64-dvd1.iso
+    url: https://download.rockylinux.org/pub/rocky/10.2/isos/x86_64/Rocky-10.2-x86_64-dvd1.iso
+    sha256: 16ca9c96cdb221ba6e1f68579f21bd69fd8da81c6a921d9068949796f91c8feb
+    mutable_aliases: forbidden
+
+  packages:
+    lock: config/artifacts/rocky-10.2-base-packages.lock.json
+    single_definition_for_all_outputs: true
+
+  kernel:
+    nevra: kernel-0:6.12.0-211.56.1.el10_2.0.1.x86_64
+    modules_extra: required
+    required_modules: [br_netfilter, nf_conntrack, overlay, vxlan]
+
+  security:
+    selinux: enforcing
+    container_selinux: required
+    firewall_backend: nftables
+    firewalld: absent
+    ssh_root_login: forbidden
+    ssh_password_authentication: forbidden
+    ssh_empty_passwords: forbidden
+    kernel_redirect_acceptance: disabled
+    core_dumps: restricted
+
+  networking:
+    manager: NetworkManager
+    ipv4_forwarding: prepared
+    static_ip: forbidden
+
+  services:
+    enabled: [NetworkManager, chronyd, sshd]
+    disabled: [firewalld]
+
+  kubernetes_prerequisites:
+    swap: disabled
+    cgroup: v2
+    bpffs: required
+    rke2_selinux: supplied-by-locked-rke2-bundle
+
+  build:
+    packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
+    virtualbox:
+      version: 7.2.18
+      plugin:
+        source: github.com/hashicorp/virtualbox
+        version: 1.1.5
+    qemu_kvm:
+      plugin:
+        source: github.com/hashicorp/qemu
+        version: 1.1.6
+    vagrant_post_processor:
+      plugin:
+        source: github.com/hashicorp/vagrant
+        version: 1.1.7
+
+  outputs:
+    logical_base: rocky-10.2-base
+    virtualbox: rocky-10.2-virtualbox.box
+    qemu_kvm: rocky-10.2-kvm.qcow2
+
+  clone_hygiene:
+    hostname: rocky-10-2-base
+    machine_id: cleaned-before-export
+    ssh_host_keys: regenerate-on-first-boot
+    private_keys: forbidden
+    secrets: forbidden
+    rke2_token: forbidden
+
+  evidence:
+    sbom: required
+    sha256: required
+    package_manifest: required
+
+responsibility_boundary:
+  packer:
+    - immutable-os-base
+    - kernel-and-modules
+    - common-package-set
+    - common-os-hardening
+  ansible:
+    - ip-addresses
+    - hostname
+    - control-plane-worker-role
+    - rke2-token
+    - rke2-cluster-init-and-join
+    - haproxy
+    - cilium
+    - dns
+    - cluster-network-and-security-policies
+  rke2_bundle:
+    - exact-rke2
+    - exact-cilium-images
+    - rke2-selinux
+    - complete-runtime-rpm-closure
+
+rules:
+  packer_may_invoke_ansible: forbidden
+  cluster_identity_in_image: forbidden
+  runtime_secrets_in_image: forbidden
+  rke2_token_in_image: forbidden
+  network_identity_in_image: forbidden
+  generated_images_in_git: forbidden

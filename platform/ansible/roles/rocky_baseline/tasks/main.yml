@@ -3,10 +3,10 @@
   ansible.builtin.assert:
     that:
       - ansible_facts.distribution == "Rocky"
-      - ansible_facts.distribution_major_version == "9"
+      - ansible_facts.distribution_version == "10.2"
       - mgmt_offline_artifacts_verified | default(false) | bool
       - mgmt_offline_curl_package in ['curl', 'curl-minimal']
-    fail_msg: "MGMT nodes require Rocky Linux 9.x and verified offline artifacts with an approved curl package variant."
+    fail_msg: "MGMT nodes require Rocky Linux 10.2 and verified offline artifacts with an approved curl package variant."
 
 - name: Install baseline packages
   ansible.builtin.dnf:

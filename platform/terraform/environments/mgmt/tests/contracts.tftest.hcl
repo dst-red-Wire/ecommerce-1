@@ -5,7 +5,7 @@ variables {
   hcloud_network_zone        = "eu-central"
   hcloud_ssh_key_ids         = [123]
   hcloud_access_server_types = { wireguard-gateway = "cx22" }
-  hcloud_image               = "rocky-9-pinned-test-fixture"
+  hcloud_image               = "rocky-10.2-pinned-test-fixture"
   hcloud_server_types = {
     rke2-cp     = "cpx31"
     rke2-worker = "cpx51"

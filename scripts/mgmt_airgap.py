@@ -17,6 +17,7 @@ REQUIRED_RPMS = frozenset({
     "curl", "ca-certificates", "chrony", "jq", "NetworkManager", "iproute", "tar",
     "unzip", "firewalld", "nftables", "kmod", "rke2-selinux", "container-selinux", "selinux-policy",
     "selinux-policy-targeted", "policycoreutils", "libselinux-utils", "iptables-nft", "libnftnl",
+    "kernel", "kernel-core", "kernel-modules", "kernel-modules-extra", "openssh-server", "python3",
 })
 # Rocky minimal images provide the same required curl command through a smaller
 # package. Preserve that variant; no broad DNF erasure is authorized by bootstrap.
@@ -193,7 +194,7 @@ def validate_bundle(directory: Path, approved_sha256: str, version: str, rpm_met
     require(isinstance(manifest, dict) and manifest.get("schema_version") == 1, "unsupported manifest schema")
     require(manifest.get("rke2_version") == version and re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+\+rke2r[0-9]+", version),
             "RKE2 version differs from canonical pin")
-    require(manifest.get("os") == "rocky-9" and manifest.get("architecture") == "amd64", "unsupported target")
+    require(manifest.get("os") == "rocky-10.2" and manifest.get("architecture") == "amd64", "unsupported target")
     require(manifest.get("rpm_dependency_closure") == "complete", "complete RPM dependency inventory required")
     approved_images = manifest.get("image_inventory")
     require(isinstance(approved_images, dict) and approved_images.get("rke2_version") == version,

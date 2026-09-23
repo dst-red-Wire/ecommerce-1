@@ -7,7 +7,10 @@ by `architecture.lock.yaml`, `config/infrastructure/mgmt-bootstrap.yaml` and
 `config/infrastructure/network-plan.yaml`.
 
 The supported controller is WSL2 with Windows VirtualBox and native Windows Vagrant.
-The fixture contract in `contract.yml` pins Vagrant 2.4.9, the official Rocky 9.8
+This is superseded Rocky 9.8 evidence retained for audit history only. The active
+Rocky 10.2 Packer image contract lives in
+`config/contracts/machine-image-lock.yaml`. The historical fixture contract in
+`contract.yml` pins Vagrant 2.4.9 and the former official Rocky 9.8
 box and its SHA256, and the accepted local resource bounds. The validated host used
 VirtualBox 7.2.18. The authoritative launcher requires the canonical Windows Vagrant
 installation at `C:\\Program Files\\Vagrant\\bin\\vagrant.exe` and verifies that

@@ -11,6 +11,24 @@ scanner:
   local_config: forbidden
   generated_config: required
 
+capabilities:
+  container_and_filesystem:
+    implementation: trivy
+    execution: affected-container-and-configuration-inputs
+  secret_detection:
+    implementation: gitleaks
+    execution: exact-materialized-git-tree
+  go_static_analysis:
+    implementation: gosec
+    execution: affected-go-modules
+  go_vulnerabilities:
+    implementation: govulncheck
+    execution: affected-go-modules
+  kubernetes_cis:
+    implementation: kube-bench
+    execution: qualified-rke2-cluster-only
+    policy_authority: architecture.lock.yaml#security
+
 configuration:
   use_default_rules: true
   allowlist:

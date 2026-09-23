@@ -48,8 +48,8 @@ def checked_lock(path: Path, expected_version: str) -> dict:
     require(re.fullmatch(r"[0-9a-f]{64}", str(document.get("approved_manifest_sha256"))) is not None,
             "independently approved manifest SHA256 is required")
     target = document.get("target")
-    require(target == {"architecture": "amd64", "os": "rocky-9.8"},
-            "bundle lock target must be Rocky 9.8 amd64")
+    require(target == {"architecture": "amd64", "os": "rocky-10.2"},
+            "bundle lock target must be Rocky 10.2 amd64")
     image = document.get("preparer_image")
     require(isinstance(image, str) and re.fullmatch(
         r"[A-Za-z0-9./_-]+@sha256:[0-9a-f]{64}", image),
@@ -173,7 +173,7 @@ def manifest_from_lock(lock: dict) -> dict:
         "architecture": "amd64",
         "artifacts": sorted(artifacts, key=lambda item: item["file"]),
         "image_inventory": lock["image_inventory"],
-        "os": "rocky-9",
+        "os": "rocky-10.2",
         "rke2_version": lock["rke2_version"],
         "rpm_dependency_closure": "complete",
         "schema_version": 1,

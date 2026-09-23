@@ -800,7 +800,8 @@ workflows:
         parameters:
           expected_stdout:
             context: vagrant_expected_stdout
-    completion:
+    superseded_completion:
+      superseded_by: rocky-10.2-packer-image-migration
       status: complete
       criteria_status: PASS
       proof_registration: existing-proof-no-rerun

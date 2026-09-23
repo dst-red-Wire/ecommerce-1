@@ -3,6 +3,8 @@
 # architecture remains owned by config/infrastructure and architecture.lock.yaml.
 mgmt_local_vm_contract:
   schema_version: 1
+  status: superseded-rocky-9.8-evidence-only
+  replacement: config/contracts/machine-image-lock.yaml#packer_image.outputs.virtualbox
   vagrant:
     version: 2.4.9
   rocky_box:

@@ -70,10 +70,22 @@ def _raw_toolchain_lock() -> dict:
 def managed_bin_dirs() -> tuple[Path, ...]:
     contract = _raw_toolchain_lock()
     policy = contract.get("capability_policy", {})
-    relatives = policy.get("managed_bin_subdirectories", [])
-    if not isinstance(relatives, list) or not relatives or any(not isinstance(item, str) or not item for item in relatives):
-        raise RuntimeError("central toolchain lock must declare managed_bin_subdirectories")
-    return tuple(Path.home() / item for item in relatives)
+    install_root = policy.get("managed_install_root", {})
+    environment = install_root.get("environment")
+    fallback = install_root.get("fallback")
+    bin_subdirectory = install_root.get("bin_subdirectory")
+    if not all(isinstance(value, str) and value for value in (environment, fallback, bin_subdirectory)):
+        raise RuntimeError("central toolchain lock must declare managed_install_root")
+    configured = os.environ.get(environment, "").strip()
+    if configured:
+        root = Path(configured).expanduser()
+    elif fallback == "~":
+        root = Path.home()
+    elif fallback.startswith("~/"):
+        root = Path.home() / fallback[2:]
+    else:
+        root = Path(fallback)
+    return (root / bin_subdirectory,)
 
 
 def toolchain_projection_path(name: str) -> Path:
@@ -4590,12 +4602,19 @@ def doctor() -> int:
         "terraform",
         "tflint",
         "trivy",
+        "skopeo",
+        "packer",
         "checkov",
         "gitleaks",
+        "gosec",
+        "govulncheck",
+        "kube-bench",
         "ggshield",
         "semgrep",
         "syft",
         "cosign",
+        "sops",
+        "age",
         "oras",
         "rg",
         "fd",

@@ -1,105 +1,9 @@
 {
-  "approved_manifest_sha256": "3f2771268cfa6d648398516bd4daef2f9629c6ff51a05f39f7b52427194c4f05",
-  "image_inventory": {
-    "archives": {
-      "images-cilium": [
-        "docker.io/rancher/hardened-cni-plugins:v1.9.1-build20260903",
-        "docker.io/rancher/mirrored-cilium-certgen:v0.4.9",
-        "docker.io/rancher/mirrored-cilium-cilium-envoy:v1.37.5-1786810558-766ccfb37260a43e9d228837aa84ce3faf9f64e7",
-        "docker.io/rancher/mirrored-cilium-cilium:v1.20.1",
-        "docker.io/rancher/mirrored-cilium-clustermesh-apiserver:v1.20.1",
-        "docker.io/rancher/mirrored-cilium-hubble-relay:v1.20.1",
-        "docker.io/rancher/mirrored-cilium-hubble-ui-backend:v0.13.5",
-        "docker.io/rancher/mirrored-cilium-hubble-ui:v0.13.5",
-        "docker.io/rancher/mirrored-cilium-operator-aws:v1.20.1",
-        "docker.io/rancher/mirrored-cilium-operator-azure:v1.20.1",
-        "docker.io/rancher/mirrored-cilium-operator-generic:v1.20.1"
-      ],
-      "images-core": [
-        "rancher/hardened-addon-resizer:1.8.23-build20260909",
-        "rancher/hardened-cluster-autoscaler:v1.10.3-build20260819",
-        "rancher/hardened-coredns:v1.14.7-build20260909",
-        "rancher/hardened-dns-node-cache:1.26.8-build20260909",
-        "rancher/hardened-etcd:v3.7.1-k3s1-build20260910",
-        "rancher/hardened-k8s-metrics-server:v0.9.0-build20260909",
-        "rancher/hardened-kubernetes:v1.37.0-rke2r1-build20260909",
-        "rancher/hardened-snapshot-controller:v8.6.0-build20260909",
-        "rancher/hardened-traefik:v3.7.13-build20260910",
-        "rancher/klipper-helm:v0.13.3-build20260909",
-        "rancher/klipper-lb:v0.4.17",
-        "rancher/mirrored-pause:3.10.2",
-        "rancher/rke2-cloud-provider:v1.35.1-0.20260817230842-2a1e2e8cf41b-build20260910",
-        "rancher/rke2-runtime:v1.37.0-rke2r1",
-        "rancher/rke2-security-responder:v0.1.5",
-        "sha256:3b22418b8d19711924b74091dab7b1e511ce352652d2ad8eedb46de365b50fbb",
-        "sha256:577c1202f08bd085e03e240d795257f8fbea58527271185fdccadec7ce15648c",
-        "sha256:66822795b54aaea56220b62c0223106449ac6b82751bb6728c2a1a522a0f03c8",
-        "sha256:66d66121b3efa6588f5d3eb26b6c0ddaec775fdbcbf4f1b2cd73ca1fc2a0f264",
-        "sha256:70871d9e0d5d505354dd2c69daae6c2010851bff70138fc2cf3ee3c394ffaaad",
-        "sha256:72dacd6919c408d6bdb619c3df5a2ccb68235d3150d3e118929a7320ab2b2d43",
-        "sha256:7914f4b7206cb3387d5059b9434fb656115f418681e559c66508b684a636333a",
-        "sha256:7b122b30e5c62f55889e7d2d2fb6565c7d8cdc749c7fc5dc7690b1d213dbe271",
-        "sha256:7cfc2ec25ea65eb2fe572df5ead508279813088f4383210ead336b09f538962d",
-        "sha256:8a993d863feb767ef99e08bbc37e88d88f3a0b59f38ee382c138010be2f765e9",
-        "sha256:910944bb0bd94f060a82a56ca1ea1c577d3e49b3473a093a47a985f32e92d94a",
-        "sha256:9298306cd6de814e35cf9a22faf0825d4130e71c22c493431779163622013ef8",
-        "sha256:c9b9b027e4d2cf1731311f9714f4aa633d37d7b0a72c9d3e6fc7a0594350d27c",
-        "sha256:e89ce639d4e7aec131aaf7aecb7fd9b3b26f21f5604bdc37c2336b8901a2d9b0",
-        "sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
-      ]
-    },
-    "rke2_version": "v1.37.0+rke2r1"
-  },
-  "preparer_image": "quay.io/rockylinux/rockylinux@sha256:e372170ca8630f0f03e9b70fdd0bf4a3ce3426b0de7cdba615f06337389de176",
-  "release_artifacts": {
-    "binary": {
-      "category": "binary",
-      "file": "rke2.linux-amd64",
-      "sha256": "0200ef2151296d35c662ee00732db1adadff37ba15b8c0ee37abded7c26e79d9",
-      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2.linux-amd64"
-    },
-    "images-cilium": {
-      "category": "images-cilium",
-      "compressed_file": "rke2-images-cilium.linux-amd64.tar.zst",
-      "compressed_sha256": "37ea271fee07962b89183c5b8f70f3e1d6bc7ef0017deaf2c987a32f6786b234",
-      "file": "rke2-images-cilium.linux-amd64.tar",
-      "sha256": "125d9b7eaed7794488abc679af6e6b64ef6e22962d0d715a0d3a059d2275ed4e",
-      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2-images-cilium.linux-amd64.tar.zst"
-    },
-    "images-core": {
-      "category": "images-core",
-      "compressed_file": "rke2-images-core.linux-amd64.tar.zst",
-      "compressed_sha256": "234b5f88463289b9abede674667d24c186945279fc6d658cb43db39e8ccb2657",
-      "file": "rke2-images-core.linux-amd64.tar",
-      "sha256": "f672f4fffb6fd9a286b01651c9c93fc6bfb46b9b1d897ee36f7132b793d60bbd",
-      "url": "https://github.com/rancher/rke2/releases/download/v1.37.0%2Brke2r1/rke2-images-core.linux-amd64.tar.zst"
-    }
-  },
-  "rke2_version": "v1.37.0+rke2r1",
-  "rpm_signing_keys": [
-    {
-      "category": "rpm-signing-key",
-      "file": "rancher-public.asc",
-      "fingerprint": "C8CFF216455126E9B9C918BE925EA29AE257814A",
-      "sha256": "7d2415f7fc532c365c8874bfad966566daaa0d04a9a5ba14d1db6080a9c12629",
-      "url": "https://rpm.rancher.io/public.key"
-    },
-    {
-      "category": "rpm-signing-key",
-      "file": "rocky-10-public.asc",
-      "fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "sha256": "be8c4f070b696e64d8ce40e59a95a57e8b5c776f0015c2fd64e14b896622bdb4",
-      "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-10"
-    },
-    {
-      "category": "rpm-signing-key",
-      "file": "epel-10-public.asc",
-      "fingerprint": "7D8D15CBFC4E62688591FB2633D98517E37ED158",
-      "sha256": "de390fc168eae5ab2852e9e93d34a0b9ddf05cf9ce90ee28d97de26a4b1f6b93",
-      "url": "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-10"
-    }
-  ],
-  "rpms": [
+  "approved_manifest_sha256": "adb90bb84fee847dffdcd6472828804ca7d42e66b0f43f66d874cf302536edcd",
+  "architecture": "x86_64-v3",
+  "dependency_closure": "complete",
+  "image": "rocky-10.2-base",
+  "packages": [
     {
       "category": "rpm",
       "file": "NetworkManager-1.56.0-2.el10_2.x86_64.rpm",
@@ -417,15 +321,6 @@
     },
     {
       "category": "rpm",
-      "file": "dbus-libs-1.14.10-5.el10.x86_64.rpm",
-      "nevra": "dbus-libs-1:1.14.10-5.el10.x86_64",
-      "package": "dbus-libs",
-      "sha256": "966b6f686ffa14e52d73400e66d0e5867f8918e4a4054ffe93d6f725061367d2",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/d/dbus-libs-1.14.10-5.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
       "file": "device-mapper-1.02.210-2.el10.x86_64.rpm",
       "nevra": "device-mapper-10:1.02.210-2.el10.x86_64",
       "package": "device-mapper",
@@ -561,24 +456,6 @@
     },
     {
       "category": "rpm",
-      "file": "firewalld-2.4.3-4.el10_2.noarch.rpm",
-      "nevra": "firewalld-0:2.4.3-4.el10_2.noarch",
-      "package": "firewalld",
-      "sha256": "d01d481f5c4a8fd1feabd1207b4600594af86718c07f529b8d42621fa6ce420a",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/f/firewalld-2.4.3-4.el10_2.noarch.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "firewalld-filesystem-2.4.3-4.el10_2.noarch.rpm",
-      "nevra": "firewalld-filesystem-0:2.4.3-4.el10_2.noarch",
-      "package": "firewalld-filesystem",
-      "sha256": "945914a43232c9b9b78c3c893d69494d2d29f42a0dbd61727ab8f4fdc8c37db5",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/f/firewalld-filesystem-2.4.3-4.el10_2.noarch.rpm"
-    },
-    {
-      "category": "rpm",
       "file": "fstrm-0.6.1-12.el10.x86_64.rpm",
       "nevra": "fstrm-0:0.6.1-12.el10.x86_64",
       "package": "fstrm",
@@ -696,15 +573,6 @@
     },
     {
       "category": "rpm",
-      "file": "gobject-introspection-1.79.1-6.el10.x86_64.rpm",
-      "nevra": "gobject-introspection-0:1.79.1-6.el10.x86_64",
-      "package": "gobject-introspection",
-      "sha256": "21f9e767c373380feb4d6c6d553be0b1c31dc7b2c07cc577a06e8ba626b65492",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/g/gobject-introspection-1.79.1-6.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
       "file": "grep-3.11-10.el10.x86_64.rpm",
       "nevra": "grep-0:3.11-10.el10.x86_64",
       "package": "grep",
@@ -747,24 +615,6 @@
       "sha256": "90b3186762e5fed9a46c57c7382df0ae1ca9b93746608941bf0c5cffc13f27f2",
       "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
       "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/i/iproute-6.17.0-2.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "ipset-7.22-13.el10_2.x86_64.rpm",
-      "nevra": "ipset-0:7.22-13.el10_2.x86_64",
-      "package": "ipset",
-      "sha256": "f80eae1d34fc628fb8543988d4e97f245694ab41f00becdb689bb385386fe860",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/i/ipset-7.22-13.el10_2.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "ipset-libs-7.22-13.el10_2.x86_64.rpm",
-      "nevra": "ipset-libs-0:7.22-13.el10_2.x86_64",
-      "package": "ipset-libs",
-      "sha256": "7e8e516e6cb81f6525e873debdfe54b38a84db57680cb6aecdb36ba85071b06f",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/i/ipset-libs-7.22-13.el10_2.x86_64.rpm"
     },
     {
       "category": "rpm",
@@ -1026,15 +876,6 @@
       "sha256": "4fce88bd251c58ceb04f0f007be361eb2ce3650749646f34143f8273aecf0e50",
       "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
       "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/l/libcap-ng-0.8.4-6.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "libcap-ng-python3-0.8.4-6.el10.x86_64.rpm",
-      "nevra": "libcap-ng-python3-0:0.8.4-6.el10.x86_64",
-      "package": "libcap-ng-python3",
-      "sha256": "7f0ffad93ce43efe4c8692e96e7e18e8cc60755e526ab2678cc9ce2844c94747",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/AppStream/x86_64/os/Packages/l/libcap-ng-python3-0.8.4-6.el10.x86_64.rpm"
     },
     {
       "category": "rpm",
@@ -1857,57 +1698,12 @@
     },
     {
       "category": "rpm",
-      "file": "python3-dbus-1.3.2-8.el10.x86_64.rpm",
-      "nevra": "python3-dbus-0:1.3.2-8.el10.x86_64",
-      "package": "python3-dbus",
-      "sha256": "f8a4d557418b6192a5ffea995bcb730d25cec37f99d9bd8a3ab9c3ba63e0589d",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-dbus-1.3.2-8.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "python3-firewall-2.4.3-4.el10_2.noarch.rpm",
-      "nevra": "python3-firewall-0:2.4.3-4.el10_2.noarch",
-      "package": "python3-firewall",
-      "sha256": "616471dca5bcab533c8f60d9a00ffbf0de6af1c4c9c1a8b4410310cae59fccf4",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-firewall-2.4.3-4.el10_2.noarch.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "python3-gobject-base-3.46.0-7.el10.x86_64.rpm",
-      "nevra": "python3-gobject-base-0:3.46.0-7.el10.x86_64",
-      "package": "python3-gobject-base",
-      "sha256": "d662f65f66a5cee4268d912da7c615784ed269d887d641ec35be844c763f77c6",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-gobject-base-3.46.0-7.el10.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "python3-gobject-base-noarch-3.46.0-7.el10.noarch.rpm",
-      "nevra": "python3-gobject-base-noarch-0:3.46.0-7.el10.noarch",
-      "package": "python3-gobject-base-noarch",
-      "sha256": "d0f5fd8bb0c8259f1ec1ffba85ec58dcfef33ea42f8c7957f6cb19f6128e0244",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-gobject-base-noarch-3.46.0-7.el10.noarch.rpm"
-    },
-    {
-      "category": "rpm",
       "file": "python3-libs-3.12.14-1.el10_2.x86_64.rpm",
       "nevra": "python3-libs-0:3.12.14-1.el10_2.x86_64",
       "package": "python3-libs",
       "sha256": "f849e641fd867cd913247349f41d60c08c435f1aca6ae117fcf17762dfe5cd2a",
       "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
       "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-libs-3.12.14-1.el10_2.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "python3-nftables-1.1.5-6.el10_2.x86_64.rpm",
-      "nevra": "python3-nftables-1:1.1.5-6.el10_2.x86_64",
-      "package": "python3-nftables",
-      "sha256": "5ea4624c3f67607d8cdc9047fe4e1ff5caebe1a4e3ad7b1d793f52649d4767ee",
-      "signer_fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-      "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/p/python3-nftables-1.1.5-6.el10_2.x86_64.rpm"
     },
     {
       "category": "rpm",
@@ -1953,15 +1749,6 @@
       "sha256": "3d80991c5993567d836a997d2ecefe516abc7613488766cee0103e1343abc93e",
       "signer_fingerprint": "7D8D15CBFC4E62688591FB2633D98517E37ED158",
       "url": "https://dl.fedoraproject.org/pub/epel/10.2/Everything/x86_64/Packages/r/ripgrep-14.1.1-1.el10_0.x86_64.rpm"
-    },
-    {
-      "category": "rpm",
-      "file": "rke2-selinux-0.23-1.el10.noarch.rpm",
-      "nevra": "rke2-selinux-0:0.23-1.el10.noarch",
-      "package": "rke2-selinux",
-      "sha256": "b70c6e4f77323f6468bcb53eda3f4461437806ccbf5140e943a6ff9f11ebd868",
-      "signer_fingerprint": "C8CFF216455126E9B9C918BE925EA29AE257814A",
-      "url": "https://rpm.rancher.io/rke2/stable/common/centos/10/noarch/rke2-selinux-0.23-1.el10.noarch.rpm"
     },
     {
       "category": "rpm",
@@ -2315,9 +2102,22 @@
       "url": "https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/Packages/z/zlib-ng-compat-2.2.3-3.el10_1.x86_64.rpm"
     }
   ],
+  "rpm_signing_keys": [
+    {
+      "category": "rpm-signing-key",
+      "file": "rocky-10-public.asc",
+      "fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
+      "sha256": "be8c4f070b696e64d8ce40e59a95a57e8b5c776f0015c2fd64e14b896622bdb4",
+      "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-10"
+    },
+    {
+      "category": "rpm-signing-key",
+      "file": "epel-10-public.asc",
+      "fingerprint": "7D8D15CBFC4E62688591FB2633D98517E37ED158",
+      "sha256": "de390fc168eae5ab2852e9e93d34a0b9ddf05cf9ce90ee28d97de26a4b1f6b93",
+      "url": "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-10"
+    }
+  ],
   "schema_version": 1,
-  "target": {
-    "architecture": "amd64",
-    "os": "rocky-10.2"
-  }
+  "source_lock": "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"
 }

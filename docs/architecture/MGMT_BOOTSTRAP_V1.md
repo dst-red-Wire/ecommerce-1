@@ -14,11 +14,12 @@ activate M4. Terraform/OpenTofu owns one Hetzner Network, its six contract-deriv
 subnets, seven servers (three RKE2 servers, three agents, and the dedicated
 WireGuard gateway), private attachments, and two provider firewalls. Node names,
 addresses, profiles, and segments are decoded directly from the canonical YAML.
-Provider server-type and Rocky Linux 9 image mappings remain explicit reviewed
+Provider server-type and Rocky Linux 10.2 image mappings remain explicit reviewed
 runtime inputs because provider SKUs cannot be inferred from resource intent.
 
 Terraform does not install packages, render RKE2 configuration, configure
-systemd, or install Kubernetes software. Ansible owns Rocky Linux 9 prerequisites,
+systemd, or install Kubernetes software. Packer owns the common Rocky Linux 10.2
+prerequisites; Ansible owns runtime machine identity and configuration,
 private address aliases, the WireGuard host, and pinned RKE2 server/agent setup.
 The RKE2 token remains a runtime secret input. WireGuard has two deliberately
 separate phases: first bootstrap generates a temporary key locally on `wg-01`
@@ -140,7 +141,7 @@ creating a new infrastructure domain and requires neither cluster-hosted Harbor
 nor Istio Egress Gateway. No proxy or WireGuard Internet NAT is introduced.
 
 The connected preparation machine gathers the canonical RKE2 version's native
-binary, core image archive and Cilium image archive, plus the complete Rocky 9
+binary, core image archive and Cilium image archive, plus the complete Rocky 10.2
 RPM dependency closure. `scripts/mgmt_airgap.py` defines the mandatory package
 inventory (`REQUIRED_RPMS` and mutually exclusive `RPM_VARIANTS`), including host tools, firewalld/nftables, kernel module tools and SELinux
 policies. Rocky minimal curl/coreutils providers are retained where compatible; conflicting

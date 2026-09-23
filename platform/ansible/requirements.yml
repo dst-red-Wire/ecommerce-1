@@ -15,9 +15,6 @@ collections:
   - name: community.sops
     version: 1.6.7
 
-  - name: containers.podman
-    version: 1.11.0
-
   - name: hetzner.hcloud
     version: 2.4.1
 

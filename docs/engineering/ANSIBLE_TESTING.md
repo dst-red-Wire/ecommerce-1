@@ -8,9 +8,9 @@ Validation follows this order when a role can be exercised safely:
 4. Molecule idempotence
 5. Testinfra verify
 
-`developer_toolchain` is a workstation role and is not a Docker Molecule candidate: it requires the supported Ubuntu WSL2 host, user-local toolchains, and Docker Desktop integration. `rocky_baseline` manages `chronyd` through systemd; it should receive a Rocky 9 systemd-capable Molecule scenario only when the chosen runner can provide real cgroups and service management.
+`developer_toolchain` is a workstation role and is not a Docker Molecule candidate: it requires the supported Ubuntu WSL2 host, user-local toolchains, and Docker Desktop integration. `rocky_baseline` manages `chronyd` through systemd; it should receive a Rocky 10.2 systemd-capable Molecule scenario only when the chosen runner can provide real cgroups and service management.
 
-`rke2_server` and `rke2_agent` download and enable RKE2 services, require a token, and interact with kernel/cgroup/network prerequisites. A Docker-only scenario would be a false pass. Their first Molecule coverage must instead use a systemd-capable Rocky 9 runner with isolated RKE2 networking and non-secret test variables. Until that runner exists, syntax and lint remain the applicable local gates; this is a documented `SKIP`, not Molecule success.
+`rke2_server` and `rke2_agent` install and enable RKE2 services from the locked bundle, require a token, and interact with kernel/cgroup/network prerequisites. A Docker-only scenario would be a false pass. Their first Molecule coverage must instead use a systemd-capable Rocky 10.2 runner with isolated RKE2 networking and non-secret test variables. Until that runner exists, syntax and lint remain the applicable local gates; this is a documented `SKIP`, not Molecule success.
 
 Component-specific role tests live beside the role when introduced. Cross-role and repository governance tests stay in `tests/`.
 

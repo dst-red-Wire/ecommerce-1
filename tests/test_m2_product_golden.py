@@ -95,7 +95,8 @@ class ProductGoldenServiceContractTest(unittest.TestCase):
             for task in tasks
             for step in task["spec"]["steps"]
         }
-        self.assertTrue({"python3", "buildah", "skopeo", "trivy", "syft", "cosign"}.issubset(commands))
+        self.assertTrue({"python3", "buildctl-daemonless.sh", "skopeo", "trivy", "syft", "cosign"}.issubset(commands))
+        self.assertNotIn("buildah", commands)
         self.assertIn("$(params.image-repository)@$(tasks.build-push.results.image-digest)", source)
 
 

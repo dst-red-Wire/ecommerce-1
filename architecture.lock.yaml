@@ -56,7 +56,7 @@ business:
 
 platform:
   kubernetes: rke2
-  node_os: rocky-linux-9
+  node_os: rocky-linux-10.2
   cni: cilium
   mesh: istio
   gitops: rancher-fleet
@@ -350,6 +350,36 @@ supply_chain:
   immutable_images: true
   forbid_latest: true
 
+tooling:
+  registry: architecture.lock.yaml#machine_contracts.toolchain_lock
+  registry_scope: versions-sources-checksums-platforms-installation
+  architecture_scope: capabilities-responsibilities-authorities-relations
+  container:
+    local_runtime: {authority: docker-engine, mode: rootless, environment: wsl2}
+    image_builder: {authority: docker-buildkit}
+    image_transport:
+      authority: skopeo
+      responsibilities: [inspect, copy, registry-transport, manifest-read]
+  machine_images:
+    builder: packer
+    contract: architecture.lock.yaml#machine_contracts.machine_image_lock
+  security:
+    container_and_filesystem: trivy
+    secret_detection: gitleaks
+    go_static_analysis: gosec
+    go_vulnerabilities: govulncheck
+    kubernetes_cis: kube-bench
+  secrets:
+    static_file_encryption: sops
+    recipient_crypto: age
+    runtime_authority: openbao-via-eso
+  performance:
+    authority: central-qualification-metrics-and-go-benchmarks
+    hyperfine: rejected-no-distinct-consumer
+  forbidden_authorities:
+    oci_runtime: podman
+    oci_builder: buildah
+
 topology_contracts:
   exact_index: docs/architecture/EXACT_TOPOLOGY_V5.md
   preprod: docs/architecture/PREPROD_TOPOLOGY_V2.md
@@ -392,6 +422,7 @@ machine_contracts:
   mesh_policy_authority: config/contracts/mesh-policy-authority.yaml
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
+  machine_image_lock: config/contracts/machine-image-lock.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml

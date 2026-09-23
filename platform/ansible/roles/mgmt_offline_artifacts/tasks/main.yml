@@ -3,7 +3,7 @@
   ansible.builtin.assert:
     that:
       - ansible_facts.distribution == "Rocky"
-      - ansible_facts.distribution_major_version == "9"
+      - ansible_facts.distribution_version == "10.2"
       - ansible_facts.architecture == "x86_64"
       - mgmt_offline_bundle_dir is match('^/')
       - mgmt_offline_manifest_sha256 is match('^[0-9a-f]{64}$')

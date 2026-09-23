@@ -123,7 +123,7 @@ Required implementation domains:
 2. IPAM/network inventory consumed by Terraform/Ansible/NetBox-compatible data;
 3. bare-metal provisioning assumptions;
 4. Proxmox VE 9 configuration;
-5. Rocky Linux 9.x VM templates/bootstrap;
+5. Rocky Linux 10.2 Packer templates/bootstrap;
 6. VM anti-affinity/layout;
 7. RKE2 bootstrap;
 8. Cilium installation prerequisites;

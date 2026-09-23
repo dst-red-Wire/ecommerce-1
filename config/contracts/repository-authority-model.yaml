@@ -15,6 +15,8 @@ domains:
     machine_contract: source_quality_policy
   toolchain:
     machine_contract: toolchain_lock
+  machine_image:
+    machine_contract: machine_image_lock
   qualification_cache:
     machine_contract: cache_policy
   qualification_execution:
@@ -48,6 +50,15 @@ artifact_classes:
     may_define_component_schema: true
 
 native_projections:
+  - path: config/artifacts/rocky-10.2-base-packages.lock.json
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: platform/packer/rocky-10.2/rocky-10.2.pkr.hcl
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: platform/packer/rocky-10.2/http/rocky-10.2.ks
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
   - path: config/toolchain/versions.env
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.toolchain_lock

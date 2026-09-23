@@ -137,88 +137,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_campaign["exact_sha_required"])
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
-        completion = rke2["completion"]
-        self.assertEqual("complete", completion["status"])
-        self.assertEqual("PASS", completion["criteria_status"])
-        self.assertEqual("existing-proof-no-rerun", completion["proof_registration"])
-        self.assertEqual(
-            "84cf01601aa336f0cdd2d1899d764437294fbfe6",
-            completion["qualified_source_sha"],
-        )
-        self.assertEqual(128, completion["merged_by_pr"])
-        self.assertEqual(
-            "088b576dac43cb17e304967e3e58433499760fa9",
-            completion["merge_commit_sha"],
-        )
-        self.assertEqual(
-            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746",
-            completion["provenance"]["code_review"],
-        )
-        self.assertEqual(
-            "https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831",
-            completion["provenance"]["security_review"],
-        )
-        self.assertEqual(
-            "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
-            completion["provenance"]["approved_manifest_sha256"],
-        )
-        self.assertIn(
-            "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json",
-            completion["invalidation_inputs"],
-        )
-        runtime_fixture_inputs = [
-            "platform/ansible/tests/mgmt_offline_vm/Vagrantfile",
-            "platform/ansible/tests/mgmt_offline_vm/contract.yml",
-            "platform/ansible/tests/mgmt_offline_vm/create.yml",
-            "platform/ansible/tests/mgmt_offline_vm/destroy.yml",
-            "platform/ansible/tests/mgmt_offline_vm/main.yml",
-            "platform/ansible/tests/mgmt_offline_vm/server.yml",
-            "platform/ansible/tests/mgmt_offline_vm/test.yml",
-            "platform/ansible/tests/mgmt_offline_vm/transport.py",
-        ]
-        for path in runtime_fixture_inputs:
-            self.assertIn(path, completion["invalidation_inputs"])
-        self.assertNotIn(
-            "platform/ansible/tests/mgmt_offline_vm/README.md",
-            completion["invalidation_inputs"],
-        )
-        self.assertEqual(
-            set(completion["invalidation_inputs"]),
-            set(completion["invalidation_object_ids"]),
-        )
-        self.assertTrue(
-            all(
-                __import__("re").fullmatch(r"[0-9a-f]{40}", object_id)
-                for object_id in completion["invalidation_object_ids"].values()
-            )
-        )
-        toolchain_inputs = [
-            "config/contracts/toolchain-lock.json",
-            "config/toolchain/versions.env",
-            "platform/ansible/requirements.yml",
-        ]
-        for path in toolchain_inputs:
-            self.assertIn(path, completion["invalidation_inputs"])
-            with self.subTest(invalidation_input=path):
-                expected = completion["invalidation_object_ids"][path]
-                changed = MOD.subprocess.CompletedProcess([], 0, "f" * 40 + "\n", "")
-                with mock.patch.object(MOD, "run", return_value=changed):
-                    self.assertFalse(
-                        MOD._completed_proof_inputs_unchanged(
-                            completion["qualified_source_sha"],
-                            [path],
-                            {path: expected},
-                        )
-                    )
-        semantic = completion["invalidation_semantic_functions"]
-        self.assertIn("scripts/repoctl.py", semantic)
-        self.assertIn("scripts/capability_bootstrap.py", semantic)
-        self.assertIn("ansible_collections_ready", semantic["scripts/repoctl.py"])
-        self.assertIn(
-            "validate_toolchain_projections",
-            semantic["scripts/capability_bootstrap.py"],
-        )
-        self.assertTrue(MOD._semantic_function_snapshot_unchanged(semantic))
+        self.assertNotIn("completion", rke2)
+        superseded = rke2["superseded_completion"]
+        self.assertEqual("rocky-10.2-packer-image-migration", superseded["superseded_by"])
+        self.assertEqual("84cf01601aa336f0cdd2d1899d764437294fbfe6", superseded["qualified_source_sha"])
+        self.assertEqual("complete", superseded["status"])
+        self.assertEqual("PASS", superseded["criteria_status"])
         self.assertEqual(
             ".context/mgmt-offline-vm/<name>/rke2-result.json",
             rke2["evidence"]["runtime"],
