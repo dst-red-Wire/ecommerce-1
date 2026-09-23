@@ -75,4 +75,14 @@ class ContractConsistencyTest < Minitest::Test
       assert ContractConsistency.validate(root).any? { |error| error.include?("missing ProductUpdated.v1") }
     end
   end
+
+  def test_missing_registered_protobuf_contract_fails
+    Dir.mktmpdir do |root|
+      fixture(root)
+      events = YAML.safe_load(File.read(File.join(root, "config/contracts/event-contracts.yaml")))
+      events["protobuf"] = {"product_v1" => {"path" => "contracts/proto/product.proto", "package" => "ecommerce.product.v1"}}
+      write_yaml(root, "config/contracts/event-contracts.yaml", events)
+      assert ContractConsistency.validate(root).any? { |error| error.include?("protobuf contract product_v1 path is missing") }
+    end
+  end
 end

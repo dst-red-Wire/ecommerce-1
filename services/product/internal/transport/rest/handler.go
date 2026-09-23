@@ -18,9 +18,24 @@ import (
 
 type Readiness func(context.Context) error
 
+type Authorizer interface {
+	Authorize(context.Context, string) error
+}
+
+type bearerAuthorizer struct{}
+
+func (bearerAuthorizer) Authorize(_ context.Context, value string) error {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")) == "" {
+		return errors.New("bearer token required")
+	}
+	return nil
+}
+
 type Handler struct {
-	service   *application.Service
-	readiness Readiness
+	service    *application.Service
+	readiness  Readiness
+	authorizer Authorizer
 }
 
 func NewHandler(service *application.Service) *Handler {
@@ -28,12 +43,20 @@ func NewHandler(service *application.Service) *Handler {
 }
 
 func NewHandlerWithReadiness(service *application.Service, readiness Readiness) *Handler {
-	return &Handler{service: service, readiness: readiness}
+	return NewHandlerWithAuthorizer(service, readiness, bearerAuthorizer{})
+}
+
+func NewHandlerWithAuthorizer(service *application.Service, readiness Readiness, authorizer Authorizer) *Handler {
+	return &Handler{service: service, readiness: readiness, authorizer: authorizer}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := requestID(r)
 	w.Header().Set("X-Request-ID", requestID)
+	r = r.WithContext(application.WithCommandMetadata(r.Context(), application.CommandMetadata{
+		CorrelationID: firstNonEmpty(r.Header.Get("X-Correlation-ID"), requestID),
+		CausationID:   firstNonEmpty(r.Header.Get("X-Causation-ID"), requestID),
+	}))
 
 	if r.URL.Path == "/healthz" {
 		if r.Method != http.MethodGet {
@@ -55,7 +78,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
-	if !authorized(r) {
+	if h.authorizer == nil || h.authorizer.Authorize(r.Context(), r.Header.Get("Authorization")) != nil {
 		problem(w, requestID, http.StatusUnauthorized, "UNAUTHORIZED", "Unauthorized", "Bearer token required")
 		return
 	}
@@ -227,6 +250,8 @@ func (h *Handler) writeError(w http.ResponseWriter, requestID string, err error)
 		problem(w, requestID, http.StatusPreconditionFailed, "PRECONDITION_FAILED", "Precondition failed", "If-Match does not match current version")
 	case errors.Is(err, application.ErrInvalidIdempotency):
 		problem(w, requestID, http.StatusBadRequest, "INVALID_IDEMPOTENCY_KEY", "Invalid idempotency key", "Idempotency-Key must contain 8 to 128 characters")
+	case errors.Is(err, application.ErrInvalidID):
+		problem(w, requestID, http.StatusBadRequest, "INVALID_ID", "Invalid resource identifier", "Resource identifiers must be canonical UUIDs")
 	case errors.Is(err, application.ErrValidation):
 		problem(w, requestID, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Validation failed", "")
 	default:
@@ -373,14 +398,6 @@ func pathParts(path string) []string {
 	return strings.Split(trimmed, "/")
 }
 
-func authorized(r *http.Request) bool {
-	value := strings.TrimSpace(r.Header.Get("Authorization"))
-	if !strings.HasPrefix(value, "Bearer ") {
-		return false
-	}
-	return strings.TrimSpace(strings.TrimPrefix(value, "Bearer ")) != ""
-}
-
 func requestID(r *http.Request) string {
 	if value := strings.TrimSpace(r.Header.Get("X-Request-ID")); value != "" {
 		return value
@@ -391,3 +408,12 @@ func requestID(r *http.Request) string {
 var counter atomic.Uint64
 
 func requestCounter() uint64 { return counter.Add(1) }
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}

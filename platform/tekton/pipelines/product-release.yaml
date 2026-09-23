@@ -1,0 +1,82 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: ecommerce-product-release
+  annotations:
+    ecommerce-1.io/runtime-proof: m4-required
+spec:
+  params:
+    - {name: runner-image, type: string}
+    - {name: buildah-image, type: string}
+    - {name: skopeo-image, type: string}
+    - {name: trivy-image, type: string}
+    - {name: syft-image, type: string}
+    - {name: cosign-image, type: string}
+    - {name: repo-url, type: string}
+    - {name: base, type: string}
+    - {name: head, type: string}
+    - {name: image-repository, type: string}
+    - {name: registry-auth-secret, type: string}
+    - {name: signing-secret, type: string}
+  results:
+    - name: image-reference
+      value: $(params.image-repository)@$(tasks.build-push.results.image-digest)
+  workspaces:
+    - name: source
+  tasks:
+    - name: source-checkout
+      taskRef:
+        name: ecommerce-source-checkout
+      params:
+        - {name: runner-image, value: $(params.runner-image)}
+        - {name: repo-url, value: $(params.repo-url)}
+        - {name: base, value: $(params.base)}
+        - {name: head, value: $(params.head)}
+      workspaces:
+        - {name: source, workspace: source}
+    - name: product-gates
+      runAfter: [source-checkout]
+      taskRef:
+        name: ecommerce-go-service-gates
+      params:
+        - {name: runner-image, value: $(params.runner-image)}
+        - {name: service, value: product}
+      workspaces:
+        - {name: source, workspace: source}
+    - name: build-push
+      runAfter: [product-gates]
+      taskRef:
+        name: ecommerce-product-build-push
+      params:
+        - {name: runner-image, value: $(params.runner-image)}
+        - {name: buildah-image, value: $(params.buildah-image)}
+        - {name: skopeo-image, value: $(params.skopeo-image)}
+        - {name: head, value: $(params.head)}
+        - {name: image-repository, value: $(params.image-repository)}
+        - {name: registry-auth-secret, value: $(params.registry-auth-secret)}
+      workspaces:
+        - {name: source, workspace: source}
+    - name: scan-sbom
+      runAfter: [build-push]
+      taskRef:
+        name: ecommerce-product-scan-sbom
+      params:
+        - {name: trivy-image, value: $(params.trivy-image)}
+        - {name: syft-image, value: $(params.syft-image)}
+        - {name: image-reference, value: $(params.image-repository)@$(tasks.build-push.results.image-digest)}
+        - {name: head, value: $(params.head)}
+        - {name: registry-auth-secret, value: $(params.registry-auth-secret)}
+      workspaces:
+        - {name: source, workspace: source}
+    - name: sign-attest
+      runAfter: [scan-sbom]
+      taskRef:
+        name: ecommerce-product-sign-attest
+      params:
+        - {name: cosign-image, value: $(params.cosign-image)}
+        - {name: image-reference, value: $(params.image-repository)@$(tasks.build-push.results.image-digest)}
+        - {name: head, value: $(params.head)}
+        - {name: signing-secret, value: $(params.signing-secret)}
+        - {name: registry-auth-secret, value: $(params.registry-auth-secret)}
+      workspaces:
+        - {name: source, workspace: source}

@@ -2,7 +2,9 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +16,7 @@ import (
 
 func newTestHandler() http.Handler {
 	store := memory.NewStore()
-	return NewHandler(application.NewService(store, store))
+	return NewHandler(application.NewService(store))
 }
 
 func request(t *testing.T, h http.Handler, method, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
@@ -47,6 +49,17 @@ func TestHealthDoesNotRequireBearer(t *testing.T) {
 	rec := request(t, newTestHandler(), http.MethodGet, "/healthz", nil, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestReadinessReflectsRequiredDependency(t *testing.T) {
+	store := memory.NewStore()
+	handler := NewHandlerWithReadiness(application.NewService(store), func(context.Context) error {
+		return errors.New("database unavailable")
+	})
+	rec := request(t, handler, http.MethodGet, "/readyz", nil, nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -169,5 +182,12 @@ func TestUnknownFieldsFailClosed(t *testing.T) {
 	rec := request(t, h, http.MethodPost, "/v1/products", map[string]any{"name": "Valid", "price": 10}, headers)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for unowned/unknown field, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInvalidResourceIDFailsBeforePersistence(t *testing.T) {
+	rec := request(t, newTestHandler(), http.MethodGet, "/v1/products/not-a-uuid", nil, authHeaders())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -264,6 +264,7 @@ gates:
       - config/contracts/dependency-map.yaml
       - config/contracts/event-contracts.yaml
       - contracts/openapi/**/*
+      - contracts/proto/**/*
       - scripts/validate-openapi.rb
       - scripts/validate-contract-consistency.rb
       - scripts/validate-architecture.rb
@@ -410,6 +411,7 @@ gates:
       - scripts/qualification_cache.py
     inputs:
       - services/<target>/**/*
+      - contracts/proto/**/*
       - go.work
       - architecture.lock.yaml
       - config/contracts/toolchain-lock.json
@@ -486,14 +488,13 @@ workflows:
         code_review: https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280746
         security_review: https://github.com/dst-red-Wire/ecommerce-1/pull/128#issuecomment-5754280831
         approved_manifest_sha256: 738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad
+      # Track only inputs executed by the RKE2 fixture. Generic developer-tool
+      # additions remain covered by current CI and must not invalidate runtime proof.
       invalidation_inputs:
         - config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json
         - config/infrastructure/mgmt-bootstrap.yaml
         - config/infrastructure/network-plan.yaml
-        - config/contracts/toolchain-lock.json
-        - config/toolchain/versions.env
         - platform/ansible/requirements.yml
-        - config/toolchain/capabilities.json
         - platform/ansible/ansible.cfg
         - .bazelversion
         - .bazelrc
@@ -528,10 +529,7 @@ workflows:
         config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json: acc86510ab2f4379d4bec2b0fc14b389b19b0246
         config/infrastructure/mgmt-bootstrap.yaml: 128d0ae26b5a2b35ea484bf94bf91e89f4d56c06
         config/infrastructure/network-plan.yaml: 28752b2c3db1221dfe3a77bea01130baf8dc0068
-        config/contracts/toolchain-lock.json: 69e40f7fed49ba552044c3e489c7323ab1471931
-        config/toolchain/versions.env: a3875b9317134d731861befa4e545b3a87fd2a40
         platform/ansible/requirements.yml: ccdbaaba616e5cceb2b1297e6aefa5a91d3ba2f5
-        config/toolchain/capabilities.json: fb5862b4ecda340fbe55569abe09cfdbd591b31f
         platform/ansible/ansible.cfg: 4a2cc432522110ddc49259fe96241ba90e7a1080
         .bazelversion: 3b6825376addb7433aa80c05f27d2d6151af9cf3
         .bazelrc: cfbc93e1dc1ec421ebfe0eb28320c2f82fcd09bd

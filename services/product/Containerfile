@@ -8,14 +8,19 @@ COPY . .
 
 ARG TARGETOS=linux
 ARG TARGETARCH
+ARG SOURCE_REVISION
 ENV CGO_ENABLED=0
 ENV GOOS=${TARGETOS}
 ENV GOARCH=${TARGETARCH}
 RUN ["go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w", "-o", "/out/product-api", "./cmd/product-api"]
 
 FROM scratch
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.title="ecommerce-product" \
+      org.opencontainers.image.source="https://github.com/dst-red-Wire/ecommerce-1" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build --chown=65532:65532 /out/product-api /product-api
 USER 65532:65532
-EXPOSE 8080
+EXPOSE 8080 9090
 ENTRYPOINT ["/product-api"]

@@ -103,6 +103,8 @@ adapters:
       severity: blocking
     openapi:
       severity: blocking
+    protobuf:
+      severity: blocking
 
 evidence:
   advisory_prefix: ADVISORY

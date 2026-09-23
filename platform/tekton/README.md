@@ -8,6 +8,7 @@
 - `frontend`: Storefront or Admin, parameterized by scope and using the PNPM workspace.
 - `go-service`: one autonomous `services/<service>` Go module at a time.
 - `platform`: Terraform or Ansible validation without performing apply/mutation.
+- `product-release`: M2 golden path from exact-SHA Product gates to multi-architecture OCI build, Harbor push, Trivy, Syft, and Cosign signature/attestation. It never deploys or mutates Fleet state.
 
 Changed paths are classified with `scripts/ci-affected.rb` (`make affected BASE=<sha> HEAD=<sha>`). The classifier uses the canonical ownership/API contracts and fails closed for unknown service or OpenAPI paths. CI-control changes fan out to every component class.
 
@@ -20,6 +21,8 @@ Remote PASS evidence is published as a signed OCI artifact in Harbor according t
 The authoritative `ecommerce-affected` Pipeline owns population of its `source` workspace. Its first Task initializes an empty workspace, fetches the immutable base/head commit SHAs supplied by the authenticated trigger, and checks out the head detached before classification. `repoctl tekton-plan` then fails closed unless the requested head resolves to the clean checked-out `HEAD`. Runner images are supplied as Pipeline parameters because their immutable Harbor digests belong to the management-plane runtime configuration, not to an unverified public tag in these manifests. Admission policy must require `@sha256:` runner references before the Tekton control plane is certified.
 
 CI may build, test, scan, attest and publish immutable artifacts. It must not deploy workloads directly. Promotion remains `Tekton -> Harbor digest -> reviewed GitOps update -> Fleet -> cluster`, with Argo Rollouts used only for rollout strategy.
+
+The Product release pipeline accepts all execution images as runtime parameters; M4 admission must reject any value that is not an immutable `@sha256:` Harbor reference. Registry and signing credentials are secret names only and must be materialized from OpenBao through ESO. M2 proves this pipeline statically. A real Harbor push, Trivy scan of the published digest, SBOM attestation, signature, and Fleet reconciliation remain `REMOTE_RUNTIME_NOT_AVAILABLE` until the M4 control plane exists.
 
 ## Forge trigger path
 

@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package ecommerce.product.v1;
+
+option go_package = "github.com/dst-red-Wire/ecommerce-1/services/product/api/generated/product/v1;productv1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+service ProductService {
+  rpc ListProducts(ListProductsRequest) returns (ListProductsResponse);
+  rpc GetProduct(GetProductRequest) returns (GetProductResponse);
+  rpc CreateProduct(CreateProductRequest) returns (CreateProductResponse);
+  rpc UpdateProduct(UpdateProductRequest) returns (UpdateProductResponse);
+  rpc ListSKUs(ListSKUsRequest) returns (ListSKUsResponse);
+  rpc GetSKU(GetSKURequest) returns (GetSKUResponse);
+  rpc CreateSKU(CreateSKURequest) returns (CreateSKUResponse);
+  rpc UpdateSKU(UpdateSKURequest) returns (UpdateSKUResponse);
+}
+
+message Product {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string brand = 4;
+  string manufacturer_part_number = 5;
+  string status = 6;
+  google.protobuf.Struct attributes = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  int64 version = 10;
+}
+
+message SKU {
+  string id = 1;
+  string product_id = 2;
+  string code = 3;
+  string gtin = 4;
+  string status = 5;
+  map<string, string> option_values = 6;
+  google.protobuf.Struct attributes = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+  int64 version = 10;
+}
+
+message ListProductsRequest {
+  string status = 1;
+  int32 offset = 2;
+  int32 limit = 3;
+}
+
+message ListProductsResponse {
+  repeated Product items = 1;
+  bool has_more = 2;
+}
+
+message GetProductRequest {
+  string id = 1;
+}
+
+message GetProductResponse {
+  Product product = 1;
+}
+
+message CreateProductRequest {
+  string idempotency_key = 1;
+  string name = 2;
+  string description = 3;
+  string brand = 4;
+  string manufacturer_part_number = 5;
+  string status = 6;
+  google.protobuf.Struct attributes = 7;
+}
+
+message UpdateProductRequest {
+  string id = 1;
+  string idempotency_key = 2;
+  string if_match = 3;
+  optional string name = 4;
+  optional string description = 5;
+  optional string brand = 6;
+  optional string manufacturer_part_number = 7;
+  optional string status = 8;
+  google.protobuf.Struct attributes = 9;
+}
+
+message CreateProductResponse {
+  Product product = 1;
+  bool replayed = 2;
+}
+
+message UpdateProductResponse {
+  Product product = 1;
+  bool replayed = 2;
+}
+
+message ListSKUsRequest {
+  string product_id = 1;
+  int32 offset = 2;
+  int32 limit = 3;
+}
+
+message ListSKUsResponse {
+  repeated SKU items = 1;
+  bool has_more = 2;
+}
+
+message GetSKURequest {
+  string product_id = 1;
+  string id = 2;
+}
+
+message GetSKUResponse {
+  SKU sku = 1;
+}
+
+message CreateSKURequest {
+  string product_id = 1;
+  string idempotency_key = 2;
+  string code = 3;
+  string gtin = 4;
+  string status = 5;
+  map<string, string> option_values = 6;
+  google.protobuf.Struct attributes = 7;
+}
+
+message UpdateSKURequest {
+  string product_id = 1;
+  string id = 2;
+  string idempotency_key = 3;
+  string if_match = 4;
+  optional string code = 5;
+  optional string gtin = 6;
+  optional string status = 7;
+  StringMap option_values = 8;
+  google.protobuf.Struct attributes = 9;
+}
+
+message StringMap {
+  map<string, string> values = 1;
+}
+
+message CreateSKUResponse {
+  SKU sku = 1;
+  bool replayed = 2;
+}
+
+message UpdateSKUResponse {
+  SKU sku = 1;
+  bool replayed = 2;
+}
+
+message EventEnvelope {
+  string event_id = 1;
+  string event_type = 2;
+  uint32 schema_version = 3;
+  google.protobuf.Timestamp occurred_at_utc = 4;
+  string producer = 5;
+  string aggregate_type = 6;
+  string aggregate_id = 7;
+  string correlation_id = 8;
+  string causation_id = 9;
+  string home_site = 10;
+  oneof payload {
+    ProductChanged product_changed = 20;
+    SKUChanged sku_changed = 21;
+  }
+}
+
+message ProductChanged {
+  Product product = 1;
+}
+
+message SKUChanged {
+  SKU sku = 1;
+}

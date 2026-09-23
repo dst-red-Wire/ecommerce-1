@@ -371,6 +371,9 @@ topology_contracts:
   service_policy_chain: docs/architecture/SERVICE_POLICY_CHAIN_V1.md
 
 machine_contracts:
+  buf_configuration: contracts/proto/buf.yaml
+  buf_generation: contracts/proto/buf.gen.yaml
+  protobuf_toolchain: contracts/proto/toolchain.json
   cache_policy: config/contracts/cache-policy.yaml
   certificate_authority_policy: config/contracts/certificate-authority-policy.yaml
   ci_evidence: config/contracts/ci-evidence.yaml

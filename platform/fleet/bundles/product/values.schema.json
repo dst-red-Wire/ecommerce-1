@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["image", "runtime", "resources"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "digest"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "pullPolicy": {"enum": ["IfNotPresent", "Never"]}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["homeSite", "kafkaBrokers", "kafkaTopic", "kafkaTLSSecretName", "otlpEndpoint", "oidcIssuer", "oidcAudience", "secretName"],
+      "properties": {
+        "homeSite": {"type": "string", "minLength": 1},
+        "kafkaBrokers": {"type": "string", "minLength": 1},
+        "kafkaTopic": {"type": "string", "const": "ecommerce.product.events.v1"},
+        "kafkaTLSSecretName": {"type": "string", "minLength": 1},
+        "otlpEndpoint": {"type": "string", "minLength": 1},
+        "oidcIssuer": {"type": "string", "minLength": 1},
+        "oidcAudience": {"type": "string", "const": "admin"},
+        "secretName": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

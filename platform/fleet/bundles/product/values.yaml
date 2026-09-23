@@ -1,0 +1,30 @@
+replicaCount: 2
+
+image:
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+runtime:
+  homeSite: ""
+  kafkaBrokers: ""
+  kafkaTopic: ecommerce.product.events.v1
+  kafkaTLSSecretName: product-kafka-tls
+  otlpEndpoint: ""
+  oidcIssuer: ""
+  oidcAudience: admin
+  secretName: product-runtime
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+    ephemeral-storage: 64Mi
+  limits:
+    memory: 256Mi
+    ephemeral-storage: 128Mi
+
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70

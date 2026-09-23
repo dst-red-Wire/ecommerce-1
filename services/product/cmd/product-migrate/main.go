@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -11,23 +11,27 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	dsn := os.Getenv("PRODUCT_DATABASE_URL")
 	if dsn == "" {
-		log.Fatal("PRODUCT_DATABASE_URL is required")
+		logger.Error("PRODUCT_DATABASE_URL is required")
+		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		log.Fatalf("connect product database: %v", err)
+		logger.Error("connect product database failed", "error", err.Error())
+		os.Exit(1)
 	}
 	defer func() {
 		if err := conn.Close(context.Background()); err != nil {
-			log.Printf("close product database: %v", err)
+			logger.Error("close product database failed", "error", err.Error())
 		}
 	}()
 	if err := migrations.Up(ctx, conn); err != nil {
-		log.Fatalf("migrate product database: %v", err)
+		logger.Error("migrate product database failed", "error", err.Error())
+		os.Exit(1)
 	}
-	log.Print("product database migrations: PASS")
+	logger.Info("product database migrations complete")
 }

@@ -11,6 +11,99 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const checkReadiness = `-- name: CheckReadiness :one
+SELECT (
+    to_regclass('public.products') IS NOT NULL
+    AND to_regclass('public.skus') IS NOT NULL
+    AND to_regclass('public.command_journal') IS NOT NULL
+    AND to_regclass('public.outbox_events') IS NOT NULL
+    AND to_regclass('public.outbox_dead_letters') IS NOT NULL
+)::boolean AS ready
+`
+
+func (q *Queries) CheckReadiness(ctx context.Context) (bool, error) {
+	row := q.db.QueryRow(ctx, checkReadiness)
+	var ready bool
+	err := row.Scan(&ready)
+	return ready, err
+}
+
+const claimOutboxEvents = `-- name: ClaimOutboxEvents :many
+WITH candidates AS (
+    SELECT candidate.event_id
+    FROM outbox_events AS candidate
+    WHERE candidate.published_at IS NULL
+      AND candidate.available_at <= $2
+      AND candidate.attempt_count <= $3
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events AS predecessor
+          WHERE predecessor.aggregate_type = candidate.aggregate_type
+            AND predecessor.aggregate_id = candidate.aggregate_id
+            AND predecessor.published_at IS NULL
+            AND predecessor.aggregate_version < candidate.aggregate_version
+      )
+    ORDER BY candidate.occurred_at_utc, candidate.event_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $4
+)
+UPDATE outbox_events AS event
+SET attempt_count = event.attempt_count + 1,
+    available_at = $1
+FROM candidates
+WHERE event.event_id = candidates.event_id
+RETURNING event.event_id, event.event_type, event.schema_version, event.aggregate_id,
+          event.payload, event.attempt_count
+`
+
+type ClaimOutboxEventsParams struct {
+	PLeaseUntil      pgtype.Timestamptz
+	PAvailableBefore pgtype.Timestamptz
+	PMaxAttempts     int32
+	PLimitCount      int32
+}
+
+type ClaimOutboxEventsRow struct {
+	EventID       string
+	EventType     string
+	SchemaVersion int32
+	AggregateID   string
+	Payload       []byte
+	AttemptCount  int32
+}
+
+func (q *Queries) ClaimOutboxEvents(ctx context.Context, arg ClaimOutboxEventsParams) ([]ClaimOutboxEventsRow, error) {
+	rows, err := q.db.Query(ctx, claimOutboxEvents,
+		arg.PLeaseUntil,
+		arg.PAvailableBefore,
+		arg.PMaxAttempts,
+		arg.PLimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ClaimOutboxEventsRow{}
+	for rows.Next() {
+		var i ClaimOutboxEventsRow
+		if err := rows.Scan(
+			&i.EventID,
+			&i.EventType,
+			&i.SchemaVersion,
+			&i.AggregateID,
+			&i.Payload,
+			&i.AttemptCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createProduct = `-- name: CreateProduct :one
 INSERT INTO products (
     id, name, description, brand, manufacturer_part_number,
@@ -190,6 +283,52 @@ func (q *Queries) GetSKU(ctx context.Context, arg GetSKUParams) (Sku, error) {
 	return i, err
 }
 
+const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
+INSERT INTO outbox_events (
+    event_id, event_type, schema_version, occurred_at_utc, producer,
+    aggregate_type, aggregate_id, aggregate_version,
+    correlation_id, causation_id, home_site, payload
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9,
+    $10, $11, $12
+)
+`
+
+type InsertOutboxEventParams struct {
+	EventID          string
+	EventType        string
+	SchemaVersion    int32
+	OccurredAtUtc    pgtype.Timestamptz
+	Producer         string
+	AggregateType    string
+	AggregateID      string
+	AggregateVersion int64
+	CorrelationID    string
+	CausationID      string
+	HomeSite         string
+	Payload          []byte
+}
+
+func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error {
+	_, err := q.db.Exec(ctx, insertOutboxEvent,
+		arg.EventID,
+		arg.EventType,
+		arg.SchemaVersion,
+		arg.OccurredAtUtc,
+		arg.Producer,
+		arg.AggregateType,
+		arg.AggregateID,
+		arg.AggregateVersion,
+		arg.CorrelationID,
+		arg.CausationID,
+		arg.HomeSite,
+		arg.Payload,
+	)
+	return err
+}
+
 const listProducts = `-- name: ListProducts :many
 SELECT id, name, description, brand, manufacturer_part_number, status, attributes, created_at, updated_at, version
 FROM products
@@ -324,6 +463,69 @@ func (q *Queries) ListSKUs(ctx context.Context, arg ListSKUsParams) ([]Sku, erro
 		return nil, err
 	}
 	return items, nil
+}
+
+const markOutboxPublished = `-- name: MarkOutboxPublished :exec
+UPDATE outbox_events
+SET published_at = $1, last_error = ''
+WHERE event_id = $2 AND published_at IS NULL
+`
+
+type MarkOutboxPublishedParams struct {
+	PPublishedAt pgtype.Timestamptz
+	PEventID     string
+}
+
+func (q *Queries) MarkOutboxPublished(ctx context.Context, arg MarkOutboxPublishedParams) error {
+	_, err := q.db.Exec(ctx, markOutboxPublished, arg.PPublishedAt, arg.PEventID)
+	return err
+}
+
+const moveOutboxEventToDeadLetter = `-- name: MoveOutboxEventToDeadLetter :exec
+WITH moved AS (
+    DELETE FROM outbox_events AS event
+    WHERE event.event_id = $2 AND event.published_at IS NULL
+    RETURNING event.event_id, event.event_type, event.schema_version, event.occurred_at_utc, event.producer,
+              event.aggregate_type, event.aggregate_id, event.aggregate_version,
+              event.correlation_id, event.causation_id,
+              event.home_site, event.payload, event.attempt_count
+)
+INSERT INTO outbox_dead_letters (
+    event_id, event_type, schema_version, occurred_at_utc, producer,
+    aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
+    home_site, payload, attempt_count, last_error
+)
+SELECT event_id, event_type, schema_version, occurred_at_utc, producer,
+       aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
+       home_site, payload, attempt_count, $1
+FROM moved
+`
+
+type MoveOutboxEventToDeadLetterParams struct {
+	PLastError string
+	PEventID   string
+}
+
+func (q *Queries) MoveOutboxEventToDeadLetter(ctx context.Context, arg MoveOutboxEventToDeadLetterParams) error {
+	_, err := q.db.Exec(ctx, moveOutboxEventToDeadLetter, arg.PLastError, arg.PEventID)
+	return err
+}
+
+const rescheduleOutboxEvent = `-- name: RescheduleOutboxEvent :exec
+UPDATE outbox_events
+SET available_at = $1, last_error = $2
+WHERE event_id = $3 AND published_at IS NULL
+`
+
+type RescheduleOutboxEventParams struct {
+	PAvailableAt pgtype.Timestamptz
+	PLastError   string
+	PEventID     string
+}
+
+func (q *Queries) RescheduleOutboxEvent(ctx context.Context, arg RescheduleOutboxEventParams) error {
+	_, err := q.db.Exec(ctx, rescheduleOutboxEvent, arg.PAvailableAt, arg.PLastError, arg.PEventID)
+	return err
 }
 
 const saveCommand = `-- name: SaveCommand :exec
