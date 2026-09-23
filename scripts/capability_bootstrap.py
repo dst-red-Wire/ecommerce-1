@@ -93,7 +93,7 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
         raise ValueError("toolchain lock capability policy must declare classifications and requirements")
 
     expected_tools = {
-        "skopeo", "packer", "trivy", "gitleaks", "gosec", "govulncheck",
+        "docker-buildx", "skopeo", "packer", "trivy", "gitleaks", "gosec", "govulncheck",
         "kube-bench", "cosign", "sops", "age",
     }
     tools = contract.get("tools")

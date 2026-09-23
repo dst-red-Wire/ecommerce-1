@@ -1470,6 +1470,17 @@ class CapabilityClosureTest(unittest.TestCase):
             self.assertEqual(["linux/amd64"], names[name]["platforms"])
             self.assertIn(f"{name.upper()}_SHA256_LINUX_AMD64", versions)
 
+    def test_docker_buildx_is_a_pinned_user_local_cli_plugin(self):
+        lock = MOD.load_toolchain_lock()
+        buildx = lock["tools"]["docker-buildx"]
+        self.assertEqual("0.37.1", lock["versions"][buildx["version_ref"]])
+        self.assertEqual("binary", buildx["install"]["type"])
+        self.assertTrue(buildx["install"]["docker_cli_plugin"])
+        self.assertEqual(["docker", "buildx", "version"], buildx["version_command"])
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn("{{ docker_cli_plugin_dir }}/docker-buildx", tasks)
+        self.assertIn("argv: [docker, buildx, version]", tasks)
+
     def test_docker_blockage_does_not_skip_independent_gate_tools(self):
         names = ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize")
         items = [{"name": "docker", "requires": [], "probe": ["docker", "info"], "external_failure": True}]

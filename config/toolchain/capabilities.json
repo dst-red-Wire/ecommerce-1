@@ -491,6 +491,29 @@
       "requirement": "optional-runtime"
     },
     {
+      "name": "docker-buildx",
+      "requires": [],
+      "command": "docker-buildx",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "DOCKER_BUILDX_VERSION",
+      "version_parser": "first_semver_release",
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "provision": {
+        "type": "ansible",
+        "tags": "docker_buildx"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "DOCKER_BUILDX_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
       "name": "kubectl",
       "requires": [],
       "command": "kubectl",
@@ -798,6 +821,7 @@
     "kubectl": "ansible",
     "helm": "ansible",
     "cosign": "ansible",
+    "docker-buildx": "ansible",
     "skopeo": "ansible",
     "packer": "ansible",
     "trivy": "ansible",

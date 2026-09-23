@@ -4646,6 +4646,11 @@ def doctor() -> int:
     else:
         print("FAIL docker-daemon unreachable")
         rc = 1
+    if shutil.which("docker") and run(["docker", "buildx", "version"], check=False, capture=True).returncode == 0:
+        print("PASS docker-buildx available")
+    else:
+        print("FAIL docker-buildx unavailable")
+        rc = 1
     rc |= ansible_collections_check()
     return rc
 

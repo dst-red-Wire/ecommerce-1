@@ -9,6 +9,7 @@ managed_install_root: >-
 local_bin: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.bin_subdirectory }}"
 local_share: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.share_subdirectory }}"
 local_cache: "{{ toolchain_lock.capability_policy.managed_install_root.cache_subdirectory | regex_replace('^~', ansible_env.HOME) }}"
+docker_cli_plugin_dir: "{{ ansible_env.HOME }}/.docker/cli-plugins"
 node_version: "{{ lookup('ansible.builtin.ini', 'NODE_VERSION', type='properties', file=versions_file) }}"
 node_sha256: "{{ lookup('ansible.builtin.ini', 'NODE_SHA256_LINUX_X64', type='properties', file=versions_file) }}"
 pnpm_version: "{{ lookup('ansible.builtin.ini', 'PNPM_VERSION', type='properties', file=versions_file) }}"

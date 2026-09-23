@@ -19,6 +19,8 @@
     "CHECKOV_VERSION": "3.3.16",
     "SEMGREP_VERSION": "1.176.1",
     "CVE_BIN_TOOL_VERSION": "3.4",
+    "DOCKER_BUILDX_VERSION": "0.37.1",
+    "DOCKER_BUILDX_SHA256_LINUX_AMD64": "9447199cdb435f25880548343c128a4b6650e8891ee598905d8d29d39a8e359b",
     "SKOPEO_VERSION": "1.13.3",
     "SKOPEO_PACKAGE_VERSION": "1.13.3+ds1-2ubuntu0.24.04.3",
     "SKOPEO_SHA256_LINUX_AMD64": "d908a86538f6d4bc49ea9c7423e5fb279a5c8cfc1f9bc7bd505f8bfe25d29be3",
@@ -98,6 +100,20 @@
     "kubernetes.core": "2.4.0"
   },
   "tools": {
+    "docker-buildx": {
+      "version_ref": "DOCKER_BUILDX_VERSION",
+      "source": "https://github.com/docker/buildx",
+      "artifact": {
+        "url": "https://github.com/docker/buildx/releases/download/v0.37.1/buildx-v0.37.1.linux-amd64",
+        "filename": "buildx-v0.37.1.linux-amd64"
+      },
+      "sha256_ref": "DOCKER_BUILDX_SHA256_LINUX_AMD64",
+      "platforms": ["linux/amd64"],
+      "install": {"type": "binary", "docker_cli_plugin": true},
+      "binary": "docker-buildx",
+      "version_command": ["docker", "buildx", "version"],
+      "capability": "docker-buildkit-oci-image-builder"
+    },
     "skopeo": {
       "version_ref": "SKOPEO_VERSION",
       "source": "https://github.com/containers/skopeo",

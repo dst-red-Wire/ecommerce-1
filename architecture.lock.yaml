@@ -356,7 +356,10 @@ tooling:
   architecture_scope: capabilities-responsibilities-authorities-relations
   container:
     local_runtime: {authority: docker-engine, mode: rootless, environment: wsl2}
-    image_builder: {authority: docker-buildkit}
+    image_builder:
+      authority: docker-buildkit
+      client: docker-buildx
+      version_ref: config/contracts/toolchain-lock.json#versions.DOCKER_BUILDX_VERSION
     image_transport:
       authority: skopeo
       responsibilities: [inspect, copy, registry-transport, manifest-read]
