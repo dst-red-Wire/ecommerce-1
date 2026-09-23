@@ -2700,9 +2700,14 @@ def security() -> int:
     print("PASS secret scan completed")
     return 0
 
+def terraform_source_files() -> list[Path]:
+    terraform_root = ROOT / "platform" / "terraform"
+    return [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
+
+
 def terraform_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
-    tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
+    tf_files = terraform_source_files()
     if not tf_files:
         print("SKIP terraform: no Terraform files found")
         return 0
@@ -3267,18 +3272,40 @@ def qualification_identity() -> str:
         result = run([executable, *args[1:]], check=False, capture=True)
         value = result.stdout
         if command == ("docker", "info"):
-            info = json.loads(value)
-            value = json.dumps(
-                {
-                    key: info.get(key)
-                    for key in (
-                        "ID", "ServerVersion", "Driver", "DockerRootDir", "OSType",
-                        "Architecture", "KernelVersion", "OperatingSystem", "CgroupDriver",
-                        "CgroupVersion", "SecurityOptions", "Runtimes", "DefaultRuntime", "DriverStatus",
+            normalized_error = " ".join((result.stderr or "").split())[:512]
+            if result.returncode != 0:
+                value = json.dumps(
+                    {
+                        "status": "unavailable",
+                        "return_code": result.returncode,
+                        "stderr": normalized_error,
+                    },
+                    sort_keys=True,
+                )
+            else:
+                try:
+                    info = json.loads(value)
+                except json.JSONDecodeError:
+                    value = json.dumps(
+                        {
+                            "status": "invalid-json",
+                            "return_code": result.returncode,
+                            "stderr": normalized_error,
+                        },
+                        sort_keys=True,
                     )
-                },
-                sort_keys=True,
-            )
+                else:
+                    value = json.dumps(
+                        {
+                            key: info.get(key)
+                            for key in (
+                                "ID", "ServerVersion", "Driver", "DockerRootDir", "OSType",
+                                "Architecture", "KernelVersion", "OperatingSystem", "CgroupDriver",
+                                "CgroupVersion", "SecurityOptions", "Runtimes", "DefaultRuntime", "DriverStatus",
+                            )
+                        },
+                        sort_keys=True,
+                    )
         digest.update(json.dumps([result.returncode, value, result.stderr]).encode())
     for name in ("GOFLAGS", "CGO_ENABLED", "ANSIBLE_CONFIG", "ANSIBLE_COLLECTIONS_PATH"):
         digest.update(name.encode())
@@ -3831,6 +3858,18 @@ def _execute_with_runtime(
         print(
             f"RUNTIME_ORCHESTRATION {result.status} "
             f"evidence={result.evidence_path.relative_to(ROOT)}"
+        )
+    if result.exit_code != 0 and records is not None:
+        records.append(
+            {
+                "gate": "runtime-orchestration",
+                "status": "FAIL",
+                "runtime_status": result.status,
+                "exit_code": result.exit_code,
+                "duration_seconds": 0.0,
+                "execution": "fresh",
+                "reason": f"runtime transaction ended with {result.status}",
+            }
         )
     return result.exit_code
 
@@ -4389,7 +4428,11 @@ def write_evidence(
         "head_tree_sha": worktree_tree_sha() if head == "WORKTREE" else git("rev-parse", f"{head_sha}^{{tree}}").strip(),
         "qualification_identity": qualification_identity(),
         "created_at_epoch": time.time(),
-        "status": "FAIL" if any(r["status"] == "FAIL" for r in records) else "PASS",
+        "status": (
+            "FAIL"
+            if any(r.get("status") not in {"PASS", "SKIP"} for r in records)
+            else "PASS"
+        ),
         "changed_paths": paths,
         "affected_components": components,
         "gates": records,
@@ -4525,17 +4568,6 @@ def verify_change(base: str, head: str) -> int:
         records=records,
     )
     if runtime_rc:
-        if not records:
-            records.append(
-                {
-                    "gate": "runtime-orchestration",
-                    "status": "BLOCKED_RUNTIME" if runtime_rc == 2 else "FAIL",
-                    "exit_code": runtime_rc,
-                    "duration_seconds": 0.0,
-                    "execution": "fresh",
-                    "reason": "runtime transaction did not reach gate execution",
-                }
-            )
         write_evidence(base, head, paths, components, records, verification)
         return runtime_rc
 
@@ -6232,14 +6264,15 @@ def main() -> int:
         if args.cmd == "security":
             return security()
         if args.cmd == "terraform":
+            if not terraform_source_files():
+                return terraform_check()
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(
                     "platform:terraform", ["terraform"]
                 )
             # Availability/provider identity must be checked fresh; deterministic
             # validation work may then be reused by content identity.
-            terraform_root = ROOT / "platform" / "terraform"
-            tf_files = [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
+            tf_files = terraform_source_files()
             if tf_files:
                 formatter = source_quality_adapter("terraform")["formatter"]
                 approved = next(
@@ -6406,6 +6439,10 @@ def main() -> int:
                 )
             return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":
+            if args.component == "none":
+                return ci_component(
+                    args.component, args.base, args.head, args.record_dir
+                )
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(
                     args.component,

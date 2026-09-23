@@ -13,6 +13,7 @@ ENV CGO_ENABLED=0
 ENV GOOS=${TARGETOS}
 ENV GOARCH=${TARGETARCH}
 RUN ["go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w", "-o", "/out/product-api", "./cmd/product-api"]
+RUN ["go", "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w", "-o", "/out/product-migrate", "./cmd/product-migrate"]
 
 FROM scratch
 ARG SOURCE_REVISION
@@ -21,6 +22,7 @@ LABEL org.opencontainers.image.title="ecommerce-product" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build --chown=65532:65532 /out/product-api /product-api
+COPY --from=build --chown=65532:65532 /out/product-migrate /product-migrate
 USER 65532:65532
 EXPOSE 8080 9090
 ENTRYPOINT ["/product-api"]

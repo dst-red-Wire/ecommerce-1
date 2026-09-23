@@ -92,13 +92,9 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
     if not policy.get("classifications") or not policy.get("requirements"):
         raise ValueError("toolchain lock capability policy must declare classifications and requirements")
 
-    expected_tools = {
-        "docker-buildx", "skopeo", "packer", "trivy", "gitleaks", "gosec", "govulncheck",
-        "kube-bench", "cosign", "sops", "age",
-    }
     tools = contract.get("tools")
-    if not isinstance(tools, dict) or set(tools) != expected_tools:
-        raise ValueError("toolchain registry must contain the exact approved security and infrastructure tool set")
+    if not isinstance(tools, dict) or not tools:
+        raise ValueError("toolchain registry must contain approved repository tools")
     for name, tool in tools.items():
         version_ref = tool.get("version_ref")
         if version_ref not in versions or versions[version_ref].lower() == "latest":

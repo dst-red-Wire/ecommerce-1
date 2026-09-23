@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["image", "runtime", "resources"],
+  "required": ["image", "runtime", "resources", "migration"],
   "properties": {
     "image": {
       "type": "object",
@@ -24,6 +24,14 @@
         "oidcIssuer": {"type": "string", "minLength": 1},
         "oidcAudience": {"type": "string", "const": "admin"},
         "secretName": {"type": "string", "minLength": 1}
+      }
+    },
+    "migration": {
+      "type": "object",
+      "required": ["activeDeadlineSeconds", "resources"],
+      "properties": {
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 30, "maximum": 900},
+        "resources": {"type": "object"}
       }
     }
   }

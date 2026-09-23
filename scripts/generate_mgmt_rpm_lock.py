@@ -10,10 +10,19 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import yaml
+
 
 ROCKY_IMAGE = "quay.io/rockylinux/rockylinux@sha256:e372170ca8630f0f03e9b70fdd0bf4a3ce3426b0de7cdba615f06337389de176"
 RANCHER_REPO = "https://rpm.rancher.io/rke2/stable/common/centos/10/noarch"
-EPEL_REPO = "https://dl.fedoraproject.org/pub/epel/10.2/Everything/x86_64/"
+ROOT = Path(__file__).resolve().parents[1]
+MACHINE_IMAGE_CONTRACT = yaml.safe_load(
+    (ROOT / "config/contracts/machine-image-lock.yaml").read_text(encoding="utf-8")
+)
+PACKAGE_SOURCES = MACHINE_IMAGE_CONTRACT["packer_image"]["packages"]["sources"]
+ROCKY_SOURCE = PACKAGE_SOURCES["rocky"]
+EPEL_SOURCE = PACKAGE_SOURCES["epel"]
+EPEL_REPO = EPEL_SOURCE["repository"]
 PACKAGES = (
     "bash-completion", "bat", "bind-utils", "ca-certificates", "chrony", "conntrack-tools",
     "container-selinux", "curl-minimal", "ethtool", "fd-find", "file", "firewalld", "fzf",
@@ -35,19 +44,13 @@ IMAGE_PACKAGES = frozenset({
 })
 ROCKY_REPO_OPTIONS = (
     "--setopt=baseos.mirrorlist=",
-    "--setopt=baseos.baseurl=https://download.rockylinux.org/pub/rocky/10.2/BaseOS/x86_64/os/",
+    f"--setopt=baseos.baseurl={ROCKY_SOURCE['repositories']['baseos']}",
     "--setopt=appstream.mirrorlist=",
-    "--setopt=appstream.baseurl=https://download.rockylinux.org/pub/rocky/10.2/AppStream/x86_64/os/",
+    f"--setopt=appstream.baseurl={ROCKY_SOURCE['repositories']['appstream']}",
     "--setopt=extras.mirrorlist=",
-    "--setopt=extras.baseurl=https://download.rockylinux.org/pub/rocky/10.2/extras/x86_64/os/",
+    f"--setopt=extras.baseurl={ROCKY_SOURCE['repositories']['extras']}",
 )
-ROCKY_KEY = {
-    "category": "rpm-signing-key",
-    "file": "rocky-10-public.asc",
-    "fingerprint": "FC226859C0860BF0DDB95B085B106C736FEDFC85",
-    "sha256": "be8c4f070b696e64d8ce40e59a95a57e8b5c776f0015c2fd64e14b896622bdb4",
-    "url": "https://dl.rockylinux.org/pub/rocky/RPM-GPG-KEY-Rocky-10",
-}
+ROCKY_KEY = dict(ROCKY_SOURCE["signing_key"])
 RANCHER_KEY = {
     "category": "rpm-signing-key",
     "file": "rancher-public.asc",
@@ -55,13 +58,7 @@ RANCHER_KEY = {
     "sha256": "7d2415f7fc532c365c8874bfad966566daaa0d04a9a5ba14d1db6080a9c12629",
     "url": "https://rpm.rancher.io/public.key",
 }
-EPEL_KEY = {
-    "category": "rpm-signing-key",
-    "file": "epel-10-public.asc",
-    "fingerprint": "7D8D15CBFC4E62688591FB2633D98517E37ED158",
-    "sha256": "de390fc168eae5ab2852e9e93d34a0b9ddf05cf9ce90ee28d97de26a4b1f6b93",
-    "url": "https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-10",
-}
+EPEL_KEY = dict(EPEL_SOURCE["signing_key"])
 
 
 def run(*args: str, capture: bool = False) -> str:
@@ -170,7 +167,7 @@ def generate(path: Path, image_package_lock: Path | None) -> dict:
                         raise RuntimeError(f"expected one HTTPS URL for {nevra}")
                     if package == "rke2-selinux":
                         signer = RANCHER_KEY
-                    elif "/epel/10.2/" in url:
+                    elif url.startswith(EPEL_REPO):
                         signer = EPEL_KEY
                     else:
                         signer = ROCKY_KEY

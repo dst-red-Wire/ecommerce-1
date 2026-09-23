@@ -6,7 +6,8 @@ timezone UTC --utc
 firstboot --disable
 network --bootproto=dhcp --device=link --activate --hostname=rocky-10-2-base
 rootpw --lock
-user --name=packer --groups=wheel --password=$6$rounds=656000$packerbuild$FrYdMXm2K0Vv9YbmGNnqsZXxaDmk6Ha6XyqD3hK8zJ7u/W35p99DCulLAmmlX8i3mxx6C7v3j51b.2DXgcbUd. --iscrypted
+user --name=packer --groups=wheel --lock
+sshkey --username=packer "${build_ssh_public_key}"
 selinux --enforcing
 firewall --disabled
 services --enabled=sshd,chronyd,NetworkManager
@@ -19,45 +20,15 @@ reboot
 %packages
 @^minimal-environment
 -firewalld
-bash-completion
-bind-utils
 ca-certificates
 chrony
-conntrack-tools
-container-selinux
-curl
-ethtool
-file
-gzip
-iproute
-iptables-nft
-iputils
-jq
 kernel
-kernel-core
 kernel-modules
 kernel-modules-extra
-kmod
-less
-libnftnl
-libselinux-utils
-lsof
 NetworkManager
-nftables
 openssh-server
-policycoreutils
 python3
-qemu-guest-agent
-rsync
-selinux-policy
-selinux-policy-targeted
-tar
-tcpdump
-tmux
-tree
-unzip
-which
-xz
+sudo
 %end
 
 %post --erroronfail
@@ -68,12 +39,12 @@ install -d -m 0700 -o packer -g packer /home/packer/.ssh
 cat > /etc/ssh/sshd_config.d/10-ecommerce-base.conf <<'EOF'
 PermitRootLogin no
 PermitEmptyPasswords no
-PasswordAuthentication yes
+PasswordAuthentication no
 KbdInteractiveAuthentication no
 X11Forwarding no
 EOF
 
-cat > /etc/sysctl.d/60-ecommerce-base.conf <<'EOF'
+cat > /etc/sysctl.d/90-kubernetes.conf <<'EOF'
 net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
@@ -86,7 +57,7 @@ net.ipv4.conf.default.send_redirects = 0
 fs.suid_dumpable = 0
 EOF
 
-cat > /etc/modules-load.d/60-kubernetes.conf <<'EOF'
+cat > /etc/modules-load.d/kubernetes.conf <<'EOF'
 overlay
 br_netfilter
 nf_conntrack

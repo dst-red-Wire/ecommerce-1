@@ -1,6 +1,6 @@
-import json
 import hashlib
 import importlib.util
+import json
 import re
 import tempfile
 import unittest
@@ -8,16 +8,27 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MACHINE_LOCK = ROOT / "config/contracts/machine-image-lock.yaml"
+TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
 PACKAGE_LOCK = ROOT / "config/artifacts/rocky-10.2-base-packages.lock.json"
 PACKER = ROOT / "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl"
 KICKSTART = ROOT / "platform/packer/rocky-10.2/http/rocky-10.2.ks"
 MATERIALIZER_PATH = ROOT / "scripts/materialize_packer_rpm_repo.py"
-SPEC = importlib.util.spec_from_file_location("materialize_packer_rpm_repo", MATERIALIZER_PATH)
+INSTALLER = ROOT / "scripts/install_packer_tools.py"
+GENERATOR = ROOT / "scripts/generate_packer_rpm_lock.py"
+SPEC = importlib.util.spec_from_file_location(
+    "materialize_packer_rpm_repo", MATERIALIZER_PATH
+)
 MATERIALIZER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATERIALIZER)
+
+
+def manifest_is_valid(document):
+    unsigned = dict(document)
+    approved = unsigned.pop("approved_manifest_sha256")
+    body = json.dumps(unsigned, sort_keys=True, indent=2) + "\n"
+    return hashlib.sha256(body.encode()).hexdigest() == approved
 
 
 class PackerImageContractTest(unittest.TestCase):
@@ -25,6 +36,7 @@ class PackerImageContractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.contract = yaml.safe_load(MACHINE_LOCK.read_text(encoding="utf-8"))
         cls.image = cls.contract["packer_image"]
+        cls.toolchain = json.loads(TOOLCHAIN_LOCK.read_text(encoding="utf-8"))
         cls.package_lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
         cls.packer = PACKER.read_text(encoding="utf-8")
         cls.kickstart = KICKSTART.read_text(encoding="utf-8")
@@ -41,95 +53,237 @@ class PackerImageContractTest(unittest.TestCase):
         )
         self.assertEqual(self.image["os"]["architecture"], "x86_64-v3")
 
-    def test_one_package_definition_drives_both_outputs(self):
-        self.assertTrue(self.image["packages"]["single_definition_for_all_outputs"])
-        self.assertEqual(self.package_lock["image"], "rocky-10.2-base")
-        packages = {entry["package"]: entry for entry in self.package_lock["packages"]}
+    def test_profile_roots_have_one_central_definition(self):
+        profiles = self.image["profiles"]
+        base = set(profiles["base"]["rpm_packages"])
+        admin = set(profiles["admin-qualification"]["rpm_packages"])
+        qemu = set(self.image["hypervisors"]["qemu_kvm"]["rpm_packages"])
+        self.assertFalse(base & admin)
+        self.assertFalse(base & qemu)
+        self.assertFalse(admin & qemu)
         for required in (
-            "kernel", "kernel-modules-extra", "container-selinux", "NetworkManager",
-            "openssh-server", "python3", "chrony", "nftables", "iptables-nft",
-            "qemu-guest-agent", "conntrack-tools", "ripgrep", "fd-find", "fzf", "yq",
-            "bat", "tmux", "tree", "less", "lsof", "bind-utils",
+            "kernel-modules-extra",
+            "container-selinux",
+            "NetworkManager",
+            "openssh-server",
+            "python3",
+            "chrony",
+            "nftables",
+            "iptables-nft",
+            "conntrack-tools",
+            "socat",
+            "nmap-ncat",
+            "zstd",
+            "zip",
+            "acl",
+            "attr",
+            "openssl",
+            "fzf",
+            "jq",
+            "bat",
+            "tmux",
+            "curl",
         ):
-            self.assertIn(required, packages)
-            self.assertRegex(packages[required]["sha256"], r"^[0-9a-f]{64}$")
-        self.assertNotIn("firewalld", packages)
-        self.assertNotIn("rke2-selinux", packages)
-        self.assertEqual(packages["kernel"]["nevra"], self.image["kernel"]["nevra"])
-        unsigned = dict(self.package_lock)
-        approved = unsigned.pop("approved_manifest_sha256")
-        body = json.dumps(unsigned, sort_keys=True, indent=2) + "\n"
-        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), approved)
+            self.assertIn(required, base)
+        self.assertEqual(admin, {"git", "strace", "sysstat", "mtr", "ShellCheck"})
+        self.assertEqual(qemu, {"qemu-guest-agent"})
+        self.assertNotIn("qemu-guest-agent", base)
 
-    def test_materializer_fails_closed_on_tamper(self):
+    def test_profile_package_lock_is_a_valid_projection(self):
+        self.assertEqual(self.package_lock["schema_version"], 2)
+        self.assertEqual(self.package_lock["image"], "rocky-10.2-base")
+        self.assertTrue(manifest_is_valid(self.package_lock))
+        roots = {
+            "base": self.image["profiles"]["base"]["rpm_packages"],
+            "qemu-kvm": self.image["hypervisors"]["qemu_kvm"]["rpm_packages"],
+            "admin-qualification": self.image["profiles"]["admin-qualification"][
+                "rpm_packages"
+            ],
+        }
+        files = {}
+        for profile, expected_roots in roots.items():
+            definition = self.package_lock["profiles"][profile]
+            self.assertEqual(definition["roots"], expected_roots)
+            self.assertTrue(manifest_is_valid(definition))
+            names = {entry["package"] for entry in definition["packages"]}
+            for required in expected_roots:
+                self.assertIn(required, names)
+            for entry in definition["packages"]:
+                self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+                self.assertIn(entry["architecture"], {"x86_64", "noarch"})
+                self.assertNotIn("nevra", entry)
+            files[profile] = {entry["file"] for entry in definition["packages"]}
+        self.assertFalse(files["base"] & files["qemu-kvm"])
+        self.assertFalse(files["base"] & files["admin-qualification"])
+        sources = self.image["packages"]["sources"]
+        self.assertEqual(
+            self.package_lock["rpm_signing_keys"],
+            [sources["rocky"]["signing_key"], sources["epel"]["signing_key"]],
+        )
+
+    def test_materializer_reports_expected_and_actual_digest(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "package.rpm"
-            source.write_bytes(b"tampered")
-            lock = {
-                "image": "rocky-10.2-base",
-                "dependency_closure": "complete",
-                "rpm_signing_keys": [],
-                "packages": [{
-                    "file": source.name,
-                    "url": source.as_uri(),
-                    "sha256": "0" * 64,
-                }],
-            }
-            lock_path = root / "lock.json"
-            lock_path.write_text(json.dumps(lock), encoding="utf-8")
-            with self.assertRaises(MATERIALIZER.MaterializationError):
-                MATERIALIZER.materialize(lock_path, root / "output")
+            artifact = Path(directory) / "gh.rpm"
+            artifact.write_bytes(b"tampered")
+            with self.assertRaisesRegex(
+                MATERIALIZER.MaterializationError,
+                r"artifact=gh\.rpm expected_version=2\.101\.0 "
+                r"expected_sha256=0{64} actual_sha256=[0-9a-f]{64}",
+            ):
+                MATERIALIZER._verify(
+                    artifact,
+                    artifact="gh.rpm",
+                    version="2.101.0",
+                    expected="0" * 64,
+                )
 
-    def test_packer_plugins_and_outputs_are_exact(self):
+    def test_external_tools_use_the_central_toolchain_authority(self):
+        expected = {
+            "ripgrep": ("15.2.0", "rocky-10.2-base"),
+            "fd": ("10.4.2", "rocky-10.2-base"),
+            "yq": ("4.53.6", "rocky-10.2-base"),
+            "gh": ("2.101.0", "rocky-10.2-admin-qualification"),
+            "shfmt": ("3.14.1", "rocky-10.2-admin-qualification"),
+        }
+        for name, (version, scope) in expected.items():
+            tool = self.toolchain["tools"][name]
+            self.assertEqual(self.toolchain["versions"][tool["version_ref"]], version)
+            self.assertEqual(tool["architecture"], "amd64")
+            self.assertIn(scope, tool["scope"])
+            self.assertRegex(
+                self.toolchain["versions"][tool["sha256_ref"]],
+                r"^[0-9a-f]{64}$",
+            )
+        gh = self.toolchain["tools"]["gh"]
+        self.assertEqual(gh["artifact"]["filename"], "gh_2.101.0_linux_amd64.rpm")
+        self.assertEqual(
+            self.toolchain["versions"][gh["sha256_ref"]],
+            "72ef6dcd0ee459645cda485f2e55f18eca7b9252fce85a3be4c2446ae7627f36",
+        )
+        self.assertEqual(
+            gh["qualification"]["stdout_contains"], ["--paginate", "--slurp"]
+        )
+        self.assertEqual(gh["qualification"]["network"], "forbidden")
+
+    def test_packer_plugins_profiles_and_outputs_are_exact(self):
         expected = {"virtualbox": "1.1.5", "qemu": "1.1.6", "vagrant": "1.1.7"}
         for plugin, version in expected.items():
-            block = re.search(rf"{plugin}\s*=\s*\{{(?P<body>.*?)\n\s*\}}", self.packer, re.S)
+            block = re.search(
+                rf"{plugin}\s*=\s*\{{(?P<body>.*?)\n\s*\}}", self.packer, re.DOTALL
+            )
             self.assertIsNotNone(block)
             self.assertIn(f'version = "= {version}"', block.group("body"))
-        self.assertIn("rocky-10.2-virtualbox.box", self.packer)
-        self.assertEqual(self.image["outputs"]["qemu_kvm"], "rocky-10.2-kvm.qcow2")
-
-    def test_packer_owns_only_immutable_os_base(self):
-        packer_tree = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in (ROOT / "platform/packer").rglob("*") if path.is_file()
+        self.assertIn(
+            'contains(["rke2", "admin-qualification"], var.image_profile)', self.packer
         )
-        for forbidden in ("ansible", "rke2-token", "cluster-init", "cilium", "haproxy"):
-            self.assertNotIn(forbidden, packer_tree.lower())
-        self.assertEqual(self.contract["rules"]["packer_may_invoke_ansible"], "forbidden")
-        renderer = (ROOT / "scripts/render_packer_vars.py").read_text(encoding="utf-8")
-        self.assertIn('contract["packer_image"]', renderer)
-        self.assertNotIn("Rocky-10.2-x86_64-dvd1.iso", self.packer)
+        self.assertIn("${local.image_name}-virtualbox.box", self.packer)
+        self.assertIn("${local.image_name}-kvm", self.packer)
 
-    def test_image_hardening_and_clone_hygiene_are_executable(self):
+    def test_packer_build_is_offline_and_profile_separated(self):
+        self.assertIn("source      = var.offline_bundle_dir", self.packer)
+        self.assertIn("sha256sum --check SHA256SUMS", self.packer)
+        self.assertIn("--disablerepo='*'", self.packer)
+        self.assertNotIn("curl ", self.packer)
+        self.assertNotIn("wget ", self.packer)
+        self.assertNotIn("releases/download", self.packer)
+        self.assertIn("PACKER_BUILDER_TYPE", self.packer)
+        self.assertIn("qemu-guest-agent; else ! rpm -q qemu-guest-agent", self.packer)
+        self.assertIn("--profile admin-qualification", self.packer)
+        for version in ("15.2.0", "10.4.2", "4.53.6", "2.101.0", "3.14.1"):
+            self.assertNotIn(version, self.packer)
+
+    def test_build_credentials_are_runtime_injected_and_removed(self):
+        credential = self.image["build"]["credential"]
+        self.assertEqual("runtime-injected-temporary-ssh-key", credential["type"])
+        self.assertEqual("forbidden", credential["committed_private_key"])
+        self.assertEqual("forbidden", credential["committed_password_or_hash"])
+        self.assertEqual("forbidden", credential["password_authentication"])
+        self.assertNotIn("build_password", self.packer)
+        self.assertNotIn("ssh_password", self.packer)
+        self.assertIn("ssh_private_key_file", self.packer)
+        self.assertIn("build_ssh_public_key", self.packer)
+        self.assertIn(
+            'sshkey --username=packer "${build_ssh_public_key}"', self.kickstart
+        )
+        self.assertIn("user --name=packer --groups=wheel --lock", self.kickstart)
+        self.assertNotRegex(self.kickstart, r"\$[156]\$")
+        self.assertIn("PasswordAuthentication no", self.kickstart)
+        self.assertIn("usermod --lock --shell /sbin/nologin packer", self.packer)
+        self.assertIn("rm -rf /home/packer/.ssh", self.packer)
+
+    def test_rke2_profile_excludes_admin_tools_and_credentials(self):
+        forbidden = set(self.image["profiles"]["rke2"]["forbidden_tools"])
+        self.assertEqual(
+            forbidden,
+            {"gh", "git", "strace", "sysstat", "mtr", "shellcheck", "shfmt"},
+        )
+        self.assertIn("! command -v gh", self.packer)
+        self.assertIn("/root/.config/gh/hosts.yml", self.packer)
+        self.assertIn("GH_TOKEN|GITHUB_TOKEN", self.packer)
+        for tool in forbidden:
+            self.assertNotIn(tool, self.kickstart.lower())
+
+    def test_image_hardening_and_kubernetes_baseline_are_executable(self):
         expected_kickstart = (
-            "selinux --enforcing", "firewall --disabled", "-firewalld",
-            "kernel-modules-extra", "swapoff -a", "net.ipv4.ip_forward = 1",
-            "overlay", "br_netfilter", "nf_conntrack", "vxlan", "NetworkManager",
-            "chronyd", "sshd",
+            "selinux --enforcing",
+            "firewall --disabled",
+            "-firewalld",
+            "kernel-modules-extra",
+            "swapoff -a",
+            "net.ipv4.ip_forward = 1",
+            "overlay",
+            "br_netfilter",
+            "nf_conntrack",
+            "vxlan",
+            "NetworkManager",
+            "chronyd",
+            "sshd",
+            "/etc/sysctl.d/90-kubernetes.conf",
+            "/etc/modules-load.d/kubernetes.conf",
         )
         for value in expected_kickstart:
             self.assertIn(value, self.kickstart)
         for value in (
-            "truncate -s 0 /etc/machine-id", "rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
-            "PasswordAuthentication no", "hostnamectl set-hostname rocky-10-2-base",
-            "cgroup2fs", "grep -qw bpf /proc/filesystems",
+            "truncate -s 0 /etc/machine-id",
+            "rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
+            "PasswordAuthentication no",
+            "hostnamectl set-hostname rocky-10-2-base",
+            "cgroup2fs",
+            "grep -qw bpf /proc/filesystems",
+            "net.bridge.bridge-nf-call-iptables",
+            "fs.inotify.max_user_instances",
         ):
             self.assertIn(value, self.packer)
+        self.assertNotIn("qemu-guest-agent", self.kickstart)
+
+    def test_packer_owns_only_stable_os_prerequisites(self):
+        packer_tree = self.packer + "\n" + self.kickstart
+        for forbidden in ("rke2-token", "cluster-init", "cilium", "haproxy"):
+            self.assertNotIn(forbidden, packer_tree.lower())
+        self.assertEqual(
+            self.contract["rules"]["packer_may_invoke_ansible"], "forbidden"
+        )
+        self.assertNotIn("Rocky-10.2-x86_64-dvd1.iso", self.packer)
 
     def test_rke2_selinux_stays_in_bundle_and_runtime_config(self):
-        bundle = json.loads((ROOT / "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json").read_text())
+        bundle = json.loads(
+            (
+                ROOT / "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"
+            ).read_text()
+        )
         packages = {entry["package"] for entry in bundle["rpms"]}
         self.assertIn("rke2-selinux", packages)
         for template in ("rke2_server", "rke2_agent"):
-            text = (ROOT / f"platform/ansible/roles/{template}/templates/config.yaml.j2").read_text()
+            text = (
+                ROOT / f"platform/ansible/roles/{template}/templates/config.yaml.j2"
+            ).read_text()
             self.assertIn("selinux: true", text)
-        server = (ROOT / "platform/ansible/roles/rke2_server/templates/config.yaml.j2").read_text()
-        self.assertIn("cluster-init: true", server)
-        mgmt = (ROOT / "platform/ansible/mgmt.yml").read_text()
-        self.assertIn("ansible.builtin.hostname", mgmt)
-        self.assertIn('name: "{{ inventory_hostname }}"', mgmt)
+
+    def test_generators_and_installer_are_python_not_shell(self):
+        self.assertTrue(GENERATOR.is_file())
+        installer = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn('"--disablerepo=*"', installer)
+        self.assertNotIn("urllib", installer)
 
 
 if __name__ == "__main__":

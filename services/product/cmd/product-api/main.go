@@ -68,11 +68,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	service := application.NewServiceWithOptions(store, application.Options{HomeSite: runtimeConfig.HomeSite})
 
 	var applicationHandler http.Handler = resttransport.NewHandlerWithReadiness(service, readiness)
+	var oidcAuthorizer *security.OIDCAuthorizer
 	if runtimeConfig.Storage == "postgres" {
 		authorizer, err := security.NewOIDCAuthorizer(ctx, runtimeConfig.OIDCIssuer, runtimeConfig.OIDCAudience)
 		if err != nil {
 			return err
 		}
+		oidcAuthorizer = authorizer
 		applicationHandler = resttransport.NewHandlerWithAuthorizer(service, readiness, authorizer)
 	}
 	restHandler := otelhttp.NewHandler(requestLogger(logger, applicationHandler), "product.http")
@@ -86,9 +88,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 	defer grpcListener.Close()
+	grpcInterceptors := []googlegrpc.UnaryServerInterceptor{grpcLogger(logger)}
+	if oidcAuthorizer != nil {
+		grpcInterceptors = append(grpcInterceptors, security.GRPCMutationAuthorizer(oidcAuthorizer))
+	}
 	grpcServer := googlegrpc.NewServer(
 		googlegrpc.StatsHandler(otelgrpc.NewServerHandler()),
-		googlegrpc.ChainUnaryInterceptor(grpcLogger(logger)),
+		googlegrpc.ChainUnaryInterceptor(grpcInterceptors...),
 	)
 	productv1.RegisterProductServiceServer(grpcServer, grpctransport.NewServer(service))
 	healthServer := health.NewServer()

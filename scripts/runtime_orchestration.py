@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
@@ -312,6 +313,12 @@ class BuiltinCapabilityDriver:
 
     def __init__(self, environment: Mapping[str, str] | None = None) -> None:
         self.environment = dict(environment or os.environ)
+        self.mutation_playbook = (
+            Path(__file__).resolve().parents[1]
+            / "platform"
+            / "ansible"
+            / "runtime-capability.yml"
+        )
 
     @staticmethod
     def _run(
@@ -338,12 +345,48 @@ class BuiltinCapabilityDriver:
             )
         return value
 
-    def _docker_env(self) -> dict[str, str]:
+    def _rootless_docker_env(self) -> dict[str, str]:
         env = dict(self.environment)
-        if not env.get("DOCKER_HOST"):
-            runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-            env["DOCKER_HOST"] = f"unix://{runtime_dir}/docker.sock"
+        runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        env["DOCKER_HOST"] = f"unix://{runtime_dir}/docker.sock"
         return env
+
+    def _docker_env_for_host(self, docker_host: object) -> dict[str, str]:
+        env = dict(self.environment)
+        if isinstance(docker_host, str) and docker_host:
+            env["DOCKER_HOST"] = docker_host
+        else:
+            env.pop("DOCKER_HOST", None)
+        return env
+
+    def _reconcile_with_ansible(
+        self, capability: PlannedCapability, target_state: str
+    ) -> None:
+        ansible = shutil.which("ansible-playbook", path=self.environment.get("PATH"))
+        if not ansible:
+            raise RuntimeVerificationError(
+                f"{capability.spec.name}: ansible-playbook is unavailable"
+            )
+        result = self._run(
+            [
+                ansible,
+                "--inventory",
+                "localhost,",
+                "--connection",
+                "local",
+                str(self.mutation_playbook),
+                "--extra-vars",
+                f"runtime_capability={capability.spec.name}",
+                "--extra-vars",
+                f"runtime_target_state={target_state}",
+            ],
+            env=self.environment,
+            timeout=capability.spec.timeout_seconds,
+        )
+        if result.returncode != 0:
+            raise RuntimeVerificationError(
+                f"{capability.spec.name}: Ansible runtime reconciliation failed"
+            )
 
     def _docker_info(
         self, env: Mapping[str, str] | None = None, timeout: int = 30
@@ -415,24 +458,41 @@ class BuiltinCapabilityDriver:
             return {"satisfied": True}
         if handler == "docker-rootless":
             service = self._docker_service_state()
+            current_env = dict(self.environment)
+            configured_host = current_env.get("DOCKER_HOST", "")
             current_ready = self._docker_info(
-                self.environment, capability.spec.timeout_seconds
+                current_env, capability.spec.timeout_seconds
             )
-            candidate_env = self._docker_env()
-            candidate_ready = current_ready or self._docker_info(
-                candidate_env, capability.spec.timeout_seconds
+            candidate_env = self._rootless_docker_env()
+            candidate_ready = False
+            if not current_ready and not configured_host:
+                candidate_ready = self._docker_info(
+                    candidate_env, capability.spec.timeout_seconds
+                )
+            satisfied = current_ready or candidate_ready
+            docker_host = (
+                configured_host if current_ready else candidate_env["DOCKER_HOST"]
             )
+            endpoint_source = (
+                "configured"
+                if current_ready and configured_host
+                else "system-default"
+                if current_ready
+                else "rootless-user-service"
+            )
+            socket_present = False
+            if docker_host.startswith("unix://"):
+                socket_present = Path(docker_host.removeprefix("unix://")).exists()
             return {
-                "satisfied": candidate_ready,
+                "satisfied": satisfied,
                 "runtime": "existing" if current_ready else "rootless-user-service",
-                "requires_docker_host": candidate_ready and not current_ready,
+                "docker_host": docker_host,
+                "endpoint_source": endpoint_source,
                 "service_active": service["active_state"] == "active",
                 "service_state": service["active_state"],
                 "service_loaded": service["load_state"] == "loaded",
                 "manager_reachable": service["manager_reachable"],
-                "socket_present": Path(
-                    candidate_env["DOCKER_HOST"].removeprefix("unix://")
-                ).exists(),
+                "socket_present": socket_present,
             }
         if handler == "ip-forward":
             result = self._run(
@@ -584,20 +644,16 @@ class BuiltinCapabilityDriver:
             updates = {}
             if (
                 capability.spec.handler == "docker-rootless"
-                and initial_state.get("requires_docker_host") is True
+                and isinstance(initial_state.get("docker_host"), str)
+                and initial_state.get("docker_host")
+                and initial_state.get("docker_host")
+                != self.environment.get("DOCKER_HOST")
             ):
-                updates["DOCKER_HOST"] = self._docker_env()["DOCKER_HOST"]
+                updates["DOCKER_HOST"] = str(initial_state["docker_host"])
             return dict(initial_state), updates
         if capability.spec.handler == "docker-rootless":
-            result = self._run(
-                ["systemctl", "--user", "start", "docker.service"],
-                timeout=capability.spec.timeout_seconds,
-            )
-            if result.returncode != 0:
-                raise RuntimeVerificationError(
-                    "docker-runtime: failed to start rootless user service"
-                )
-            env = self._docker_env()
+            self._reconcile_with_ansible(capability, "started")
+            env = self._rootless_docker_env()
             deadline = time.monotonic() + capability.spec.timeout_seconds
             while time.monotonic() < deadline:
                 if self._docker_info(env, capability.spec.timeout_seconds):
@@ -615,15 +671,7 @@ class BuiltinCapabilityDriver:
                 "docker-runtime: rootless daemon did not become ready before timeout"
             )
         if capability.spec.handler == "ip-forward":
-            prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
-            result = self._run(
-                [*prefix, "sysctl", "-w", "net.ipv4.ip_forward=1"],
-                timeout=capability.spec.timeout_seconds,
-            )
-            if result.returncode != 0:
-                raise RuntimeVerificationError(
-                    "ip-forward: failed to enable forwarding"
-                )
+            self._reconcile_with_ansible(capability, "1")
             return {"satisfied": True, "value": "1", "readable": True}, {}
         raise RuntimePolicyError(
             f"{capability.spec.name}: prepare requested for a non-mutable handler"
@@ -633,7 +681,7 @@ class BuiltinCapabilityDriver:
         self, capability: PlannedCapability, prepared_state: Mapping[str, object]
     ) -> dict:
         if capability.spec.handler == "docker-rootless":
-            env = self._docker_env()
+            env = self._docker_env_for_host(prepared_state.get("docker_host"))
             if not self._docker_info(env, capability.spec.timeout_seconds):
                 raise RuntimeVerificationError(
                     "docker-runtime: docker info failed after prepare"
@@ -663,28 +711,13 @@ class BuiltinCapabilityDriver:
             capability.spec.handler == "docker-rootless"
             and initial_state.get("satisfied") is not True
         ):
-            result = self._run(
-                ["systemctl", "--user", "stop", "docker.service"],
-                timeout=capability.spec.timeout_seconds,
-            )
-            if result.returncode != 0:
-                raise RuntimeVerificationError(
-                    "docker-runtime: failed to restore stopped rootless service"
-                )
+            self._reconcile_with_ansible(capability, "stopped")
             return {"action": "stop-user-service"}
         if (
             capability.spec.handler == "ip-forward"
             and initial_state.get("value") == "0"
         ):
-            prefix = [] if os.geteuid() == 0 else ["sudo", "-n"]
-            result = self._run(
-                [*prefix, "sysctl", "-w", "net.ipv4.ip_forward=0"],
-                timeout=capability.spec.timeout_seconds,
-            )
-            if result.returncode != 0:
-                raise RuntimeVerificationError(
-                    "ip-forward: failed to restore initial value"
-                )
+            self._reconcile_with_ansible(capability, "0")
             return {"action": "restore", "value": "0"}
         return {"action": "none"}
 
@@ -706,7 +739,7 @@ class BuiltinCapabilityDriver:
                 "service_loaded": state.get("load_state") == "loaded",
                 "manager_reachable": state.get("manager_reachable"),
                 "socket_present": Path(
-                    self._docker_env()["DOCKER_HOST"].removeprefix("unix://")
+                    self._rootless_docker_env()["DOCKER_HOST"].removeprefix("unix://")
                 ).exists(),
             }
         elif capability.spec.handler == "ip-forward":
@@ -719,6 +752,32 @@ class BuiltinCapabilityDriver:
         return {"status": "PASS"}
 
 
+def resolve_runtime_lock_path(
+    runtime_policy: Mapping[str, object],
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve the contract-owned host/user-global lock independently of a checkout."""
+    lock = runtime_policy.get("lock", {})
+    if not isinstance(lock, Mapping):
+        raise RuntimePolicyError("runtime orchestration lock policy is invalid")
+    env = dict(environment or os.environ)
+    runtime_env = str(lock.get("runtime_directory_env", ""))
+    runtime_relative = Path(str(lock.get("runtime_relative_path", "")))
+    fallback_relative = Path(str(lock.get("fallback_relative_path", "")))
+    if (
+        not runtime_env
+        or runtime_relative.is_absolute()
+        or fallback_relative.is_absolute()
+        or ".." in runtime_relative.parts
+        or ".." in fallback_relative.parts
+    ):
+        raise RuntimePolicyError("runtime orchestration lock paths are invalid")
+    runtime_base = env.get(runtime_env, "").strip()
+    if runtime_base and Path(runtime_base).is_absolute():
+        return Path(runtime_base) / runtime_relative
+    return Path.home() / fallback_relative
+
+
 class RuntimeLock:
     def __init__(self, path: Path, timeout_seconds: int) -> None:
         self.path = path
@@ -726,8 +785,23 @@ class RuntimeLock:
         self._handle = None
 
     def __enter__(self) -> Self:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self.path.open("a+", encoding="utf-8")
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        parent_state = self.path.parent.lstat()
+        if (
+            stat.S_ISLNK(parent_state.st_mode)
+            or not stat.S_ISDIR(parent_state.st_mode)
+            or parent_state.st_uid != os.getuid()
+        ):
+            raise RuntimeBlocked("runtime orchestration lock directory is unsafe")
+        os.chmod(self.path.parent, 0o700)
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.path, flags, 0o600)
+        lock_state = os.fstat(descriptor)
+        if not stat.S_ISREG(lock_state.st_mode) or lock_state.st_uid != os.getuid():
+            os.close(descriptor)
+            raise RuntimeBlocked("runtime orchestration lock file is unsafe")
+        os.fchmod(descriptor, 0o600)
+        self._handle = os.fdopen(descriptor, "a+", encoding="utf-8")
         deadline = time.monotonic() + self.timeout_seconds
         while True:
             try:
@@ -757,12 +831,14 @@ class RuntimeExecutor:
         *,
         driver: CapabilityDriver | None = None,
         lock_factory: Callable[[Path, int], RuntimeLock] = RuntimeLock,
+        lock_environment: Mapping[str, str] | None = None,
     ) -> None:
         self.root = root
         self.policy = runtime_policy
         self.planner = RuntimePlanner(runtime_policy)
         self.driver = driver or BuiltinCapabilityDriver()
         self.lock_factory = lock_factory
+        self.lock_environment = dict(lock_environment or os.environ)
 
     def _filter_state(
         self, capability: PlannedCapability, state: Mapping[str, object]
@@ -853,9 +929,7 @@ class RuntimeExecutor:
 
         lock_cfg = self.policy.get("lock", {})
         lock_required = any(item.spec.global_lock for item in plan)
-        lock_path = self.root / str(
-            lock_cfg.get("path", ".context/runtime/orchestration.lock")
-        )
+        lock_path = resolve_runtime_lock_path(self.policy, self.lock_environment)
         lock_timeout = int(lock_cfg.get("timeout_seconds", 30))
         lock = (
             self.lock_factory(lock_path, lock_timeout) if lock_required else _NullLock()
@@ -1079,9 +1153,27 @@ def validate_runtime_policy(runtime_policy: Mapping[str, object]) -> None:
     lock = runtime_policy.get("lock")
     if (
         not isinstance(lock, Mapping)
-        or lock.get("path") != ".context/runtime/orchestration.lock"
+        or lock.get("scope") != "host-user-global"
+        or lock.get("runtime_directory_env") != "XDG_RUNTIME_DIR"
+        or lock.get("runtime_relative_path")
+        != "ecommerce-1/qualification-orchestration.lock"
+        or lock.get("fallback_relative_path")
+        != ".cache/ecommerce-1/runtime/qualification-orchestration.lock"
+        or lock.get("owner") != "current-user"
+        or lock.get("directory_mode") != "0700"
+        or lock.get("file_mode") != "0600"
         or type(lock.get("timeout_seconds")) is not int
         or not 1 <= lock["timeout_seconds"] <= 300
     ):
         raise RuntimePolicyError("runtime orchestration lock policy is invalid")
+    mutation_executor = runtime_policy.get("mutation_executor")
+    if (
+        not isinstance(mutation_executor, Mapping)
+        or mutation_executor.get("owner") != "ansible"
+        or mutation_executor.get("playbook")
+        != "platform/ansible/runtime-capability.yml"
+        or mutation_executor.get("persistence") != "forbidden"
+        or mutation_executor.get("direct_python_host_mutation") != "forbidden"
+    ):
+        raise RuntimePolicyError("runtime mutation executor policy is invalid")
     RuntimePlanner(runtime_policy)

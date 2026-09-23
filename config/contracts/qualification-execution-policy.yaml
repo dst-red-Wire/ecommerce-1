@@ -50,10 +50,21 @@ runtime_orchestration:
     implicit_mutation: forbidden
     prepare_default: readonly
   lock:
-    path: .context/runtime/orchestration.lock
+    scope: host-user-global
+    runtime_directory_env: XDG_RUNTIME_DIR
+    runtime_relative_path: ecommerce-1/qualification-orchestration.lock
+    fallback_relative_path: .cache/ecommerce-1/runtime/qualification-orchestration.lock
     timeout_seconds: 30
     tracked: false
     crash_safety: operating-system-advisory-lock
+    owner: current-user
+    directory_mode: "0700"
+    file_mode: "0600"
+  mutation_executor:
+    owner: ansible
+    playbook: platform/ansible/runtime-capability.yml
+    persistence: forbidden
+    direct_python_host_mutation: forbidden
   stale_state:
     detect_prior_incomplete_evidence: required
     recapture_current_state: required
@@ -61,7 +72,7 @@ runtime_orchestration:
   capabilities:
     docker-runtime:
       handler: docker-rootless
-      requires: []
+      requires: [ansible-runtime]
       mutation_class: local-ephemeral
       timeout_seconds: 30
       privilege: user-systemd
@@ -69,14 +80,14 @@ runtime_orchestration:
       operations:
         detector: docker-info-and-user-service
         preflight: non-mutating-rootless-ownership-check
-        prepare: start-rootless-user-service-if-stopped
+        prepare: ansible-start-rootless-user-service-if-stopped
         verify: docker-info
-        restore: restore-captured-user-service-state
+        restore: ansible-restore-captured-user-service-state
         verify_restore: compare-captured-user-service-state
-      evidence_fields: [satisfied, runtime, service_active, service_state, service_loaded, manager_reachable, socket_present]
+      evidence_fields: [satisfied, runtime, docker_host, endpoint_source, service_active, service_state, service_loaded, manager_reachable, socket_present]
     ip-forward:
       handler: ip-forward
-      requires: []
+      requires: [ansible-runtime]
       mutation_class: local-ephemeral
       timeout_seconds: 10
       privilege: root-or-sudo-noninteractive
@@ -84,9 +95,9 @@ runtime_orchestration:
       operations:
         detector: sysctl-read
         preflight: noninteractive-privilege-check-when-change-required
-        prepare: set-one-if-required
+        prepare: ansible-set-one-if-required
         verify: sysctl-read-one
-        restore: restore-captured-value
+        restore: ansible-restore-captured-value
         verify_restore: compare-captured-value
       evidence_fields: [satisfied, value, readable]
     testcontainers:

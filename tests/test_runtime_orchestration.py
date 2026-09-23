@@ -19,6 +19,7 @@ from scripts.runtime_orchestration import (
     RuntimePlanner,
     RuntimePolicyError,
     RuntimeVerificationError,
+    resolve_runtime_lock_path,
     validate_runtime_policy,
 )
 
@@ -91,11 +92,49 @@ def policy(capabilities: dict[str, dict]) -> dict:
         "external_paid_resources": {"implicit_creation": "forbidden"},
         "production": {"implicit_mutation": "forbidden"},
         "lock": {
-            "path": ".context/runtime/orchestration.lock",
+            "scope": "host-user-global",
+            "runtime_directory_env": "XDG_RUNTIME_DIR",
+            "runtime_relative_path": "ecommerce-1/qualification-orchestration.lock",
+            "fallback_relative_path": ".cache/ecommerce-1/runtime/qualification-orchestration.lock",
             "timeout_seconds": 1,
+            "owner": "current-user",
+            "directory_mode": "0700",
+            "file_mode": "0600",
+        },
+        "mutation_executor": {
+            "owner": "ansible",
+            "playbook": "platform/ansible/runtime-capability.yml",
+            "persistence": "forbidden",
+            "direct_python_host_mutation": "forbidden",
         },
         "capabilities": capabilities,
     }
+
+
+def planned(
+    name: str, handler: str, *, mutation_class: str = "none"
+) -> PlannedCapability:
+    return PlannedCapability(
+        CapabilitySpec(
+            name=name,
+            handler=handler,
+            requires=(),
+            mutation_class=mutation_class,
+            timeout_seconds=2,
+            privilege="none",
+            global_lock=mutation_class != "none",
+            operations={},
+            evidence_fields=(
+                "satisfied",
+                "runtime",
+                "docker_host",
+                "endpoint_source",
+                "service_active",
+            ),
+            default_parameters={},
+        ),
+        {},
+    )
 
 
 class FakeDriver:
@@ -170,7 +209,12 @@ class RuntimeOrchestrationTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         root = Path(directory.name)
-        executor = RuntimeExecutor(root, policy(capabilities), driver=driver)
+        executor = RuntimeExecutor(
+            root,
+            policy(capabilities),
+            driver=driver,
+            lock_environment={"XDG_RUNTIME_DIR": str(root / "runtime")},
+        )
         result = executor.execute(
             requests,
             gate or (lambda _env: 0),
@@ -261,6 +305,76 @@ class RuntimeOrchestrationTests(unittest.TestCase):
             state = driver.capture(item)
         self.assertTrue(state["satisfied"])
         self.assertEqual("terraform", state["command"])
+
+    def test_system_docker_endpoint_is_preserved_without_rootless_override(self):
+        item = planned("docker-runtime", "docker-rootless")
+        driver = BuiltinCapabilityDriver({"PATH": "/usr/bin"})
+        service = {
+            "active_state": "inactive",
+            "load_state": "loaded",
+            "manager_reachable": True,
+        }
+        with (
+            mock.patch.object(driver, "_docker_service_state", return_value=service),
+            mock.patch.object(driver, "_docker_info", return_value=True) as docker_info,
+        ):
+            state = driver.capture(item)
+            driver.verify(item, state)
+        self.assertEqual("", state["docker_host"])
+        self.assertEqual("system-default", state["endpoint_source"])
+        self.assertNotIn("DOCKER_HOST", docker_info.call_args.args[0])
+
+    def test_explicit_working_docker_endpoint_is_preserved(self):
+        item = planned("docker-runtime", "docker-rootless")
+        endpoint = "unix:///run/user/1000/custom-docker.sock"
+        driver = BuiltinCapabilityDriver({"PATH": "/usr/bin", "DOCKER_HOST": endpoint})
+        service = {
+            "active_state": "inactive",
+            "load_state": "loaded",
+            "manager_reachable": True,
+        }
+        with (
+            mock.patch.object(driver, "_docker_service_state", return_value=service),
+            mock.patch.object(driver, "_docker_info", return_value=True) as docker_info,
+        ):
+            state = driver.capture(item)
+            driver.verify(item, state)
+        self.assertEqual(endpoint, state["docker_host"])
+        self.assertEqual("configured", state["endpoint_source"])
+        self.assertEqual(endpoint, docker_info.call_args.args[0]["DOCKER_HOST"])
+
+    def test_host_mutations_are_delegated_to_governed_ansible_playbook(self):
+        item = planned(
+            "docker-runtime", "docker-rootless", mutation_class="local-ephemeral"
+        )
+        driver = BuiltinCapabilityDriver({"PATH": "/usr/bin"})
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch(
+                "scripts.runtime_orchestration.shutil.which",
+                return_value="/usr/bin/ansible-playbook",
+            ),
+            mock.patch.object(driver, "_run", return_value=completed) as execute,
+        ):
+            driver._reconcile_with_ansible(item, "started")
+        command = execute.call_args.args[0]
+        self.assertEqual("/usr/bin/ansible-playbook", command[0])
+        self.assertIn(str(driver.mutation_playbook), command)
+        source = (ROOT / "scripts/runtime_orchestration.py").read_text(encoding="utf-8")
+        self.assertNotIn('["systemctl", "--user", "start"', source)
+        self.assertNotIn('"net.ipv4.ip_forward=1"', source)
+
+    def test_lock_path_is_host_user_global_across_repository_roots(self):
+        contract = policy({"check": capability()})
+        environment = {"XDG_RUNTIME_DIR": "/run/user/4242"}
+        first = resolve_runtime_lock_path(contract, environment)
+        second = resolve_runtime_lock_path(contract, environment)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            Path("/run/user/4242/ecommerce-1/qualification-orchestration.lock"),
+            first,
+        )
+        self.assertNotIn(".context", str(first))
 
     def test_global_preflight_failure_causes_zero_mutation(self):
         caps = {
@@ -454,6 +568,20 @@ class RuntimeOrchestrationGovernanceTests(unittest.TestCase):
             if path != self.contract_path
         ]
         self.assertEqual([], parallel_contracts)
+
+        lock = runtime["lock"]
+        self.assertEqual("host-user-global", lock["scope"])
+        self.assertEqual("XDG_RUNTIME_DIR", lock["runtime_directory_env"])
+        self.assertNotIn(".context", lock["runtime_relative_path"])
+        mutation_executor = runtime["mutation_executor"]
+        self.assertEqual("ansible", mutation_executor["owner"])
+        self.assertEqual(
+            "platform/ansible/runtime-capability.yml",
+            mutation_executor["playbook"],
+        )
+        playbook = (ROOT / mutation_executor["playbook"]).read_text(encoding="utf-8")
+        self.assertIn("ansible.builtin.systemd_service", playbook)
+        self.assertIn("net.ipv4.ip_forward={{ runtime_target_state }}", playbook)
 
     def test_capability_references_and_mutation_compensation_are_governed(self):
         runtime = self.contract["runtime_orchestration"]

@@ -40,6 +40,9 @@
     "FD_SHA256_LINUX_AMD64": "e3257d48e29a6be965187dbd24ce9af564e0fe67b3e73c9bdcd180f4ec11bdde",
     "YQ_VERSION": "4.53.6",
     "YQ_SHA256_LINUX_AMD64": "c5f056448f973ae7d39b5401949648a78f2dc1947d6a8eb65be60d5c504b9385",
+    "GH_SHA256_LINUX_AMD64_RPM": "72ef6dcd0ee459645cda485f2e55f18eca7b9252fce85a3be4c2446ae7627f36",
+    "SHFMT_VERSION": "3.14.1",
+    "SHFMT_SHA256_LINUX_AMD64": "76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf",
     "AST_GREP_VERSION": "0.45.0",
     "AST_GREP_SHA256_LINUX_AMD64": "78931ae35ebac33d9a72b3aecea3e3d62d6e5b0b718ac8bbedfbe69d68421e41",
     "GO_VERSION": "1.26.6",
@@ -102,6 +105,91 @@
     "kubernetes.core": "2.4.0"
   },
   "tools": {
+    "ripgrep": {
+      "version_ref": "RIPGREP_VERSION",
+      "source": "https://github.com/BurntSushi/ripgrep",
+      "artifact": {
+        "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+        "filename": "ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz"
+      },
+      "sha256_ref": "RIPGREP_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "archive", "binary_relative": "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg"},
+      "binary": "rg",
+      "version_command": ["rg", "--version"],
+      "capability": "recursive-text-search"
+    },
+    "fd": {
+      "version_ref": "FD_VERSION",
+      "source": "https://github.com/sharkdp/fd",
+      "artifact": {
+        "url": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz",
+        "filename": "fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz"
+      },
+      "sha256_ref": "FD_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "archive", "binary_relative": "fd-v10.4.2-x86_64-unknown-linux-musl/fd"},
+      "binary": "fd",
+      "version_command": ["fd", "--version"],
+      "capability": "filesystem-search"
+    },
+    "yq": {
+      "version_ref": "YQ_VERSION",
+      "source": "https://github.com/mikefarah/yq",
+      "artifact": {
+        "url": "https://github.com/mikefarah/yq/releases/download/v4.53.6/yq_linux_amd64",
+        "filename": "yq_linux_amd64"
+      },
+      "sha256_ref": "YQ_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "rocky-10.2-base"],
+      "install": {"type": "binary"},
+      "binary": "yq",
+      "version_command": ["yq", "--version"],
+      "capability": "yaml-query-and-transformation"
+    },
+    "gh": {
+      "version_ref": "GH_VERSION",
+      "source": "https://github.com/cli/cli",
+      "artifact": {
+        "url": "https://github.com/cli/cli/releases/download/v2.101.0/gh_2.101.0_linux_amd64.rpm",
+        "filename": "gh_2.101.0_linux_amd64.rpm"
+      },
+      "sha256_ref": "GH_SHA256_LINUX_AMD64_RPM",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-admin-qualification"],
+      "install": {"type": "rpm", "package": "gh", "offline": true},
+      "binary": "gh",
+      "version_command": ["gh", "--version"],
+      "qualification": {
+        "command": ["gh", "api", "--help"],
+        "stdout_contains": ["--paginate", "--slurp"],
+        "network": "forbidden"
+      },
+      "capability": "github-api-qualification"
+    },
+    "shfmt": {
+      "version_ref": "SHFMT_VERSION",
+      "source": "https://github.com/mvdan/sh",
+      "artifact": {
+        "url": "https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64",
+        "filename": "shfmt_v3.14.1_linux_amd64"
+      },
+      "sha256_ref": "SHFMT_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-admin-qualification"],
+      "install": {"type": "binary"},
+      "binary": "shfmt",
+      "version_command": ["shfmt", "--version"],
+      "capability": "shell-format-qualification"
+    },
     "docker-buildx": {
       "version_ref": "DOCKER_BUILDX_VERSION",
       "source": "https://github.com/docker/buildx",
