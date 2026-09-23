@@ -9,14 +9,20 @@ import (
 )
 
 type Querier interface {
+	CheckReadiness(ctx context.Context) (bool, error)
+	ClaimOutboxEvents(ctx context.Context, arg ClaimOutboxEventsParams) ([]ClaimOutboxEventsRow, error)
 	CreateProduct(ctx context.Context, arg CreateProductParams) (Product, error)
 	CreateSKU(ctx context.Context, arg CreateSKUParams) (Sku, error)
 	GetCommand(ctx context.Context, journalKey string) (CommandJournal, error)
 	GetProduct(ctx context.Context, id string) (Product, error)
 	GetSKU(ctx context.Context, arg GetSKUParams) (Sku, error)
+	InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error
 	ListProducts(ctx context.Context, arg ListProductsParams) ([]Product, error)
 	ListProductsByStatus(ctx context.Context, arg ListProductsByStatusParams) ([]Product, error)
 	ListSKUs(ctx context.Context, arg ListSKUsParams) ([]Sku, error)
+	MarkOutboxPublished(ctx context.Context, arg MarkOutboxPublishedParams) error
+	MoveOutboxEventToDeadLetter(ctx context.Context, arg MoveOutboxEventToDeadLetterParams) error
+	RescheduleOutboxEvent(ctx context.Context, arg RescheduleOutboxEventParams) error
 	SaveCommand(ctx context.Context, arg SaveCommandParams) error
 	UpdateProduct(ctx context.Context, arg UpdateProductParams) (Product, error)
 	UpdateSKU(ctx context.Context, arg UpdateSKUParams) (Sku, error)

@@ -16,6 +16,42 @@ type CommandJournal struct {
 	CreatedAt     pgtype.Timestamptz
 }
 
+type OutboxDeadLetter struct {
+	EventID       string
+	EventType     string
+	SchemaVersion int32
+	OccurredAtUtc pgtype.Timestamptz
+	Producer      string
+	AggregateType string
+	AggregateID   string
+	CorrelationID string
+	CausationID   string
+	HomeSite      string
+	Payload       []byte
+	AttemptCount  int32
+	LastError     string
+	FailedAt      pgtype.Timestamptz
+}
+
+type OutboxEvent struct {
+	EventID       string
+	EventType     string
+	SchemaVersion int32
+	OccurredAtUtc pgtype.Timestamptz
+	Producer      string
+	AggregateType string
+	AggregateID   string
+	CorrelationID string
+	CausationID   string
+	HomeSite      string
+	Payload       []byte
+	AttemptCount  int32
+	AvailableAt   pgtype.Timestamptz
+	PublishedAt   pgtype.Timestamptz
+	LastError     string
+	CreatedAt     pgtype.Timestamptz
+}
+
 type Product struct {
 	ID                     string
 	Name                   string

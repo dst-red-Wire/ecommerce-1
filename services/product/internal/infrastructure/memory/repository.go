@@ -14,6 +14,7 @@ type Store struct {
 	products map[string]domain.Product
 	skus     map[string]domain.SKU
 	journal  map[string]application.CommandResult
+	outbox   []application.OutboxEvent
 }
 
 func NewStore() *Store {
@@ -24,13 +25,18 @@ func NewStore() *Store {
 	}
 }
 
-func (s *Store) CreateProduct(_ context.Context, product domain.Product) error {
+func (s *Store) CreateProduct(_ context.Context, key string, result application.CommandResult, product domain.Product, event application.OutboxEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.journal[key]; exists {
+		return application.ErrConflict
+	}
 	if _, exists := s.products[product.ID]; exists {
 		return application.ErrConflict
 	}
 	s.products[product.ID] = cloneProduct(product)
+	s.journal[key] = cloneCommandResult(result)
+	s.outbox = append(s.outbox, cloneEvent(event))
 	return nil
 }
 
@@ -44,9 +50,12 @@ func (s *Store) GetProduct(_ context.Context, id string) (domain.Product, error)
 	return cloneProduct(product), nil
 }
 
-func (s *Store) UpdateProduct(_ context.Context, product domain.Product, expectedVersion int64) (domain.Product, error) {
+func (s *Store) UpdateProduct(_ context.Context, key string, result application.CommandResult, product domain.Product, expectedVersion int64, event application.OutboxEvent) (domain.Product, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.journal[key]; exists {
+		return domain.Product{}, application.ErrConflict
+	}
 	current, ok := s.products[product.ID]
 	if !ok {
 		return domain.Product{}, application.ErrNotFound
@@ -55,6 +64,8 @@ func (s *Store) UpdateProduct(_ context.Context, product domain.Product, expecte
 		return domain.Product{}, application.ErrPrecondition
 	}
 	s.products[product.ID] = cloneProduct(product)
+	s.journal[key] = cloneCommandResult(result)
+	s.outbox = append(s.outbox, cloneEvent(event))
 	return cloneProduct(product), nil
 }
 
@@ -82,9 +93,12 @@ func (s *Store) ListProducts(_ context.Context, status *domain.ProductStatus, of
 	return items[offset:end], more, nil
 }
 
-func (s *Store) CreateSKU(_ context.Context, sku domain.SKU) error {
+func (s *Store) CreateSKU(_ context.Context, key string, result application.CommandResult, sku domain.SKU, event application.OutboxEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.journal[key]; exists {
+		return application.ErrConflict
+	}
 	if _, exists := s.skus[sku.ID]; exists {
 		return application.ErrConflict
 	}
@@ -94,6 +108,8 @@ func (s *Store) CreateSKU(_ context.Context, sku domain.SKU) error {
 		}
 	}
 	s.skus[sku.ID] = cloneSKU(sku)
+	s.journal[key] = cloneCommandResult(result)
+	s.outbox = append(s.outbox, cloneEvent(event))
 	return nil
 }
 
@@ -107,9 +123,12 @@ func (s *Store) GetSKU(_ context.Context, productID, skuID string) (domain.SKU, 
 	return cloneSKU(sku), nil
 }
 
-func (s *Store) UpdateSKU(_ context.Context, sku domain.SKU, expectedVersion int64) (domain.SKU, error) {
+func (s *Store) UpdateSKU(_ context.Context, key string, result application.CommandResult, sku domain.SKU, expectedVersion int64, event application.OutboxEvent) (domain.SKU, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.journal[key]; exists {
+		return domain.SKU{}, application.ErrConflict
+	}
 	current, ok := s.skus[sku.ID]
 	if !ok || current.ProductID != sku.ProductID {
 		return domain.SKU{}, application.ErrNotFound
@@ -123,6 +142,8 @@ func (s *Store) UpdateSKU(_ context.Context, sku domain.SKU, expectedVersion int
 		}
 	}
 	s.skus[sku.ID] = cloneSKU(sku)
+	s.journal[key] = cloneCommandResult(result)
+	s.outbox = append(s.outbox, cloneEvent(event))
 	return cloneSKU(sku), nil
 }
 
@@ -149,7 +170,7 @@ func (s *Store) ListSKUs(_ context.Context, productID string, offset, limit int)
 	return items[offset:end], more, nil
 }
 
-func (s *Store) Load(_ context.Context, key string) (application.CommandResult, bool, error) {
+func (s *Store) LoadCommand(_ context.Context, key string) (application.CommandResult, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result, ok := s.journal[key]
@@ -159,17 +180,14 @@ func (s *Store) Load(_ context.Context, key string) (application.CommandResult, 
 	return cloneCommandResult(result), true, nil
 }
 
-func (s *Store) Save(_ context.Context, key string, result application.CommandResult) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if previous, exists := s.journal[key]; exists {
-		if previous.Fingerprint != result.Fingerprint {
-			return application.ErrConflict
-		}
-		return nil
+func (s *Store) OutboxEvents() []application.OutboxEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	events := make([]application.OutboxEvent, len(s.outbox))
+	for i, event := range s.outbox {
+		events[i] = cloneEvent(event)
 	}
-	s.journal[key] = cloneCommandResult(result)
-	return nil
+	return events
 }
 
 func cloneProduct(in domain.Product) domain.Product {
@@ -198,6 +216,19 @@ func cloneAttributes(in domain.AttributeMap) domain.AttributeMap {
 
 func cloneCommandResult(in application.CommandResult) application.CommandResult {
 	out := application.CommandResult{Fingerprint: in.Fingerprint}
+	if in.Product != nil {
+		product := cloneProduct(*in.Product)
+		out.Product = &product
+	}
+	if in.SKU != nil {
+		sku := cloneSKU(*in.SKU)
+		out.SKU = &sku
+	}
+	return out
+}
+
+func cloneEvent(in application.OutboxEvent) application.OutboxEvent {
+	out := in
 	if in.Product != nil {
 		product := cloneProduct(*in.Product)
 		out.Product = &product

@@ -1,0 +1,10 @@
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: services/product/api/generated
+    opt:
+      - module=github.com/dst-red-Wire/ecommerce-1/services/product/api/generated
+  - local: protoc-gen-go-grpc
+    out: services/product/api/generated
+    opt:
+      - module=github.com/dst-red-Wire/ecommerce-1/services/product/api/generated

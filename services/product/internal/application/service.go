@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
+	"github.com/google/uuid"
 )
 
 var (
@@ -21,16 +22,19 @@ var (
 	ErrValidation         = errors.New("validation failed")
 	ErrInvalidCursor      = errors.New("invalid cursor")
 	ErrInvalidIdempotency = errors.New("invalid idempotency key")
+	ErrInvalidID          = errors.New("invalid resource id")
 )
 
-type Repository interface {
-	CreateProduct(context.Context, domain.Product) error
+const (
+	EventProductCreated = "product.ProductCreated.v1"
+	EventProductUpdated = "product.ProductUpdated.v1"
+	EventSKUUpdated     = "product.SKUUpdated.v1"
+)
+
+type QueryRepository interface {
 	GetProduct(context.Context, string) (domain.Product, error)
-	UpdateProduct(context.Context, domain.Product, int64) (domain.Product, error)
 	ListProducts(context.Context, *domain.ProductStatus, int, int) ([]domain.Product, bool, error)
-	CreateSKU(context.Context, domain.SKU) error
 	GetSKU(context.Context, string, string) (domain.SKU, error)
-	UpdateSKU(context.Context, domain.SKU, int64) (domain.SKU, error)
 	ListSKUs(context.Context, string, int, int) ([]domain.SKU, bool, error)
 }
 
@@ -40,9 +44,32 @@ type CommandResult struct {
 	SKU         *domain.SKU
 }
 
-type CommandJournal interface {
-	Load(context.Context, string) (CommandResult, bool, error)
-	Save(context.Context, string, CommandResult) error
+type OutboxEvent struct {
+	ID            string
+	Type          string
+	SchemaVersion uint32
+	OccurredAtUTC time.Time
+	Producer      string
+	AggregateType string
+	AggregateID   string
+	CorrelationID string
+	CausationID   string
+	HomeSite      string
+	Product       *domain.Product
+	SKU           *domain.SKU
+}
+
+type CommandRepository interface {
+	LoadCommand(context.Context, string) (CommandResult, bool, error)
+	CreateProduct(context.Context, string, CommandResult, domain.Product, OutboxEvent) error
+	UpdateProduct(context.Context, string, CommandResult, domain.Product, int64, OutboxEvent) (domain.Product, error)
+	CreateSKU(context.Context, string, CommandResult, domain.SKU, OutboxEvent) error
+	UpdateSKU(context.Context, string, CommandResult, domain.SKU, int64, OutboxEvent) (domain.SKU, error)
+}
+
+type Store interface {
+	QueryRepository
+	CommandRepository
 }
 
 type CreateProductInput struct {
@@ -80,27 +107,57 @@ type UpdateSKUInput struct {
 }
 
 type Service struct {
-	repo    Repository
-	journal CommandJournal
-	now     func() time.Time
-	newID   func() string
+	queries  QueryRepository
+	commands CommandRepository
+	homeSite string
+	now      func() time.Time
+	newID    func() string
 }
 
-func NewService(repo Repository, journal CommandJournal) *Service {
-	return &Service{repo: repo, journal: journal, now: func() time.Time { return time.Now().UTC() }, newID: newUUID}
+type Options struct {
+	HomeSite string
+}
+
+type CommandMetadata struct {
+	CorrelationID string
+	CausationID   string
+}
+
+type commandMetadataKey struct{}
+
+func WithCommandMetadata(ctx context.Context, metadata CommandMetadata) context.Context {
+	return context.WithValue(ctx, commandMetadataKey{}, metadata)
+}
+
+func NewService(store Store) *Service {
+	return NewServiceWithOptions(store, Options{HomeSite: "local"})
+}
+
+func NewServiceWithOptions(store Store, options Options) *Service {
+	homeSite := strings.TrimSpace(options.HomeSite)
+	if homeSite == "" {
+		homeSite = "local"
+	}
+	return &Service{
+		queries: store, commands: store, homeSite: homeSite,
+		now: func() time.Time { return time.Now().UTC() }, newID: newUUID,
+	}
 }
 
 func ETag(version int64) string { return fmt.Sprintf("\"v%d\"", version) }
 
 func (s *Service) ListProducts(ctx context.Context, status *domain.ProductStatus, offset, limit int) ([]domain.Product, bool, error) {
-	if limit < 1 || limit > 100 || offset < 0 {
+	if limit < 1 || limit > 100 || offset < 0 || (status != nil && !validProductStatus(*status)) {
 		return nil, false, ErrValidation
 	}
-	return s.repo.ListProducts(ctx, status, offset, limit)
+	return s.queries.ListProducts(ctx, status, offset, limit)
 }
 
 func (s *Service) GetProduct(ctx context.Context, id string) (domain.Product, error) {
-	return s.repo.GetProduct(ctx, id)
+	if err := validateID(id); err != nil {
+		return domain.Product{}, err
+	}
+	return s.queries.GetProduct(ctx, id)
 }
 
 func (s *Service) CreateProduct(ctx context.Context, key string, in CreateProductInput) (domain.Product, bool, error) {
@@ -112,7 +169,7 @@ func (s *Service) CreateProduct(ctx context.Context, key string, in CreateProduc
 	}
 	fingerprint := hash(in)
 	journalKey := "product:create:" + key
-	if previous, ok, err := s.journal.Load(ctx, journalKey); err != nil {
+	if previous, ok, err := s.commands.LoadCommand(ctx, journalKey); err != nil {
 		return domain.Product{}, false, err
 	} else if ok {
 		if previous.Fingerprint != fingerprint || previous.Product == nil {
@@ -138,16 +195,21 @@ func (s *Service) CreateProduct(ctx context.Context, key string, in CreateProduc
 		UpdatedAt:              now,
 		Version:                1,
 	}
-	if err := s.repo.CreateProduct(ctx, product); err != nil {
-		return domain.Product{}, false, err
-	}
-	if err := s.journal.Save(ctx, journalKey, CommandResult{Fingerprint: fingerprint, Product: &product}); err != nil {
+	result := CommandResult{Fingerprint: fingerprint, Product: &product}
+	event := s.productEvent(ctx, EventProductCreated, product)
+	if err := s.commands.CreateProduct(ctx, journalKey, result, product, event); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return s.replayProduct(ctx, journalKey, fingerprint)
+		}
 		return domain.Product{}, false, err
 	}
 	return product, false, nil
 }
 
 func (s *Service) UpdateProduct(ctx context.Context, id, key, ifMatch string, in UpdateProductInput) (domain.Product, bool, error) {
+	if err := validateID(id); err != nil {
+		return domain.Product{}, false, err
+	}
 	if err := validateIdempotencyKey(key); err != nil {
 		return domain.Product{}, false, err
 	}
@@ -160,7 +222,7 @@ func (s *Service) UpdateProduct(ctx context.Context, id, key, ifMatch string, in
 		Input   UpdateProductInput
 	}{id, ifMatch, in})
 	journalKey := "product:update:" + id + ":" + key
-	if previous, ok, err := s.journal.Load(ctx, journalKey); err != nil {
+	if previous, ok, err := s.commands.LoadCommand(ctx, journalKey); err != nil {
 		return domain.Product{}, false, err
 	} else if ok {
 		if previous.Fingerprint != fingerprint || previous.Product == nil {
@@ -169,7 +231,7 @@ func (s *Service) UpdateProduct(ctx context.Context, id, key, ifMatch string, in
 		return *previous.Product, true, nil
 	}
 
-	current, err := s.repo.GetProduct(ctx, id)
+	current, err := s.queries.GetProduct(ctx, id)
 	if err != nil {
 		return domain.Product{}, false, err
 	}
@@ -179,43 +241,57 @@ func (s *Service) UpdateProduct(ctx context.Context, id, key, ifMatch string, in
 	applyProductUpdate(&current, in)
 	current.UpdatedAt = s.now()
 	current.Version++
-	updated, err := s.repo.UpdateProduct(ctx, current, current.Version-1)
+	result := CommandResult{Fingerprint: fingerprint, Product: &current}
+	event := s.productEvent(ctx, EventProductUpdated, current)
+	updated, err := s.commands.UpdateProduct(ctx, journalKey, result, current, current.Version-1, event)
 	if err != nil {
-		return domain.Product{}, false, err
-	}
-	if err := s.journal.Save(ctx, journalKey, CommandResult{Fingerprint: fingerprint, Product: &updated}); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return s.replayProduct(ctx, journalKey, fingerprint)
+		}
 		return domain.Product{}, false, err
 	}
 	return updated, false, nil
 }
 
 func (s *Service) ListSKUs(ctx context.Context, productID string, offset, limit int) ([]domain.SKU, bool, error) {
-	if _, err := s.repo.GetProduct(ctx, productID); err != nil {
+	if err := validateID(productID); err != nil {
+		return nil, false, err
+	}
+	if _, err := s.queries.GetProduct(ctx, productID); err != nil {
 		return nil, false, err
 	}
 	if limit < 1 || limit > 100 || offset < 0 {
 		return nil, false, ErrValidation
 	}
-	return s.repo.ListSKUs(ctx, productID, offset, limit)
+	return s.queries.ListSKUs(ctx, productID, offset, limit)
 }
 
 func (s *Service) GetSKU(ctx context.Context, productID, skuID string) (domain.SKU, error) {
-	return s.repo.GetSKU(ctx, productID, skuID)
+	if err := validateID(productID); err != nil {
+		return domain.SKU{}, err
+	}
+	if err := validateID(skuID); err != nil {
+		return domain.SKU{}, err
+	}
+	return s.queries.GetSKU(ctx, productID, skuID)
 }
 
 func (s *Service) CreateSKU(ctx context.Context, productID, key string, in CreateSKUInput) (domain.SKU, bool, error) {
+	if err := validateID(productID); err != nil {
+		return domain.SKU{}, false, err
+	}
 	if err := validateIdempotencyKey(key); err != nil {
 		return domain.SKU{}, false, err
 	}
 	if err := validateCreateSKU(in); err != nil {
 		return domain.SKU{}, false, err
 	}
-	if _, err := s.repo.GetProduct(ctx, productID); err != nil {
+	if _, err := s.queries.GetProduct(ctx, productID); err != nil {
 		return domain.SKU{}, false, err
 	}
 	fingerprint := hash(in)
 	journalKey := "sku:create:" + productID + ":" + key
-	if previous, ok, err := s.journal.Load(ctx, journalKey); err != nil {
+	if previous, ok, err := s.commands.LoadCommand(ctx, journalKey); err != nil {
 		return domain.SKU{}, false, err
 	} else if ok {
 		if previous.Fingerprint != fingerprint || previous.SKU == nil {
@@ -241,16 +317,24 @@ func (s *Service) CreateSKU(ctx context.Context, productID, key string, in Creat
 		UpdatedAt:    now,
 		Version:      1,
 	}
-	if err := s.repo.CreateSKU(ctx, sku); err != nil {
-		return domain.SKU{}, false, err
-	}
-	if err := s.journal.Save(ctx, journalKey, CommandResult{Fingerprint: fingerprint, SKU: &sku}); err != nil {
+	result := CommandResult{Fingerprint: fingerprint, SKU: &sku}
+	event := s.skuEvent(ctx, sku)
+	if err := s.commands.CreateSKU(ctx, journalKey, result, sku, event); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return s.replaySKU(ctx, journalKey, fingerprint)
+		}
 		return domain.SKU{}, false, err
 	}
 	return sku, false, nil
 }
 
 func (s *Service) UpdateSKU(ctx context.Context, productID, skuID, key, ifMatch string, in UpdateSKUInput) (domain.SKU, bool, error) {
+	if err := validateID(productID); err != nil {
+		return domain.SKU{}, false, err
+	}
+	if err := validateID(skuID); err != nil {
+		return domain.SKU{}, false, err
+	}
 	if err := validateIdempotencyKey(key); err != nil {
 		return domain.SKU{}, false, err
 	}
@@ -264,7 +348,7 @@ func (s *Service) UpdateSKU(ctx context.Context, productID, skuID, key, ifMatch 
 		Input     UpdateSKUInput
 	}{productID, skuID, ifMatch, in})
 	journalKey := "sku:update:" + productID + ":" + skuID + ":" + key
-	if previous, ok, err := s.journal.Load(ctx, journalKey); err != nil {
+	if previous, ok, err := s.commands.LoadCommand(ctx, journalKey); err != nil {
 		return domain.SKU{}, false, err
 	} else if ok {
 		if previous.Fingerprint != fingerprint || previous.SKU == nil {
@@ -273,7 +357,7 @@ func (s *Service) UpdateSKU(ctx context.Context, productID, skuID, key, ifMatch 
 		return *previous.SKU, true, nil
 	}
 
-	current, err := s.repo.GetSKU(ctx, productID, skuID)
+	current, err := s.queries.GetSKU(ctx, productID, skuID)
 	if err != nil {
 		return domain.SKU{}, false, err
 	}
@@ -283,19 +367,80 @@ func (s *Service) UpdateSKU(ctx context.Context, productID, skuID, key, ifMatch 
 	applySKUUpdate(&current, in)
 	current.UpdatedAt = s.now()
 	current.Version++
-	updated, err := s.repo.UpdateSKU(ctx, current, current.Version-1)
+	result := CommandResult{Fingerprint: fingerprint, SKU: &current}
+	event := s.skuEvent(ctx, current)
+	updated, err := s.commands.UpdateSKU(ctx, journalKey, result, current, current.Version-1, event)
 	if err != nil {
-		return domain.SKU{}, false, err
-	}
-	if err := s.journal.Save(ctx, journalKey, CommandResult{Fingerprint: fingerprint, SKU: &updated}); err != nil {
+		if errors.Is(err, ErrConflict) {
+			return s.replaySKU(ctx, journalKey, fingerprint)
+		}
 		return domain.SKU{}, false, err
 	}
 	return updated, false, nil
 }
 
+func (s *Service) replayProduct(ctx context.Context, journalKey, fingerprint string) (domain.Product, bool, error) {
+	previous, ok, err := s.commands.LoadCommand(ctx, journalKey)
+	if err != nil {
+		return domain.Product{}, false, err
+	}
+	if !ok || previous.Fingerprint != fingerprint || previous.Product == nil {
+		return domain.Product{}, false, ErrConflict
+	}
+	return *previous.Product, true, nil
+}
+
+func (s *Service) replaySKU(ctx context.Context, journalKey, fingerprint string) (domain.SKU, bool, error) {
+	previous, ok, err := s.commands.LoadCommand(ctx, journalKey)
+	if err != nil {
+		return domain.SKU{}, false, err
+	}
+	if !ok || previous.Fingerprint != fingerprint || previous.SKU == nil {
+		return domain.SKU{}, false, ErrConflict
+	}
+	return *previous.SKU, true, nil
+}
+
+func (s *Service) productEvent(ctx context.Context, eventType string, product domain.Product) OutboxEvent {
+	metadata := commandMetadata(ctx)
+	return OutboxEvent{
+		ID: s.newID(), Type: eventType, SchemaVersion: 1, OccurredAtUTC: s.now(), Producer: "product",
+		AggregateType: "product", AggregateID: product.ID, CorrelationID: metadata.CorrelationID,
+		CausationID: metadata.CausationID, HomeSite: s.homeSite, Product: &product,
+	}
+}
+
+func (s *Service) skuEvent(ctx context.Context, sku domain.SKU) OutboxEvent {
+	metadata := commandMetadata(ctx)
+	return OutboxEvent{
+		ID: s.newID(), Type: EventSKUUpdated, SchemaVersion: 1, OccurredAtUTC: s.now(), Producer: "product",
+		AggregateType: "sku", AggregateID: sku.ID, CorrelationID: metadata.CorrelationID,
+		CausationID: metadata.CausationID, HomeSite: s.homeSite, SKU: &sku,
+	}
+}
+
+func commandMetadata(ctx context.Context) CommandMetadata {
+	metadata, _ := ctx.Value(commandMetadataKey{}).(CommandMetadata)
+	if strings.TrimSpace(metadata.CorrelationID) == "" {
+		metadata.CorrelationID = newUUID()
+	}
+	if strings.TrimSpace(metadata.CausationID) == "" {
+		metadata.CausationID = metadata.CorrelationID
+	}
+	return metadata
+}
+
 func validateIdempotencyKey(key string) error {
 	if n := len(strings.TrimSpace(key)); n < 8 || n > 128 {
 		return ErrInvalidIdempotency
+	}
+	return nil
+}
+
+func validateID(value string) error {
+	parsed, err := uuid.Parse(value)
+	if err != nil || !strings.EqualFold(parsed.String(), value) {
+		return ErrInvalidID
 	}
 	return nil
 }

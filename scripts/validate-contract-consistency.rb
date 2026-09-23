@@ -44,6 +44,17 @@ module ContractConsistency
     end
 
     events = data[:events].fetch("events", {})
+    protobuf_contracts = data[:events].fetch("protobuf", {})
+    protobuf_contracts.each do |name, contract|
+      path = contract && contract["path"]
+      package = contract && contract["package"]
+      unless path.is_a?(String) && File.file?(File.join(root, path))
+        errors << "protobuf contract #{name} path is missing: #{path.inspect}"
+        next
+      end
+      source = File.read(File.join(root, path))
+      errors << "protobuf contract #{name} package drift: #{package.inspect}" unless source.match?(/^package #{Regexp.escape(package.to_s)};$/)
+    end
     by_tail = Hash.new { |hash, key| hash[key] = [] }
     events.each do |event_name, spec|
       producer, tail = event_name.to_s.split(".", 2)

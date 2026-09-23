@@ -200,7 +200,7 @@ api-generate: ## Generate Go bindings from registered OpenAPI contracts
 service-new: ## Generate canonical service skeleton; set SERVICE=... [DRY_RUN=1]
 	@$(PYTHON) scripts/repoctl.py service-new --service "$(SERVICE)" $(if $(DRY_RUN),--dry-run,)
 
-.PHONY: site product-check product-run product-benchmark resource-candidate
+.PHONY: site product-check product-run product-migrate product-benchmark resource-candidate
 
 site: ## Run Storefront and Admin Go frontends locally
 	@$(PYTHON) scripts/repoctl.py site
@@ -210,6 +210,9 @@ product-check: ## Validate Product through generic Go service gate
 
 product-run: ## Run local Product REST runtime through the central tool resolver
 	@$(PYTHON) scripts/repoctl.py product-run
+
+product-migrate: ## Apply Product PostgreSQL migrations through the central tool resolver
+	@$(PYTHON) scripts/repoctl.py product-migrate
 
 product-benchmark: ## Benchmark Product through the central tool resolver
 	@$(PYTHON) scripts/repoctl.py product-benchmark

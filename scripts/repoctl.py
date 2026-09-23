@@ -1843,6 +1843,53 @@ def bundle_openapi_with_common(spec: Path, common_spec: Path) -> dict:
     return service_doc
 
 
+def protobuf_generate(check: bool = False) -> int:
+    proto_root = ROOT / "contracts" / "proto"
+    template = proto_root / "buf.gen.yaml"
+    if not proto_root.is_dir():
+        print("SKIP Protobuf generation: contracts/proto is absent")
+        return 0
+    toolchain = json.loads((proto_root / "toolchain.json").read_text(encoding="utf-8"))
+    go_tools = toolchain.get("go_tools", {})
+    expected_tools = {"buf", "protoc-gen-go", "protoc-gen-go-grpc"}
+    if set(go_tools) != expected_tools or any(
+        not isinstance(reference, str)
+        or re.fullmatch(r"[a-zA-Z0-9._/-]+@v[0-9]+\.[0-9]+\.[0-9]+", reference) is None
+        for reference in go_tools.values()
+    ):
+        return fail("Protobuf Go toolchain contract is invalid")
+    managed_go = managed_bin_dirs()[0] / "go"
+    go = str(managed_go) if managed_go.is_file() else require("go")
+    template_config = ruby_yaml(str(template))
+    for plugin in template_config.get("plugins", []):
+        name = plugin.get("local")
+        if name not in expected_tools - {"buf"}:
+            return fail(f"unsupported Protobuf generator: {name}")
+        plugin["local"] = [go, "run", go_tools[name]]
+    with tempfile.TemporaryDirectory(prefix="ecommerce-product-protobuf-") as temp:
+        candidate_root = Path(temp)
+        runtime_template = candidate_root / "buf.gen.json"
+        runtime_template.write_text(json.dumps(template_config, indent=2) + "\n", encoding="utf-8")
+        buf = [go, "run", go_tools["buf"]]
+        run([*buf, "lint", str(proto_root)], cwd=ROOT)
+        if not check:
+            run([*buf, "generate", str(proto_root), "--template", str(runtime_template)], cwd=ROOT)
+            print("PASS generated Protobuf Go bindings")
+            return 0
+        generated = ROOT / "services" / "product" / "api" / "generated" / "product" / "v1"
+        run(
+            [*buf, "generate", str(proto_root), "--template", str(runtime_template), "--output", str(candidate_root)],
+            cwd=ROOT,
+        )
+        candidate = candidate_root / "services" / "product" / "api" / "generated" / "product" / "v1"
+        diff = run(["diff", "-ru", str(generated), str(candidate)], check=False, capture=True)
+        if diff.returncode:
+            print(diff.stdout)
+            return fail("product Protobuf generated code is stale")
+    print("PASS Protobuf contracts and generated Go bindings")
+    return 0
+
+
 def api_generate(target: str = "go", service: str = "", check: bool = False) -> int:
     if target != "go":
         return fail("api-generate target must be go; Node.js application bindings are forbidden")
@@ -1890,6 +1937,10 @@ def api_generate(target: str = "go", service: str = "", check: bool = False) -> 
                     run(["gofmt", "-w", str(candidate)], cwd=module)
                     if check and (not generated.is_file() or candidate.read_bytes() != generated.read_bytes()):
                         return fail(f"generated API binding is stale: {generated.relative_to(ROOT)}")
+    if not service or service == "product":
+        result = protobuf_generate(check=check)
+        if result:
+            return result
     print(f"PASS generated API bindings target={target}")
     return 0
 
@@ -1962,6 +2013,10 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         api_compat(base, head)
     if generate or contract_changed:
         result = api_generate("go", check=True)
+        if result:
+            return result
+    else:
+        result = protobuf_generate(check=True)
         if result:
             return result
     print("PASS OpenAPI and cross-registry contract checks completed")
@@ -2315,6 +2370,18 @@ def product_run() -> int:
     return run([str(go), "run", "./services/product/cmd/product-api"], env=env, check=False).returncode
 
 
+def product_migrate() -> int:
+    ensure_developer("go")
+    managed_bin = managed_bin_dirs()[0]
+    go = managed_bin / "go"
+    if not go.is_file():
+        raise RuntimeError("validated managed Go provider is unavailable")
+    env = dict(os.environ, PATH=f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    return run([str(go), "run", "./services/product/cmd/product-migrate"], env=env, check=False).returncode
+
+
 def product_benchmark() -> int:
     ensure_developer("go")
     managed_bin = managed_bin_dirs()[0]
@@ -2427,6 +2494,11 @@ def service_check(service: str) -> int:
                 if diff.returncode:
                     print(diff.stdout)
                     return fail(f"{service} sqlc generated code is stale")
+
+        if service == "product" and (ROOT / "contracts" / "proto" / "buf.yaml").is_file():
+            result = protobuf_generate(check=True)
+            if result:
+                return result
 
         require("gofmt")
         go_files = [str(p) for p in module.rglob("*.go") if "vendor" not in p.parts]
@@ -5608,6 +5680,21 @@ def tekton_trigger_readiness_command(runtime_config: str, evidence: str) -> int:
     return run_readiness(ROOT, ruby_yaml(runtime_config), Path(evidence))
 
 
+def source_check(head: str) -> int:
+    requested = head.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", requested):
+        return fail("source-check requires a full immutable 40-character head SHA")
+    current = git("rev-parse", "HEAD").strip().lower()
+    if current != requested:
+        return fail(f"source-check HEAD mismatch: requested {requested}, checked out {current}")
+    if git("status", "--porcelain=v1", "--untracked-files=all").strip():
+        return fail("source-check requires a clean exact-SHA worktree")
+    if git("rev-parse", f"{requested}^{{commit}}").strip().lower() != requested:
+        return fail("source-check requested object is not the exact commit")
+    print(f"PASS source-check exact clean SHA {requested}")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -5628,6 +5715,7 @@ def main() -> int:
         "prepush",
         "site",
         "product-run",
+        "product-migrate",
         "product-benchmark",
     ]:
         sub.add_parser(name)
@@ -5721,6 +5809,8 @@ def main() -> int:
     tp.add_argument("--record-dir", required=True)
     tp.add_argument("--result-path", required=True)
     tp.add_argument("--global-result-path", required=True)
+    sc = sub.add_parser("source-check")
+    sc.add_argument("--head", required=True)
     cg = sub.add_parser("ci-global")
     cg.add_argument("--gate", required=True)
     cg.add_argument("--base", required=True)
@@ -5800,6 +5890,8 @@ def main() -> int:
             return site()
         if args.cmd == "product-run":
             return product_run()
+        if args.cmd == "product-migrate":
+            return product_migrate()
         if args.cmd == "product-benchmark":
             return product_benchmark()
         if args.cmd == "service":
@@ -5873,6 +5965,8 @@ def main() -> int:
             return tekton_trigger_readiness_command(args.runtime_config, args.evidence)
         if args.cmd == "tekton-plan":
             return tekton_plan(args.base, args.head, args.record_dir, args.result_path, args.global_result_path)
+        if args.cmd == "source-check":
+            return source_check(args.head)
         if args.cmd == "ci-global":
             return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":

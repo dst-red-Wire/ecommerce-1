@@ -4,7 +4,9 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/application"
 	"github.com/dst-red-Wire/ecommerce-1/services/product/internal/domain"
@@ -41,6 +43,15 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
 	}
+	preMigrationPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("new pre-migration pool: %v", err)
+	}
+	if err := productpostgres.NewStore(preMigrationPool).Ready(ctx); err == nil {
+		preMigrationPool.Close()
+		t.Fatal("unmigrated database must not report ready")
+	}
+	preMigrationPool.Close()
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect for migration: %v", err)
@@ -67,10 +78,14 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 			t.Fatalf("ping pool: %v", err)
 		}
 		store := productpostgres.NewStore(pool)
-		return application.NewService(store, store), pool
+		return application.NewService(store), pool
 	}
 
 	service, pool := newService()
+	if err := productpostgres.NewStore(pool).Ready(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("migrated database must report ready: %v", err)
+	}
 	product, replayed, err := service.CreateProduct(ctx, "create-product-001", application.CreateProductInput{
 		Name:       "Persistent NOMA Lamp",
 		Attributes: domain.AttributeMap{"material": "metal"},
@@ -138,5 +153,36 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	}
 	if more || len(items) != 1 || items[0].ID != sku.ID {
 		t.Fatalf("unexpected persisted SKU list: more=%v count=%d", more, len(items))
+	}
+
+	var outboxCount int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM outbox_events").Scan(&outboxCount); err != nil {
+		t.Fatalf("count outbox events: %v", err)
+	}
+	if outboxCount != 3 {
+		t.Fatalf("expected one event per committed command and none for replays, got %d", outboxCount)
+	}
+
+	store := productpostgres.NewStore(pool)
+	invalidProduct := domain.Product{
+		ID: "57f2a602-5435-4ce4-a12e-ae38697bc547", Name: "Must roll back", Status: domain.ProductStatusDraft,
+		Attributes: domain.AttributeMap{}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Version: 1,
+	}
+	invalidEvent := application.OutboxEvent{
+		ID: "3c645042-dd73-42fa-928a-5677f09158af", Type: "product.ProductCreated.v1", SchemaVersion: 1,
+		OccurredAtUTC: time.Now().UTC(), Producer: "product", AggregateType: "product", AggregateID: "not-a-uuid",
+		CorrelationID: "atomicity-proof", CausationID: "atomicity-proof", HomeSite: "test", Product: &invalidProduct,
+	}
+	err = store.CreateProduct(ctx, "atomicity-proof-command", application.CommandResult{
+		Fingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Product: &invalidProduct,
+	}, invalidProduct, invalidEvent)
+	if err == nil {
+		t.Fatal("expected invalid outbox insert to roll back the transaction")
+	}
+	if _, err := store.GetProduct(ctx, invalidProduct.ID); !errors.Is(err, application.ErrNotFound) {
+		t.Fatalf("business mutation survived failed outbox write: %v", err)
+	}
+	if _, found, err := store.LoadCommand(ctx, "atomicity-proof-command"); err != nil || found {
+		t.Fatalf("command journal survived failed outbox write: found=%v err=%v", found, err)
 	}
 }

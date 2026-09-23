@@ -264,6 +264,7 @@ gates:
       - config/contracts/dependency-map.yaml
       - config/contracts/event-contracts.yaml
       - contracts/openapi/**/*
+      - contracts/proto/**/*
       - scripts/validate-openapi.rb
       - scripts/validate-contract-consistency.rb
       - scripts/validate-architecture.rb
@@ -410,6 +411,7 @@ gates:
       - scripts/qualification_cache.py
     inputs:
       - services/<target>/**/*
+      - contracts/proto/**/*
       - go.work
       - architecture.lock.yaml
       - config/contracts/toolchain-lock.json

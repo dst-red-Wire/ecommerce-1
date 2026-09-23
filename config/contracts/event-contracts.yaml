@@ -21,6 +21,10 @@ semantics:
   aggregate_key_ordering: true
   secrets_in_events: forbidden
   unnecessary_pii_in_events: forbidden
+protobuf:
+  product_v1:
+    path: contracts/proto/ecommerce/product/v1/product.proto
+    package: ecommerce.product.v1
 events:
   product.ProductCreated.v1: {consumers: [catalog, search, review]}
   product.ProductUpdated.v1: {consumers: [catalog, search]}
