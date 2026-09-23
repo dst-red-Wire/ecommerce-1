@@ -35,6 +35,14 @@ WITH candidates AS (
     WHERE candidate.published_at IS NULL
       AND candidate.available_at <= $2
       AND candidate.attempt_count <= $3
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events AS predecessor
+          WHERE predecessor.aggregate_type = candidate.aggregate_type
+            AND predecessor.aggregate_id = candidate.aggregate_id
+            AND predecessor.published_at IS NULL
+            AND predecessor.aggregate_version < candidate.aggregate_version
+      )
     ORDER BY candidate.occurred_at_utc, candidate.event_id
     FOR UPDATE SKIP LOCKED
     LIMIT $4
@@ -278,27 +286,29 @@ func (q *Queries) GetSKU(ctx context.Context, arg GetSKUParams) (Sku, error) {
 const insertOutboxEvent = `-- name: InsertOutboxEvent :exec
 INSERT INTO outbox_events (
     event_id, event_type, schema_version, occurred_at_utc, producer,
-    aggregate_type, aggregate_id, correlation_id, causation_id, home_site, payload
+    aggregate_type, aggregate_id, aggregate_version,
+    correlation_id, causation_id, home_site, payload
 ) VALUES (
     $1, $2, $3,
     $4, $5, $6,
     $7, $8, $9,
-    $10, $11
+    $10, $11, $12
 )
 `
 
 type InsertOutboxEventParams struct {
-	EventID       string
-	EventType     string
-	SchemaVersion int32
-	OccurredAtUtc pgtype.Timestamptz
-	Producer      string
-	AggregateType string
-	AggregateID   string
-	CorrelationID string
-	CausationID   string
-	HomeSite      string
-	Payload       []byte
+	EventID          string
+	EventType        string
+	SchemaVersion    int32
+	OccurredAtUtc    pgtype.Timestamptz
+	Producer         string
+	AggregateType    string
+	AggregateID      string
+	AggregateVersion int64
+	CorrelationID    string
+	CausationID      string
+	HomeSite         string
+	Payload          []byte
 }
 
 func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventParams) error {
@@ -310,6 +320,7 @@ func (q *Queries) InsertOutboxEvent(ctx context.Context, arg InsertOutboxEventPa
 		arg.Producer,
 		arg.AggregateType,
 		arg.AggregateID,
+		arg.AggregateVersion,
 		arg.CorrelationID,
 		arg.CausationID,
 		arg.HomeSite,
@@ -475,16 +486,17 @@ WITH moved AS (
     DELETE FROM outbox_events AS event
     WHERE event.event_id = $2 AND event.published_at IS NULL
     RETURNING event.event_id, event.event_type, event.schema_version, event.occurred_at_utc, event.producer,
-              event.aggregate_type, event.aggregate_id, event.correlation_id, event.causation_id,
+              event.aggregate_type, event.aggregate_id, event.aggregate_version,
+              event.correlation_id, event.causation_id,
               event.home_site, event.payload, event.attempt_count
 )
 INSERT INTO outbox_dead_letters (
     event_id, event_type, schema_version, occurred_at_utc, producer,
-    aggregate_type, aggregate_id, correlation_id, causation_id,
+    aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
     home_site, payload, attempt_count, last_error
 )
 SELECT event_id, event_type, schema_version, occurred_at_utc, producer,
-       aggregate_type, aggregate_id, correlation_id, causation_id,
+       aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
        home_site, payload, attempt_count, $1
 FROM moved
 `

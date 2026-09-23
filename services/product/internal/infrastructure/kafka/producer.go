@@ -2,7 +2,11 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +24,9 @@ type Config struct {
 	ClientID        string
 	MaxRetries      int
 	DeliveryTimeout time.Duration
+	TLSCAFile       string
+	TLSCertFile     string
+	TLSKeyFile      string
 }
 
 func New(config Config) (*Producer, error) {
@@ -29,17 +36,45 @@ func New(config Config) (*Producer, error) {
 	if config.MaxRetries < 0 || config.DeliveryTimeout <= 0 {
 		return nil, errors.New("Kafka retry and delivery settings are invalid")
 	}
+	tlsConfig, err := loadTLSConfig(config)
+	if err != nil {
+		return nil, err
+	}
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(config.Brokers...),
 		kgo.ClientID(config.ClientID),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.RecordRetries(config.MaxRetries),
 		kgo.RecordDeliveryTimeout(config.DeliveryTimeout),
+		kgo.DialTLSConfig(tlsConfig),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &Producer{client: client, topic: config.Topic}, nil
+}
+
+func loadTLSConfig(config Config) (*tls.Config, error) {
+	if strings.TrimSpace(config.TLSCAFile) == "" || strings.TrimSpace(config.TLSCertFile) == "" || strings.TrimSpace(config.TLSKeyFile) == "" {
+		return nil, errors.New("Kafka mTLS CA, certificate, and key files are required")
+	}
+	caPEM, err := os.ReadFile(config.TLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read Kafka TLS CA: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("Kafka TLS CA contains no valid certificates")
+	}
+	identity, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load Kafka TLS client identity: %w", err)
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		RootCAs:      roots,
+		Certificates: []tls.Certificate{identity},
+	}, nil
 }
 
 func (p *Producer) Publish(ctx context.Context, aggregateID string, payload []byte) error {

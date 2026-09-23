@@ -185,7 +185,7 @@ func (s *Server) UpdateSKU(ctx context.Context, request *productv1.UpdateSKURequ
 	}
 	sku, replayed, err := s.service.UpdateSKU(commandContext(ctx), request.GetProductId(), request.GetId(), request.GetIdempotencyKey(), request.GetIfMatch(), application.UpdateSKUInput{
 		Code: request.Code, GTIN: request.Gtin, Status: skuStatus,
-		OptionValues: request.GetOptionValues(), Attributes: optionalAttributes(request.Attributes),
+		OptionValues: optionalStringMap(request.OptionValues), Attributes: optionalAttributes(request.Attributes),
 	})
 	if err != nil {
 		return nil, mapError(err)
@@ -221,6 +221,16 @@ func optionalAttributes(value *structpb.Struct) domain.AttributeMap {
 		return nil
 	}
 	return productprotobuf.Attributes(value)
+}
+
+func optionalStringMap(value *productv1.StringMap) map[string]string {
+	if value == nil {
+		return nil
+	}
+	if value.Values == nil {
+		return map[string]string{}
+	}
+	return value.Values
 }
 
 func mapError(err error) error {

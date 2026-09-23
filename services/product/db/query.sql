@@ -106,12 +106,13 @@ VALUES (
 -- name: InsertOutboxEvent :exec
 INSERT INTO outbox_events (
     event_id, event_type, schema_version, occurred_at_utc, producer,
-    aggregate_type, aggregate_id, correlation_id, causation_id, home_site, payload
+    aggregate_type, aggregate_id, aggregate_version,
+    correlation_id, causation_id, home_site, payload
 ) VALUES (
     sqlc.arg(event_id), sqlc.arg(event_type), sqlc.arg(schema_version),
     sqlc.arg(occurred_at_utc), sqlc.arg(producer), sqlc.arg(aggregate_type),
-    sqlc.arg(aggregate_id), sqlc.arg(correlation_id), sqlc.arg(causation_id),
-    sqlc.arg(home_site), sqlc.arg(payload)
+    sqlc.arg(aggregate_id), sqlc.arg(aggregate_version), sqlc.arg(correlation_id),
+    sqlc.arg(causation_id), sqlc.arg(home_site), sqlc.arg(payload)
 );
 
 -- name: ClaimOutboxEvents :many
@@ -121,6 +122,14 @@ WITH candidates AS (
     WHERE candidate.published_at IS NULL
       AND candidate.available_at <= sqlc.arg(p_available_before)
       AND candidate.attempt_count <= sqlc.arg(p_max_attempts)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM outbox_events AS predecessor
+          WHERE predecessor.aggregate_type = candidate.aggregate_type
+            AND predecessor.aggregate_id = candidate.aggregate_id
+            AND predecessor.published_at IS NULL
+            AND predecessor.aggregate_version < candidate.aggregate_version
+      )
     ORDER BY candidate.occurred_at_utc, candidate.event_id
     FOR UPDATE SKIP LOCKED
     LIMIT sqlc.arg(p_limit_count)
@@ -148,15 +157,16 @@ WITH moved AS (
     DELETE FROM outbox_events AS event
     WHERE event.event_id = sqlc.arg(p_event_id) AND event.published_at IS NULL
     RETURNING event.event_id, event.event_type, event.schema_version, event.occurred_at_utc, event.producer,
-              event.aggregate_type, event.aggregate_id, event.correlation_id, event.causation_id,
+              event.aggregate_type, event.aggregate_id, event.aggregate_version,
+              event.correlation_id, event.causation_id,
               event.home_site, event.payload, event.attempt_count
 )
 INSERT INTO outbox_dead_letters (
     event_id, event_type, schema_version, occurred_at_utc, producer,
-    aggregate_type, aggregate_id, correlation_id, causation_id,
+    aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
     home_site, payload, attempt_count, last_error
 )
 SELECT event_id, event_type, schema_version, occurred_at_utc, producer,
-       aggregate_type, aggregate_id, correlation_id, causation_id,
+       aggregate_type, aggregate_id, aggregate_version, correlation_id, causation_id,
        home_site, payload, attempt_count, sqlc.arg(p_last_error)
 FROM moved;

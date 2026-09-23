@@ -133,8 +133,12 @@ message UpdateSKURequest {
   optional string code = 5;
   optional string gtin = 6;
   optional string status = 7;
-  map<string, string> option_values = 8;
+  StringMap option_values = 8;
   google.protobuf.Struct attributes = 9;
+}
+
+message StringMap {
+  map<string, string> values = 1;
 }
 
 message CreateSKUResponse {

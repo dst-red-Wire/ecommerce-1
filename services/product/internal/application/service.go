@@ -45,18 +45,19 @@ type CommandResult struct {
 }
 
 type OutboxEvent struct {
-	ID            string
-	Type          string
-	SchemaVersion uint32
-	OccurredAtUTC time.Time
-	Producer      string
-	AggregateType string
-	AggregateID   string
-	CorrelationID string
-	CausationID   string
-	HomeSite      string
-	Product       *domain.Product
-	SKU           *domain.SKU
+	ID               string
+	Type             string
+	SchemaVersion    uint32
+	OccurredAtUTC    time.Time
+	Producer         string
+	AggregateType    string
+	AggregateID      string
+	AggregateVersion int64
+	CorrelationID    string
+	CausationID      string
+	HomeSite         string
+	Product          *domain.Product
+	SKU              *domain.SKU
 }
 
 type CommandRepository interface {
@@ -405,8 +406,9 @@ func (s *Service) productEvent(ctx context.Context, eventType string, product do
 	metadata := commandMetadata(ctx)
 	return OutboxEvent{
 		ID: s.newID(), Type: eventType, SchemaVersion: 1, OccurredAtUTC: s.now(), Producer: "product",
-		AggregateType: "product", AggregateID: product.ID, CorrelationID: metadata.CorrelationID,
-		CausationID: metadata.CausationID, HomeSite: s.homeSite, Product: &product,
+		AggregateType: "product", AggregateID: product.ID, AggregateVersion: product.Version,
+		CorrelationID: metadata.CorrelationID,
+		CausationID:   metadata.CausationID, HomeSite: s.homeSite, Product: &product,
 	}
 }
 
@@ -414,8 +416,9 @@ func (s *Service) skuEvent(ctx context.Context, sku domain.SKU) OutboxEvent {
 	metadata := commandMetadata(ctx)
 	return OutboxEvent{
 		ID: s.newID(), Type: EventSKUUpdated, SchemaVersion: 1, OccurredAtUTC: s.now(), Producer: "product",
-		AggregateType: "sku", AggregateID: sku.ID, CorrelationID: metadata.CorrelationID,
-		CausationID: metadata.CausationID, HomeSite: s.homeSite, SKU: &sku,
+		AggregateType: "sku", AggregateID: sku.ID, AggregateVersion: sku.Version,
+		CorrelationID: metadata.CorrelationID,
+		CausationID:   metadata.CausationID, HomeSite: s.homeSite, SKU: &sku,
 	}
 }
 

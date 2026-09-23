@@ -22,6 +22,9 @@ type Config struct {
 	KafkaBrokers      []string
 	KafkaTopic        string
 	KafkaClientID     string
+	KafkaTLSCAFile    string
+	KafkaTLSCertFile  string
+	KafkaTLSKeyFile   string
 	KafkaMaxRetries   int
 	KafkaDeliveryTime time.Duration
 	ShutdownTimeout   time.Duration
@@ -35,6 +38,9 @@ func Load() (Config, error) {
 		HomeSite: strings.TrimSpace(os.Getenv("PRODUCT_HOME_SITE")), KafkaBrokers: csv(os.Getenv("PRODUCT_KAFKA_BROKERS")),
 		OIDCIssuer: strings.TrimSpace(os.Getenv("PRODUCT_OIDC_ISSUER")), OIDCAudience: strings.TrimSpace(os.Getenv("PRODUCT_OIDC_AUDIENCE")),
 		KafkaTopic: get("PRODUCT_KAFKA_TOPIC", "ecommerce.product.events.v1"), KafkaClientID: get("PRODUCT_KAFKA_CLIENT_ID", "product"),
+		KafkaTLSCAFile:   strings.TrimSpace(os.Getenv("PRODUCT_KAFKA_TLS_CA_FILE")),
+		KafkaTLSCertFile: strings.TrimSpace(os.Getenv("PRODUCT_KAFKA_TLS_CERT_FILE")),
+		KafkaTLSKeyFile:  strings.TrimSpace(os.Getenv("PRODUCT_KAFKA_TLS_KEY_FILE")),
 	}
 	var err error
 	if config.KafkaMaxRetries, err = integer("PRODUCT_KAFKA_MAX_RETRIES", 2); err != nil {
@@ -93,6 +99,15 @@ func (c Config) validate() error {
 		}
 		if c.OIDCAudience == "" {
 			missing = append(missing, "PRODUCT_OIDC_AUDIENCE")
+		}
+		if c.KafkaTLSCAFile == "" {
+			missing = append(missing, "PRODUCT_KAFKA_TLS_CA_FILE")
+		}
+		if c.KafkaTLSCertFile == "" {
+			missing = append(missing, "PRODUCT_KAFKA_TLS_CERT_FILE")
+		}
+		if c.KafkaTLSKeyFile == "" {
+			missing = append(missing, "PRODUCT_KAFKA_TLS_KEY_FILE")
 		}
 		if len(missing) > 0 {
 			return fmt.Errorf("required PostgreSQL runtime configuration missing: %s", strings.Join(missing, ", "))

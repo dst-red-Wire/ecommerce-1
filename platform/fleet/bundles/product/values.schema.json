@@ -14,11 +14,12 @@
     },
     "runtime": {
       "type": "object",
-      "required": ["homeSite", "kafkaBrokers", "kafkaTopic", "otlpEndpoint", "oidcIssuer", "oidcAudience", "secretName"],
+      "required": ["homeSite", "kafkaBrokers", "kafkaTopic", "kafkaTLSSecretName", "otlpEndpoint", "oidcIssuer", "oidcAudience", "secretName"],
       "properties": {
         "homeSite": {"type": "string", "minLength": 1},
         "kafkaBrokers": {"type": "string", "minLength": 1},
         "kafkaTopic": {"type": "string", "const": "ecommerce.product.events.v1"},
+        "kafkaTLSSecretName": {"type": "string", "minLength": 1},
         "otlpEndpoint": {"type": "string", "minLength": 1},
         "oidcIssuer": {"type": "string", "minLength": 1},
         "oidcAudience": {"type": "string", "const": "admin"},

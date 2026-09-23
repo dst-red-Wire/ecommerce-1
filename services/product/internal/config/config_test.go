@@ -9,6 +9,9 @@ func TestMemoryConfigurationNeedsNoExternalSecrets(t *testing.T) {
 	t.Setenv("PRODUCT_HOME_SITE", "")
 	t.Setenv("PRODUCT_OIDC_ISSUER", "")
 	t.Setenv("PRODUCT_OIDC_AUDIENCE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_CA_FILE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_CERT_FILE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_KEY_FILE", "")
 	config, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -25,6 +28,9 @@ func TestPostgresConfigurationFailsClosed(t *testing.T) {
 	t.Setenv("PRODUCT_HOME_SITE", "")
 	t.Setenv("PRODUCT_OIDC_ISSUER", "")
 	t.Setenv("PRODUCT_OIDC_AUDIENCE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_CA_FILE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_CERT_FILE", "")
+	t.Setenv("PRODUCT_KAFKA_TLS_KEY_FILE", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected missing external configuration to fail")
 	}

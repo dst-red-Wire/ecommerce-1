@@ -8,6 +8,7 @@ CREATE TABLE outbox_events (
     producer text NOT NULL,
     aggregate_type text NOT NULL,
     aggregate_id uuid NOT NULL,
+    aggregate_version bigint NOT NULL CHECK (aggregate_version >= 1),
     correlation_id text NOT NULL,
     causation_id text NOT NULL,
     home_site text NOT NULL,
@@ -18,6 +19,9 @@ CREATE TABLE outbox_events (
     last_error text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX outbox_events_aggregate_version_idx
+    ON outbox_events (aggregate_type, aggregate_id, aggregate_version);
 
 CREATE INDEX outbox_events_pending_idx
     ON outbox_events (available_at, occurred_at_utc)
@@ -31,6 +35,7 @@ CREATE TABLE outbox_dead_letters (
     producer text NOT NULL,
     aggregate_type text NOT NULL,
     aggregate_id uuid NOT NULL,
+    aggregate_version bigint NOT NULL CHECK (aggregate_version >= 1),
     correlation_id text NOT NULL,
     causation_id text NOT NULL,
     home_site text NOT NULL,

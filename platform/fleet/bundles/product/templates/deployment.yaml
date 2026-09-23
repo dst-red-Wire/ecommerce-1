@@ -59,6 +59,10 @@ spec:
                 resourceFieldRef:
                   resource: limits.memory
                   divisor: "1"
+          volumeMounts:
+            - name: kafka-tls
+              mountPath: /var/run/secrets/product-kafka
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -76,6 +80,11 @@ spec:
             failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: kafka-tls
+          secret:
+            secretName: {{ .Values.runtime.kafkaTLSSecretName }}
+            defaultMode: 0440
       terminationGracePeriodSeconds: 30
       topologySpreadConstraints:
         - maxSkew: 1

@@ -34,7 +34,10 @@ Apply migrations first, then run the API. Runtime values shown below are example
 ```sh
 PRODUCT_DATABASE_URL='postgres://...' make product-migrate
 PRODUCT_DATABASE_URL='postgres://...' \
-PRODUCT_KAFKA_BROKERS='kafka-0.example:9092' \
+PRODUCT_KAFKA_BROKERS='kafka-0.example:9093' \
+PRODUCT_KAFKA_TLS_CA_FILE='/run/secrets/kafka/ca.crt' \
+PRODUCT_KAFKA_TLS_CERT_FILE='/run/secrets/kafka/tls.crt' \
+PRODUCT_KAFKA_TLS_KEY_FILE='/run/secrets/kafka/tls.key' \
 PRODUCT_HOME_SITE='preprod-a' \
 PRODUCT_OIDC_ISSUER='https://identity.example/realms/ecommerce' \
 PRODUCT_OIDC_AUDIENCE='admin' \
@@ -61,6 +64,9 @@ The default listeners are REST `:8080` and gRPC `:9090`.
 | `PRODUCT_HOME_SITE` | persisted event home-site identity | required for PostgreSQL |
 | `PRODUCT_KAFKA_BROKERS` | comma-separated broker endpoints | required for PostgreSQL |
 | `PRODUCT_KAFKA_TOPIC` | Product event topic | `ecommerce.product.events.v1` |
+| `PRODUCT_KAFKA_TLS_CA_FILE` | trusted Kafka CA bundle | required for PostgreSQL |
+| `PRODUCT_KAFKA_TLS_CERT_FILE` | Kafka client certificate | required for PostgreSQL |
+| `PRODUCT_KAFKA_TLS_KEY_FILE` | Kafka client private key | required for PostgreSQL |
 | `PRODUCT_OIDC_ISSUER` | Keycloak-compatible OIDC issuer | required for PostgreSQL |
 | `PRODUCT_OIDC_AUDIENCE` | required REST token audience | required for PostgreSQL |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Rotel OTLP endpoint | telemetry no-op when absent locally |
@@ -100,7 +106,7 @@ Write commands require an 8-128 character idempotency key. Replaying the same ke
 
 Every write inserts the command journal, changes the aggregate, and inserts the Protobuf event in one PostgreSQL transaction. If any of the three writes fails, all three roll back. The integration test forces an outbox constraint failure and proves that neither business state nor journal survives.
 
-The franz-go publisher claims rows with `FOR UPDATE SKIP LOCKED`, publishes with an aggregate key, and records completion. Delivery is at least once. A crash after Kafka acknowledgement but before the database acknowledgement can replay an event; consumers must remain idempotent as required by the central event contract. Retry uses a bounded exponential delay. Exhausted events move atomically to `outbox_dead_letters`; there is no unbounded per-event retry loop.
+The franz-go publisher claims only the oldest unpublished version of each aggregate with `FOR UPDATE SKIP LOCKED`, publishes with the aggregate key over authenticated TLS, and records completion. A leased or rescheduled predecessor blocks later versions, so multiple replicas cannot reverse aggregate order. Delivery is at least once. A crash after Kafka acknowledgement but before the database acknowledgement can replay an event; consumers must remain idempotent as required by the central event contract. Retry uses a bounded exponential delay. Exhausted events move atomically to `outbox_dead_letters`; there is no unbounded per-event retry loop.
 
 Schema evolution follows expand -> migrate/backfill -> contract. Do not perform destructive contraction in the same release that removes a field from readers. Rollback normally means rolling the application back to the previous immutable digest while leaving additive migrations in place. Destructive schema rollback requires a reviewed restore/recreation procedure.
 
