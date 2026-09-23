@@ -862,6 +862,19 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertIn('checksum: "sha256:{{ yq_sha256 }}"', tasks)
         self.assertIn('dest: "{{ local_bin }}/yq"', tasks)
 
+    def test_gh_is_pinned_ansible_managed_and_requires_slurp(self):
+        canonical = MOD.load_contract()
+        gh = next(item for item in canonical["capabilities"] if item["name"] == "gh")
+        self.assertEqual("managed", gh["classification"])
+        self.assertEqual("GH_VERSION", gh["version_key"])
+        self.assertEqual("GH_SHA256_LINUX_AMD64_TARGZ", gh["checksum_key"])
+        self.assertEqual({"type": "ansible", "tags": "gh"}, gh["provision"])
+        self.assertNotIn("gh", {item["command"] for item in canonical["platform_primitives"]})
+        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
+        self.assertIn('checksum: "sha256:{{ gh_sha256 }}"', tasks)
+        self.assertIn('dest: "{{ local_bin }}/gh"', tasks)
+        self.assertIn("'--slurp' not in gh_api_help.stdout", tasks)
+
     def test_node_tooling_honors_ephemeral_runner_proxy_environment(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         install = tasks.split("- name: Install isolated pinned Nx dependency", 1)[1].split("\n- name:", 1)[0]
