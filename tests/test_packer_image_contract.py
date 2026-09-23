@@ -180,7 +180,11 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn("${local.image_name}-kvm", self.packer)
 
     def test_packer_build_is_offline_and_profile_separated(self):
-        self.assertIn("source      = var.offline_bundle_dir", self.packer)
+        self.assertIn("install -d -m 0700 /tmp/packer-offline", self.packer)
+        for relative in ("rpm-keys", "rpms", "tools", "install_tools.py"):
+            self.assertIn(f"${{var.offline_bundle_dir}}/{relative}", self.packer)
+        self.assertNotIn("${var.offline_bundle_dir}/iso", self.packer)
+        self.assertNotIn("source      = var.offline_bundle_dir", self.packer)
         self.assertIn("sha256sum --check SHA256SUMS", self.packer)
         self.assertIn("--disablerepo='*'", self.packer)
         self.assertNotIn("curl ", self.packer)
@@ -281,6 +285,11 @@ class PackerImageContractTest(unittest.TestCase):
 
     def test_generators_and_installer_are_python_not_shell(self):
         self.assertTrue(GENERATOR.is_file())
+        mgmt_generator = (ROOT / "scripts/generate_mgmt_rpm_lock.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("image-package-lock", mgmt_generator)
+        self.assertNotIn("write_image_package_lock", mgmt_generator)
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn('"--disablerepo=*"', installer)
         self.assertNotIn("urllib", installer)

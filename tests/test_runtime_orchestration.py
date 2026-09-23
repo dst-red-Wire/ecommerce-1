@@ -16,6 +16,7 @@ from scripts.runtime_orchestration import (
     PlannedCapability,
     RuntimeBlocked,
     RuntimeExecutor,
+    RuntimeLock,
     RuntimePlanner,
     RuntimePolicyError,
     RuntimeVerificationError,
@@ -375,6 +376,21 @@ class RuntimeOrchestrationTests(unittest.TestCase):
             first,
         )
         self.assertNotIn(".context", str(first))
+
+    def test_runtime_lock_rejects_a_symlink_without_touching_its_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.write_text("preserve", encoding="utf-8")
+            lock_path = root / "runtime" / "qualification.lock"
+            lock_path.parent.mkdir()
+            lock_path.symlink_to(target)
+            with (
+                self.assertRaisesRegex(RuntimeBlocked, "unavailable or unsafe"),
+                RuntimeLock(lock_path, 1),
+            ):
+                self.fail("unsafe lock must never be acquired")
+            self.assertEqual("preserve", target.read_text(encoding="utf-8"))
 
     def test_global_preflight_failure_causes_zero_mutation(self):
         caps = {

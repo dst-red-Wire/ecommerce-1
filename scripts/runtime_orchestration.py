@@ -785,23 +785,32 @@ class RuntimeLock:
         self._handle = None
 
     def __enter__(self) -> Self:
-        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        parent_state = self.path.parent.lstat()
-        if (
-            stat.S_ISLNK(parent_state.st_mode)
-            or not stat.S_ISDIR(parent_state.st_mode)
-            or parent_state.st_uid != os.getuid()
-        ):
-            raise RuntimeBlocked("runtime orchestration lock directory is unsafe")
-        os.chmod(self.path.parent, 0o700)
-        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(self.path, flags, 0o600)
-        lock_state = os.fstat(descriptor)
-        if not stat.S_ISREG(lock_state.st_mode) or lock_state.st_uid != os.getuid():
-            os.close(descriptor)
-            raise RuntimeBlocked("runtime orchestration lock file is unsafe")
-        os.fchmod(descriptor, 0o600)
-        self._handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+        descriptor: int | None = None
+        try:
+            self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            parent_state = self.path.parent.lstat()
+            if (
+                stat.S_ISLNK(parent_state.st_mode)
+                or not stat.S_ISDIR(parent_state.st_mode)
+                or parent_state.st_uid != os.getuid()
+            ):
+                raise RuntimeBlocked("runtime orchestration lock directory is unsafe")
+            os.chmod(self.path.parent, 0o700)
+            flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags, 0o600)
+            lock_state = os.fstat(descriptor)
+            if not stat.S_ISREG(lock_state.st_mode) or lock_state.st_uid != os.getuid():
+                raise RuntimeBlocked("runtime orchestration lock file is unsafe")
+            os.fchmod(descriptor, 0o600)
+            self._handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+            descriptor = None
+        except OSError as exc:
+            raise RuntimeBlocked(
+                "runtime orchestration lock path is unavailable or unsafe"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
         deadline = time.monotonic() + self.timeout_seconds
         while True:
             try:

@@ -125,9 +125,28 @@ build {
     "source.qemu.base",
   ]
 
+  provisioner "shell" {
+    inline = ["install -d -m 0700 /tmp/packer-offline"]
+  }
+
   provisioner "file" {
-    source      = var.offline_bundle_dir
+    source      = "${var.offline_bundle_dir}/rpm-keys"
     destination = "/tmp/packer-offline"
+  }
+
+  provisioner "file" {
+    source      = "${var.offline_bundle_dir}/rpms"
+    destination = "/tmp/packer-offline"
+  }
+
+  provisioner "file" {
+    source      = "${var.offline_bundle_dir}/tools"
+    destination = "/tmp/packer-offline"
+  }
+
+  provisioner "file" {
+    source      = "${var.offline_bundle_dir}/install_tools.py"
+    destination = "/tmp/packer-offline/install_tools.py"
   }
 
   provisioner "shell" {
