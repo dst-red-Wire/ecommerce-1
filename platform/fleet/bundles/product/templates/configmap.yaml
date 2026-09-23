@@ -11,6 +11,9 @@ data:
   PRODUCT_HOME_SITE: {{ required "runtime.homeSite is required" .Values.runtime.homeSite | quote }}
   PRODUCT_KAFKA_BROKERS: {{ required "runtime.kafkaBrokers is required" .Values.runtime.kafkaBrokers | quote }}
   PRODUCT_KAFKA_TOPIC: {{ .Values.runtime.kafkaTopic | quote }}
+  PRODUCT_KAFKA_TLS_CA_FILE: /var/run/secrets/product-kafka/ca.crt
+  PRODUCT_KAFKA_TLS_CERT_FILE: /var/run/secrets/product-kafka/tls.crt
+  PRODUCT_KAFKA_TLS_KEY_FILE: /var/run/secrets/product-kafka/tls.key
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ required "runtime.otlpEndpoint is required" .Values.runtime.otlpEndpoint | quote }}
   OTEL_SERVICE_NAME: product
   PRODUCT_OIDC_ISSUER: {{ required "runtime.oidcIssuer is required" .Values.runtime.oidcIssuer | quote }}

@@ -306,6 +306,25 @@
       "requirement": "required-static"
     },
     {
+      "name": "gh",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "gh",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "GH_VERSION",
+      "checksum_key": "GH_SHA256_LINUX_AMD64_TARGZ",
+      "provision": {
+        "type": "ansible",
+        "tags": "gh"
+      },
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
       "name": "bazel",
       "requires": [],
       "provision_requires": [
@@ -812,6 +831,7 @@
     "fd": "ansible",
     "ast-grep": "ansible",
     "oras": "ansible",
+    "gh": "ansible",
     "bazel": "ansible",
     "nx": "ansible",
     "oapi-codegen": "ansible",
@@ -877,10 +897,6 @@
     {
       "command": "cc",
       "justification": "Platform compiler primitive required conditionally by CGO service integration tests."
-    },
-    {
-      "command": "gh",
-      "justification": "Authenticated forge transport used only by explicit delivery commands."
     },
     {
       "command": "curl",

@@ -76,6 +76,13 @@ class ProductGoldenServiceContractTest(unittest.TestCase):
         self.assertEqual(default_deny["spec"]["podSelector"], {})
         self.assertEqual(default_deny["spec"]["policyTypes"], ["Ingress", "Egress"])
         self.assertNotIn("PRODUCT_DATABASE_URL", by_kind["ConfigMap"]["data"])
+        self.assertEqual(
+            by_kind["ConfigMap"]["data"]["PRODUCT_KAFKA_TLS_CA_FILE"],
+            "/var/run/secrets/product-kafka/ca.crt",
+        )
+        kafka_volume = next(volume for volume in pod_spec["volumes"] if volume["name"] == "kafka-tls")
+        self.assertEqual(kafka_volume["secret"]["secretName"], "product-kafka-tls")
+        self.assertEqual(kafka_volume["secret"]["defaultMode"], 0o440)
 
     def test_tekton_product_release_is_supply_chain_only(self) -> None:
         pipeline_path = ROOT / "platform/tekton/pipelines/product-release.yaml"

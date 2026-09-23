@@ -1970,6 +1970,66 @@ def protobuf_generate(check: bool = False) -> int:
     return 0
 
 
+def _git_tree_has_path(ref: str, path: str) -> bool:
+    if ref == "WORKTREE":
+        return (ROOT / path).is_dir()
+    return run(["git", "cat-file", "-e", f"{ref}:{path}"], check=False, capture=True).returncode == 0
+
+
+def _materialize_proto_tree(ref: str, destination: Path) -> None:
+    target = destination / "contracts" / "proto"
+    if ref == "WORKTREE":
+        shutil.copytree(ROOT / "contracts" / "proto", target)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.Popen(
+        ["git", "archive", ref, "contracts/proto"],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+    )
+    extracted = subprocess.run(["tar", "-x", "-C", str(destination)], stdin=archive.stdout)
+    if archive.stdout:
+        archive.stdout.close()
+    archive_rc = archive.wait()
+    if archive_rc or extracted.returncode:
+        raise RuntimeError(f"git archive failed for Protobuf tree at {ref}")
+
+
+def protobuf_compat(base: str, head: str) -> int:
+    args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", base]
+    if head != "WORKTREE":
+        args.append(head)
+    args += ["--", "contracts/proto"]
+    if not git(*args).strip():
+        print("SKIP Protobuf compatibility: no Protobuf contract changes")
+        return 0
+    if not _git_tree_has_path(base, "contracts/proto"):
+        print(f"SKIP Protobuf compatibility: module is new relative to {base}")
+        return 0
+    if not _git_tree_has_path(head, "contracts/proto"):
+        return fail("Protobuf compatibility: contracts/proto cannot be removed")
+    toolchain = json.loads((ROOT / "contracts" / "proto" / "toolchain.json").read_text(encoding="utf-8"))
+    buf_reference = toolchain.get("go_tools", {}).get("buf")
+    if not isinstance(buf_reference, str) or re.fullmatch(r"[a-zA-Z0-9._/-]+@v[0-9]+\.[0-9]+\.[0-9]+", buf_reference) is None:
+        return fail("Protobuf buf toolchain contract is invalid")
+    managed_go = managed_bin_dirs()[0] / "go"
+    go = str(managed_go) if managed_go.is_file() else require("go")
+    with (
+        tempfile.TemporaryDirectory(prefix="ecommerce-protobuf-old-") as old_name,
+        tempfile.TemporaryDirectory(prefix="ecommerce-protobuf-new-") as new_name,
+    ):
+        old = Path(old_name)
+        new = Path(new_name)
+        _materialize_proto_tree(base, old)
+        _materialize_proto_tree(head, new)
+        run(
+            [go, "run", buf_reference, "breaking", str(new / "contracts" / "proto"), "--against", str(old / "contracts" / "proto")],
+            cwd=ROOT,
+        )
+    print(f"PASS Protobuf compatibility against {base}")
+    return 0
+
+
 def api_generate(target: str = "go", service: str = "", check: bool = False) -> int:
     if target != "go":
         return fail("api-generate target must be go; Node.js application bindings are forbidden")
@@ -2091,6 +2151,9 @@ def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) ->
         args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
         contract_changed = bool(git(*args).strip())
         api_compat(base, head)
+        result = protobuf_compat(base, head)
+        if result:
+            return result
     if generate or contract_changed:
         result = api_generate("go", check=True)
         if result:
@@ -6147,7 +6210,7 @@ def main() -> int:
                 diff_args = ["diff", "--name-only", "--diff-filter=ACMRTUXB", args.base]
                 if args.head != "WORKTREE":
                     diff_args.append(args.head)
-                diff_args += ["--", "contracts/openapi", "config/contracts/public-api-contracts.yaml"]
+                diff_args += ["--", "contracts/openapi", "contracts/proto", "config/contracts/public-api-contracts.yaml"]
                 contract_changed = bool(git(*diff_args).strip())
             contract_options = {
                 "compat_base_sha": git("rev-parse", args.base).strip() if args.base and contract_changed else "",

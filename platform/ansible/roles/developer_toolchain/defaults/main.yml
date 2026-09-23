@@ -33,6 +33,8 @@ oasdiff_version: "{{ lookup('ansible.builtin.ini', 'OASDIFF_VERSION', type='prop
 oasdiff_sha256: "{{ lookup('ansible.builtin.ini', 'OASDIFF_SHA256_LINUX_AMD64_TARGZ', type='properties', file=versions_file) }}"
 oras_version: "{{ lookup('ansible.builtin.ini', 'ORAS_VERSION', type='properties', file=versions_file) }}"
 oras_sha256: "{{ lookup('ansible.builtin.ini', 'ORAS_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
+gh_version: "{{ lookup('ansible.builtin.ini', 'GH_VERSION', type='properties', file=versions_file) }}"
+gh_sha256: "{{ lookup('ansible.builtin.ini', 'GH_SHA256_LINUX_AMD64_TARGZ', type='properties', file=versions_file) }}"
 cosign_version: "{{ lookup('ansible.builtin.ini', 'COSIGN_VERSION', type='properties', file=versions_file) }}"
 cosign_sha256: "{{ lookup('ansible.builtin.ini', 'COSIGN_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
 oapi_codegen_version: "{{ lookup('ansible.builtin.ini', 'OAPI_CODEGEN_VERSION', type='properties', file=versions_file) }}"

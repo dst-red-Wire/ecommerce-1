@@ -1068,7 +1068,7 @@ type UpdateSKURequest struct {
 	Code           *string                `protobuf:"bytes,5,opt,name=code,proto3,oneof" json:"code,omitempty"`
 	Gtin           *string                `protobuf:"bytes,6,opt,name=gtin,proto3,oneof" json:"gtin,omitempty"`
 	Status         *string                `protobuf:"bytes,7,opt,name=status,proto3,oneof" json:"status,omitempty"`
-	OptionValues   map[string]string      `protobuf:"bytes,8,rep,name=option_values,json=optionValues,proto3" json:"option_values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	OptionValues   *StringMap             `protobuf:"bytes,8,opt,name=option_values,json=optionValues,proto3" json:"option_values,omitempty"`
 	Attributes     *structpb.Struct       `protobuf:"bytes,9,opt,name=attributes,proto3" json:"attributes,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -1153,7 +1153,7 @@ func (x *UpdateSKURequest) GetStatus() string {
 	return ""
 }
 
-func (x *UpdateSKURequest) GetOptionValues() map[string]string {
+func (x *UpdateSKURequest) GetOptionValues() *StringMap {
 	if x != nil {
 		return x.OptionValues
 	}
@@ -1163,6 +1163,50 @@ func (x *UpdateSKURequest) GetOptionValues() map[string]string {
 func (x *UpdateSKURequest) GetAttributes() *structpb.Struct {
 	if x != nil {
 		return x.Attributes
+	}
+	return nil
+}
+
+type StringMap struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        map[string]string      `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StringMap) Reset() {
+	*x = StringMap{}
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StringMap) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StringMap) ProtoMessage() {}
+
+func (x *StringMap) ProtoReflect() protoreflect.Message {
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StringMap.ProtoReflect.Descriptor instead.
+func (*StringMap) Descriptor() ([]byte, []int) {
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StringMap) GetValues() map[string]string {
+	if x != nil {
+		return x.Values
 	}
 	return nil
 }
@@ -1177,7 +1221,7 @@ type CreateSKUResponse struct {
 
 func (x *CreateSKUResponse) Reset() {
 	*x = CreateSKUResponse{}
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[16]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1189,7 +1233,7 @@ func (x *CreateSKUResponse) String() string {
 func (*CreateSKUResponse) ProtoMessage() {}
 
 func (x *CreateSKUResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[16]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1202,7 +1246,7 @@ func (x *CreateSKUResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSKUResponse.ProtoReflect.Descriptor instead.
 func (*CreateSKUResponse) Descriptor() ([]byte, []int) {
-	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{16}
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CreateSKUResponse) GetSku() *SKU {
@@ -1229,7 +1273,7 @@ type UpdateSKUResponse struct {
 
 func (x *UpdateSKUResponse) Reset() {
 	*x = UpdateSKUResponse{}
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[17]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1241,7 +1285,7 @@ func (x *UpdateSKUResponse) String() string {
 func (*UpdateSKUResponse) ProtoMessage() {}
 
 func (x *UpdateSKUResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[17]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1254,7 +1298,7 @@ func (x *UpdateSKUResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateSKUResponse.ProtoReflect.Descriptor instead.
 func (*UpdateSKUResponse) Descriptor() ([]byte, []int) {
-	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{17}
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *UpdateSKUResponse) GetSku() *SKU {
@@ -1294,7 +1338,7 @@ type EventEnvelope struct {
 
 func (x *EventEnvelope) Reset() {
 	*x = EventEnvelope{}
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[18]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1306,7 +1350,7 @@ func (x *EventEnvelope) String() string {
 func (*EventEnvelope) ProtoMessage() {}
 
 func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[18]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1319,7 +1363,7 @@ func (x *EventEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EventEnvelope.ProtoReflect.Descriptor instead.
 func (*EventEnvelope) Descriptor() ([]byte, []int) {
-	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{18}
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *EventEnvelope) GetEventId() string {
@@ -1442,7 +1486,7 @@ type ProductChanged struct {
 
 func (x *ProductChanged) Reset() {
 	*x = ProductChanged{}
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[19]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1454,7 +1498,7 @@ func (x *ProductChanged) String() string {
 func (*ProductChanged) ProtoMessage() {}
 
 func (x *ProductChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[19]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1467,7 +1511,7 @@ func (x *ProductChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProductChanged.ProtoReflect.Descriptor instead.
 func (*ProductChanged) Descriptor() ([]byte, []int) {
-	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{19}
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ProductChanged) GetProduct() *Product {
@@ -1486,7 +1530,7 @@ type SKUChanged struct {
 
 func (x *SKUChanged) Reset() {
 	*x = SKUChanged{}
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[20]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1498,7 +1542,7 @@ func (x *SKUChanged) String() string {
 func (*SKUChanged) ProtoMessage() {}
 
 func (x *SKUChanged) ProtoReflect() protoreflect.Message {
-	mi := &file_ecommerce_product_v1_product_proto_msgTypes[20]
+	mi := &file_ecommerce_product_v1_product_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1511,7 +1555,7 @@ func (x *SKUChanged) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SKUChanged.ProtoReflect.Descriptor instead.
 func (*SKUChanged) Descriptor() ([]byte, []int) {
-	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{20}
+	return file_ecommerce_product_v1_product_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *SKUChanged) GetSku() *SKU {
@@ -1633,7 +1677,7 @@ const file_ecommerce_product_v1_product_proto_rawDesc = "" +
 	"attributes\x1a?\n" +
 	"\x11OptionValuesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xca\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf0\x02\n" +
 	"\x10UpdateSKURequest\x12\x1d\n" +
 	"\n" +
 	"product_id\x18\x01 \x01(\tR\tproductId\x12\x0e\n" +
@@ -1642,17 +1686,19 @@ const file_ecommerce_product_v1_product_proto_rawDesc = "" +
 	"\bif_match\x18\x04 \x01(\tR\aifMatch\x12\x17\n" +
 	"\x04code\x18\x05 \x01(\tH\x00R\x04code\x88\x01\x01\x12\x17\n" +
 	"\x04gtin\x18\x06 \x01(\tH\x01R\x04gtin\x88\x01\x01\x12\x1b\n" +
-	"\x06status\x18\a \x01(\tH\x02R\x06status\x88\x01\x01\x12]\n" +
-	"\roption_values\x18\b \x03(\v28.ecommerce.product.v1.UpdateSKURequest.OptionValuesEntryR\foptionValues\x127\n" +
+	"\x06status\x18\a \x01(\tH\x02R\x06status\x88\x01\x01\x12D\n" +
+	"\roption_values\x18\b \x01(\v2\x1f.ecommerce.product.v1.StringMapR\foptionValues\x127\n" +
 	"\n" +
 	"attributes\x18\t \x01(\v2\x17.google.protobuf.StructR\n" +
-	"attributes\x1a?\n" +
-	"\x11OptionValuesEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\a\n" +
+	"attributesB\a\n" +
 	"\x05_codeB\a\n" +
 	"\x05_gtinB\t\n" +
-	"\a_status\"\\\n" +
+	"\a_status\"\x8b\x01\n" +
+	"\tStringMap\x12C\n" +
+	"\x06values\x18\x01 \x03(\v2+.ecommerce.product.v1.StringMap.ValuesEntryR\x06values\x1a9\n" +
+	"\vValuesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\\\n" +
 	"\x11CreateSKUResponse\x12+\n" +
 	"\x03sku\x18\x01 \x01(\v2\x19.ecommerce.product.v1.SKUR\x03sku\x12\x1a\n" +
 	"\breplayed\x18\x02 \x01(\bR\breplayed\"\\\n" +
@@ -1704,7 +1750,7 @@ func file_ecommerce_product_v1_product_proto_rawDescGZIP() []byte {
 	return file_ecommerce_product_v1_product_proto_rawDescData
 }
 
-var file_ecommerce_product_v1_product_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_ecommerce_product_v1_product_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_ecommerce_product_v1_product_proto_goTypes = []any{
 	(*Product)(nil),               // 0: ecommerce.product.v1.Product
 	(*SKU)(nil),                   // 1: ecommerce.product.v1.SKU
@@ -1722,65 +1768,67 @@ var file_ecommerce_product_v1_product_proto_goTypes = []any{
 	(*GetSKUResponse)(nil),        // 13: ecommerce.product.v1.GetSKUResponse
 	(*CreateSKURequest)(nil),      // 14: ecommerce.product.v1.CreateSKURequest
 	(*UpdateSKURequest)(nil),      // 15: ecommerce.product.v1.UpdateSKURequest
-	(*CreateSKUResponse)(nil),     // 16: ecommerce.product.v1.CreateSKUResponse
-	(*UpdateSKUResponse)(nil),     // 17: ecommerce.product.v1.UpdateSKUResponse
-	(*EventEnvelope)(nil),         // 18: ecommerce.product.v1.EventEnvelope
-	(*ProductChanged)(nil),        // 19: ecommerce.product.v1.ProductChanged
-	(*SKUChanged)(nil),            // 20: ecommerce.product.v1.SKUChanged
-	nil,                           // 21: ecommerce.product.v1.SKU.OptionValuesEntry
-	nil,                           // 22: ecommerce.product.v1.CreateSKURequest.OptionValuesEntry
-	nil,                           // 23: ecommerce.product.v1.UpdateSKURequest.OptionValuesEntry
-	(*structpb.Struct)(nil),       // 24: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil), // 25: google.protobuf.Timestamp
+	(*StringMap)(nil),             // 16: ecommerce.product.v1.StringMap
+	(*CreateSKUResponse)(nil),     // 17: ecommerce.product.v1.CreateSKUResponse
+	(*UpdateSKUResponse)(nil),     // 18: ecommerce.product.v1.UpdateSKUResponse
+	(*EventEnvelope)(nil),         // 19: ecommerce.product.v1.EventEnvelope
+	(*ProductChanged)(nil),        // 20: ecommerce.product.v1.ProductChanged
+	(*SKUChanged)(nil),            // 21: ecommerce.product.v1.SKUChanged
+	nil,                           // 22: ecommerce.product.v1.SKU.OptionValuesEntry
+	nil,                           // 23: ecommerce.product.v1.CreateSKURequest.OptionValuesEntry
+	nil,                           // 24: ecommerce.product.v1.StringMap.ValuesEntry
+	(*structpb.Struct)(nil),       // 25: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil), // 26: google.protobuf.Timestamp
 }
 var file_ecommerce_product_v1_product_proto_depIdxs = []int32{
-	24, // 0: ecommerce.product.v1.Product.attributes:type_name -> google.protobuf.Struct
-	25, // 1: ecommerce.product.v1.Product.created_at:type_name -> google.protobuf.Timestamp
-	25, // 2: ecommerce.product.v1.Product.updated_at:type_name -> google.protobuf.Timestamp
-	21, // 3: ecommerce.product.v1.SKU.option_values:type_name -> ecommerce.product.v1.SKU.OptionValuesEntry
-	24, // 4: ecommerce.product.v1.SKU.attributes:type_name -> google.protobuf.Struct
-	25, // 5: ecommerce.product.v1.SKU.created_at:type_name -> google.protobuf.Timestamp
-	25, // 6: ecommerce.product.v1.SKU.updated_at:type_name -> google.protobuf.Timestamp
+	25, // 0: ecommerce.product.v1.Product.attributes:type_name -> google.protobuf.Struct
+	26, // 1: ecommerce.product.v1.Product.created_at:type_name -> google.protobuf.Timestamp
+	26, // 2: ecommerce.product.v1.Product.updated_at:type_name -> google.protobuf.Timestamp
+	22, // 3: ecommerce.product.v1.SKU.option_values:type_name -> ecommerce.product.v1.SKU.OptionValuesEntry
+	25, // 4: ecommerce.product.v1.SKU.attributes:type_name -> google.protobuf.Struct
+	26, // 5: ecommerce.product.v1.SKU.created_at:type_name -> google.protobuf.Timestamp
+	26, // 6: ecommerce.product.v1.SKU.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 7: ecommerce.product.v1.ListProductsResponse.items:type_name -> ecommerce.product.v1.Product
 	0,  // 8: ecommerce.product.v1.GetProductResponse.product:type_name -> ecommerce.product.v1.Product
-	24, // 9: ecommerce.product.v1.CreateProductRequest.attributes:type_name -> google.protobuf.Struct
-	24, // 10: ecommerce.product.v1.UpdateProductRequest.attributes:type_name -> google.protobuf.Struct
+	25, // 9: ecommerce.product.v1.CreateProductRequest.attributes:type_name -> google.protobuf.Struct
+	25, // 10: ecommerce.product.v1.UpdateProductRequest.attributes:type_name -> google.protobuf.Struct
 	0,  // 11: ecommerce.product.v1.CreateProductResponse.product:type_name -> ecommerce.product.v1.Product
 	0,  // 12: ecommerce.product.v1.UpdateProductResponse.product:type_name -> ecommerce.product.v1.Product
 	1,  // 13: ecommerce.product.v1.ListSKUsResponse.items:type_name -> ecommerce.product.v1.SKU
 	1,  // 14: ecommerce.product.v1.GetSKUResponse.sku:type_name -> ecommerce.product.v1.SKU
-	22, // 15: ecommerce.product.v1.CreateSKURequest.option_values:type_name -> ecommerce.product.v1.CreateSKURequest.OptionValuesEntry
-	24, // 16: ecommerce.product.v1.CreateSKURequest.attributes:type_name -> google.protobuf.Struct
-	23, // 17: ecommerce.product.v1.UpdateSKURequest.option_values:type_name -> ecommerce.product.v1.UpdateSKURequest.OptionValuesEntry
-	24, // 18: ecommerce.product.v1.UpdateSKURequest.attributes:type_name -> google.protobuf.Struct
-	1,  // 19: ecommerce.product.v1.CreateSKUResponse.sku:type_name -> ecommerce.product.v1.SKU
-	1,  // 20: ecommerce.product.v1.UpdateSKUResponse.sku:type_name -> ecommerce.product.v1.SKU
-	25, // 21: ecommerce.product.v1.EventEnvelope.occurred_at_utc:type_name -> google.protobuf.Timestamp
-	19, // 22: ecommerce.product.v1.EventEnvelope.product_changed:type_name -> ecommerce.product.v1.ProductChanged
-	20, // 23: ecommerce.product.v1.EventEnvelope.sku_changed:type_name -> ecommerce.product.v1.SKUChanged
-	0,  // 24: ecommerce.product.v1.ProductChanged.product:type_name -> ecommerce.product.v1.Product
-	1,  // 25: ecommerce.product.v1.SKUChanged.sku:type_name -> ecommerce.product.v1.SKU
-	2,  // 26: ecommerce.product.v1.ProductService.ListProducts:input_type -> ecommerce.product.v1.ListProductsRequest
-	4,  // 27: ecommerce.product.v1.ProductService.GetProduct:input_type -> ecommerce.product.v1.GetProductRequest
-	6,  // 28: ecommerce.product.v1.ProductService.CreateProduct:input_type -> ecommerce.product.v1.CreateProductRequest
-	7,  // 29: ecommerce.product.v1.ProductService.UpdateProduct:input_type -> ecommerce.product.v1.UpdateProductRequest
-	10, // 30: ecommerce.product.v1.ProductService.ListSKUs:input_type -> ecommerce.product.v1.ListSKUsRequest
-	12, // 31: ecommerce.product.v1.ProductService.GetSKU:input_type -> ecommerce.product.v1.GetSKURequest
-	14, // 32: ecommerce.product.v1.ProductService.CreateSKU:input_type -> ecommerce.product.v1.CreateSKURequest
-	15, // 33: ecommerce.product.v1.ProductService.UpdateSKU:input_type -> ecommerce.product.v1.UpdateSKURequest
-	3,  // 34: ecommerce.product.v1.ProductService.ListProducts:output_type -> ecommerce.product.v1.ListProductsResponse
-	5,  // 35: ecommerce.product.v1.ProductService.GetProduct:output_type -> ecommerce.product.v1.GetProductResponse
-	8,  // 36: ecommerce.product.v1.ProductService.CreateProduct:output_type -> ecommerce.product.v1.CreateProductResponse
-	9,  // 37: ecommerce.product.v1.ProductService.UpdateProduct:output_type -> ecommerce.product.v1.UpdateProductResponse
-	11, // 38: ecommerce.product.v1.ProductService.ListSKUs:output_type -> ecommerce.product.v1.ListSKUsResponse
-	13, // 39: ecommerce.product.v1.ProductService.GetSKU:output_type -> ecommerce.product.v1.GetSKUResponse
-	16, // 40: ecommerce.product.v1.ProductService.CreateSKU:output_type -> ecommerce.product.v1.CreateSKUResponse
-	17, // 41: ecommerce.product.v1.ProductService.UpdateSKU:output_type -> ecommerce.product.v1.UpdateSKUResponse
-	34, // [34:42] is the sub-list for method output_type
-	26, // [26:34] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	23, // 15: ecommerce.product.v1.CreateSKURequest.option_values:type_name -> ecommerce.product.v1.CreateSKURequest.OptionValuesEntry
+	25, // 16: ecommerce.product.v1.CreateSKURequest.attributes:type_name -> google.protobuf.Struct
+	16, // 17: ecommerce.product.v1.UpdateSKURequest.option_values:type_name -> ecommerce.product.v1.StringMap
+	25, // 18: ecommerce.product.v1.UpdateSKURequest.attributes:type_name -> google.protobuf.Struct
+	24, // 19: ecommerce.product.v1.StringMap.values:type_name -> ecommerce.product.v1.StringMap.ValuesEntry
+	1,  // 20: ecommerce.product.v1.CreateSKUResponse.sku:type_name -> ecommerce.product.v1.SKU
+	1,  // 21: ecommerce.product.v1.UpdateSKUResponse.sku:type_name -> ecommerce.product.v1.SKU
+	26, // 22: ecommerce.product.v1.EventEnvelope.occurred_at_utc:type_name -> google.protobuf.Timestamp
+	20, // 23: ecommerce.product.v1.EventEnvelope.product_changed:type_name -> ecommerce.product.v1.ProductChanged
+	21, // 24: ecommerce.product.v1.EventEnvelope.sku_changed:type_name -> ecommerce.product.v1.SKUChanged
+	0,  // 25: ecommerce.product.v1.ProductChanged.product:type_name -> ecommerce.product.v1.Product
+	1,  // 26: ecommerce.product.v1.SKUChanged.sku:type_name -> ecommerce.product.v1.SKU
+	2,  // 27: ecommerce.product.v1.ProductService.ListProducts:input_type -> ecommerce.product.v1.ListProductsRequest
+	4,  // 28: ecommerce.product.v1.ProductService.GetProduct:input_type -> ecommerce.product.v1.GetProductRequest
+	6,  // 29: ecommerce.product.v1.ProductService.CreateProduct:input_type -> ecommerce.product.v1.CreateProductRequest
+	7,  // 30: ecommerce.product.v1.ProductService.UpdateProduct:input_type -> ecommerce.product.v1.UpdateProductRequest
+	10, // 31: ecommerce.product.v1.ProductService.ListSKUs:input_type -> ecommerce.product.v1.ListSKUsRequest
+	12, // 32: ecommerce.product.v1.ProductService.GetSKU:input_type -> ecommerce.product.v1.GetSKURequest
+	14, // 33: ecommerce.product.v1.ProductService.CreateSKU:input_type -> ecommerce.product.v1.CreateSKURequest
+	15, // 34: ecommerce.product.v1.ProductService.UpdateSKU:input_type -> ecommerce.product.v1.UpdateSKURequest
+	3,  // 35: ecommerce.product.v1.ProductService.ListProducts:output_type -> ecommerce.product.v1.ListProductsResponse
+	5,  // 36: ecommerce.product.v1.ProductService.GetProduct:output_type -> ecommerce.product.v1.GetProductResponse
+	8,  // 37: ecommerce.product.v1.ProductService.CreateProduct:output_type -> ecommerce.product.v1.CreateProductResponse
+	9,  // 38: ecommerce.product.v1.ProductService.UpdateProduct:output_type -> ecommerce.product.v1.UpdateProductResponse
+	11, // 39: ecommerce.product.v1.ProductService.ListSKUs:output_type -> ecommerce.product.v1.ListSKUsResponse
+	13, // 40: ecommerce.product.v1.ProductService.GetSKU:output_type -> ecommerce.product.v1.GetSKUResponse
+	17, // 41: ecommerce.product.v1.ProductService.CreateSKU:output_type -> ecommerce.product.v1.CreateSKUResponse
+	18, // 42: ecommerce.product.v1.ProductService.UpdateSKU:output_type -> ecommerce.product.v1.UpdateSKUResponse
+	35, // [35:43] is the sub-list for method output_type
+	27, // [27:35] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_ecommerce_product_v1_product_proto_init() }
@@ -1790,7 +1838,7 @@ func file_ecommerce_product_v1_product_proto_init() {
 	}
 	file_ecommerce_product_v1_product_proto_msgTypes[7].OneofWrappers = []any{}
 	file_ecommerce_product_v1_product_proto_msgTypes[15].OneofWrappers = []any{}
-	file_ecommerce_product_v1_product_proto_msgTypes[18].OneofWrappers = []any{
+	file_ecommerce_product_v1_product_proto_msgTypes[19].OneofWrappers = []any{
 		(*EventEnvelope_ProductChanged)(nil),
 		(*EventEnvelope_SkuChanged)(nil),
 	}
@@ -1800,7 +1848,7 @@ func file_ecommerce_product_v1_product_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ecommerce_product_v1_product_proto_rawDesc), len(file_ecommerce_product_v1_product_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

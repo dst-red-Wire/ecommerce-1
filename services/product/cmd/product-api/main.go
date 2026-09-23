@@ -115,6 +115,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			Brokers: runtimeConfig.KafkaBrokers, Topic: runtimeConfig.KafkaTopic,
 			ClientID: runtimeConfig.KafkaClientID, MaxRetries: runtimeConfig.KafkaMaxRetries,
 			DeliveryTimeout: runtimeConfig.KafkaDeliveryTime,
+			TLSCAFile:       runtimeConfig.KafkaTLSCAFile, TLSCertFile: runtimeConfig.KafkaTLSCertFile,
+			TLSKeyFile: runtimeConfig.KafkaTLSKeyFile,
 		})
 		if err != nil {
 			return err
@@ -143,8 +145,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	healthServer.SetServingStatus("ecommerce.product.v1.ProductService", healthv1.HealthCheckResponse_NOT_SERVING)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), runtimeConfig.ShutdownTimeout)
 	defer cancel()
-	grpcServer.GracefulStop()
-	return httpServer.Shutdown(shutdownCtx)
+	httpStopped := make(chan error, 1)
+	go func() { httpStopped <- httpServer.Shutdown(shutdownCtx) }()
+	stopGRPC(shutdownCtx, grpcServer)
+	return <-httpStopped
+}
+
+type grpcStopper interface {
+	GracefulStop()
+	Stop()
+}
+
+func stopGRPC(ctx context.Context, server grpcStopper) {
+	stopped := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-ctx.Done():
+		server.Stop()
+		<-stopped
+	}
 }
 
 func persistence(ctx context.Context, runtimeConfig config.Config) (application.Store, resttransport.Readiness, func(), error) {

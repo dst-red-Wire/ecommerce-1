@@ -164,6 +164,32 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	}
 
 	store := productpostgres.NewStore(pool)
+	claimed, err := store.Claim(ctx, time.Now().UTC().Add(time.Second), time.Now().UTC().Add(time.Minute), 10, 5)
+	if err != nil {
+		t.Fatalf("claim outbox events: %v", err)
+	}
+	var firstProductEvent string
+	for _, event := range claimed {
+		if event.AggregateID == product.ID {
+			if firstProductEvent != "" || event.Type != application.EventProductCreated {
+				t.Fatalf("later event for product aggregate was claimed before its predecessor: %+v", claimed)
+			}
+			firstProductEvent = event.ID
+		}
+	}
+	if firstProductEvent == "" {
+		t.Fatalf("oldest product event was not claimed: %+v", claimed)
+	}
+	if err := store.MarkPublished(ctx, firstProductEvent, time.Now().UTC()); err != nil {
+		t.Fatalf("mark oldest product event published: %v", err)
+	}
+	next, err := store.Claim(ctx, time.Now().UTC().Add(time.Second), time.Now().UTC().Add(time.Minute), 10, 5)
+	if err != nil {
+		t.Fatalf("claim successor event: %v", err)
+	}
+	if len(next) != 1 || next[0].AggregateID != product.ID || next[0].Type != application.EventProductUpdated {
+		t.Fatalf("expected product update only after create acknowledgement, got %+v", next)
+	}
 	invalidProduct := domain.Product{
 		ID: "57f2a602-5435-4ce4-a12e-ae38697bc547", Name: "Must roll back", Status: domain.ProductStatusDraft,
 		Attributes: domain.AttributeMap{}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Version: 1,
@@ -171,7 +197,8 @@ func TestPostgresPersistenceAndIdempotencySurviveRestart(t *testing.T) {
 	invalidEvent := application.OutboxEvent{
 		ID: "3c645042-dd73-42fa-928a-5677f09158af", Type: "product.ProductCreated.v1", SchemaVersion: 1,
 		OccurredAtUTC: time.Now().UTC(), Producer: "product", AggregateType: "product", AggregateID: "not-a-uuid",
-		CorrelationID: "atomicity-proof", CausationID: "atomicity-proof", HomeSite: "test", Product: &invalidProduct,
+		AggregateVersion: 1,
+		CorrelationID:    "atomicity-proof", CausationID: "atomicity-proof", HomeSite: "test", Product: &invalidProduct,
 	}
 	err = store.CreateProduct(ctx, "atomicity-proof-command", application.CommandResult{
 		Fingerprint: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Product: &invalidProduct,

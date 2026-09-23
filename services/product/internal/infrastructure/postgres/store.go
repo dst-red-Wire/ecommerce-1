@@ -285,7 +285,7 @@ func (s *Store) transaction(
 	if err := queries.InsertOutboxEvent(ctx, sqlcgen.InsertOutboxEventParams{
 		EventID: event.ID, EventType: event.Type, SchemaVersion: int32(event.SchemaVersion),
 		OccurredAtUtc: timestamp(event.OccurredAtUTC), Producer: event.Producer,
-		AggregateType: event.AggregateType, AggregateID: event.AggregateID,
+		AggregateType: event.AggregateType, AggregateID: event.AggregateID, AggregateVersion: event.AggregateVersion,
 		CorrelationID: event.CorrelationID, CausationID: event.CausationID,
 		HomeSite: event.HomeSite, Payload: payload,
 	}); err != nil {

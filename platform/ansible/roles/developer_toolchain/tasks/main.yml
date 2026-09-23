@@ -9,7 +9,7 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, kube_bench, cosign, sops, age, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, kube_bench, cosign, sops, age, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -300,6 +300,54 @@
     state: link
     force: true
   tags: [toolchain, agent_tools]
+
+- name: Download pinned GitHub CLI archive
+  ansible.builtin.get_url:
+    url: "https://github.com/cli/cli/releases/download/v{{ gh_version }}/gh_{{ gh_version }}_linux_amd64.tar.gz"
+    dest: "{{ local_cache }}/gh-{{ gh_version }}-linux-amd64.tar.gz"
+    checksum: "sha256:{{ gh_sha256 }}"
+    mode: '0644'
+  tags: [toolchain, agent_tools, gh]
+
+- name: Create GitHub CLI version directory
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/gh-{{ gh_version }}"
+    state: directory
+    mode: '0755'
+  tags: [toolchain, agent_tools, gh]
+
+- name: Extract pinned GitHub CLI
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/gh-{{ gh_version }}-linux-amd64.tar.gz"
+    dest: "{{ local_share }}/tools/gh-{{ gh_version }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "{{ local_share }}/tools/gh-{{ gh_version }}/bin/gh"
+  tags: [toolchain, agent_tools, gh]
+
+- name: Link GitHub CLI into the user path
+  ansible.builtin.file:
+    src: "{{ local_share }}/tools/gh-{{ gh_version }}/bin/gh"
+    dest: "{{ local_bin }}/gh"
+    state: link
+    force: true
+  tags: [toolchain, agent_tools, gh]
+
+- name: Validate pinned GitHub CLI version
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/gh", --version]
+  register: gh_version_output
+  changed_when: false
+  failed_when: gh_version_output.rc != 0 or gh_version not in gh_version_output.stdout
+  tags: [toolchain, agent_tools, gh]
+
+- name: Validate required GitHub CLI slurp capability
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/gh", api, --help]
+  register: gh_api_help
+  changed_when: false
+  failed_when: gh_api_help.rc != 0 or '--slurp' not in gh_api_help.stdout
+  tags: [toolchain, agent_tools, gh]
 
 - name: Download registry-managed archive tools
   ansible.builtin.get_url:

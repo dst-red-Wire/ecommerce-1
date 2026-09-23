@@ -9,6 +9,7 @@ runtime:
   homeSite: ""
   kafkaBrokers: ""
   kafkaTopic: ecommerce.product.events.v1
+  kafkaTLSSecretName: product-kafka-tls
   otlpEndpoint: ""
   oidcIssuer: ""
   oidcAudience: admin
