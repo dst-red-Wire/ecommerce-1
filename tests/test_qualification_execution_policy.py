@@ -193,9 +193,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             )
         )
         toolchain_inputs = [
-            "config/contracts/toolchain-lock.json",
-            "config/toolchain/versions.env",
             "platform/ansible/requirements.yml",
+            "config/python/requirements.lock",
         ]
         for path in toolchain_inputs:
             self.assertIn(path, completion["invalidation_inputs"])
@@ -210,6 +209,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                             {path: expected},
                         )
                     )
+        for developer_only_input in (
+            "config/contracts/toolchain-lock.json",
+            "config/toolchain/versions.env",
+            "config/toolchain/capabilities.json",
+        ):
+            self.assertNotIn(developer_only_input, completion["invalidation_inputs"])
         semantic = completion["invalidation_semantic_functions"]
         self.assertIn("scripts/repoctl.py", semantic)
         self.assertIn("scripts/capability_bootstrap.py", semantic)
