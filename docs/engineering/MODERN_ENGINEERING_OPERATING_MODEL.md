@@ -10,7 +10,9 @@ The nine QCE sectors remain closed and unchanged in count. `measuring_engineerin
 
 ## Security and CVE decisions
 
-`config/contracts/security-scan-policy.yaml` is the only CVE/scanner policy authority. It defines CVSS normalization, fix and reachability handling, KEV/EPSS risk decisions, remediation targets, scan scopes, expiring exact-scope exceptions, and PASS/BLOCK evidence.
+`config/contracts/security-scan-policy.yaml` is the only vulnerability/scanner policy authority. It defines accepted CVE, GO, GHSA, and OSV identifiers; alias normalization; multi-scanner observation preservation and deduplication; CVSS normalization; fix and exact Go symbol-reachability handling; KEV/EPSS risk decisions through CVE identifiers or aliases; remediation targets; scan scopes; expiring exact-scope exceptions; and PASS/BLOCK evidence. A non-CVE advisory without a CVE alias records KEV and EPSS as not applicable, but it never receives an automatic PASS: unknown, reachable, or otherwise unresolved release risk remains blocking unless exact symbol-level evidence proves it unreachable.
+
+Policy version 3 corrects a governance inconsistency in the earlier evaluator: the contract selected `govulncheck` as the canonical Go vulnerability scanner while the normalized finding validator accepted only CVE identifiers. Scanner-native advisory identifiers are now modeled generically; no individual advisory is hard-coded or filtered.
 
 KEV and EPSS are refreshed explicitly with `make security-datasets-sync`. The command records official source URLs, snapshot time, checksum, and provenance below `.context/security-datasets/`. Qualification never calls those volatile endpoints. Missing, corrupt, or stale datasets block decisions that need enrichment. An absence of findings records `NOT_REQUIRED_NO_FINDINGS`; it is not represented as a verified dataset.
 

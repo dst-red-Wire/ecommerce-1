@@ -3436,8 +3436,8 @@ def security() -> int:
     )
     destination = CONTEXT / "evidence" / "security" / ("worktree.json" if head == "WORKTREE" else f"{head_sha}.json")
     _cve_policy_api().write_evidence(destination, evidence)
-    print(f"PASS deterministic CVE policy evidence {destination.relative_to(ROOT)}")
-    return 0 if evidence["final_result"] == "PASS" else fail("CVE policy evaluation blocked", 1)
+    print(f"PASS deterministic vulnerability policy evidence {destination.relative_to(ROOT)}")
+    return 0 if evidence["final_result"] == "PASS" else fail("vulnerability policy evaluation blocked", 1)
 
 def terraform_source_files() -> list[Path]:
     terraform_root = ROOT / "platform" / "terraform"
@@ -5862,6 +5862,50 @@ def security_datasets_sync_command(output_path: str) -> int:
     return 0
 
 
+def govulncheck_scan_command(target_path: str, mode: str, output_path: str) -> int:
+    target = Path(target_path)
+    if not target.is_absolute():
+        target = ROOT / target
+    target = target.resolve()
+    if mode == "source":
+        if not target.is_dir() or not (target / "go.mod").is_file():
+            raise RuntimeError("govulncheck source target must be a Go module directory")
+        command = [require("govulncheck"), "-mode=source", "-format=json", "-scan=symbol", "./..."]
+        cwd = target
+    else:
+        if not target.is_file():
+            raise RuntimeError("govulncheck binary target must be an existing file")
+        command = [require("govulncheck"), "-mode=binary", "-format=json", "-scan=symbol", str(target)]
+        cwd = ROOT
+    destination = Path(output_path)
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("govulncheck evidence must remain under .context")
+    env = os.environ.copy()
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    completed = run(command, cwd=cwd, env=env, check=False, capture=True)
+    if completed.returncode not in {0, 3}:
+        raise RuntimeError((completed.stderr or completed.stdout or "govulncheck failed").strip())
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(completed.stdout, encoding="utf-8")
+    events = _cve_policy_api().load_json_stream(destination, "govulncheck scanner output")
+    findings, config = _cve_policy_api().govulncheck_findings(
+        events,
+        artifact=str(target.relative_to(ROOT)) if target.is_relative_to(ROOT) else target.name,
+        scope="reachable_go_vulnerabilities",
+        target=target.name,
+    )
+    print(
+        f"PASS govulncheck exact {config['scan_mode']}/{config['scan_level']} evidence "
+        f"{destination.relative_to(ROOT)} ({len(findings)} advisory finding(s))"
+    )
+    return 0
+
+
 def _security_exceptions() -> list[dict]:
     root = ROOT / str(security_scan_policy()["exceptions"]["root"])
     if not root.is_dir():
@@ -5873,9 +5917,10 @@ def _security_exceptions() -> list[dict]:
     return values
 
 
-def cve_evaluate_command(
+def vulnerability_evaluate_command(
     input_path: str,
     input_format: str,
+    govulncheck_paths: list[str],
     output_path: str,
     artifact: str,
     artifact_digest: str,
@@ -5915,7 +5960,45 @@ def cve_evaluate_command(
             payload = raw
             scanner_runs = list(payload.get("scanner_runs", []))
             required_scanners = list(payload.get("required_scanners", []))
-    except ValueError as exc:
+        govulncheck_configs = []
+        for govulncheck_path in govulncheck_paths:
+            govulncheck = Path(govulncheck_path)
+            if not govulncheck.is_absolute():
+                govulncheck = ROOT / govulncheck
+            events = _cve_policy_api().load_json_stream(govulncheck, "govulncheck scanner output")
+            go_findings, go_config = _cve_policy_api().govulncheck_findings(
+                events, artifact=artifact, scope=scope, target=govulncheck.stem
+            )
+            payload["findings"] = [*payload.get("findings", []), *go_findings]
+            govulncheck_configs.append(go_config)
+        if govulncheck_configs:
+            identities = {
+                (
+                    config.get("scanner_version"),
+                    config.get("db"),
+                    config.get("db_last_modified"),
+                    config.get("scan_level"),
+                )
+                for config in govulncheck_configs
+            }
+            if len(identities) != 1:
+                raise ValueError("govulncheck scanner identities conflict")
+            go_config = govulncheck_configs[0]
+            scanner_runs.append(
+                {
+                    "name": "govulncheck",
+                    "status": "PASS",
+                    "version": go_config.get("scanner_version"),
+                    "checksum": "go-checksum-database",
+                    "database": go_config.get("db"),
+                    "database_identity": go_config.get("db_last_modified"),
+                    "scan_modes": sorted({config.get("scan_mode") for config in govulncheck_configs}),
+                    "scan_level": go_config.get("scan_level"),
+                    "targets": sorted(Path(path).stem for path in govulncheck_paths),
+                }
+            )
+            required_scanners.append("govulncheck")
+    except (TypeError, ValueError) as exc:
         payload = {"findings": []}
         scanner_runs = [{"name": input_format, "status": "FAIL", "version": None, "checksum": None}]
         required_scanners = [input_format]
@@ -5965,6 +6048,9 @@ def cve_evaluate_command(
     _cve_policy_api().write_evidence(destination, evidence)
     print(json.dumps(evidence, indent=2, sort_keys=True))
     return 0 if evidence["final_result"] == "PASS" else 1
+
+
+cve_evaluate_command = vulnerability_evaluate_command
 
 
 def _roadmap_followup_after_merge() -> int:
@@ -7273,18 +7359,24 @@ def main() -> int:
     metrics.add_argument("--output", default="")
     datasets = sub.add_parser("security-datasets-sync")
     datasets.add_argument("--output", default=".context/security-datasets")
-    cve = sub.add_parser("cve-evaluate")
-    cve.add_argument("--input", required=True)
-    cve.add_argument("--format", choices=["normalized", "trivy"], default="normalized")
-    cve.add_argument("--output", default="")
-    cve.add_argument("--artifact", default="repository")
-    cve.add_argument("--artifact-digest", default="")
-    cve.add_argument("--sbom", default="")
-    cve.add_argument("--scope", default="repository_filesystem")
-    cve.add_argument("--environment", default="development")
-    cve.add_argument("--release", action="store_true")
-    cve.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
-    cve.add_argument("--head", default=os.environ.get("HEAD", "HEAD"))
+    govulncheck_scan = sub.add_parser("govulncheck-scan")
+    govulncheck_scan.add_argument("--target", required=True)
+    govulncheck_scan.add_argument("--mode", choices=["source", "binary"], required=True)
+    govulncheck_scan.add_argument("--output", required=True)
+    for command in ("vulnerability-evaluate", "cve-evaluate"):
+        vulnerability = sub.add_parser(command)
+        vulnerability.add_argument("--input", required=True)
+        vulnerability.add_argument("--format", choices=["normalized", "trivy"], default="normalized")
+        vulnerability.add_argument("--govulncheck", action="append", default=[])
+        vulnerability.add_argument("--output", default="")
+        vulnerability.add_argument("--artifact", default="repository")
+        vulnerability.add_argument("--artifact-digest", default="")
+        vulnerability.add_argument("--sbom", default="")
+        vulnerability.add_argument("--scope", default="repository_filesystem")
+        vulnerability.add_argument("--environment", default="development")
+        vulnerability.add_argument("--release", action="store_true")
+        vulnerability.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+        vulnerability.add_argument("--head", default=os.environ.get("HEAD", "HEAD"))
     experiment = sub.add_parser("experiment")
     experiment.add_argument("action", choices=["baseline", "evaluate", "status"])
     experiment.add_argument("--input", required=True)
@@ -7581,10 +7673,13 @@ def main() -> int:
             return engineering_metrics_command(args.input, args.output)
         if args.cmd == "security-datasets-sync":
             return security_datasets_sync_command(args.output)
-        if args.cmd == "cve-evaluate":
-            return cve_evaluate_command(
+        if args.cmd == "govulncheck-scan":
+            return govulncheck_scan_command(args.target, args.mode, args.output)
+        if args.cmd in {"vulnerability-evaluate", "cve-evaluate"}:
+            return vulnerability_evaluate_command(
                 args.input,
                 args.format,
+                args.govulncheck,
                 args.output,
                 args.artifact,
                 args.artifact_digest,

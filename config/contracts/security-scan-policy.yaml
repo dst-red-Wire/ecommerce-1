@@ -1,4 +1,4 @@
-version: 2
+version: 3
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
@@ -62,6 +62,27 @@ scan_scopes:
     execution: qualified-rke2-cluster-only
     status: deferred
 
+advisory_identifiers:
+  accepted_namespaces:
+    CVE: '^CVE-[0-9]{4}-[0-9]{4,}$'
+    GO: '^GO-[0-9]{4}-[0-9]{4,}$'
+    GHSA: '^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$'
+    OSV: '^OSV-[0-9]{4}-[0-9A-Z][0-9A-Z._-]*$'
+  alias_normalization: uppercase-sorted-unique
+  cve_alias_resolution:
+    required_for_kev_epss: true
+    accepted_namespace: CVE
+  non_cve_without_alias:
+    kev: NOT_APPLICABLE_NO_CVE_ALIAS
+    epss: NOT_APPLICABLE_NO_CVE_ALIAS
+    automatic_pass: forbidden
+    release_unknown_or_reachable_unfixed: BLOCK
+    exact_unreachable: REPORT
+  scanner_deduplication:
+    identity: transitive-identifier-and-alias-set
+    preserve_observations: true
+    conflict: BLOCK
+
 vulnerability_policy:
   severity_source: scanner-normalized-with-cvss-floor
   cvss:
@@ -101,12 +122,16 @@ vulnerability_policy:
   reachability:
     scanner: govulncheck
     reachable_high: BLOCK
+    exact_proof_modes: [source, binary]
+    exact_proof_level: symbol
+    exact_unreachable_release: REPORT
     unknown_reachability_release: risk-not-reduced
 
 risk_datasets:
   qualification_network_access: forbidden
-  findings_require_verified_datasets: true
+  findings_require_verified_datasets: CVE-or-advisory-with-CVE-alias
   no_findings_dataset_state: NOT_REQUIRED_NO_FINDINGS
+  non_cve_without_alias_dataset_state: NOT_APPLICABLE_NO_CVE_ALIAS
   update_command: python3 scripts/repoctl.py security-datasets-sync
   manifest: .context/security-datasets/manifest.json
   kev:
@@ -164,6 +189,7 @@ evidence:
     - epss_dataset_identity
     - artifact_digest
     - sbom_digest
+    - observations
     - findings
     - policy_decisions
     - exceptions_used

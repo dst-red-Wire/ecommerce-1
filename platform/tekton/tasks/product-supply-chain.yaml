@@ -96,16 +96,30 @@ spec:
       args: [$(params.image-reference), --output, spdx-json=.context/product-sbom-$(params.head).spdx.json]
       volumeMounts:
         - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+    - name: govulncheck-reachability
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args:
+        - govulncheck-scan
+        - --target
+        - services/product
+        - --mode
+        - source
+        - --output
+        - .context/product-govulncheck-$(params.head).json
     - name: evaluate-vulnerability-policy
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
       command: [python3, scripts/repoctl.py]
       args:
-        - cve-evaluate
+        - vulnerability-evaluate
         - --input
         - .context/product-trivy-$(params.head).json
         - --format
         - trivy
+        - --govulncheck
+        - .context/product-govulncheck-$(params.head).json
         - --artifact
         - $(params.image-reference)
         - --sbom

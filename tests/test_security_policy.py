@@ -73,13 +73,21 @@ class SecurityPolicyTest(unittest.TestCase):
     def finding(self, severity, **values):
         return {
             "finding_id": values.pop("finding_id", "CVE-2026-1000"),
+            "identifier_namespace": values.pop("identifier_namespace", None),
+            "aliases": values.pop("aliases", []),
             "severity": severity,
             "cvss": values.pop("cvss", None),
+            "fixed_version": values.pop("fixed_version", ""),
             "fix_available": values.pop("fix_available", False),
             "reachable": values.pop("reachable", None),
+            "presence": values.pop("presence", "package"),
+            "reachability_evidence": values.pop("reachability_evidence", None),
             "artifact": "product@sha256:" + "d" * 64,
             "scope": "oci_images",
             "scanner": "trivy",
+            "ecosystem": values.pop("ecosystem", "alpine"),
+            "package": values.pop("package", "test-package"),
+            "installed_version": values.pop("installed_version", "1.0.0"),
             **values,
         }
 
@@ -123,7 +131,7 @@ class SecurityPolicyTest(unittest.TestCase):
             "affected_artifact": finding["artifact"],
             "created_at": (NOW - timedelta(hours=1)).isoformat(),
             "expires_at": (NOW + timedelta(days=2)).isoformat(),
-            "approval": f"/owner-authorization approve scope=cve-exception:{finding['finding_id']} sha={'b' * 40}",
+            "approval": f"/owner-authorization approve scope=vulnerability-exception:{finding['finding_id']} sha={'b' * 40}",
             "exact_sha": "b" * 40,
             "environment": "release",
             "mitigation": "network isolation",
@@ -134,8 +142,14 @@ class SecurityPolicyTest(unittest.TestCase):
 
     def test_severity_decisions_fix_and_unfixed(self):
         cases = (
-            (self.finding("CRITICAL", fix_available=True), "BLOCK"),
-            (self.finding("HIGH", fix_available=True), "BLOCK"),
+            (
+                self.finding("CRITICAL", fix_available=True, fixed_version="1.0.1"),
+                "BLOCK",
+            ),
+            (
+                self.finding("HIGH", fix_available=True, fixed_version="1.0.1"),
+                "BLOCK",
+            ),
             (self.finding("HIGH", fix_available=False), "BLOCK"),
             (self.finding("MEDIUM"), "REPORT"),
             (self.finding("LOW"), "REPORT"),
@@ -189,7 +203,7 @@ class SecurityPolicyTest(unittest.TestCase):
             ({"owner": ""}, "missing owner"),
             ({"expires_at": ""}, "missing expires_at"),
             ({"expires_at": (NOW - timedelta(minutes=1)).isoformat()}, "expired"),
-            ({"scope": "repository_filesystem"}, "wrong CVE scope"),
+            ({"scope": "repository_filesystem"}, "wrong advisory scope"),
             ({"affected_artifact": "other@sha256:" + "e" * 64}, "wrong artifact"),
         )
         for changes, expected in invalid:
@@ -248,11 +262,255 @@ class SecurityPolicyTest(unittest.TestCase):
         exact = self.evaluate([finding, dict(finding)])
         self.assertEqual("PASS", exact["final_result"])
         self.assertEqual(1, len(exact["findings"]))
-        conflict = self.evaluate([finding, {**finding, "fix_available": True}])
+        conflict = self.evaluate(
+            [
+                finding,
+                {**finding, "fix_available": True, "fixed_version": "1.0.1"},
+            ]
+        )
         self.assertEqual("BLOCK", conflict["final_result"])
         self.assertTrue(
             any("conflicting duplicate" in reason for reason in conflict["reasons"])
         )
+
+    def test_supported_advisory_namespaces_and_malformed_identifier(self):
+        for finding_id in (
+            "CVE-2026-93990",
+            "GO-2026-5932",
+            "GHSA-XXXX-XXXX-XXXX",
+            "OSV-2026-1234",
+        ):
+            with self.subTest(finding_id=finding_id):
+                finding = self.finding(
+                    "LOW",
+                    finding_id=finding_id,
+                    scanner="govulncheck",
+                    ecosystem="Go",
+                    reachable=False,
+                    presence="module",
+                    reachability_evidence={
+                        "scanner": "govulncheck",
+                        "scan_mode": "binary",
+                        "scan_level": "symbol",
+                    },
+                )
+                if finding_id.startswith("CVE-"):
+                    self.datasets(scores={finding_id: 0.1})
+                evidence = self.evaluate([finding])
+                self.assertEqual("PASS", evidence["final_result"])
+                self.assertEqual(
+                    finding_id.split("-", 1)[0],
+                    evidence["findings"][0]["identifier_namespace"],
+                )
+        malformed = self.evaluate(
+            [self.finding("LOW", finding_id="NOT-A-VULNERABILITY")]
+        )
+        self.assertEqual("BLOCK", malformed["final_result"])
+        self.assertTrue(
+            any(
+                "malformed advisory identifier" in item for item in malformed["reasons"]
+            )
+        )
+
+    def test_non_cve_alias_drives_cve_risk_datasets(self):
+        finding = self.finding(
+            "MEDIUM",
+            finding_id="GO-2026-2000",
+            aliases=["CVE-2026-2000"],
+            ecosystem="Go",
+            package="example.org/vulnerable",
+        )
+        self.datasets(kev=["CVE-2026-2000"], scores={"CVE-2026-2000": 0.1})
+        evidence = self.evaluate([finding])
+        decision = evidence["policy_decisions"][0]
+        self.assertEqual("BLOCK", decision["decision"])
+        self.assertTrue(decision["kev"])
+        self.assertEqual("APPLICABLE", decision["kev_status"])
+
+    def test_non_cve_without_alias_is_not_a_false_pass(self):
+        finding = self.finding(
+            "LOW",
+            finding_id="GO-2026-2001",
+            ecosystem="Go",
+            package="example.org/vulnerable",
+            reachable=None,
+            presence="module",
+        )
+        evidence = self.evaluate([finding])
+        self.assertEqual("BLOCK", evidence["final_result"])
+        decision = evidence["policy_decisions"][0]
+        self.assertEqual("BLOCK", decision["decision"])
+        self.assertEqual("NOT_APPLICABLE_NO_CVE_ALIAS", decision["kev_status"])
+        self.assertEqual(
+            "NOT_APPLICABLE_NO_CVE_ALIAS",
+            evidence["kev_dataset_identity"]["status"],
+        )
+
+    def test_go_reachability_is_fail_closed_unless_exactly_unreachable(self):
+        base = {
+            "finding_id": "GO-2026-5932",
+            "scanner": "govulncheck",
+            "ecosystem": "Go",
+            "package": "golang.org/x/crypto",
+            "presence": "module",
+            "reachability_evidence": {
+                "scanner": "govulncheck",
+                "scan_mode": "binary",
+                "scan_level": "symbol",
+            },
+        }
+        unreachable = self.evaluate([self.finding("UNKNOWN", reachable=False, **base)])
+        self.assertEqual("PASS", unreachable["final_result"])
+        self.assertEqual("REPORT", unreachable["policy_decisions"][0]["decision"])
+        reachable = self.evaluate(
+            [
+                self.finding(
+                    "UNKNOWN",
+                    reachable=True,
+                    presence="symbol",
+                    **{k: v for k, v in base.items() if k != "presence"},
+                )
+            ]
+        )
+        self.assertEqual("BLOCK", reachable["final_result"])
+        unknown = self.evaluate([self.finding("UNKNOWN", reachable=None, **base)])
+        self.assertEqual("BLOCK", unknown["final_result"])
+
+    def test_aliases_deduplicate_multi_scanner_observations(self):
+        trivy = self.finding(
+            "HIGH",
+            finding_id="CVE-2026-3000",
+            aliases=["GO-2026-3000", "GO-2026-3000"],
+            ecosystem="Go",
+            package="example.org/vulnerable",
+        )
+        govulncheck = self.finding(
+            "UNKNOWN",
+            finding_id="GO-2026-3000",
+            aliases=["CVE-2026-3000"],
+            scanner="govulncheck",
+            ecosystem="Go",
+            package="example.org/vulnerable",
+            reachable=True,
+            presence="symbol",
+        )
+        self.datasets(scores={"CVE-2026-3000": 0.1})
+        evidence = self.evaluate([trivy, govulncheck])
+        self.assertEqual(1, len(evidence["findings"]))
+        self.assertEqual(2, len(evidence["observations"]))
+        self.assertEqual(
+            ["CVE-2026-3000", "GO-2026-3000"],
+            evidence["findings"][0]["identifiers"],
+        )
+
+    def test_multiple_binary_targets_preserve_observations_and_any_reachability(self):
+        base = {
+            "finding_id": "GO-2026-3001",
+            "scanner": "govulncheck",
+            "ecosystem": "Go",
+            "package": "example.org/vulnerable",
+            "reachability_evidence": {
+                "scanner": "govulncheck",
+                "scan_mode": "binary",
+                "scan_level": "symbol",
+            },
+        }
+        manager = self.finding(
+            "UNKNOWN",
+            reachable=False,
+            presence="module",
+            target="manager",
+            **base,
+        )
+        adapter = self.finding(
+            "UNKNOWN",
+            reachable=True,
+            presence="symbol",
+            target="pipeline-adapter",
+            **base,
+        )
+        evidence = self.evaluate(
+            [manager, adapter],
+            scanner_runs=[{"name": "govulncheck", "status": "PASS"}],
+            required_scanners=["govulncheck"],
+        )
+        self.assertEqual(2, len(evidence["observations"]))
+        self.assertEqual(1, len(evidence["findings"]))
+        self.assertTrue(evidence["findings"][0]["reachable"])
+        self.assertEqual("BLOCK", evidence["final_result"])
+
+    def test_conflicting_scanner_data_and_invalid_alias_fail_closed(self):
+        first = self.finding(
+            "HIGH",
+            finding_id="CVE-2026-4000",
+            aliases=["GO-2026-4000"],
+            ecosystem="Go",
+            package="example.org/vulnerable",
+        )
+        second = self.finding(
+            "MEDIUM",
+            finding_id="GO-2026-4000",
+            aliases=["CVE-2026-4000"],
+            scanner="govulncheck",
+            ecosystem="Go",
+            package="example.org/vulnerable",
+        )
+        self.datasets(scores={"CVE-2026-4000": 0.1})
+        conflict = self.evaluate([first, second])
+        self.assertEqual("BLOCK", conflict["final_result"])
+        self.assertTrue(
+            any("conflicting scanner severity" in item for item in conflict["reasons"])
+        )
+        invalid_alias = self.evaluate(
+            [self.finding("LOW", aliases=["arbitrary identifier"])]
+        )
+        self.assertEqual("BLOCK", invalid_alias["final_result"])
+        self.assertTrue(
+            any("invalid alias" in item for item in invalid_alias["reasons"])
+        )
+
+    def test_govulncheck_binary_evidence_distinguishes_presence_and_reachability(self):
+        events = [
+            {
+                "config": {
+                    "scanner_name": "govulncheck",
+                    "scanner_version": "v1.8.0",
+                    "scan_mode": "binary",
+                    "scan_level": "symbol",
+                    "db": "https://vuln.go.dev",
+                    "db_last_modified": "2026-09-16T18:00:43Z",
+                }
+            },
+            {
+                "osv": {
+                    "id": "GO-2026-5932",
+                    "aliases": [],
+                    "published": "2026-07-07T22:15:29Z",
+                    "affected": [
+                        {
+                            "package": {
+                                "name": "golang.org/x/crypto",
+                                "ecosystem": "Go",
+                            }
+                        }
+                    ],
+                }
+            },
+            {
+                "finding": {
+                    "osv": "GO-2026-5932",
+                    "trace": [{"module": "golang.org/x/crypto", "version": "v0.56.0"}],
+                }
+            },
+        ]
+        findings, config = SECURITY.govulncheck_findings(
+            events,
+            artifact="kratix@sha256:" + "d" * 64,
+            scope="oci_images",
+        )
+        self.assertEqual("binary", config["scan_mode"])
+        self.assertEqual("module", findings[0]["presence"])
+        self.assertFalse(findings[0]["reachable"])
 
     def test_sbom_artifact_and_exact_sha_mismatches_block(self):
         evidence = self.evaluate(

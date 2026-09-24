@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -252,6 +253,38 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         govulncheck_modules = {cwd for argv, cwd in calls if argv[:1] == ["govulncheck"]}
         self.assertEqual(modules, gosec_modules)
         self.assertEqual(modules, govulncheck_modules)
+
+    def test_govulncheck_scan_writes_exact_symbol_evidence_under_context(self):
+        config = {
+            "config": {
+                "scanner_name": "govulncheck",
+                "scanner_version": "v1.8.0",
+                "scan_mode": "source",
+                "scan_level": "symbol",
+                "db": "https://vuln.go.dev",
+                "db_last_modified": "2026-09-16T18:00:43Z",
+            }
+        }
+        completed = subprocess.CompletedProcess(
+            ["govulncheck"], 0, json.dumps(config), ""
+        )
+        with tempfile.TemporaryDirectory(dir=MOD.CONTEXT) as directory:
+            destination = Path(directory) / "product.govulncheck.json"
+            with (
+                mock.patch.object(MOD, "require", return_value="govulncheck"),
+                mock.patch.object(MOD, "run", return_value=completed) as execute,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.govulncheck_scan_command(
+                        "services/product", "source", str(destination)
+                    ),
+                )
+            self.assertEqual(config, json.loads(destination.read_text(encoding="utf-8")))
+            command = execute.call_args.args[0]
+            self.assertIn("-mode=source", command)
+            self.assertIn("-scan=symbol", command)
+            self.assertEqual("./...", command[-1])
 
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
         with tempfile.TemporaryDirectory() as directory:

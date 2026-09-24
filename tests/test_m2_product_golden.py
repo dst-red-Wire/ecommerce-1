@@ -181,6 +181,9 @@ class ProductGoldenServiceContractTest(unittest.TestCase):
             }.issubset(commands)
         )
         self.assertNotIn("buildah", commands)
+        self.assertIn("govulncheck-scan", source)
+        self.assertIn("vulnerability-evaluate", source)
+        self.assertNotIn("cve-evaluate", source)
         self.assertIn(
             "$(params.image-repository)@$(tasks.build-push.results.image-digest)",
             source,
