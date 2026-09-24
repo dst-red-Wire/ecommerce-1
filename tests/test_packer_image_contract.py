@@ -5,6 +5,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -162,6 +163,29 @@ class PackerImageContractTest(unittest.TestCase):
                     version="2.101.0",
                     expected="0" * 64,
                 )
+
+    def test_materializer_cache_copy_avoids_sendfile_fast_path(self):
+        content = (b"bounded-cross-filesystem-copy\n" * 150_000) + b"end"
+        expected = hashlib.sha256(content).hexdigest()
+        entry = {
+            "file": "large.iso",
+            "sha256": expected,
+            "version": "test",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cached = root / "cache" / expected / entry["file"]
+            cached.parent.mkdir(parents=True)
+            cached.write_bytes(content)
+            destination = root / "staging" / entry["file"]
+            destination.parent.mkdir()
+            with mock.patch.object(
+                MATERIALIZER.shutil,
+                "copyfile",
+                side_effect=AssertionError("sendfile-backed copy is forbidden"),
+            ):
+                MATERIALIZER._acquire(entry, destination, root / "cache", offline=True)
+            self.assertEqual(content, destination.read_bytes())
 
     def test_external_tools_use_the_central_toolchain_authority(self):
         expected = {

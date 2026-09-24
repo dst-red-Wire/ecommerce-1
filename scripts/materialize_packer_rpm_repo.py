@@ -39,6 +39,14 @@ def _verify(path: Path, *, artifact: str, version: str, expected: str) -> None:
         )
 
 
+def _copy_file(source: Path, destination: Path) -> None:
+    """Copy across filesystems without the platform-dependent sendfile fast path."""
+    with source.open("rb") as input_stream, destination.open("wb") as output_stream:
+        shutil.copyfileobj(input_stream, output_stream, length=4 * 1024 * 1024)
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
+
+
 def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) -> None:
     artifact = entry["file"]
     version = entry.get("nevra", entry.get("version", "locked"))
@@ -46,7 +54,7 @@ def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) 
     cached = cache / expected / artifact if cache is not None else None
     if cached is not None and cached.is_file():
         _verify(cached, artifact=artifact, version=version, expected=expected)
-        shutil.copyfile(cached, destination)
+        _copy_file(cached, destination)
     elif offline:
         raise MaterializationError(
             f"artifact={artifact} expected_version={version} "
@@ -71,7 +79,7 @@ def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) 
         _verify(destination, artifact=artifact, version=version, expected=expected)
         if cached is not None:
             cached.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(destination, cached)
+            _copy_file(destination, cached)
     _verify(destination, artifact=artifact, version=version, expected=expected)
 
 
