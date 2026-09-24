@@ -157,6 +157,16 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             r"while\s*\(\s*\$true\s*\)|for\s*\(\s*;;",
         )
 
+    def test_build_wsl_process_calls_only_use_supported_parameters(self):
+        calls = re.findall(
+            r"Invoke-WslProcess\b.*?(?=\n\s*Assert-ProcessSuccess)",
+            self.build,
+            re.DOTALL,
+        )
+        self.assertEqual(2, len(calls))
+        for call in calls:
+            self.assertNotIn("-WorkingDirectory", call)
+
     def test_vagrant_only_owns_lifecycle_and_smoke_transport(self):
         self.assertIn("config.vm.box", self.vagrant)
         self.assertIn('config.ssh.username = "packer"', self.vagrant)
