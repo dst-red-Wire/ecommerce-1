@@ -72,6 +72,43 @@ repository_delivery:
   forge: github
   default_branch: main
 
+  commit_provenance:
+    authority_source: architecture.lock.yaml#machine_contracts.review_policy
+    required_for_default_branch_delivery: true
+    identity:
+      author_required: true
+      committer_required: true
+      placeholder_identity_forbidden: true
+      placeholder_email_domains_forbidden:
+        - example.invalid
+        - example.com
+        - example.org
+      reserved_email_tlds_forbidden: [invalid]
+      explicit_placeholder_names_forbidden:
+        - test
+        - test user
+        - test account
+        - fake
+        - fake user
+        - fake account
+        - example
+        - example user
+        - example account
+    remote_verification:
+      provider: github
+      required_before_delivery: true
+      required_before_merge: true
+      exact_sha: true
+      accepted_reasons: [valid]
+      unavailable_in_network_workflow: blocking
+      offline_qualification: local-identity-only
+    historical_evidence:
+      sha: 9037b2c6442ae68c6bc10d41ffa254e01a1791df
+      relation: predates-commit-provenance-gate-on-governance-toolchain-closure
+      retention: visible-in-original-branch-history
+      delivery_handling: report-and-block-until-clean-replay-from-default-branch
+    failure_mode: blocking
+
   publish:
     qualification: exact-sha
     exact_evidence_required: true

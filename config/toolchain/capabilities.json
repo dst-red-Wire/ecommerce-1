@@ -103,6 +103,17 @@
       "requirement": "required-static"
     },
     {
+      "name": "pre-commit",
+      "requires": ["python"],
+      "command": "pre-commit",
+      "version_args": ["--version"],
+      "version_key": "PRE_COMMIT_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "pre_commit"},
+      "classification": "managed",
+      "requirement": "required-static"
+    },
+    {
       "name": "node",
       "requires": [],
       "provision_requires": [
@@ -459,13 +470,6 @@
       "version_args": [
         "--version"
       ],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "provision": {
-        "type": "ansible",
-        "tags": "docker_client"
-      },
       "classification": "platform-provided",
       "justification": "The Docker CLI package is supplied by the supported OS/Desktop channel; daemon lifecycle and access remain external.",
       "requirement": "optional-runtime"
@@ -508,29 +512,6 @@
       "external_failure": true,
       "classification": "conditional",
       "requirement": "optional-runtime"
-    },
-    {
-      "name": "docker-buildx",
-      "requires": [],
-      "command": "docker-buildx",
-      "version_args": [
-        "version"
-      ],
-      "version_key": "DOCKER_BUILDX_VERSION",
-      "version_parser": "first_semver_release",
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "provision": {
-        "type": "ansible",
-        "tags": "docker_buildx"
-      },
-      "platforms": [
-        "linux/amd64"
-      ],
-      "classification": "managed",
-      "checksum_key": "DOCKER_BUILDX_SHA256_LINUX_AMD64",
-      "requirement": "required-static"
     },
     {
       "name": "kubectl",
@@ -667,45 +648,6 @@
       "requirement": "required-static"
     },
     {
-      "name": "kube-bench",
-      "requires": [],
-      "command": "kube-bench",
-      "version_args": ["version"],
-      "version_key": "KUBE_BENCH_VERSION",
-      "provision_requires": ["ansible-playbook"],
-      "provision": {"type": "ansible", "tags": "kube_bench"},
-      "platforms": ["linux/amd64"],
-      "classification": "managed",
-      "checksum_key": "KUBE_BENCH_SHA256_LINUX_AMD64",
-      "requirement": "required-static"
-    },
-    {
-      "name": "sops",
-      "requires": ["age"],
-      "command": "sops",
-      "version_args": ["--version"],
-      "version_key": "SOPS_VERSION",
-      "provision_requires": ["ansible-playbook"],
-      "provision": {"type": "ansible", "tags": "sops"},
-      "platforms": ["linux/amd64"],
-      "classification": "managed",
-      "checksum_key": "SOPS_SHA256_LINUX_AMD64",
-      "requirement": "required-static"
-    },
-    {
-      "name": "age",
-      "requires": [],
-      "command": "age",
-      "version_args": ["--version"],
-      "version_key": "AGE_VERSION",
-      "provision_requires": ["ansible-playbook"],
-      "provision": {"type": "ansible", "tags": "age"},
-      "platforms": ["linux/amd64"],
-      "classification": "managed",
-      "checksum_key": "AGE_SHA256_LINUX_AMD64",
-      "requirement": "required-static"
-    },
-    {
       "name": "terraform",
       "requires": [],
       "version_key": "TERRAFORM_VERSION",
@@ -763,30 +705,6 @@
       "requirement": "required-static"
     },
     {
-      "name": "kind",
-      "requires": [
-        "docker"
-      ],
-      "command": "kind",
-      "version_args": [
-        "version"
-      ],
-      "version_key": "KIND_VERSION",
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "provision": {
-        "type": "ansible",
-        "tags": "kind"
-      },
-      "platforms": [
-        "linux/amd64"
-      ],
-      "classification": "managed",
-      "checksum_key": "KIND_SHA256_LINUX_AMD64",
-      "requirement": "optional-runtime"
-    },
-    {
       "name": "container-tests",
       "requires": [
         "docker",
@@ -821,6 +739,7 @@
   ],
   "provision_owners": {
     "ansible-lint": "ansible",
+    "pre-commit": "ansible",
     "node": "ansible",
     "go": "ansible",
     "templ": "ansible",
@@ -841,18 +760,13 @@
     "kubectl": "ansible",
     "helm": "ansible",
     "cosign": "ansible",
-    "docker-buildx": "ansible",
     "skopeo": "ansible",
     "packer": "ansible",
     "trivy": "ansible",
     "gosec": "ansible",
     "govulncheck": "ansible",
-    "kube-bench": "ansible",
-    "sops": "ansible",
-    "age": "ansible",
     "terraform": "ansible",
     "kustomize": "ansible",
-    "kind": "ansible",
     "gitleaks": "ansible"
   },
   "seed_prerequisites": [
@@ -957,13 +871,17 @@
       "pnpm",
       "node",
       "oxlint",
-      "oxfmt"
+      "oxfmt",
+      "helm"
     ],
     "frontend": ["python3", "go", "gofmt", "templ", "cc"],
     "security": [
       "python3",
       "git",
-      "gitleaks"
+      "gitleaks",
+      "trivy",
+      "gosec",
+      "govulncheck"
     ],
     "terraform": [
       "python3",

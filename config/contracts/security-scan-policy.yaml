@@ -14,19 +14,25 @@ scanner:
 capabilities:
   container_and_filesystem:
     implementation: trivy
+    status: active
     execution: affected-container-and-configuration-inputs
   secret_detection:
     implementation: gitleaks
+    status: active
     execution: exact-materialized-git-tree
   go_static_analysis:
     implementation: gosec
+    status: active
     execution: affected-go-modules
   go_vulnerabilities:
     implementation: govulncheck
+    status: active
     execution: affected-go-modules
   kubernetes_cis:
     implementation: kube-bench
+    status: deferred
     execution: qualified-rke2-cluster-only
+    reason: no current qualified RKE2 campaign executes kube-bench
     policy_authority: architecture.lock.yaml#security
 
 configuration:

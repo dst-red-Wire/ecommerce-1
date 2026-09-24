@@ -31,6 +31,8 @@ domains:
     machine_contract: context_router
   workstation:
     machine_contract: workstation_policy
+  git_delivery:
+    machine_contract: review_policy
   contract_registry:
     authority: architecture.lock.yaml#machine_contracts
 
