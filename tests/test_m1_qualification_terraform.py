@@ -25,7 +25,7 @@ def terraform_output_block(source: str, name: str) -> str:
         re.MULTILINE | re.DOTALL,
     )
     if match is None:
-        raise AssertionError(f"missing Terraform output block: {name}")
+        raise AssertionError(f"missing OpenTofu output block: {name}")
     return match.group(0)
 
 
@@ -54,6 +54,7 @@ def resolve_base(value: str) -> str | None:
 
 def validate_contract(files: dict[str, str]) -> None:
     combined = "\n".join(files.values())
+    normalized = re.sub(r"[ \t]+", " ", combined)
     main = files["module/main.tf"]
     gateway_bootstrap = files["module/gateway-cloud-init.yaml.tftpl"]
     gateway_tasks = files["ansible/gateway_tasks"]
@@ -67,9 +68,9 @@ def validate_contract(files: dict[str, str]) -> None:
         'resource "hcloud_server" "runner"',
         'resource "hcloud_server" "gateway"',
         'network_zone = data.hcloud_location.qualification.network_zone',
-        'subnet_cidr        = var.network_cidr',
+        'subnet_cidr = var.network_cidr',
         'gateway_private_ip = cidrhost(var.network_cidr, 2)',
-        'runner_private_ip  = cidrhost(var.network_cidr, 3)',
+        'runner_private_ip = cidrhost(var.network_cidr, 3)',
         'source_ips = ["${local.gateway_private_ip}/32"]',
         'destination_ips = ["${local.gateway_private_ip}/32"]',
         'ipv4_enabled = false',
@@ -83,7 +84,7 @@ def validate_contract(files: dict[str, str]) -> None:
         '!endswith(cidr, "/0")',
     )
     for marker in required:
-        if marker not in combined:
+        if marker not in normalized:
             raise AssertionError(f"missing qualification boundary: {marker}")
 
     if len(re.findall(r'resource\s+"hcloud_server"\s+"', main)) != 2:
@@ -252,7 +253,7 @@ def validate_contract(files: dict[str, str]) -> None:
         'resource "terraform_data"',
     ):
         if marker in combined:
-            raise AssertionError(f"Terraform orchestration is forbidden: {marker}")
+            raise AssertionError(f"OpenTofu orchestration is forbidden: {marker}")
 
 
 class QualificationTerraformContractTest(unittest.TestCase):

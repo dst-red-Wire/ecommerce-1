@@ -36,7 +36,7 @@ locals {
   access_profiles    = local.access_inventory.vm_profiles
   wireguard          = local.network_plan.wireguard.mgmt
 
-  # Terraform has no built-in IPv4 containment predicate. Convert addresses to
+  # OpenTofu has no built-in IPv4 containment predicate. Convert addresses to
   # integers so checks can compare each inventory address to its CIDR bounds.
   ipv4_octet_weights = [16777216, 65536, 256, 1]
 

@@ -6,7 +6,7 @@ Status: `ACCEPTED`
 
 The workstation bootstrap was exposed through task-oriented targets and a single Ansible
 play whose platform preflight and task order could stop unrelated tooling. Docker readiness
-is not a prerequisite for API contract tooling, Ansible, Terraform or Kubernetes clients.
+is not a prerequisite for API contract tooling, Ansible, OpenTofu or Kubernetes clients.
 
 ## Decision
 
@@ -31,8 +31,10 @@ side-effect-free audit. Reconciliation first probes exact state and does not rei
 compliant capabilities. A later run naturally resumes nodes that were blocked.
 
 `scripts/repoctl.py toolchain-closure` closes the registry, capability graph, doctor,
-installers, gates and proofs before bootstrap or qualification. Undeclared tools, incomplete
-active tools, orphan versions/checksums and projection drift fail closed.
+installers, gates and proofs before bootstrap or qualification. The IaC branch has one
+active engine, OpenTofu, exposed only through the `tofu` command; Terraform CLI is rejected
+by governance. Undeclared tools, incomplete active tools, orphan versions/checksums and
+projection drift fail closed.
 
 OS (`linux`, `darwin`, `windows`), architecture (`amd64`, `arm64`) and execution context
 (`native`, `wsl2`, `ci`, or an explicit `BOOTSTRAP_CONTEXT`) are normalized independently.
@@ -43,7 +45,7 @@ installer.
 
 Python and Ruby are independent roots. `ansible-core` is a runner prerequisite, and
 `ansible-playbook` plus `ansible-galaxy` are bound to that same validated provider; Corepack depends on Node. Go, sqlc, yq,
-oasdiff, ripgrep, fd, kubectl, Helm, Terraform and Kustomize have no Docker runtime
+oasdiff, ripgrep, fd, kubectl, Helm, OpenTofu and Kustomize have no Docker runtime
 dependency. Docker readiness is layered over client installation and user access. Kind and
 containerized tests alone depend on the logical Docker capability.
 
@@ -62,7 +64,7 @@ consume pinned versions and checksums from the existing authority.
 ## Gate executable closure
 
 The contract also owns `gate_requirements`, the explicit executable closure for bootstrap,
-governance, contracts, lint, tests, security, Terraform, Ansible, Kubernetes readiness,
+governance, contracts, lint, tests, security, OpenTofu, Ansible, Kubernetes readiness,
 context generation and delivery. `gate_sources` identifies Python orchestration entrypoints;
 their literal subprocess and `require()` commands are checked with Python's AST rather than
 with a partial shell parser. Contract validation rejects an executable that has no managed
@@ -77,7 +79,7 @@ and `unzip` are explicitly justified platform primitives. This classification do
 silently turn them into managed downloads; it records who supplies them and prevents an
 undeclared assumption.
 
-Gitleaks, kubectl, Helm, Terraform, Kustomize and Kind use independent, checksum-pinned
+Gitleaks, kubectl, Helm, OpenTofu, Kustomize and Kind use independent, checksum-pinned
 Linux/amd64 release assets. Their contract says `UNSUPPORTED` on combinations for which this
 repository does not yet implement a provisioner. `oapi-codegen` has no Go runtime dependency;
 Go and Ansible are only provisioning dependencies. Kind alone retains the real Docker

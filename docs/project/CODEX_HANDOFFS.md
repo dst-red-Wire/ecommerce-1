@@ -43,7 +43,7 @@ Codex must never infer or redesign architecture when these sources are explicit.
 
 You are implementing the E-COMMERCE platform from a locked architecture baseline and exact topology contracts. Work only inside the scope of the assigned milestone/issue. Before changing files, inventory the current repository and reuse existing structure. Do not create duplicate ownership, duplicate helpers, duplicate pipelines or duplicate source-of-truth files. Keep diffs small and reviewable. Repeatable state changes belong in Ansible; stateless orchestration belongs in `scripts/repoctl.py` or a justified native tool. Do not commit secrets, credentials, generated evidence, state files or runtime artifacts. Never use `latest`. Preserve rollback/rebuild paths. Run the repository's required validation commands and report exact PASS/FAIL/SKIP results. A milestone is not complete because files exist; it is complete only when its acceptance criteria are demonstrated.
 
-When exact config exists, consume it as data rather than rewriting the same constants in Terraform, Ansible, Helm, scripts or documentation. Add automated consistency checks instead of copy/paste.
+When exact config exists, consume it as data rather than rewriting the same constants in OpenTofu, Ansible, Helm, scripts or documentation. Add automated consistency checks instead of copy/paste.
 
 ## M1 prompt — Monorepo Bootstrap
 
@@ -84,8 +84,8 @@ Goal: implement reproducible JIT infrastructure as code from `PREPROD_TOPOLOGY_V
 Do not re-decide placement, VM sizing, VLANs, CIDRs, public-IP role slots, anti-affinity or storage-device ownership. Consume the canonical YAML and validate it.
 
 Implement:
-1. Terraform/OpenTofu provider modules and environment composition;
-2. inventory/IPAM/storage loaders reused by Terraform/Ansible;
+1. OpenTofu provider modules and environment composition;
+2. inventory/IPAM/storage loaders reused by OpenTofu/Ansible;
 3. Proxmox host/bootstrap configuration hooks;
 4. VM creation with anti-affinity/layout assertions;
 5. Rocky cloud-init/bootstrap and Ansible hardening;
@@ -109,7 +109,7 @@ Entry gate: M1 PROVEN.
 
 Bounded implementation scope:
 - consume the declared MGMT inventory, network/IPAM, WireGuard access, security-zone, and resilience contracts without duplicating their values;
-- prepare the Terraform/OpenTofu and Ansible bootstrap workflow for the locked persistent MGMT services and human apply gate;
+- prepare the OpenTofu and Ansible bootstrap workflow for the locked persistent MGMT services and human apply gate;
 - keep PREPROD JIT provisioning and all M3 work out of scope;
 - do not invent provider, RTO, RPO, credential, or deployment values.
 
@@ -128,7 +128,7 @@ Tracker: `#17`.
 Goal: install the minimum complete platform needed to run and prove application slices, following `DEPLOYMENT_DAG.md`, `deployment-waves.yaml`, `STORAGE_TOPOLOGY_V2.md`, `storage-plan.yaml` and `SECURITY_TRUST_ZONES.md`.
 
 Order:
-`RKE2 -> Cilium/Hubble -> Fleet -> Argo Rollouts -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> stateful platform`.
+`RKE2 -> Cilium/Hubble -> Fleet -> Argo Rollouts -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton + cert-manager -> Kratix/Kustomize/Helm -> observability/security logging -> stateful platform`.
 
 Stateful baseline:
 - CNPG/PostgreSQL;

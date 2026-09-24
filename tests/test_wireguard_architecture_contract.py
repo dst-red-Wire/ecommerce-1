@@ -88,7 +88,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertTrue(self.gateway_inventory["implementation"]["human_apply_gate"])
         self.assertEqual(
             "platform/terraform/modules/hcloud-mgmt",
-            self.gateway_inventory["implementation"]["terraform_wiring"],
+            self.gateway_inventory["implementation"]["opentofu_wiring"],
         )
 
     def test_operator_routes_are_mgmt_only(self):
@@ -132,7 +132,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         self.assertEqual("forbidden", self.policy["access"]["customer_identity"])
         self.assertEqual("deny", self.policy["access"]["default_forwarding"])
         self.assertEqual("forbidden", self.policy["secrets"]["git"])
-        self.assertEqual("terraform", self.policy["ownership"]["provider_vm_network_firewall"])
+        self.assertEqual("opentofu", self.policy["ownership"]["provider_vm_network_firewall"])
         self.assertEqual("ansible", self.policy["ownership"]["rocky_wireguard_routing_firewall"])
         self.assertEqual("none", self.policy["ownership"]["kubernetes"])
         self.assertEqual(
@@ -228,7 +228,7 @@ class WireGuardArchitectureContractTests(unittest.TestCase):
         text = DOC.read_text(encoding="utf-8")
         self.assertIn("Static qualification does not create a VM", text)
         self.assertIn("SNAT on `wg-01`", text)
-        self.assertIn("Terraform/OpenTofu owns provider resources", text)
+        self.assertIn("OpenTofu owns provider resources", text)
         self.assertIn("Ansible owns Rocky Linux state", text)
         self.assertIn("OpenBao is the permanent secret authority", text)
         self.assertIn("operator peer private keys", text)

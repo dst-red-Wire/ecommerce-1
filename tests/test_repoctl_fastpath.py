@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -23,11 +24,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             with self.assertRaisesRegex(MOD.MissingRunnerPrerequisite, "runner prerequisite missing: ruby"):
                 MOD.require("ruby")
 
-    def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
+    def test_opentofu_check_uses_only_tofu(self):
         calls = []
         policy = {
             "formatter": {
-                "executable_preference": ["tofu", "terraform"],
+                "executable_preference": ["tofu"],
                 "args": ["fmt", "-check", "-recursive", "-diff"],
                 "drift_exit_codes": [3],
             },
@@ -38,7 +39,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         provider_lock = {
             "providers": {
                 "hcloud": {
-                    "source": "registry.terraform.io/hetznercloud/hcloud",
+                    "source": "registry.opentofu.org/hetznercloud/hcloud",
                     "version": "1.68.0",
                     "constraints": "1.68.0",
                     "hashes": ["h1:test", "zh:test"],
@@ -47,17 +48,19 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             "qualification": {
                 "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
+                "providers_args": ["providers"],
                 "provider_plugin_cache": {},
                 "repository_context_paths": ["config/infrastructure"],
             },
         }
 
         def fake_which(command):
-            return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
+            return {"tofu": "/opt/bin/tofu"}.get(command)
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            stdout = json.dumps({"Results": []}) if argv[:2] == ["trivy", "fs"] else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(
@@ -71,19 +74,23 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
             mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
-            self.assertEqual(0, MOD.terraform_check())
+            self.assertEqual(0, MOD.opentofu_check())
 
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+        self.assertTrue(any(call[1:] == ["providers"] for call in calls))
 
     def test_terraform_provider_lock_is_central_and_exact(self):
         contract = MOD.terraform_provider_lock_contract()
         self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
         self.assertEqual("platform/terraform", contract["scope"])
         self.assertEqual("exact", contract["status"])
+        self.assertEqual("opentofu", contract["iac_engine"]["authority"])
+        self.assertEqual("tofu", contract["iac_engine"]["command"])
+        self.assertEqual("forbidden", contract["iac_engine"]["terraform_cli"])
 
         provider = contract["providers"]["hcloud"]
-        self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])
+        self.assertEqual("registry.opentofu.org/hetznercloud/hcloud", provider["source"])
         self.assertEqual("1.68.0", provider["version"])
         self.assertEqual("1.68.0", provider["constraints"])
         self.assertTrue(any(value.startswith("h1:") for value in provider["hashes"]))
@@ -93,6 +100,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("non-authoritative", qualification["repository_lockfiles"]["authority"])
         self.assertFalse(qualification["repository_lockfiles"]["qualification_input"])
         self.assertIn("-lockfile=readonly", qualification["init_args"])
+        self.assertEqual(["providers"], qualification["providers_args"])
         self.assertEqual(["config/infrastructure"], qualification["repository_context_paths"])
 
     def test_terraform_native_lockfile_is_generated_from_central_contract(self):
@@ -101,7 +109,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             MOD.write_terraform_provider_lock(path)
             text = path.read_text(encoding="utf-8")
 
-        self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
+        self.assertIn('provider "registry.opentofu.org/hetznercloud/hcloud"', text)
         self.assertIn('version     = "1.68.0"', text)
         self.assertIn('constraints = "1.68.0"', text)
         self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
@@ -133,7 +141,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         )
         self.assertEqual(
             "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
-            policy["adapters"]["terraform"]["validation"]["provider_lock_authority"],
+            policy["adapters"]["opentofu"]["validation"]["provider_lock_authority"],
         )
 
     def test_repository_maximal_authority_model_is_root(self):
@@ -149,6 +157,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("cache_policy", domains["qualification_cache"]["machine_contract"])
         self.assertEqual("qualification_execution_policy", domains["qualification_execution"]["machine_contract"])
         self.assertEqual("roadmap_policy", domains["roadmap"]["machine_contract"])
+        self.assertEqual("engineering_metrics_policy", domains["engineering_metrics"]["machine_contract"])
         self.assertEqual("security_scan_policy", domains["security_scan"]["machine_contract"])
         self.assertEqual("terraform_provider_lock", domains["terraform_provider"]["machine_contract"])
         self.assertEqual("context_router", domains["context_routing"]["machine_contract"])
@@ -208,7 +217,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            stdout = json.dumps({"Results": []}) if argv[:2] == ["trivy", "fs"] else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(MOD, "require", return_value="/managed/tool"),
@@ -227,12 +237,95 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertNotIn("--scanners", trivy_calls[0])
         self.assertEqual("platform/tekton/tasks", trivy_calls[0][-1])
 
+    def test_security_propagates_trivy_findings_and_fails_closed_on_malformed_output(self):
+        cases = (
+            ("HIGH", False, 1),
+            ("LOW", False, 0),
+            (None, True, 1),
+        )
+        for severity, malformed, expected_rc in cases:
+            captured = {}
+
+            def fake_run(argv, **kwargs):
+                if argv[:2] == ["trivy", "fs"]:
+                    if malformed:
+                        stdout = "not-json"
+                    else:
+                        stdout = json.dumps(
+                            {
+                                "Results": [
+                                    {
+                                        "Type": "alpine",
+                                        "Vulnerabilities": [
+                                            {
+                                                "VulnerabilityID": "CVE-2026-1000",
+                                                "Severity": severity,
+                                                "PkgName": "libexample",
+                                                "InstalledVersion": "1.0.0",
+                                                "FixedVersion": "1.0.1",
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        )
+                    return subprocess.CompletedProcess(argv, 0, stdout, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            def fake_evaluate(payload, *_args, **_kwargs):
+                captured.update(payload)
+                scanner_failed = any(
+                    item.get("name") == "trivy" and item.get("status") == "FAIL"
+                    for item in payload["scanner_runs"]
+                )
+                blocking = scanner_failed or any(
+                    item.get("severity") == "HIGH" for item in payload["findings"]
+                )
+                return {
+                    "final_result": "BLOCK" if blocking else "PASS",
+                    "reasons": ["scanner failure"] if scanner_failed else [],
+                }
+
+            with (
+                self.subTest(severity=severity, malformed=malformed),
+                mock.patch.object(MOD, "require", return_value="/managed/tool"),
+                mock.patch.object(MOD, "changed_paths", return_value=[]),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+                mock.patch.object(MOD._cve_policy_api(), "evaluate", side_effect=fake_evaluate),
+                mock.patch.object(MOD._cve_policy_api(), "write_evidence"),
+                mock.patch.dict(os.environ, {"BASE": "origin/main", "HEAD": "HEAD"}, clear=False),
+            ):
+                self.assertEqual(expected_rc, MOD.security())
+            self.assertEqual(["trivy"], captured["required_scanners"])
+            if malformed:
+                self.assertEqual([], captured["findings"])
+                self.assertEqual("FAIL", captured["scanner_runs"][-1]["status"])
+            else:
+                self.assertEqual(severity, captured["findings"][0]["severity"])
+
     def test_security_scans_every_go_module_when_workspace_changes(self):
         calls = []
 
         def fake_run(argv, **kwargs):
             calls.append((argv, kwargs.get("cwd")))
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["trivy", "fs"]:
+                stdout = json.dumps({"Results": []})
+            elif argv[:1] == ["govulncheck"]:
+                stdout = json.dumps(
+                    {
+                        "config": {
+                            "scanner_name": "govulncheck",
+                            "scanner_version": "v1.8.0",
+                            "scan_mode": "source",
+                            "scan_level": "symbol",
+                            "db": "https://vuln.go.dev",
+                            "db_last_modified": "2026-09-16T18:00:43Z",
+                        }
+                    }
+                )
+            else:
+                stdout = ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(MOD, "require", return_value="/managed/tool"),
@@ -252,6 +345,38 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual(modules, gosec_modules)
         self.assertEqual(modules, govulncheck_modules)
 
+    def test_govulncheck_scan_writes_exact_symbol_evidence_under_context(self):
+        config = {
+            "config": {
+                "scanner_name": "govulncheck",
+                "scanner_version": "v1.8.0",
+                "scan_mode": "source",
+                "scan_level": "symbol",
+                "db": "https://vuln.go.dev",
+                "db_last_modified": "2026-09-16T18:00:43Z",
+            }
+        }
+        completed = subprocess.CompletedProcess(
+            ["govulncheck"], 0, json.dumps(config), ""
+        )
+        with tempfile.TemporaryDirectory(dir=MOD.CONTEXT) as directory:
+            destination = Path(directory) / "product.govulncheck.json"
+            with (
+                mock.patch.object(MOD, "require", return_value="govulncheck"),
+                mock.patch.object(MOD, "run", return_value=completed) as execute,
+            ):
+                self.assertEqual(
+                    0,
+                    MOD.govulncheck_scan_command(
+                        "services/product", "source", str(destination)
+                    ),
+                )
+            self.assertEqual(config, json.loads(destination.read_text(encoding="utf-8")))
+            command = execute.call_args.args[0]
+            self.assertIn("-mode=source", command)
+            self.assertIn("-scan=symbol", command)
+            self.assertEqual("./...", command[-1])
+
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ruff.toml"
@@ -263,15 +388,15 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertIn('"F82"', text)
 
     def test_declared_formatter_drift_is_advisory_but_execution_errors_block(self):
-        command = ["terraform", "fmt", "-check", "-recursive", "-diff"]
+        command = ["tofu", "fmt", "-check", "-recursive", "-diff"]
         drift = subprocess.CompletedProcess(command, 3, "format diff", "")
         with mock.patch.object(MOD, "run", return_value=drift):
-            MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
+            MOD.advisory_exit_check("tofu fmt", command, drift_exit_codes=[3])
 
         failure = subprocess.CompletedProcess(command, 2, "", "formatter crashed")
         with mock.patch.object(MOD, "run", return_value=failure):
             with self.assertRaisesRegex(RuntimeError, "formatter crashed"):
-                MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
+                MOD.advisory_exit_check("tofu fmt", command, drift_exit_codes=[3])
 
     def test_exact_state_skips_ansible_startup(self):
         with (

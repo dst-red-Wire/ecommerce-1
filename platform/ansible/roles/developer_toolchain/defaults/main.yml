@@ -7,9 +7,18 @@ active_tool_names: "{{ toolchain_lock.tool_lifecycle.active.keys() | list }}"
 managed_install_root: >-
   {{ lookup('ansible.builtin.env', toolchain_lock.capability_policy.managed_install_root.environment)
      | default(ansible_env.HOME + '/.local', true) }}
+managed_install_root_explicit: >-
+  {{ (lookup('ansible.builtin.env', toolchain_lock.capability_policy.managed_install_root.environment)
+      | default('', true) | length) > 0 }}
 local_bin: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.bin_subdirectory }}"
 local_share: "{{ managed_install_root }}/{{ toolchain_lock.capability_policy.managed_install_root.share_subdirectory }}"
-local_cache: "{{ toolchain_lock.capability_policy.managed_install_root.cache_subdirectory | regex_replace('^~', ansible_env.HOME) }}"
+local_cache: >-
+  {{ (managed_install_root + '/' + toolchain_lock.capability_policy.managed_install_root.cache_subdirectory)
+     if managed_install_root_explicit
+     else (toolchain_lock.capability_policy.managed_install_root.fallback_cache_root | regex_replace('^~', ansible_env.HOME)) }}
+toolchain_offline: >-
+  {{ lookup('ansible.builtin.env', toolchain_lock.capability_policy.managed_install_root.offline_environment)
+     | default('false', true) | bool }}
 docker_cli_plugin_dir: "{{ ansible_env.HOME }}/.docker/cli-plugins"
 node_version: "{{ lookup('ansible.builtin.ini', 'NODE_VERSION', type='properties', file=versions_file) }}"
 node_sha256: "{{ lookup('ansible.builtin.ini', 'NODE_SHA256_LINUX_X64', type='properties', file=versions_file) }}"
@@ -49,7 +58,5 @@ kubectl_version: "{{ lookup('ansible.builtin.ini', 'KUBECTL_VERSION', type='prop
 kubectl_sha256: "{{ lookup('ansible.builtin.ini', 'KUBECTL_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
 helm_version: "{{ lookup('ansible.builtin.ini', 'HELM_VERSION', type='properties', file=versions_file) }}"
 helm_sha256: "{{ lookup('ansible.builtin.ini', 'HELM_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
-terraform_version: "{{ lookup('ansible.builtin.ini', 'TERRAFORM_VERSION', type='properties', file=versions_file) }}"
-terraform_sha256: "{{ lookup('ansible.builtin.ini', 'TERRAFORM_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"
 kustomize_version: "{{ lookup('ansible.builtin.ini', 'KUSTOMIZE_VERSION', type='properties', file=versions_file) }}"
 kustomize_sha256: "{{ lookup('ansible.builtin.ini', 'KUSTOMIZE_SHA256_LINUX_AMD64', type='properties', file=versions_file) }}"

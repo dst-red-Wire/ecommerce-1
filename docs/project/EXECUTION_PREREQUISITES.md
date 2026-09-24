@@ -75,7 +75,7 @@ Required before M4 real deployment:
 - SeaweedFS;
 - Prometheus/Alertmanager/Grafana/OTel/Wazuh/log pipeline;
 - application build/runtime base images;
-- Terraform/OpenTofu providers/modules and Ansible collections.
+- OpenTofu providers/modules and Ansible collections; the Terraform CLI is forbidden.
 
 Rule: resolve compatibility as code/config and test it; do not add a new component or change topology merely to solve version friction without architecture review.
 

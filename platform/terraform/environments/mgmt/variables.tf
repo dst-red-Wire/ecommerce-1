@@ -83,7 +83,7 @@ variable "wireguard_udp_human_gate_confirmed" {
 }
 
 variable "hcloud_ssh_key_ids" {
-  description = "Explicit existing Hetzner SSH public-key IDs authorized for bootstrap access to the gateway and private nodes. No private key enters Terraform."
+  description = "Explicit existing Hetzner SSH public-key IDs authorized for bootstrap access to the gateway and private nodes. No private key enters OpenTofu."
   type        = list(number)
 
   validation {
