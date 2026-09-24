@@ -175,7 +175,8 @@ qualification evidence and cleanup evidence.
 The Linux profile requires a native Ubuntu 24.04 x86_64 host with
 readable/writable `/dev/kvm`, Packer 1.16.1 and the exact contracted QEMU 8.2.2
 package. It intentionally rejects WSL so Packer cannot become a second authority
-next to Packer Windows.
+next to Packer Windows. Host packages are verified by preflight and are never
+installed or upgraded automatically by this pipeline.
 
 ```console
 make image-rocky-linux-preflight
