@@ -16,4 +16,3 @@ deny contains message if {
     not input.metadata.labels.owner
     message := "metadata.labels.owner is required"
 }
-

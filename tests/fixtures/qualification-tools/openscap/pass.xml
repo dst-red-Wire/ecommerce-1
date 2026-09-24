@@ -3,4 +3,3 @@
   <rule-result idref="xccdf_rule_one"><result>pass</result></rule-result>
   <rule-result idref="xccdf_rule_two"><result>pass</result></rule-result>
 </TestResult>
-

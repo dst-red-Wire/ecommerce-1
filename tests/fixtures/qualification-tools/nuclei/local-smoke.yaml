@@ -15,4 +15,3 @@ http:
       - type: word
         part: body
         words: ["ecommerce-qualified"]
-

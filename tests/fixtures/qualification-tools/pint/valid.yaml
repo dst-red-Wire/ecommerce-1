@@ -8,4 +8,3 @@ groups:
           severity: warning
         annotations:
           summary: Qualification fixture
-
