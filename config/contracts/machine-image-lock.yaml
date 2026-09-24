@@ -104,8 +104,9 @@ packer_image:
     rke2:
       kind: build-profile
       extends: base
-      rpm_packages: []
-      external_tools: []
+      rpm_packages: [openscap-scanner, scap-security-guide]
+      external_tools: [kube-bench]
+      required_tools: [oscap, scap-security-guide, kube-bench]
       forbidden_tools: [gh, git, strace, sysstat, mtr, shellcheck, shfmt]
     admin-qualification:
       kind: build-profile
@@ -122,7 +123,7 @@ packer_image:
       rpm_packages: [qemu-guest-agent]
 
   kernel:
-    nevra: kernel-0:6.12.0-211.56.1.el10_2.0.1.x86_64
+    nevra: kernel-0:6.12.0-211.58.1.el10_2.x86_64
     modules_extra: required
     required_modules: [br_netfilter, nf_conntrack, overlay, vxlan]
 
@@ -211,6 +212,11 @@ packer_image:
       profile: admin-qualification
       version: 2.101.0
       offline_help_capabilities: [--paginate, --slurp]
+    rke2_security:
+      openscap_profile: xccdf_org.ssgproject.content_profile_cis_server_l1
+      openscap_datastream: /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml
+      kube_bench_profile: rke2-cis-1.9
+      kube_bench_profile_status: unsupported-for-rke2-v1.37
 
 responsibility_boundary:
   packer:

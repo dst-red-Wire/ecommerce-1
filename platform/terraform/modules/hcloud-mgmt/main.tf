@@ -261,7 +261,7 @@ resource "hcloud_firewall" "internal_nodes" {
 # Segment 401 is the provider primary private IP. Canonical K8S/storage/backup
 # addresses are reserved as aliases on the same Hetzner Network. Hetzner DHCP
 # configures only the primary address; host-side alias reconciliation remains an
-# Ansible-owned runtime prerequisite and is not claimed by this Terraform slice.
+# Ansible-owned runtime prerequisite and is not claimed by this OpenTofu slice.
 resource "hcloud_server_network" "node" {
   for_each = var.nodes
 

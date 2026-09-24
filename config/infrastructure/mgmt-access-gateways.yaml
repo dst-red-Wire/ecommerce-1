@@ -27,6 +27,6 @@ access_gateways:
       teardown: mandatory-after-wireguard-proof
     steady_public_ssh: forbidden
 implementation:
-  terraform_wiring: platform/terraform/modules/hcloud-mgmt
+  opentofu_wiring: platform/terraform/modules/hcloud-mgmt
   ansible_wiring: platform/ansible/roles/wireguard_gateway
   human_apply_gate: true

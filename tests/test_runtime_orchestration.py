@@ -281,10 +281,10 @@ class RuntimeOrchestrationTests(unittest.TestCase):
         plan = RuntimePlanner(policy(caps)).resolve([CapabilityRequest("tests")])
         self.assertEqual(["docker", "tests"], [item.spec.name for item in plan])
 
-    def test_command_probe_uses_first_available_approved_alternative(self):
+    def test_command_probe_uses_the_sole_approved_opentofu_command(self):
         item = PlannedCapability(
             CapabilitySpec(
-                name="terraform-runtime",
+                name="opentofu-runtime",
                 handler="command",
                 requires=(),
                 mutation_class="none",
@@ -295,17 +295,14 @@ class RuntimeOrchestrationTests(unittest.TestCase):
                 evidence_fields=("satisfied", "command", "exit_code"),
                 default_parameters={},
             ),
-            {"commands": [["tofu", "version"], ["terraform", "version"]]},
+            {"command": ["tofu", "version"]},
         )
         driver = BuiltinCapabilityDriver()
-        unavailable = subprocess.CompletedProcess(["tofu", "version"], 127, "", "")
-        available = subprocess.CompletedProcess(
-            ["terraform", "version"], 0, "Terraform v1.9.8\n", ""
-        )
-        with mock.patch.object(driver, "_run", side_effect=[unavailable, available]):
+        available = subprocess.CompletedProcess(["tofu", "version"], 0, "OpenTofu v1.12.6\n", "")
+        with mock.patch.object(driver, "_run", return_value=available):
             state = driver.capture(item)
         self.assertTrue(state["satisfied"])
-        self.assertEqual("terraform", state["command"])
+        self.assertEqual("tofu", state["command"])
 
     def test_system_docker_endpoint_is_preserved_without_rootless_override(self):
         item = planned("docker-runtime", "docker-rootless")

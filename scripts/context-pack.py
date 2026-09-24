@@ -23,6 +23,16 @@ OWNERSHIP = ROOT / "config/contracts/service-ownership.yaml"
 DEPS = ROOT / "config/contracts/dependency-map.yaml"
 PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
 
+PEM_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?"
+    r"-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+PEM_PRIVATE_KEY_BEGIN = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+
 
 class MissingManagedYq(RuntimeError):
     pass
@@ -128,8 +138,19 @@ def service_contract(name: str) -> str:
     )
 
 
+def context_input(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RuntimeError(f"context input must be repository-relative: {path}")
+    repository = ROOT.resolve()
+    target = (repository / candidate).resolve()
+    if target != repository and repository not in target.parents:
+        raise RuntimeError(f"context input escapes repository: {path}")
+    return target
+
+
 def excerpt(path: str, max_lines: int) -> str:
-    target = ROOT / path
+    target = context_input(path)
     if not target.is_file():
         return ""
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -144,7 +165,7 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
     AST extraction is best-effort context reduction only; it must never make a
     deterministic gate fail merely because a language pattern evolves.
     """
-    target = ROOT / path
+    target = context_input(path)
     if not target.is_file():
         return ""
     suffix = target.suffix.lower()
@@ -197,6 +218,88 @@ def bounded(text: str, max_bytes: int) -> str:
     return cut + marker
 
 
+def validate_router_contract(cfg: dict, lock: dict | None = None) -> None:
+    """Validate the agent-data boundary before reading repository content."""
+    access = cfg.get("agent_data_access")
+    if not isinstance(access, dict):
+        raise RuntimeError("context router is missing agent_data_access policy")
+    expected = {
+        "authority": "architecture.lock.yaml#machine_contracts.context_router",
+        "default_mode": "read-only",
+        "least_privilege": "required",
+        "secret_values": "forbidden",
+        "production_credentials": "forbidden",
+        "private_keys": "forbidden",
+        "unbounded_environment_dump": "forbidden",
+        "output_root": ".context",
+        "maximum_override_policy": "may-reduce-never-increase-level-budget",
+    }
+    for key, value in expected.items():
+        if access.get(key) != value:
+            raise RuntimeError(f"invalid context access policy: {key}")
+    authority = lock if lock is not None else yq_json(".", ROOT / "architecture.lock.yaml")
+    registry = authority.get("machine_contracts", {}) if isinstance(authority, dict) else {}
+    prefix = "architecture.lock.yaml#machine_contracts."
+    references = access.get("contract_references")
+    if not isinstance(references, list) or not references:
+        raise RuntimeError("context router must declare bounded contract references")
+    for reference in references:
+        if not isinstance(reference, str) or not reference.startswith(prefix):
+            raise RuntimeError(f"invalid context authority reference: {reference!r}")
+        role = reference.removeprefix(prefix)
+        if role not in registry:
+            raise RuntimeError(f"unknown context contract reference: {role}")
+    for level, values in cfg.get("levels", {}).items():
+        budget = values.get("max_bytes") if isinstance(values, dict) else None
+        if type(budget) is not int or budget <= 0:
+            raise RuntimeError(f"context level {level} must have a positive byte budget")
+
+
+def guard_context_paths(paths: list[str], cfg: dict) -> None:
+    patterns = cfg["agent_data_access"].get("forbidden_path_patterns", [])
+    for path in paths:
+        normalized = path.replace("\\", "/")
+        context_input(path)
+        if any(re.search(str(pattern), normalized) for pattern in patterns):
+            raise RuntimeError(f"context input is forbidden by least-privilege policy: {path}")
+
+
+def redact_sensitive(text: str, cfg: dict) -> str:
+    redacted = PEM_PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY BY CONTEXT POLICY]", text)
+    incomplete = PEM_PRIVATE_KEY_BEGIN.search(redacted)
+    if incomplete:
+        redacted = redacted[: incomplete.start()] + "[REDACTED INCOMPLETE PRIVATE KEY BY CONTEXT POLICY]"
+    for pattern in cfg["agent_data_access"].get("redaction_patterns", []):
+        redacted = re.sub(
+            str(pattern),
+            "[REDACTED BY CONTEXT POLICY]",
+            redacted,
+            flags=re.MULTILINE,
+        )
+    return redacted
+
+
+def output_path(relative: str, cfg: dict) -> Path:
+    candidate = Path(relative)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RuntimeError("context output must be repository-relative")
+    root = (ROOT / str(cfg["agent_data_access"]["output_root"])).resolve()
+    destination = (ROOT / candidate).resolve()
+    if destination != root and root not in destination.parents:
+        raise RuntimeError("context output must remain under the governed .context root")
+    return destination
+
+
+def resolve_byte_budget(level_budget: int, override: str | None) -> int:
+    try:
+        requested = int(override) if override is not None else int(level_budget)
+    except ValueError as exc:
+        raise RuntimeError("context byte budget override must be an integer") from exc
+    if requested <= 0 or requested > int(level_budget):
+        raise RuntimeError(f"context byte budget override must be between 1 and {level_budget}")
+    return requested
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", required=True)
@@ -205,10 +308,13 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = yq_json(".", ROUTER)
+    validate_router_contract(cfg)
     files = changed_files(args.base)
+    guard_context_paths(files, cfg)
     level = route(args.task, files)
     level_cfg = cfg["levels"][level]
-    max_bytes = int(os.environ.get("CONTEXT_MAX_BYTES", level_cfg["max_bytes"]))
+    level_budget = int(level_cfg["max_bytes"])
+    max_bytes = resolve_byte_budget(level_budget, os.environ.get("CONTEXT_MAX_BYTES"))
     max_diff_lines = int(level_cfg["max_diff_lines"])
     max_excerpt_lines = int(level_cfg["max_excerpt_lines"])
     services = detect_services(args.task, files)
@@ -228,6 +334,7 @@ def main() -> int:
     ]
 
     canonical = cfg.get("canonical", {}).get(level, [])
+    guard_context_paths(canonical, cfg)
     if canonical:
         parts += ["", "## Canonical pointers", *[f"- {path}" for path in canonical]]
 
@@ -265,8 +372,8 @@ def main() -> int:
             lines = lines[:max_diff_lines] + [f"... diff truncated after {max_diff_lines} lines ..."]
         parts += ["", "## Focused diff", "```diff", "\n".join(lines), "```"]
 
-    output = bounded("\n".join(parts) + "\n", max_bytes)
-    destination = ROOT / args.output
+    output = bounded(redact_sensitive("\n".join(parts) + "\n", cfg), max_bytes)
+    destination = output_path(args.output, cfg)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(output, encoding="utf-8")
     print(output, end="")
@@ -278,5 +385,8 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except MissingManagedYq as exc:
+        print(f"BLOCKED {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except (RuntimeError, ValueError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         raise SystemExit(1) from None

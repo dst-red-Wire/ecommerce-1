@@ -1,0 +1,200 @@
+version: 1
+kind: EngineeringMetricsPolicy
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: engineering-system-not-individuals
+
+principles:
+  formula_authority: this-contract
+  measure_system_not_individuals: true
+  contract_is_not_implementation_proof: true
+  missing_data: unknown-not-zero
+  exact_sha_evidence_required: true
+  fabricated_runtime_data: forbidden
+  optimization_model: evidence-feedback-experiment
+
+calculation:
+  timestamp_format: RFC3339-UTC
+  event_identity: event_id
+  duplicate_event: reject
+  input_order: irrelevant-sort-by-timestamp-then-event-id
+  default_window_days: 30
+  empty_window: MISSING
+  percentages: zero-to-one-hundred
+  durations: seconds
+
+dora:
+  change_lead_time:
+    meaning: elapsed-time-from-committed-change-to-successful-deployment
+    event_sources: [git.change_committed, delivery.deployment_succeeded]
+    start_event: change_committed
+    end_event: deployment_succeeded
+    correlation_key: change_id
+    window_days: 30
+    unit: seconds
+    aggregation: [median, p90]
+    formula: end_timestamp-minus-start_timestamp
+    missing_data: MISSING
+    evidence: exact-event-set-and-calculation-record
+  deployment_frequency:
+    meaning: successful-production-deployments-per-day
+    event_sources: [delivery.deployment_succeeded]
+    start_event: window_start
+    end_event: window_end
+    window_days: 30
+    unit: deployments-per-day
+    aggregation: count-divided-by-window-days
+    formula: successful_deployments/window_days
+    missing_data: MISSING
+    evidence: exact-deployment-event-set
+  failed_deployment_recovery_time:
+    meaning: elapsed-time-from-failed-deployment-to-restored-service
+    event_sources: [delivery.deployment_failed, incident.deployment_recovered]
+    start_event: deployment_failed
+    end_event: deployment_recovered
+    correlation_key: deployment_id
+    window_days: 30
+    unit: seconds
+    aggregation: [median, p90]
+    formula: recovery_timestamp-minus-failure_timestamp
+    missing_data: MISSING
+    evidence: correlated-failure-recovery-events
+  change_fail_rate:
+    meaning: percentage-of-completed-deployments-causing-failure
+    event_sources: [delivery.deployment_succeeded, delivery.deployment_failed]
+    start_event: window_start
+    end_event: window_end
+    window_days: 30
+    unit: percent
+    aggregation: ratio
+    formula: failed_deployments/completed_deployments*100
+    missing_data: MISSING
+    evidence: exact-completed-deployment-event-set
+  deployment_rework_rate:
+    meaning: percentage-of-completed-deployments-requiring-rollback-or-corrective-redeploy
+    event_sources: [delivery.deployment_succeeded, delivery.deployment_failed, delivery.deployment_reworked]
+    start_event: deployment_completed
+    end_event: rollback-or-corrective-redeploy
+    correlation_key: deployment_id
+    window_days: 30
+    unit: percent
+    aggregation: ratio
+    formula: unique_reworked_deployments/completed_deployments*100
+    missing_data: MISSING
+    evidence: correlated-deployment-rework-events
+
+reliability:
+  slo_attainment: {source: service-slo, formula: good_events/total_events*100, missing_data: MISSING}
+  error_budget_remaining: {source: service-slo, formula: allowed_bad_events-observed_bad_events, missing_data: MISSING}
+  error_budget_burn_rate: {source: service-slo, formula: observed_bad_event_ratio/allowed_bad_event_ratio, missing_data: MISSING}
+  mean_time_to_recovery: {source: incident-events, formula: mean(recovery_timestamp-start_timestamp), missing_data: MISSING}
+  incident_rate: {source: incident-events, formula: incidents/window_days, missing_data: MISSING}
+  rollback_rate: {source: deployment-events, formula: rollbacks/completed_deployments*100, missing_data: MISSING}
+  availability: {source: telemetry, formula: good_events/total_events*100, missing_data: MISSING}
+  latency: {source: telemetry, formula: histogram-quantiles, missing_data: MISSING}
+
+quality:
+  escaped_defects: {source: incident-and-defect-events, formula: production_defects/window, missing_data: MISSING}
+  regression_rate: {source: qualification-events, formula: regression_failures/changes*100, missing_data: MISSING}
+  test_feedback_latency: {source: qualification-events, formula: result_timestamp-start_timestamp, missing_data: MISSING}
+  flaky_test_rate: {source: qualification-events, formula: flaky_tests/executed_tests*100, missing_data: MISSING}
+  rework: {source: change-events, formula: corrective_changes/all_changes*100, missing_data: MISSING}
+  failed_qualification: {source: qualification-events, formula: failed_runs/all_runs*100, missing_data: MISSING}
+  coverage: {source: test-evidence, formula: covered_units/measured_units*100, role: supporting-signal-not-sole-kpi}
+  contract_failures: {source: contract-gates, formula: failed_contract_gates/window, missing_data: MISSING}
+
+security:
+  blocking_vulnerabilities: {source: security-scan-evidence, formula: count(decision=BLOCK), missing_data: MISSING}
+  cve_age: {source: security-scan-evidence, formula: observation_timestamp-first_detected_timestamp, missing_data: MISSING}
+  remediation_time: {source: security-scan-evidence, formula: remediated_timestamp-first_detected_timestamp, missing_data: MISSING}
+  expired_exceptions: {source: security-scan-evidence, formula: count(exception_expired), missing_data: MISSING}
+  supply_chain_verification: {source: provenance-evidence, formula: verified_artifacts/all_release_artifacts*100, missing_data: MISSING}
+  unsigned_artifacts: {source: provenance-evidence, formula: count(signature_missing), missing_data: MISSING}
+  secret_findings: {source: security-gate, formula: count(secret_finding), missing_data: MISSING}
+  policy_violations: {source: governance-gates, formula: count(policy_violation), missing_data: MISSING}
+
+devex:
+  time_to_first_successful_build: {source: ci-events, formula: first_success_timestamp-onboarding_start_timestamp, missing_data: MISSING}
+  time_to_preview: {source: preview-events, formula: preview_ready_timestamp-request_timestamp, missing_data: MISSING}
+  pr_feedback_latency: {source: forge-events, formula: first_feedback_timestamp-pr_opened_timestamp, missing_data: MISSING}
+  environment_provisioning_latency: {source: platform-events, formula: ready_timestamp-request_timestamp, missing_data: MISSING}
+  flaky_test_burden: {source: qualification-events, formula: flaky_retry_seconds/window, missing_data: MISSING}
+  manual_steps: {source: workflow-events, formula: count(manual_interventions), missing_data: MISSING}
+  tool_failure_rate: {source: tool-events, formula: failed_tool_runs/all_tool_runs*100, missing_data: MISSING}
+  developer_friction: {source: governed-anonymous-survey, formula: declared-survey-model, missing_data: MISSING}
+  cognitive_load_signals: {source: governed-anonymous-survey, formula: declared-survey-model, missing_data: MISSING}
+  forbidden_individual_productivity_kpis:
+    - lines_of_code
+    - commit_count
+    - pull_request_count
+    - tickets_closed
+    - hours_online
+    - number_of_ai_prompts
+
+finops_value:
+  proof_state_until-runtime-data: CONTRACTED
+  metrics:
+    cost_per_environment: {source: infrastructure-cost-and-environment-events, missing_data: MISSING}
+    cost_per_deployment: {source: infrastructure-cost-and-deployment-events, missing_data: MISSING}
+    cost_per_request: {source: infrastructure-cost-and-telemetry, missing_data: MISSING}
+    cost_per_order: {source: infrastructure-cost-and-order-events, missing_data: MISSING}
+    resource_utilization: {source: telemetry, missing_data: MISSING}
+    idle_waste: {source: telemetry-and-cost, missing_data: MISSING}
+    business_value: {source: product-outcomes, missing_data: MISSING}
+
+product_outcomes:
+  proof_state_until-m5-m6-data: CONTRACTED
+  metrics:
+    - conversion
+    - checkout_success
+    - payment_success
+    - availability
+    - latency
+    - abandonment
+    - returns
+    - customer_satisfaction
+  linkage: engineering-change-to-technical-outcome-to-product-outcome
+
+ai_effectiveness:
+  proof_state_without-human-verified-events: CONTRACTED
+  metrics:
+    - cycle_time_impact
+    - review_rework_impact
+    - defect_impact
+    - qualification_failure_impact
+    - human_verification_effort
+    - accepted_rejected_agent_changes
+    - rollback_impact
+  productivity_proxy_number_of_prompts: forbidden
+  human_verification_required: true
+
+experiments:
+  lifecycle: [baseline, hypothesis, experiment, measurement, comparison, decision, keep-or-rollback, standardisation]
+  required_fields:
+    - experiment_id
+    - owner
+    - hypothesis
+    - baseline_evidence
+    - change_sha
+    - metric
+    - expected_direction
+    - measurement_window
+    - result
+    - decision
+    - evidence
+  expected_directions: [increase, decrease]
+  decisions: [KEEP, ROLLBACK, IMPROVE]
+  evidence_root: .context/experiments
+  exact_change_sha_required: true
+  standardisation_requires_keep: true
+
+evidence:
+  schema_version: 1
+  root: .context/evidence/engineering-metrics
+  required_identity:
+    - head_sha
+    - head_tree_sha
+    - policy_sha256
+    - input_sha256
+    - window
+    - generated_at

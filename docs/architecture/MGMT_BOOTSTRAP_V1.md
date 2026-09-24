@@ -10,14 +10,14 @@ qualified.
 ## Boundary and ownership
 
 M2.5 is unlocked by M1 alone. It creates no M3 PREPROD resources and does not
-activate M4. Terraform/OpenTofu owns one Hetzner Network, its six contract-derived
+activate M4. OpenTofu owns one Hetzner Network, its six contract-derived
 subnets, seven servers (three RKE2 servers, three agents, and the dedicated
 WireGuard gateway), private attachments, and two provider firewalls. Node names,
 addresses, profiles, and segments are decoded directly from the canonical YAML.
 Provider server-type and Rocky Linux 10.2 image mappings remain explicit reviewed
 runtime inputs because provider SKUs cannot be inferred from resource intent.
 
-Terraform does not install packages, render RKE2 configuration, configure
+OpenTofu does not install packages, render RKE2 configuration, configure
 systemd, or install Kubernetes software. Packer owns the common Rocky Linux 10.2
 prerequisites; Ansible owns runtime machine identity and configuration,
 private address aliases, the WireGuard host, and pinned RKE2 server/agent setup.
@@ -39,7 +39,7 @@ WireGuard UDP port and public SSH is forbidden. Internal-node SSH is limited to
 the canonical management segment. Host routing and exact scoped SNAT remain
 Ansible-owned, default forwarding is denied by contract,
 and operator/break-glass peer issuance remains a separately authorized runtime
-ceremony. No operator CIDR is invented by Terraform.
+ceremony. No operator CIDR is invented by OpenTofu.
 
 Management, Kubernetes, storage, and backup addresses remain distinct canonical
 segments. Hetzner realizes them as subnets in one private Network and reserves
@@ -51,7 +51,7 @@ ownership.
 
 The same non-circular rule applies to WireGuard authority. The bootstrap key is
 generated cryptographically on `wg-01`, stays root-owned mode `0600`, and never
-returns to Terraform, inventory, Git, or controller output. After M4 performs a
+returns to OpenTofu, inventory, Git, or controller output. After M4 performs a
 governed OpenBao activation, it must establish persistent records, rotate to a
 new OpenBao-controlled gateway key (copying the bootstrap key is forbidden),
 switch Ansible to `runtime-openbao-read`, delete the bootstrap key and peer

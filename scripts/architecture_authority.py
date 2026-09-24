@@ -148,6 +148,7 @@ V5_SECTION_KEYS = {
             "gate_executable_inventory",
             "container",
             "machine_images",
+            "iac",
             "security",
             "secrets",
             "performance",
@@ -170,7 +171,7 @@ V5_SECTION_KEYS = {
     ),
     "management_plane.bootstrap": frozenset(
         {
-            "terraform_opentofu",
+            "opentofu",
             "ansible",
             "requires_human_apply_gate",
         }
@@ -182,6 +183,9 @@ V5_SECTION_KEYS = {
             "principles",
             "runtime_boundary",
             "backstage_pr_contract",
+            "golden_paths",
+            "developer_hub",
+            "platform_orchestrator",
             "git_contract",
             "pull_request_contract",
             "platform_request_api",
@@ -222,6 +226,46 @@ V5_SECTION_KEYS = {
             "allowed_operations",
             "forbidden_operations",
             "gitea_pull_request_action",
+        }
+    ),
+    "developer_platform.golden_paths": frozenset(
+        {
+            "status",
+            "implementation_milestone",
+            "proof_milestone",
+            "change_authority",
+            "properties",
+            "request_kinds",
+        }
+    ),
+    "developer_platform.developer_hub": frozenset(
+        {
+            "implementation",
+            "status",
+            "implementation_milestone",
+            "proof_milestone",
+            "exposes",
+            "mutation_authority",
+        }
+    ),
+    "developer_platform.platform_orchestrator": frozenset(
+        {
+            "implementation",
+            "status",
+            "implementation_milestone",
+            "proof_milestone",
+            "role",
+            "request_source",
+            "machine_contract",
+            "state_store",
+            "deployment_authority",
+            "manifest_composition",
+            "package_format",
+            "target_runtime",
+            "destinations",
+            "direct_cluster_apply",
+            "bundled_flux",
+            "bundled_object_store",
         }
     ),
     "developer_platform.git_contract": frozenset(
@@ -272,7 +316,7 @@ V5_SECTION_KEYS = {
             "crossplane_materializes_platform_api",
         }
     ),
-    "developer_platform.infrastructure_ownership": frozenset({"terraform_opentofu", "crossplane"}),
+    "developer_platform.infrastructure_ownership": frozenset({"opentofu", "crossplane"}),
     "developer_platform.preview_lifecycle": frozenset(
         {
             "creation",
@@ -426,7 +470,7 @@ V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.sectors"] = frozen
 for sector in V5_QCE_SECTORS:
     V5_SECTION_KEYS[f"developer_platform.quality_cloud_engineering.sectors.{sector}"] = V5_QCE_SECTOR_FIELDS
 V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting"] = frozenset(
-    {"security", "culture", "ai_agent"}
+    {"security", "culture", "data_driven", "ai_agent"}
 )
 V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.security"] = frozenset(
     {"owner", "applies_to_all_sectors", "evidence_required"}
@@ -434,10 +478,25 @@ V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.secu
 V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.culture"] = frozenset(
     {"owner", "applies_to_all_sectors", "explicit_ownership_required", "documentation_as_code_required"}
 )
+V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.data_driven"] = frozenset(
+    {
+        "owner",
+        "applies_to_all_sectors",
+        "decision_model",
+        "measurement_owner",
+        "evidence_required",
+        "continuous_improvement_required",
+        "small_batch_delivery",
+        "universal_size_limit",
+    }
+)
 V5_SECTION_KEYS["developer_platform.quality_cloud_engineering.cross_cutting.ai_agent"] = frozenset(
     {
         "owner", "applies_to_all_sectors", "role", "authoritative_gate",
         "may_bypass_required_gates", "may_merge", "may_deploy_production_directly",
+        "human_accountability", "user_centric_focus", "strong_version_control",
+        "small_batch_delivery", "ai_stance", "internal_platform", "data_ecosystem",
+        "ai_accessible_internal_data",
     }
 )
 
@@ -586,6 +645,27 @@ def lock_schema_errors(lock):
         and culture["documentation_as_code_required"]
     ):
         errors.append("quality_cloud_engineering culture must preserve ownership and documentation-as-code")
+    data_driven = cross_cutting["data_driven"]
+    expected_decision_model = [
+        "observe",
+        "measure",
+        "detect",
+        "hypothesis",
+        "small-experiment",
+        "measure-outcome",
+        "keep-rollback-improve",
+        "standardise",
+    ]
+    if (
+        data_driven["owner"] != "developer-experience"
+        or not data_driven["applies_to_all_sectors"]
+        or data_driven["decision_model"] != expected_decision_model
+        or data_driven["measurement_owner"] != "measuring_engineering"
+        or not data_driven["evidence_required"]
+        or not data_driven["continuous_improvement_required"]
+        or data_driven["universal_size_limit"] != "forbidden"
+    ):
+        errors.append("quality_cloud_engineering data_driven must remain transverse and evidence-led")
     ai_agent = cross_cutting["ai_agent"]
     if (
         not ai_agent["applies_to_all_sectors"]
@@ -594,8 +674,70 @@ def lock_schema_errors(lock):
         or ai_agent["may_bypass_required_gates"]
         or ai_agent["may_merge"]
         or ai_agent["may_deploy_production_directly"]
+        or ai_agent["human_accountability"] != "required"
+        or ai_agent["user_centric_focus"] != "required"
+        or ai_agent["strong_version_control"] != "required"
+        or ai_agent["small_batch_delivery"] != "required"
+        or ai_agent["ai_stance"] != "assist-with-human-verification"
+        or ai_agent["internal_platform"] != "quality-required"
+        or ai_agent["data_ecosystem"] != "healthy-required"
+        or ai_agent["ai_accessible_internal_data"] != "read-only-least-privilege-audited"
     ):
         errors.append("quality_cloud_engineering AI agent must remain non-authoritative")
+
+    golden_paths = lock["developer_platform"]["golden_paths"]
+    expected_path_properties = {
+        "safe-by-default",
+        "secure-by-default",
+        "observable-by-default",
+        "versioned",
+        "reproducible",
+        "policy-compliant",
+    }
+    expected_request_kinds = {
+        "new-service",
+        "new-api",
+        "new-database",
+        "new-event-topic",
+        "new-secret",
+        "new-workload",
+        "new-environment",
+        "new-slo-dashboard",
+        "new-dependency",
+    }
+    if (
+        golden_paths["change_authority"] != "git-pull-request"
+        or set(golden_paths["properties"]) != expected_path_properties
+        or set(golden_paths["request_kinds"]) != expected_request_kinds
+    ):
+        errors.append("developer platform golden paths must remain PR-governed and safe by default")
+    developer_hub = lock["developer_platform"]["developer_hub"]
+    if (
+        developer_hub["implementation"] != "backstage"
+        or developer_hub["status"] != "contracted"
+        or developer_hub["mutation_authority"] != "developer_platform.backstage_pr_contract"
+    ):
+        errors.append("developer hub must remain contracted to Backstage without direct mutation authority")
+    platform_orchestrator = lock["developer_platform"]["platform_orchestrator"]
+    if (
+        platform_orchestrator["implementation"] != "kratix-oss"
+        or platform_orchestrator["status"] != "contracted"
+        or platform_orchestrator["request_source"] != "developer-hub"
+        or platform_orchestrator["machine_contract"]
+        != "architecture.lock.yaml#machine_contracts.kratix_platform"
+        or platform_orchestrator["state_store"] != "gitea-gitstatestore"
+        or platform_orchestrator["deployment_authority"] != "rancher-fleet"
+        or platform_orchestrator["manifest_composition"] != "kustomize"
+        or platform_orchestrator["package_format"] != "helm"
+        or platform_orchestrator["target_runtime"] != "rke2"
+        or platform_orchestrator["destinations"] != ["lab", "preprod", "prod"]
+        or platform_orchestrator["direct_cluster_apply"] != "forbidden"
+        or platform_orchestrator["bundled_flux"] != "forbidden"
+        or platform_orchestrator["bundled_object_store"] != "forbidden"
+    ):
+        errors.append(
+            "Kratix must remain a Fleet-deployed, Gitea-backed orchestrator composed by Kustomize with Helm packages"
+        )
 
     prod = lock["prod_certified_topology"]
     for field in V5_PROD_TOPOLOGY_KEYS - {"sites"}:
@@ -1209,6 +1351,32 @@ def validate(root):
             if not (root / relative).is_file():
                 errors.append(f"missing machine contract: {relative}")
 
+        kratix = load_yaml(root / lock["machine_contracts"]["kratix_platform"])
+        kratix_commit = "d50cebceb33defc1f6b9882a009bb1436f0aa3f4"
+        kratix_digest = "sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7"
+        if (
+            kratix.get("status") != "exact"
+            or kratix.get("component", {}).get("name") != "kratix-oss"
+            or kratix.get("component", {}).get("deployment_status")
+            != "contracted-blocked-upstream-cve"
+            or kratix.get("upstream", {}).get("commit") != kratix_commit
+            or kratix.get("controller_image", {}).get("index_digest") != kratix_digest
+            or not kratix.get("controller_image", {}).get("reference", "").endswith("@" + kratix_digest)
+            or kratix.get("installation", {}).get("owner") != "rancher-fleet"
+            or kratix.get("installation", {}).get("composition") != "kustomize"
+            or kratix.get("promise_packaging", {}).get("format") != "helm"
+            or kratix.get("state_store", {}).get("provider") != "gitea"
+            or kratix.get("state_store", {}).get("credentials_source") != "openbao-via-eso"
+            or kratix.get("state_store", {}).get("shared_write_identity") != "forbidden"
+            or kratix.get("reconciliation", {}).get("sole_gitops_authority") != "rancher-fleet"
+            or kratix.get("reconciliation", {}).get("bundled_flux") != "forbidden"
+            or kratix.get("reconciliation", {}).get("bundled_object_store") != "forbidden"
+            or kratix.get("installation", {}).get("fleet_bundle_paused") is not True
+            or kratix.get("security_qualification", {}).get("final_result") != "BLOCK"
+            or kratix.get("security_qualification", {}).get("deployment_permitted") is not False
+            or kratix.get("security_qualification", {}).get("automatic_exception") != "forbidden"
+        ):
+            errors.append("Kratix machine contract must preserve exact pins and Fleet/Gitea authority boundaries")
         review_policy = load_yaml(root / lock["machine_contracts"]["review_policy"])
         inherited_owner_authorization = (
             review_policy.get("pull_request_review", {}).get("owner_authorization", {})
@@ -1337,8 +1505,8 @@ def validate(root):
                 errors.append(f"management_plane.{field} contradicts subordinate MGMT contracts")
         bootstrap = management.get("bootstrap", {})
         if (
-            bootstrap.get("terraform_opentofu") is not True
-            or inventory.get("bootstrap", {}).get("infrastructure") != "terraform-opentofu"
+            bootstrap.get("opentofu") is not True
+            or inventory.get("bootstrap", {}).get("infrastructure") != "opentofu"
             or bootstrap.get("ansible") is not True
             or inventory.get("bootstrap", {}).get("configuration") != "ansible"
         ):
@@ -1412,7 +1580,8 @@ def validate(root):
             "Istio",
             "OpenBao/ESO",
             "Harbor",
-            "Tekton",
+            "Tekton + cert-manager",
+            "Kratix/Kustomize/Helm",
             "observability/security logging",
             "stateful platform",
         ]
@@ -1557,6 +1726,10 @@ def validate(root):
         canonical_l2_contracts = (
             INDEX,
             lock["machine_contracts"]["deployment_waves"],
+            lock["machine_contracts"]["kratix_platform"],
+            lock["machine_contracts"]["security_scan_policy"],
+            lock["machine_contracts"]["service_slo"],
+            lock["machine_contracts"]["engineering_metrics_policy"],
             topology_contracts["aiops"],
             topology_contracts["mlops"],
         )
@@ -1567,9 +1740,42 @@ def validate(root):
             relative = lock["machine_contracts"][key]
             if relative not in l2_patterns or relative not in l2_canonical:
                 errors.append(f"L2 context must include exact contract: {relative}")
-        for keyword in ("resilience", "recovery", "mlops", "aiops"):
+        for keyword in (
+            "resilience",
+            "recovery",
+            "mlops",
+            "aiops",
+            "qce",
+            "cve",
+            "slo",
+            "engineering metrics",
+            "context engineering",
+            "kratix",
+            "kustomize",
+            "helm",
+        ):
             if keyword not in router["levels"]["L2"]["task_keywords"]:
                 errors.append(f"L2 context must route {keyword} tasks")
+        agent_access = router.get("agent_data_access", {})
+        if (
+            agent_access.get("authority") != "architecture.lock.yaml#machine_contracts.context_router"
+            or agent_access.get("default_mode") != "read-only"
+            or agent_access.get("least_privilege") != "required"
+            or agent_access.get("secret_values") != "forbidden"
+            or agent_access.get("production_credentials") != "forbidden"
+            or agent_access.get("private_keys") != "forbidden"
+            or agent_access.get("unbounded_environment_dump") != "forbidden"
+            or agent_access.get("maximum_override_policy") != "may-reduce-never-increase-level-budget"
+        ):
+            errors.append("agent context access must remain bounded, read-only, least-privilege, and secret-free")
+        for reference in agent_access.get("contract_references", []):
+            prefix = "architecture.lock.yaml#machine_contracts."
+            if not isinstance(reference, str) or not reference.startswith(prefix):
+                errors.append(f"agent context contains invalid authority reference: {reference!r}")
+                continue
+            role = reference.removeprefix(prefix)
+            if role not in lock["machine_contracts"]:
+                errors.append(f"agent context references unknown machine contract: {role}")
         for old in ("BASELINE_V2.md", "EXACT_TOPOLOGY_V2.md"):
             if (root / "docs/architecture" / old).exists():
                 errors.append(f"removed architecture document reintroduced: {old}")

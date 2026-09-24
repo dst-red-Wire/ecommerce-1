@@ -56,9 +56,11 @@ class PackerImageContractTest(unittest.TestCase):
     def test_profile_roots_have_one_central_definition(self):
         profiles = self.image["profiles"]
         base = set(profiles["base"]["rpm_packages"])
+        rke2 = set(profiles["rke2"]["rpm_packages"])
         admin = set(profiles["admin-qualification"]["rpm_packages"])
         qemu = set(self.image["hypervisors"]["qemu_kvm"]["rpm_packages"])
         self.assertFalse(base & admin)
+        self.assertFalse(base & rke2)
         self.assertFalse(base & qemu)
         self.assertFalse(admin & qemu)
         for required in (
@@ -86,6 +88,7 @@ class PackerImageContractTest(unittest.TestCase):
         ):
             self.assertIn(required, base)
         self.assertEqual(admin, {"git", "strace", "sysstat", "mtr", "ShellCheck"})
+        self.assertEqual(rke2, {"openscap-scanner", "scap-security-guide"})
         self.assertEqual(qemu, {"qemu-guest-agent"})
         self.assertNotIn("qemu-guest-agent", base)
 
@@ -95,6 +98,7 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertTrue(manifest_is_valid(self.package_lock))
         roots = {
             "base": self.image["profiles"]["base"]["rpm_packages"],
+            "rke2": self.image["profiles"]["rke2"]["rpm_packages"],
             "qemu-kvm": self.image["hypervisors"]["qemu_kvm"]["rpm_packages"],
             "admin-qualification": self.image["profiles"]["admin-qualification"][
                 "rpm_packages"
@@ -114,12 +118,27 @@ class PackerImageContractTest(unittest.TestCase):
                 self.assertNotIn("nevra", entry)
             files[profile] = {entry["file"] for entry in definition["packages"]}
         self.assertFalse(files["base"] & files["qemu-kvm"])
+        self.assertFalse(files["base"] & files["rke2"])
         self.assertFalse(files["base"] & files["admin-qualification"])
         sources = self.image["packages"]["sources"]
         self.assertEqual(
             self.package_lock["rpm_signing_keys"],
             [sources["rocky"]["signing_key"], sources["epel"]["signing_key"]],
         )
+
+    def test_kernel_nevra_matches_the_approved_package_lock(self):
+        kernels = [
+            entry
+            for entry in self.package_lock["profiles"]["base"]["packages"]
+            if entry["package"] == "kernel"
+        ]
+        self.assertEqual(1, len(kernels))
+        kernel = kernels[0]
+        expected = (
+            f"{kernel['package']}-{kernel['epoch']}:{kernel['version']}-"
+            f"{kernel['release']}.{kernel['architecture']}"
+        )
+        self.assertEqual(expected, self.image["kernel"]["nevra"])
 
     def test_materializer_reports_expected_and_actual_digest(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +163,7 @@ class PackerImageContractTest(unittest.TestCase):
             "yq": ("4.53.6", "rocky-10.2-base"),
             "gh": ("2.101.0", "rocky-10.2-admin-qualification"),
             "shfmt": ("3.14.1", "rocky-10.2-admin-qualification"),
+            "kube-bench": ("0.16.0", "rocky-10.2-rke2"),
         }
         for name, (version, scope) in expected.items():
             tool = self.toolchain["tools"][name]
@@ -193,6 +213,11 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn("PACKER_BUILDER_TYPE", self.packer)
         self.assertIn("qemu-guest-agent; else ! rpm -q qemu-guest-agent", self.packer)
         self.assertIn("--profile admin-qualification", self.packer)
+        self.assertIn("--profile rke2", self.packer)
+        self.assertIn("--rpm-profile rke2", self.packer)
+        self.assertIn("oscap --version", self.packer)
+        self.assertIn("ssg-rl10-ds.xml", self.packer)
+        self.assertIn("kube-bench version", self.packer)
         for version in ("15.2.0", "10.4.2", "4.53.6", "2.101.0", "3.14.1"):
             self.assertNotIn(version, self.packer)
 

@@ -20,11 +20,10 @@ orchestration_adapters:
     required_delegate: scripts/repoctl.py
 
 adapters:
-  terraform:
+  opentofu:
     formatter:
       executable_preference:
         - tofu
-        - terraform
       args:
         - fmt
         - -check

@@ -35,16 +35,16 @@ Only these statuses are allowed:
 | Milestone | Tracker | Primary owner | Objective | Entry gate | Exit gate | Current status |
 |---|---:|---|---|---|---|---|
 | M0 Architecture Sync | — | ChatGPT | lock `architecture.lock.yaml` as the canonical V5 authority and remove architecture collisions | validated project decisions | V5 lock, derived index, agent rules and merged sync PR | DONE |
-| M1 Monorepo Bootstrap | #13 | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | PROVEN |
-| M2 Golden Service Product | #14 | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | READY FOR CODEX |
-| M2.5 Persistent MGMT Bootstrap | #32 | Codex | bootstrap the persistent management plane required before PREPROD | M1 PROVEN | persistent MGMT bootstrap PROVEN under the canonical architecture contracts | READY FOR CODEX |
-| M3 PREPROD Infrastructure | #16 | Codex | provision reproducible JIT infrastructure foundation | M2.5 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | BLOCKED by M2.5 |
-| M4 Platform Baseline | #17 | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | BLOCKED by M3 |
-| M5 Commerce Vertical Slice | #18 | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | BLOCKED by M2/M4 |
-| M6 Full Application | #19 | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | BLOCKED by M5 |
-| M7 Qualification | #20 | Codex | run full QA/security/supply-chain/perf/chaos/DR gates | M6 feature complete and platform stable | qualification evidence complete; no unresolved release blocker | BLOCKED by M6 |
-| M8 PREPROD Certification | #21 | Codex execution + Work reporting; release governance authority | execute three PREPROD campaigns and certify material equivalence | M7 PROVEN | standard + endurance + PROD-equivalent PASS; evidence archived; test state destroyed; READY_FOR_PROD | BLOCKED by M7 |
-| M9 PROD A/B Rollout | #22 | Codex execution; release governance authority; Work launch pack | build trusted PROD A/B and progressive rollout | M8 READY_FOR_PROD | controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete | BLOCKED by M8 |
+| M1 Monorepo Bootstrap | #13 | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | DERIVED — run make roadmap-check |
+| M2 Golden Service Product | #14 | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | DERIVED — run make roadmap-check |
+| M2.5 Persistent MGMT Bootstrap | #32 | Codex | bootstrap the persistent management plane required before PREPROD | M1 PROVEN | persistent MGMT bootstrap PROVEN under the canonical architecture contracts | DERIVED — run make roadmap-check |
+| M3 PREPROD Infrastructure | #16 | Codex | provision reproducible JIT infrastructure foundation | M2.5 PROVEN; exact infrastructure contracts already merged | OpenTofu/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | DERIVED — run make roadmap-check |
+| M4 Platform Baseline | #17 | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | DERIVED — run make roadmap-check |
+| M5 Commerce Vertical Slice | #18 | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | DERIVED — run make roadmap-check |
+| M6 Full Application | #19 | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | DERIVED — run make roadmap-check |
+| M7 Qualification | #20 | Codex | run full QA/security/supply-chain/perf/chaos/DR gates | M6 feature complete and platform stable | qualification evidence complete; no unresolved release blocker | DERIVED — run make roadmap-check |
+| M8 PREPROD Certification | #21 | Codex execution + Work reporting; release governance authority | execute three PREPROD campaigns and certify material equivalence | M7 PROVEN | standard + endurance + PROD-equivalent PASS; evidence archived; test state destroyed; READY_FOR_PROD | DERIVED — run make roadmap-check |
+| M9 PROD A/B Rollout | #22 | Codex execution; release governance authority; Work launch pack | build trusted PROD A/B and progressive rollout | M8 READY_FOR_PROD | controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete | DERIVED — run make roadmap-check |
 <!-- END GENERATED ROADMAP MILESTONES -->
 
 ## 4. Critical path
@@ -120,7 +120,7 @@ Implement directly from the exact topology and machine-readable contracts alread
 Required implementation domains:
 
 1. provider inputs and environment variables;
-2. IPAM/network inventory consumed by Terraform/Ansible/NetBox-compatible data;
+2. IPAM/network inventory consumed by OpenTofu/Ansible/NetBox-compatible data;
 3. bare-metal provisioning assumptions;
 4. Proxmox VE 9 configuration;
 5. Rocky Linux 10.2 Packer templates/bootstrap;
@@ -139,7 +139,7 @@ Canonical tracker: GitHub issue `#17`.
 
 Delivery order:
 
-`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> data platform`.
+`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton + cert-manager -> Kratix/Kustomize/Helm -> observability/security logging -> data platform`.
 
 Stateful components follow the locked architecture: CNPG/PostgreSQL, Strimzi Kafka KRaft, RabbitMQ Quorum Queues, Redis Cluster, OpenSearch and SeaweedFS S3. Ceph is conditional only for an explicitly approved block/RWX need.
 

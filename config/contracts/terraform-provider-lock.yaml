@@ -3,18 +3,33 @@ status: exact
 architecture_authority: architecture.lock.yaml
 scope: platform/terraform
 
-terraform_cli:
-  required_version: ">= 1.15.0, < 2.0.0"
+iac_engine:
+  authority: opentofu
+  command: tofu
+  version_authority: config/contracts/toolchain-lock.json#versions.OPENTOFU_VERSION
+  terraform_cli: forbidden
 
 providers:
   hcloud:
     local_name: hcloud
-    source: registry.terraform.io/hetznercloud/hcloud
+    source: registry.opentofu.org/hetznercloud/hcloud
     module_source: hetznercloud/hcloud
     version: "1.68.0"
     constraints: "1.68.0"
     hashes:
+      - "h1:226Z1Y5A30w6lKA7/EG6vzPn8inyZ9XYbnmpIzZcA58="
+      - "h1:2MU8gDe67KjqALpvzzRfWONH2c/8djL+yxTnym9/FjY="
+      - "h1:6PW+TynH6Po3bSEZ+3+qSeKN/KvuH3N3fWrm9t8HNcc="
+      - "h1:8zYaD/LRDEAJDwyZx/gbbBL01b9oeGr1mhQeBCNmuhM="
+      - "h1:BrgHGuh9WEMd8CQefgdSqhcePf4CZPdovwlHNdo3h70="
+      - "h1:CPBOIltDqRCFo99PHVgt/8z5r+P3JyyiJygsbIozZC4="
       - "h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM="
+      - "h1:KvAWG1HTh3EO8PNymwQQ9+zpAQa3wRvzLvRjRM5jxq4="
+      - "h1:Zxdt/lmDDS+Uty9kViYoYNxYRlC3CUk2v4l3+XPcibo="
+      - "h1:gWVxkXIPIJcwAl74VMTz0hgaiJ/2feZIo4KMRQ+l9io="
+      - "h1:oxpWvl0qfZplr759glEx537EqkkAgtagBtNsI8V13H8="
+      - "h1:vXPWFLMNZzSEutr1Z66zicXVx4QAzUXqm3LCYXQH81U="
+      - "h1:ynTUfNuk5ppK9aniyVQi9HcQ+pdYmoGFX9U2LJgfzd0="
       - "zh:0c3c2eb5bad6e2853da46dd83ed9c93c547b79f2abe977d492da9cf9d7236a62"
       - "zh:0ccae6bb2daee7c30b55672645b31c50920839a8aadac502d187f105352c1b37"
       - "zh:11559d821030e5f4657b81153419f3c5e4f6389e8cc6f8086db2ebeb7aade6bc"
@@ -45,16 +60,18 @@ qualification:
     - -lockfile=readonly
   validate_args:
     - validate
+  providers_args:
+    - providers
   provider_plugin_cache:
     root_source: ECOMMERCE_TOOL_HOME
     fallback_root: ~/.cache/ecommerce-1
-    subdirectory: terraform-provider-cache/v1
+    subdirectory: opentofu-provider-cache/v1
 
 cache_safety:
   provider_contract_digest_required: true
-  terraform_executable_digest_required: true
+  opentofu_executable_digest_required: true
   source_content_digest_required: true
   successful_results_only: true
   provider_contract_change: miss
-  terraform_executable_change: miss
+  opentofu_executable_change: miss
   terraform_source_change: miss

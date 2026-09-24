@@ -1,0 +1,4 @@
+kind: UnownedSample
+metadata:
+  name: invalid-sample
+  labels: {}

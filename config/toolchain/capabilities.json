@@ -648,38 +648,104 @@
       "requirement": "required-static"
     },
     {
-      "name": "terraform",
+      "name": "conftest",
+      "requires": ["opa"],
+      "command": "conftest",
+      "version_args": ["--version"],
+      "version_key": "CONFTEST_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "conftest"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "CONFTEST_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "opa",
       "requires": [],
-      "version_key": "TERRAFORM_VERSION",
+      "command": "opa",
+      "version_args": ["version"],
+      "version_key": "OPA_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "opa"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "OPA_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "k6",
+      "requires": [],
+      "command": "k6",
+      "version_args": ["version"],
+      "version_key": "K6_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "k6"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "K6_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "nuclei",
+      "requires": [],
+      "command": "nuclei",
+      "version_args": ["-version"],
+      "version_key": "NUCLEI_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "nuclei"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "NUCLEI_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "hubble",
+      "requires": [],
+      "command": "hubble",
+      "version_args": ["version"],
+      "version_key": "HUBBLE_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "hubble"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "HUBBLE_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "pint",
+      "requires": [],
+      "command": "pint",
+      "version_args": ["version"],
+      "version_key": "PINT_VERSION",
+      "provision_requires": ["ansible-playbook"],
+      "provision": {"type": "ansible", "tags": "pint"},
+      "platforms": ["linux/amd64"],
+      "classification": "managed",
+      "checksum_key": "PINT_SHA256_LINUX_AMD64",
+      "requirement": "optional-runtime"
+    },
+    {
+      "name": "opentofu",
+      "requires": [],
+      "command": "tofu",
+      "version_args": [
+        "version"
+      ],
+      "version_key": "OPENTOFU_VERSION",
       "provision_requires": [
-        "ansible-playbook"
+        "ansible-playbook",
+        "openpgp-verification-primitive"
       ],
       "provision": {
         "type": "ansible",
-        "tags": "terraform"
+        "tags": "opentofu"
       },
       "platforms": [
         "linux/amd64"
       ],
       "classification": "managed",
-      "checksum_key": "TERRAFORM_SHA256_LINUX_AMD64",
-      "selection_policy": "first_available",
-      "any_of": [
-        {
-          "command": "tofu",
-          "version_args": [
-            "version"
-          ],
-          "version_key": "OPENTOFU_VERSION"
-        },
-        {
-          "command": "terraform",
-          "version_args": [
-            "version"
-          ],
-          "version_key": "TERRAFORM_VERSION"
-        }
-      ],
+      "checksum_key": "OPENTOFU_SHA256_LINUX_AMD64",
       "requirement": "required-static"
     },
     {
@@ -713,6 +779,15 @@
       "virtual": true,
       "classification": "conditional",
       "requirement": "optional-runtime"
+    },
+    {
+      "name": "openpgp-verification-primitive",
+      "requires": [],
+      "command": "gpg",
+      "version_args": ["--version"],
+      "classification": "platform-provided",
+      "justification": "OpenPGP verification primitive required to authenticate cached OpenTofu release manifests without network access.",
+      "requirement": "required-static"
     },
     {
       "name": "gitleaks",
@@ -765,7 +840,13 @@
     "trivy": "ansible",
     "gosec": "ansible",
     "govulncheck": "ansible",
-    "terraform": "ansible",
+    "conftest": "ansible",
+    "opa": "ansible",
+    "k6": "ansible",
+    "nuclei": "ansible",
+    "hubble": "ansible",
+    "pint": "ansible",
+    "opentofu": "ansible",
     "kustomize": "ansible",
     "gitleaks": "ansible"
   },
@@ -819,6 +900,10 @@
     {
       "command": "unzip",
       "justification": "Archive primitive owned by supported platform bootstrap."
+    },
+    {
+      "command": "gpg",
+      "justification": "OpenPGP verification primitive supplied by the supported platform for offline release authentication."
     }
   ],
   "gate_requirements": {
@@ -883,9 +968,18 @@
       "gosec",
       "govulncheck"
     ],
-    "terraform": [
+    "qualification-tools": [
       "python3",
-      "terraform"
+      "conftest",
+      "opa",
+      "k6",
+      "nuclei",
+      "hubble",
+      "pint"
+    ],
+    "opentofu": [
+      "python3",
+      "tofu"
     ],
     "ansible": [
       "python3",
@@ -931,8 +1025,7 @@
     "gofmt": "go",
     "pnpm": "pnpm",
     "docker": "docker",
-    "terraform": "terraform",
-    "tofu": "terraform",
+    "tofu": "opentofu",
     "sysctl": "container-network-forwarding",
     "bazel": "bazel"
   },

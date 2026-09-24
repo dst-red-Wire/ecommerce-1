@@ -59,7 +59,7 @@ state:
 
 platform_bootstrap:
   activation_owner: M4-platform-baseline
-  order: [rke2, cilium, tetragon, openbao-bootstrap, external-secrets, gitea, harbor, rancher, rancher-fleet, tekton]
+  order: [rke2, cilium, tetragon, openbao-bootstrap, external-secrets, gitea, harbor, rancher, rancher-fleet, cert-manager, tekton, kratix]
   services:
     gitea:
       version: 1.24.6
@@ -94,6 +94,21 @@ platform_bootstrap:
       version: 0.13.0
       namespace: cattle-fleet-system
       gitops_authority: true
+      reconciliation: deferred
+    cert-manager:
+      version: 1.21.2
+      namespace: cert-manager
+      purpose: kratix-webhook-and-metrics-certificates
+      readiness_required_before: kratix
+      reconciliation: deferred
+    kratix:
+      source: config/infrastructure/kratix-platform.yaml
+      namespace: kratix-platform-system
+      deployment_owner: rancher-fleet
+      composition: kustomize
+      packages: helm
+      state_store: gitea-gitstatestore
+      activation_dependencies: [gitea, rancher-fleet, cert-manager, openbao-bootstrap, external-secrets]
       reconciliation: deferred
     openbao-bootstrap:
       version: 2.4.4

@@ -10,7 +10,7 @@ Must exist before PREPROD `CREATE`:
 
 - Git/Gitea sources reachable;
 - Harbor registry and required OCI artifacts available by immutable digest;
-- Terraform state backend reachable;
+- OpenTofu state backend reachable;
 - OpenBao bootstrap path available;
 - version locks/checksums available;
 - Ansible collections and RKE2 air-gap artifacts prepared;
@@ -59,6 +59,8 @@ Machine wave `30-gitops-identity` scheduled components: `rancher-fleet`, `argo-r
 - Istio mTLS STRICT validation.
 
 Gate W4: GitOps reconciliation healthy, secret injection smoke passes, mesh identity/mTLS passes.
+
+After the delivery prerequisites and cert-manager are healthy, Fleet installs the pinned Kratix OSS control plane through a Kustomize overlay; Helm remains the governed Promise/chart package format. Kratix writes generated destination state to the dedicated Gitea Git State Store with a write-only platform identity; Fleet reads it with a distinct read-only identity and remains the sole reconciler. The Kratix quick-start Flux and bundled object-store paths are forbidden.
 
 ## Wave 5 — Delivery/registry/observability
 

@@ -1,0 +1,10 @@
+groups:
+  - name: qualification_fixture
+    rules:
+      - alert: QualificationFixtureAlways
+        expr: vector(1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Qualification fixture

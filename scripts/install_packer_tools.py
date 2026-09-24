@@ -163,10 +163,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", required=True, type=Path)
     selection = parser.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--profile", choices=("base", "admin-qualification"))
+    selection.add_argument("--profile", choices=("base", "rke2", "admin-qualification"))
     selection.add_argument(
         "--rpm-profile",
-        choices=("base", "qemu-kvm", "admin-qualification"),
+        choices=("base", "rke2", "qemu-kvm", "admin-qualification"),
     )
     args = parser.parse_args()
     if args.profile:

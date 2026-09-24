@@ -50,7 +50,7 @@ Only these blocker classes are valid:
 
 ## Codex rule
 
-Codex consumes canonical YAML/contracts as data. It must not duplicate constants in Terraform, Ansible, Helm, scripts or docs. If provider/runtime facts make an exact contract impossible, Codex stops and returns the precise conflict instead of selecting another topology.
+Codex consumes canonical YAML/contracts as data. It must not duplicate constants in OpenTofu, Ansible, Helm, scripts or docs. If provider/runtime facts make an exact contract impossible, Codex stops and returns the precise conflict instead of selecting another topology.
 
 ## Work rule
 

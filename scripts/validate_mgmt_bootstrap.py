@@ -42,20 +42,48 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
     if architecture.get("platform", {}).get("node_os") != "rocky-linux-10.2":
         errors.append("MGMT node OS must be Rocky Linux 10.2")
     services = bootstrap.get("platform_bootstrap", {}).get("services", {})
+    bootstrap_order = bootstrap.get("platform_bootstrap", {}).get("order", [])
     required = {
         "gitea",
         "harbor",
         "tekton",
         "rancher",
         "rancher-fleet",
+        "cert-manager",
+        "kratix",
         "openbao-bootstrap",
         "external-secrets",
         "tetragon",
     }
     if not required.issubset(services):
         errors.append("platform bootstrap service set incomplete")
+    if (
+        not isinstance(bootstrap_order, list)
+        or "tekton" not in bootstrap_order
+        or "kratix" not in bootstrap_order
+        or bootstrap_order.index("tekton") >= bootstrap_order.index("kratix")
+    ):
+        errors.append(
+            "platform bootstrap order must place Tekton wave 40 before Kratix wave 45"
+        )
     if not services.get("rancher-fleet", {}).get("gitops_authority"):
         errors.append("Fleet must remain canonical GitOps")
+    kratix = services.get("kratix", {})
+    if (
+        kratix.get("deployment_owner") != "rancher-fleet"
+        or kratix.get("composition") != "kustomize"
+        or kratix.get("packages") != "helm"
+        or kratix.get("state_store") != "gitea-gitstatestore"
+    ):
+        errors.append("Kratix must remain Fleet-deployed, Kustomize-composed, Helm-packaged and Gitea-backed")
+    if set(kratix.get("activation_dependencies", [])) != {
+        "gitea",
+        "rancher-fleet",
+        "cert-manager",
+        "openbao-bootstrap",
+        "external-secrets",
+    }:
+        errors.append("Kratix activation dependencies are incomplete")
     if services.get("external-secrets", {}).get("dependency") != "openbao-initialized-and-scoped-auth-created":
         errors.append("External Secrets must retain its explicit OpenBao dependency")
     authority = bootstrap.get("wireguard_authority", {})
@@ -136,12 +164,12 @@ def validate_repository_text() -> list[str]:
         errors.append("hcloud provider is not exactly pinned")
     canonical_ip = re.compile(r"10\.243\.\d+\.\d+")
     if canonical_ip.search(tf):
-        errors.append("Terraform duplicates canonical MGMT IP constants")
+        errors.append("OpenTofu duplicates canonical MGMT IP constants")
     if re.search(r'port\s*=\s*"22"[\s\S]{0,160}source_ips\s*=\s*\[[^]]*0\.0\.0\.0/0', tf):
         errors.append("unrestricted management SSH")
     forbidden_ownership = re.compile(r"(remote-exec|local-exec|install-rke2|rke2-server\.service)", re.I)
     if forbidden_ownership.search(tf):
-        errors.append("Terraform attempts Ansible/RKE2 ownership")
+        errors.append("OpenTofu attempts Ansible/RKE2 ownership")
     module = (ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf").read_text(encoding="utf-8")
     if "bootstrap_ssh_allowed_cidrs" not in module or 'dynamic "rule"' not in module:
         errors.append("temporary wg-01 bootstrap SSH lifecycle is not modeled")

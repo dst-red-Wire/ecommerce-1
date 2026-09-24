@@ -144,6 +144,7 @@ def materialize(
     }
     tool_profiles = {
         "base": image["profiles"]["base"]["external_tools"],
+        "rke2": image["profiles"]["rke2"]["external_tools"],
         "admin-qualification": image["profiles"]["admin-qualification"][
             "external_tools"
         ],

@@ -12,6 +12,7 @@ import argparse
 import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import functools
 import hashlib
 import json
@@ -31,6 +32,28 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+
+
+_MODERN_ENGINEERING = None
+_CVE_POLICY = None
+
+
+def _modern_engineering_api():
+    global _MODERN_ENGINEERING
+    if _MODERN_ENGINEERING is None:
+        import modern_engineering
+
+        _MODERN_ENGINEERING = modern_engineering
+    return _MODERN_ENGINEERING
+
+
+def _cve_policy_api():
+    global _CVE_POLICY
+    if _CVE_POLICY is None:
+        import security_policy
+
+        _CVE_POLICY = security_policy
+    return _CVE_POLICY
 
 
 def _missing_repository_delivery(*_args, **_kwargs):
@@ -392,6 +415,72 @@ def toolchain_closure_violations(
     if len(capabilities) != len(capabilities_list):
         violations.append("capability graph contains duplicate or invalid capabilities")
 
+    # IaC execution is a closed set: OpenTofu/tofu is the only engine/command.
+    # Historical HCL identifiers such as `terraform {}`, `.terraform/`, and
+    # `terraform_remote_state` are deliberately outside this executable model.
+    def terraform_cli_identifier(value: object) -> bool:
+        token = str(value).strip().lower().replace("_", "-")
+        return token in {"terraform", "terraform-cli"}
+
+    def terraform_cli_command(value: object) -> bool:
+        parts = str(value).strip().split(maxsplit=1)
+        if not parts:
+            return False
+        command = parts[0].replace("\\", "/")
+        return command.rsplit("/", 1)[-1].lower() in {"terraform", "terraform.exe"}
+
+    forbidden_version_keys = sorted(
+        key
+        for key in versions
+        if re.search(r"(?:^|_)TERRAFORM(?:_|$)", str(key).upper())
+    )
+    if forbidden_version_keys:
+        violations.append("Terraform CLI version authority is forbidden: " + ", ".join(forbidden_version_keys))
+    lifecycle_entries = (
+        ("active", active),
+        ("deferred", deferred),
+        ("rejected", rejected),
+        ("platform-provided", platform_tools),
+    )
+    opentofu_lifecycle = [
+        status
+        for status, entries in lifecycle_entries
+        if isinstance(entries, dict) and "opentofu" in entries
+    ]
+    terraform_lifecycle = [
+        f"{status}:{name}"
+        for status, entries in lifecycle_entries
+        if isinstance(entries, dict)
+        for name in entries
+        if terraform_cli_identifier(name)
+    ]
+    if opentofu_lifecycle != ["active"] or terraform_lifecycle:
+        violations.append("OpenTofu must be the sole IaC engine lifecycle entry")
+    iac_capability = capabilities.get("opentofu")
+    if not isinstance(iac_capability, dict) or iac_capability.get("command") != "tofu":
+        violations.append("OpenTofu capability must execute the tofu command")
+    if any(terraform_cli_identifier(name) for name in capabilities):
+        violations.append("Terraform CLI capability is forbidden")
+    for capability in capabilities.values():
+        commands = [capability.get("command")]
+        commands.extend(
+            alternative.get("command")
+            for alternative in capability.get("any_of", [])
+            if isinstance(alternative, dict)
+        )
+        if any(terraform_cli_command(command) for command in commands if command):
+            violations.append("Terraform CLI command is forbidden in the capability graph")
+            break
+    for name, tool in lock.get("tools", {}).items():
+        version_command = tool.get("version_command", []) if isinstance(tool, dict) else []
+        if (
+            terraform_cli_identifier(name)
+            or (isinstance(tool, dict) and terraform_cli_command(tool.get("binary", "")))
+            or (isinstance(version_command, list) and version_command and terraform_cli_command(version_command[0]))
+        ):
+            violations.append("Terraform CLI tool definition is forbidden")
+            break
+
     execution_dependencies: dict[str, list[str]] = {}
     all_dependencies: dict[str, list[str]] = {}
     for name, capability in capabilities.items():
@@ -448,6 +537,14 @@ def toolchain_closure_violations(
     expected_aliases = lock.get("capability_policy", {}).get("command_capabilities", {})
     if graph.get("command_capabilities", {}) != expected_aliases:
         violations.append("capability graph command projection drift")
+    actual_aliases = graph.get("command_capabilities", {})
+    if (
+        expected_aliases.get("tofu") != "opentofu"
+        or any(terraform_cli_command(command) for command in expected_aliases)
+        or actual_aliases.get("tofu") != "opentofu"
+        or any(terraform_cli_command(command) for command in actual_aliases)
+    ):
+        violations.append("IaC command projection must expose tofu only")
     gate_commands = {
         str(command)
         for commands in gate_requirements.values()
@@ -479,14 +576,26 @@ def toolchain_closure_violations(
 
     try:
         security_statuses = _security_policy_tool_statuses(root)
-        security_commands = set(gate_requirements.get("security", []))
+        security_commands = {
+            str(command)
+            for commands in gate_requirements.values()
+            if isinstance(commands, list)
+            for command in commands
+        }
         for name, declared_status in security_statuses.items():
             if declared_status not in TOOLCHAIN_STATUSES:
                 violations.append(f"security policy tool {name} has invalid lifecycle status")
             elif lifecycle_index.get(name) != declared_status:
                 violations.append(f"security policy lifecycle drift: {name}")
-            if declared_status == "active" and name not in security_commands:
-                violations.append(f"active security tool {name} is absent from security gate")
+            provision_type = active.get(name, {}).get("provision", {}).get("type")
+            command = capabilities.get(name, {}).get("command")
+            if (
+                declared_status == "active"
+                and provision_type != "packer-bundle"
+                and name not in security_commands
+                and command not in security_commands
+            ):
+                violations.append(f"active security tool {name} is absent from a declared gate")
     except OSError:
         violations.append("security scan policy is missing")
 
@@ -677,6 +786,14 @@ def toolchain_closure_violations(
                 violations.append(f"architecture missing toolchain closure rule: {marker}")
         if "oci_runtime: podman" not in architecture_text or "oci_builder: buildah" not in architecture_text:
             violations.append("forbidden Podman/Buildah authorities are not locked")
+        for marker in (
+            "authority: opentofu",
+            "command: tofu",
+            "terraform_cli: forbidden",
+            "iac_engine: terraform-cli",
+        ):
+            if marker not in architecture_text:
+                violations.append(f"architecture missing sole OpenTofu authority marker: {marker}")
     except OSError:
         violations.append("architecture authority is missing")
 
@@ -717,6 +834,12 @@ def toolchain_closure() -> int:
     print("PASS platform-provided tools have probes")
     print("PASS projections are exact")
     print("PASS doctor derives from registry")
+    print("IAC_AUTHORITY=OpenTofu")
+    print("TOFU=PINNED")
+    print("TERRAFORM_CLI=ABSENT")
+    print("PROVIDER_LOCK=.terraform.lock.hcl")
+    print("DUAL_IAC_ENGINE=false")
+    print("GOVERNANCE=PASS")
     print("PASS toolchain closure")
     return 0
 
@@ -1728,7 +1851,7 @@ def validate_workstation_projections(policy: dict | None = None) -> None:
 
 
 def validate_terraform_lockfile_projections(provider_contract: dict | None = None) -> None:
-    """Verify committed Terraform lockfiles project the canonical provider identity."""
+    """Verify committed OpenTofu-compatible lockfiles project the canonical provider identity."""
     contract = provider_contract or terraform_provider_lock_contract()
     expected = contract.get("providers", {})
     lockfiles = (
@@ -1767,6 +1890,15 @@ def repository_authority_check() -> int:
     registry = lock.get("machine_contracts", {})
     if not isinstance(registry, dict):
         raise RuntimeError("architecture.lock.yaml machine_contracts must be a mapping")
+
+    iac_authority = lock.get("tooling", {}).get("iac", {})
+    if iac_authority != {
+        "authority": "opentofu",
+        "command": "tofu",
+        "terraform_cli": "forbidden",
+        "provider_lock": ".terraform.lock.hcl",
+    }:
+        raise RuntimeError("architecture.lock.yaml must define OpenTofu/tofu as the sole IaC execution authority")
 
     model = repository_authority_model()
     for domain, entry in model.get("domains", {}).items():
@@ -1895,12 +2027,25 @@ def repository_authority_check() -> int:
     validate_terraform_lockfile_projections()
 
     security_policy = security_scan_policy()
+    _cve_policy_api().validate_policy(security_policy)
     scanner = security_policy.get("scanner", {})
     version_key = scanner.get("version_key")
     checksum_key = scanner.get("checksum_key")
     for key in (version_key, checksum_key):
         if not isinstance(key, str) or key not in toolchain["versions"]:
             raise RuntimeError(f"security scan policy references missing toolchain key: {key!r}")
+
+    metrics_policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    _modern_engineering_api().validate_metrics_policy(metrics_policy)
+    _modern_engineering_api().validate_service_slo_policy(
+        ruby_yaml(str(registry["service_slo"])), lock["business"]["services"]
+    )
+    _modern_engineering_api().validate_qce_traceability(
+        lock,
+        ruby_yaml(str(registry["roadmap_policy"])),
+        qualification_execution_policy(),
+        ROOT,
+    )
 
     print("PASS repository maximal authority model")
     return 0
@@ -1945,7 +2090,7 @@ _TERRAFORM_PROVIDER_LOCK: dict | None = None
 
 
 def terraform_provider_lock_contract() -> dict:
-    """Load and validate the single canonical Terraform provider lock contract."""
+    """Load and validate the OpenTofu provider lock contract."""
     global _TERRAFORM_PROVIDER_LOCK
     if _TERRAFORM_PROVIDER_LOCK is None:
         lock = ruby_yaml("architecture.lock.yaml")
@@ -1959,50 +2104,61 @@ def terraform_provider_lock_contract() -> dict:
             or contract.get("scope") != "platform/terraform"
             or contract.get("status") != "exact"
         ):
-            raise RuntimeError("Terraform provider lock must inherit architecture.lock.yaml for platform/terraform")
+            raise RuntimeError("OpenTofu provider lock must inherit architecture.lock.yaml for platform/terraform")
 
-        quality_authority = source_quality_adapter("terraform").get("validation", {}).get("provider_lock_authority")
+        iac_engine = contract.get("iac_engine", {})
+        if iac_engine != {
+            "authority": "opentofu",
+            "command": "tofu",
+            "version_authority": "config/contracts/toolchain-lock.json#versions.OPENTOFU_VERSION",
+            "terraform_cli": "forbidden",
+        }:
+            raise RuntimeError("OpenTofu must be the sole canonical IaC execution engine")
+
+        quality_authority = source_quality_adapter("opentofu").get("validation", {}).get("provider_lock_authority")
         if quality_authority != "architecture.lock.yaml#machine_contracts.terraform_provider_lock":
-            raise RuntimeError("Terraform quality validation must delegate provider resolution to the central lock contract")
+            raise RuntimeError("OpenTofu quality validation must delegate provider resolution to the central lock contract")
 
         providers = contract.get("providers")
         if not isinstance(providers, dict) or not providers:
-            raise RuntimeError("Terraform provider lock must declare at least one provider")
+            raise RuntimeError("OpenTofu provider lock must declare at least one provider")
 
         for name, provider in providers.items():
             if not isinstance(name, str) or not name.strip() or not isinstance(provider, dict):
-                raise RuntimeError("Terraform provider lock entries must be named mappings")
+                raise RuntimeError("OpenTofu provider lock entries must be named mappings")
             for field in ("source", "version", "constraints"):
                 value = provider.get(field)
                 if not isinstance(value, str) or not value.strip():
-                    raise RuntimeError(f"Terraform provider {name} must declare {field}")
+                    raise RuntimeError(f"OpenTofu provider {name} must declare {field}")
             hashes = provider.get("hashes")
             if not isinstance(hashes, list) or not hashes or any(not isinstance(value, str) or not value for value in hashes):
-                raise RuntimeError(f"Terraform provider {name} must declare non-empty hashes")
+                raise RuntimeError(f"OpenTofu provider {name} must declare non-empty hashes")
             if not any(value.startswith("h1:") for value in hashes) or not any(value.startswith("zh:") for value in hashes):
-                raise RuntimeError(f"Terraform provider {name} must include both h1 and zh hashes")
+                raise RuntimeError(f"OpenTofu provider {name} must include both h1 and zh hashes")
 
         qualification = contract.get("qualification")
         if not isinstance(qualification, dict):
-            raise RuntimeError("Terraform provider lock must declare qualification behavior")
+            raise RuntimeError("OpenTofu provider lock must declare qualification behavior")
         if qualification.get("canonical_lockfile_materialization") != "required":
-            raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
+            raise RuntimeError("OpenTofu qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
-            raise RuntimeError("Terraform qualification provider lock must be readonly")
+            raise RuntimeError("OpenTofu qualification provider lock must be readonly")
+        if qualification.get("providers_args") != ["providers"]:
+            raise RuntimeError("OpenTofu qualification must inspect providers with tofu providers")
         repository_context_paths = qualification.get("repository_context_paths")
         if (
             not isinstance(repository_context_paths, list)
             or not repository_context_paths
             or any(not isinstance(value, str) or not value.strip() for value in repository_context_paths)
         ):
-            raise RuntimeError("Terraform qualification must declare non-empty repository_context_paths")
+            raise RuntimeError("OpenTofu qualification must declare non-empty repository_context_paths")
 
         _TERRAFORM_PROVIDER_LOCK = contract
     return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
 
 
 def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> None:
-    """Materialize Terraform's native lockfile from the canonical YAML authority."""
+    """Materialize OpenTofu's compatible .terraform.lock.hcl from the canonical authority."""
     provider_lock = contract or terraform_provider_lock_contract()
     lines = [
         "# Generated from architecture.lock.yaml#machine_contracts.terraform_provider_lock.",
@@ -2031,11 +2187,11 @@ def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | 
     env_name = str(cache.get("root_source", "ECOMMERCE_TOOL_HOME"))
     configured = os.environ.get(env_name, "").strip()
     base = Path(configured).expanduser() if configured else Path(str(cache.get("fallback_root", "~/.cache/ecommerce-1"))).expanduser()
-    destination = base / str(cache.get("subdirectory", "terraform-provider-cache/v1"))
+    destination = base / str(cache.get("subdirectory", "opentofu-provider-cache/v1"))
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        print(f"ADVISORY terraform provider cache unavailable: {exc}", file=sys.stderr)
+        print(f"ADVISORY OpenTofu provider cache unavailable: {exc}", file=sys.stderr)
         return None
     return destination
 
@@ -3243,6 +3399,12 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     policy = security_scan_policy()
+    _cve_policy_api().validate_policy(policy)
+    scanner_runs: list[dict] = []
+    required_vulnerability_scanners: list[str] = []
+    vulnerability_findings: list[dict] = []
+    scanner_errors: list[str] = []
+    toolchain_versions = _raw_toolchain_lock()["versions"]
     scanner = policy.get("scanner", {})
     command = str(scanner.get("name", "gitleaks"))
     require(command)
@@ -3273,37 +3435,18 @@ def security() -> int:
             run([command, "dir", *flags, "."])
 
     print("PASS gitleaks secret scan completed")
+    scanner_runs.append(
+        {
+            "name": "gitleaks",
+            "status": "PASS",
+            "version": toolchain_versions.get("GITLEAKS_VERSION"),
+            "checksum": toolchain_versions.get("GITLEAKS_SHA256_LINUX_AMD64"),
+        }
+    )
 
     base = os.environ.get("BASE", "origin/main").strip() or "origin/main"
     head = os.environ.get("HEAD", "WORKTREE").strip() or "WORKTREE"
     security_paths = changed_paths(base, head)
-
-    trivy_targets: set[str] = set()
-    for path in security_paths:
-        candidate = Path(path)
-        parts = candidate.parts
-        if candidate.name in {"Containerfile", "Dockerfile"} or candidate.suffix in {".tf", ".hcl"}:
-            trivy_targets.add(str(candidate.parent))
-        elif candidate.suffix in {".yaml", ".yml"} and parts and parts[0] == "platform":
-            if len(parts) > 1 and parts[1] in {"fleet", "helm", "kubernetes", "tekton"}:
-                trivy_targets.add(str(candidate.parent))
-    if trivy_targets:
-        require("trivy")
-        for relative in sorted(trivy_targets):
-            run(
-                [
-                    "trivy",
-                    "config",
-                    "--exit-code",
-                    "1",
-                    "--severity",
-                    "HIGH,CRITICAL",
-                    relative,
-                ]
-            )
-        print("PASS trivy affected configuration scan completed")
-    else:
-        print("SKIP trivy: no affected container or configuration input")
 
     module_roots = [ROOT / "frontend", *sorted((ROOT / "services").glob("*"))]
     scan_all_go_modules = "go.work" in security_paths
@@ -3320,46 +3463,217 @@ def security() -> int:
             )
         )
     ]
+
+    require("trivy")
+    required_vulnerability_scanners.append("trivy")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-trivy-affected-") as temp_dir:
+        scan_root = Path(temp_dir)
+        materialized: set[Path] = set()
+        for relative in security_paths:
+            source = (ROOT / relative).resolve()
+            if source.is_file() and source.is_relative_to(ROOT.resolve()):
+                materialized.add(source)
+        for module in affected_modules:
+            for name in ("go.mod", "go.sum"):
+                source = module / name
+                if source.is_file():
+                    materialized.add(source.resolve())
+        for source in sorted(materialized):
+            destination = scan_root / source.relative_to(ROOT.resolve())
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        trivy_vulnerability = run(
+            [
+                "trivy",
+                "fs",
+                "--exit-code",
+                "0",
+                "--format",
+                "json",
+                "--scanners",
+                "vuln",
+                str(scan_root),
+            ],
+            check=False,
+            capture=True,
+        )
+    trivy_status = "PASS"
+    if trivy_vulnerability.returncode != 0:
+        trivy_status = "FAIL"
+        scanner_errors.append(
+            (trivy_vulnerability.stderr or "Trivy filesystem scan failed").strip()
+        )
+    else:
+        try:
+            trivy_payload = json.loads(trivy_vulnerability.stdout)
+            if not isinstance(trivy_payload, dict):
+                raise TypeError("Trivy output must be a JSON object")
+            vulnerability_findings.extend(
+                _cve_policy_api().trivy_findings(
+                    trivy_payload,
+                    artifact="repository",
+                    scope="repository_filesystem",
+                )
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            trivy_status = "FAIL"
+            scanner_errors.append(f"Trivy scanner output is malformed: {exc}")
+    scanner_runs.append(
+        {
+            "name": "trivy",
+            "status": trivy_status,
+            "version": toolchain_versions.get("TRIVY_VERSION"),
+            "checksum": toolchain_versions.get("TRIVY_SHA256_LINUX_AMD64"),
+        }
+    )
+    if trivy_status == "PASS":
+        print(
+            "PASS Trivy repository vulnerability scan completed "
+            f"({len(vulnerability_findings)} finding(s))"
+        )
+
+    trivy_targets: set[str] = set()
+    for path in security_paths:
+        candidate = Path(path)
+        parts = candidate.parts
+        if candidate.name in {"Containerfile", "Dockerfile"} or candidate.suffix in {".tf", ".hcl"}:
+            trivy_targets.add(str(candidate.parent))
+        elif candidate.suffix in {".yaml", ".yml"} and parts and parts[0] == "platform":
+            if len(parts) > 1 and parts[1] in {"fleet", "helm", "kubernetes", "tekton"}:
+                trivy_targets.add(str(candidate.parent))
+    if trivy_targets:
+        for relative in sorted(trivy_targets):
+            run(
+                [
+                    "trivy",
+                    "config",
+                    "--exit-code",
+                    "1",
+                    "--severity",
+                    "HIGH,CRITICAL",
+                    relative,
+                ]
+            )
+        print("PASS trivy affected configuration scan completed")
+    else:
+        print("SKIP trivy: no affected container or configuration input")
+
     if affected_modules:
         require("gosec")
         require("govulncheck")
+        required_vulnerability_scanners.append("govulncheck")
         env = os.environ.copy()
+        govulncheck_failed = False
         env.pop("GOROOT", None)
         env.pop("GOTOOLDIR", None)
         for module in affected_modules:
             run(["gosec", "./..."], cwd=module, env=env)
-            run(["govulncheck", "./..."], cwd=module, env=env)
-        print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
+            completed = run(
+                ["govulncheck", "-json", "-mode=source", "-scan=symbol", "./..."],
+                cwd=module,
+                env=env,
+                check=False,
+                capture=True,
+            )
+            if completed.returncode not in {0, 3}:
+                govulncheck_failed = True
+                scanner_errors.append(
+                    (completed.stderr or "govulncheck execution failed").strip()
+                )
+                continue
+            try:
+                events = _cve_policy_api().parse_json_stream(
+                    completed.stdout, f"govulncheck output for {module.name}"
+                )
+                findings, _ = _cve_policy_api().govulncheck_findings(
+                    events,
+                    artifact="repository",
+                    scope="reachable_go_vulnerabilities",
+                    target=str(module.relative_to(ROOT)),
+                )
+                vulnerability_findings.extend(findings)
+            except (TypeError, ValueError) as exc:
+                govulncheck_failed = True
+                scanner_errors.append(str(exc))
+        if not govulncheck_failed:
+            print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
+        scanner_runs.extend(
+            [
+                {
+                    "name": "gosec",
+                    "status": "PASS",
+                    "version": toolchain_versions.get("GOSEC_VERSION"),
+                    "checksum": toolchain_versions.get("GOSEC_SHA256_LINUX_AMD64"),
+                },
+                {
+                    "name": "govulncheck",
+                    "status": "FAIL" if govulncheck_failed else "PASS",
+                    "version": toolchain_versions.get("GOVULNCHECK_VERSION"),
+                    "checksum": "go-checksum-database",
+                },
+            ]
+        )
     else:
         print("SKIP gosec/govulncheck: no affected Go module")
-    return 0
+    base_sha = subprocess.check_output(["git", "rev-parse", base], cwd=ROOT, text=True).strip()
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD" if head == "WORKTREE" else head], cwd=ROOT, text=True
+    ).strip()
+    tree_sha = (
+        worktree_tree_sha()
+        if head == "WORKTREE"
+        else subprocess.check_output(["git", "rev-parse", f"{head_sha}^{{tree}}"], cwd=ROOT, text=True).strip()
+    )
+    evidence = _cve_policy_api().evaluate(
+        {
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "source_head_sha": head_sha,
+            "head_tree_sha": tree_sha,
+            "artifact": "repository",
+            "artifact_digest": "sha256:" + hashlib.sha256(tree_sha.encode()).hexdigest(),
+            "scope": "repository_filesystem",
+            "environment": "development",
+            "release": False,
+            "scanner_runs": scanner_runs,
+            "required_scanners": sorted(set(required_vulnerability_scanners)),
+            "findings": vulnerability_findings,
+            "exceptions": _security_exceptions(),
+        },
+        policy,
+        ROOT,
+    )
+    if scanner_errors:
+        evidence["reasons"] = sorted(set([*evidence["reasons"], *scanner_errors]))
+        evidence["final_result"] = "BLOCK"
+    destination = CONTEXT / "evidence" / "security" / ("worktree.json" if head == "WORKTREE" else f"{head_sha}.json")
+    _cve_policy_api().write_evidence(destination, evidence)
+    print(f"PASS deterministic vulnerability policy evidence {destination.relative_to(ROOT)}")
+    return 0 if evidence["final_result"] == "PASS" else fail("vulnerability policy evaluation blocked", 1)
 
 def terraform_source_files() -> list[Path]:
     terraform_root = ROOT / "platform" / "terraform"
     return [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
 
 
-def terraform_check() -> int:
+def opentofu_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
     tf_files = terraform_source_files()
     if not tf_files:
-        print("SKIP terraform: no Terraform files found")
+        print("SKIP OpenTofu: no compatible .tf sources found")
         return 0
 
-    policy = source_quality_adapter("terraform")
+    policy = source_quality_adapter("opentofu")
     formatter = policy["formatter"]
     provider_lock = terraform_provider_lock_contract()
     qualification = provider_lock["qualification"]
 
-    tool = next(
-        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
-        None,
-    )
-    if not tool:
-        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+    if formatter.get("executable_preference") != ["tofu"]:
+        return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+    tool = require("tofu")
 
     advisory_exit_check(
-        "terraform fmt",
+        "tofu fmt",
         [tool, *formatter["args"]],
         drift_exit_codes=formatter["drift_exit_codes"],
     )
@@ -3370,7 +3684,7 @@ def terraform_check() -> int:
         env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
 
     directories = sorted({p.parent for p in tf_files})
-    with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="ecommerce-opentofu-validation-") as temp_dir:
         temp_repo_root = Path(temp_dir) / "repository"
         temp_root = temp_repo_root / "platform" / "terraform"
         temp_root.parent.mkdir(parents=True, exist_ok=True)
@@ -3383,7 +3697,7 @@ def terraform_check() -> int:
             source = ROOT / str(relative_context)
             destination = temp_repo_root / str(relative_context)
             if not source.exists():
-                raise RuntimeError(f"Terraform qualification repository context is missing: {relative_context}")
+                raise RuntimeError(f"OpenTofu qualification repository context is missing: {relative_context}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
                 shutil.copytree(source, destination)
@@ -3394,16 +3708,17 @@ def terraform_check() -> int:
             relative = directory.relative_to(terraform_root)
             validation_dir = temp_root / relative
             write_terraform_provider_lock(validation_dir / ".terraform.lock.hcl", provider_lock)
-            print(f"CHECK terraform: {relative}")
+            print(f"CHECK OpenTofu: {relative}")
             run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
             run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
+            run([tool, *qualification["providers_args"]], cwd=validation_dir, env=env)
 
     providers = ", ".join(
         f"{name}={provider['version']}"
         for name, provider in sorted(provider_lock["providers"].items())
     )
-    print(f"PASS terraform provider lock {providers}")
-    print("PASS terraform checks completed")
+    print(f"PASS OpenTofu provider lock {providers}")
+    print("PASS OpenTofu checks completed")
     return 0
 def _ansible_static_check() -> int:
     require("ansible-lint")
@@ -3580,17 +3895,14 @@ def format_check() -> int:
 
     tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
     if tf_files:
-        terraform_policy = source_quality_adapter("terraform")["formatter"]
-        tool = next(
-            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
-            None,
-        )
-        if not tool:
-            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        opentofu_policy = source_quality_adapter("opentofu")["formatter"]
+        if opentofu_policy.get("executable_preference") != ["tofu"]:
+            return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+        tool = require("tofu")
         advisory_exit_check(
-            "terraform fmt",
-            [tool, *terraform_policy["args"]],
-            drift_exit_codes=terraform_policy["drift_exit_codes"],
+            "tofu fmt",
+            [tool, *opentofu_policy["args"]],
+            drift_exit_codes=opentofu_policy["drift_exit_codes"],
         )
 
     print("PASS source format diagnostics completed")
@@ -5277,7 +5589,7 @@ def failure_context(gate: str, component: str) -> int:
         elif component.startswith("frontend:"):
             cmd = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":", 1)[1]]
         elif component == "platform:terraform":
-            cmd = [sys.executable, "scripts/repoctl.py", "terraform"]
+            cmd = [sys.executable, "scripts/repoctl.py", "opentofu"]
         elif component == "platform:ansible":
             cmd = [sys.executable, "scripts/repoctl.py", "ansible"]
         else:
@@ -5291,7 +5603,7 @@ def failure_context(gate: str, component: str) -> int:
             "lint",
             "test",
             "security",
-            "terraform",
+            "opentofu",
             "ansible",
             "system",
             "automation-policy",
@@ -5649,6 +5961,312 @@ def roadmap_check(*, quiet: bool = False) -> int:
 
 def roadmap_sync() -> int:
     return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
+
+
+def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bool = False) -> int:
+    payload = _modern_engineering_api().qce_status(ROOT, sector=sector)
+    destination = _modern_engineering_api().write_qce_status(ROOT, payload)
+    if json_output or trace:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for item in payload["sectors"]:
+            print(f"{item['sector']:<32} {item['status']}")
+        print(f"EVIDENCE {destination.relative_to(ROOT)}")
+    return 0
+
+
+def qce_check_command() -> int:
+    lock, roadmap, qualification = _modern_engineering_api()._qce_contracts(ROOT)
+    _modern_engineering_api().validate_qce_traceability(lock, roadmap, qualification, ROOT)
+    _modern_engineering_api().qce_status(ROOT)
+    print("PASS QCE traceability derives exactly nine sectors from architecture.lock.yaml")
+    return 0
+
+
+def engineering_metrics_command(input_path: str, output_path: str) -> int:
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("engineering metrics input is missing or malformed") from exc
+    events = payload.get("events") if isinstance(payload, dict) else None
+    policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    metrics = _modern_engineering_api().calculate_dora(
+        events,
+        policy,
+        window_end=payload.get("window_end") if isinstance(payload, dict) else None,
+    )
+    requested_metrics = payload.get("requested_metrics", []) if isinstance(payload, dict) else []
+    if requested_metrics:
+        _modern_engineering_api().reject_forbidden_metrics(requested_metrics, policy)
+    head = git("rev-parse", "HEAD").strip()
+    tree = git("rev-parse", "HEAD^{tree}").strip()
+    evidence = {
+        "schema_version": int(policy["evidence"]["schema_version"]),
+        "head_sha": head,
+        "head_tree_sha": tree,
+        "policy_sha256": hashlib.sha256(
+            (ROOT / "config/contracts/engineering-metrics-policy.yaml").read_bytes()
+        ).hexdigest(),
+        "input_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "window": {
+            "days": metrics["window_days"],
+            "start": metrics["window_start"],
+            "end": metrics["window_end"],
+        },
+        "metrics": metrics,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    relative = output_path or f".context/evidence/engineering-metrics/{head}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("engineering metrics evidence must remain under .context")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(evidence, indent=2, sort_keys=True))
+    return 0
+
+
+def experiment_command(action: str, input_path: str, output_path: str) -> int:
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    try:
+        experiment = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("experiment input is missing or malformed") from exc
+    if not isinstance(experiment, dict):
+        raise RuntimeError("experiment input must be a JSON object")
+    policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    _modern_engineering_api().validate_experiment(experiment, policy)
+    if action == "baseline":
+        payload = {**experiment, "lifecycle_status": "BASELINED"}
+    elif action == "evaluate":
+        payload = {**_modern_engineering_api().evaluate_experiment(experiment, policy), "lifecycle_status": "EVALUATED"}
+    elif action == "status":
+        payload = {**experiment, "lifecycle_status": "EVALUATED" if experiment.get("decision") in policy["experiments"]["decisions"] else "PENDING"}
+    else:
+        raise RuntimeError(f"unknown experiment action: {action}")
+    relative = output_path or f".context/experiments/{experiment['experiment_id']}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("experiment evidence must remain under .context")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def security_datasets_sync_command(output_path: str) -> int:
+    policy = security_scan_policy()
+    destination = Path(output_path or ".context/security-datasets")
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("security datasets must remain under .context")
+    manifest = _cve_policy_api().sync_datasets(policy, destination)
+    print(f"PASS security datasets synchronized with verified manifest {manifest.relative_to(ROOT)}")
+    return 0
+
+
+def govulncheck_scan_command(target_path: str, mode: str, output_path: str) -> int:
+    target = Path(target_path)
+    if not target.is_absolute():
+        target = ROOT / target
+    target = target.resolve()
+    if mode == "source":
+        if not target.is_dir() or not (target / "go.mod").is_file():
+            raise RuntimeError("govulncheck source target must be a Go module directory")
+        command = [require("govulncheck"), "-mode=source", "-format=json", "-scan=symbol", "./..."]
+        cwd = target
+    else:
+        if not target.is_file():
+            raise RuntimeError("govulncheck binary target must be an existing file")
+        command = [require("govulncheck"), "-mode=binary", "-format=json", "-scan=symbol", str(target)]
+        cwd = ROOT
+    destination = Path(output_path)
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("govulncheck evidence must remain under .context")
+    env = os.environ.copy()
+    env.pop("GOROOT", None)
+    env.pop("GOTOOLDIR", None)
+    completed = run(command, cwd=cwd, env=env, check=False, capture=True)
+    if completed.returncode not in {0, 3}:
+        raise RuntimeError((completed.stderr or completed.stdout or "govulncheck failed").strip())
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(completed.stdout, encoding="utf-8")
+    events = _cve_policy_api().load_json_stream(destination, "govulncheck scanner output")
+    findings, config = _cve_policy_api().govulncheck_findings(
+        events,
+        artifact=str(target.relative_to(ROOT)) if target.is_relative_to(ROOT) else target.name,
+        scope="reachable_go_vulnerabilities",
+        target=target.name,
+    )
+    print(
+        f"PASS govulncheck exact {config['scan_mode']}/{config['scan_level']} evidence "
+        f"{destination.relative_to(ROOT)} ({len(findings)} advisory finding(s))"
+    )
+    return 0
+
+
+def _security_exceptions() -> list[dict]:
+    root = ROOT / str(security_scan_policy()["exceptions"]["root"])
+    if not root.is_dir():
+        return []
+    values = []
+    for path in sorted(root.glob("*.json")):
+        value = _cve_policy_api().load_json(path, f"security exception {path.name}")
+        values.append(value)
+    return values
+
+
+def vulnerability_evaluate_command(
+    input_path: str,
+    input_format: str,
+    govulncheck_paths: list[str],
+    output_path: str,
+    artifact: str,
+    artifact_digest: str,
+    sbom_path: str,
+    scope: str,
+    environment: str,
+    release: bool,
+    base_ref: str,
+    head_ref: str,
+) -> int:
+    policy = security_scan_policy()
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    base_sha = git("rev-parse", base_ref).strip()
+    head_sha = git("rev-parse", head_ref).strip()
+    tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    resolved_digest = artifact_digest
+    if not resolved_digest and "@sha256:" in artifact:
+        resolved_digest = "sha256:" + artifact.rsplit("@sha256:", 1)[1]
+    try:
+        raw = _cve_policy_api().load_json(source, f"{input_format} scanner output")
+        if input_format == "trivy":
+            findings = _cve_policy_api().trivy_findings(raw, artifact=artifact, scope=scope)
+            toolchain = _raw_toolchain_lock()["versions"]
+            scanner_runs = [
+                {
+                    "name": "trivy",
+                    "status": "PASS",
+                    "version": toolchain["TRIVY_VERSION"],
+                    "checksum": toolchain["TRIVY_SHA256_LINUX_AMD64"],
+                }
+            ]
+            required_scanners = ["trivy"]
+            payload = {"findings": findings}
+        else:
+            payload = raw
+            scanner_runs = list(payload.get("scanner_runs", []))
+            required_scanners = list(payload.get("required_scanners", []))
+        govulncheck_configs = []
+        for govulncheck_path in govulncheck_paths:
+            govulncheck = Path(govulncheck_path)
+            if not govulncheck.is_absolute():
+                govulncheck = ROOT / govulncheck
+            events = _cve_policy_api().load_json_stream(govulncheck, "govulncheck scanner output")
+            go_findings, go_config = _cve_policy_api().govulncheck_findings(
+                events, artifact=artifact, scope=scope, target=govulncheck.stem
+            )
+            payload["findings"] = [*payload.get("findings", []), *go_findings]
+            govulncheck_configs.append(go_config)
+        if govulncheck_configs:
+            identities = {
+                (
+                    config.get("scanner_version"),
+                    config.get("db"),
+                    config.get("db_last_modified"),
+                    config.get("scan_level"),
+                )
+                for config in govulncheck_configs
+            }
+            if len(identities) != 1:
+                raise ValueError("govulncheck scanner identities conflict")
+            go_config = govulncheck_configs[0]
+            scanner_runs.append(
+                {
+                    "name": "govulncheck",
+                    "status": "PASS",
+                    "version": go_config.get("scanner_version"),
+                    "checksum": "go-checksum-database",
+                    "database": go_config.get("db"),
+                    "database_identity": go_config.get("db_last_modified"),
+                    "scan_modes": sorted({config.get("scan_mode") for config in govulncheck_configs}),
+                    "scan_level": go_config.get("scan_level"),
+                    "targets": sorted(Path(path).stem for path in govulncheck_paths),
+                }
+            )
+            required_scanners.append("govulncheck")
+    except (TypeError, ValueError) as exc:
+        payload = {"findings": []}
+        scanner_runs = [{"name": input_format, "status": "FAIL", "version": None, "checksum": None}]
+        required_scanners = [input_format]
+        payload["scanner_error"] = str(exc)
+    sbom_digest = None
+    sbom_artifact_digest = None
+    if sbom_path:
+        sbom = Path(sbom_path)
+        if not sbom.is_absolute():
+            sbom = ROOT / sbom
+        try:
+            sbom_digest, sbom_artifact_digest = _cve_policy_api().sbom_identity(sbom, resolved_digest)
+            scanner_runs.append({"name": "syft", "status": "PASS", "version": "image-pinned", "checksum": None})
+            if "syft" not in required_scanners:
+                required_scanners.append("syft")
+        except (OSError, TypeError, ValueError) as exc:
+            scanner_runs.append({"name": "syft", "status": "FAIL", "version": "image-pinned", "checksum": None})
+            required_scanners.append("syft")
+            payload["scanner_error"] = str(exc)
+    payload.update(
+        {
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "source_head_sha": head_sha,
+            "head_tree_sha": tree_sha,
+            "artifact": artifact,
+            "artifact_digest": resolved_digest or None,
+            "sbom_digest": sbom_digest,
+            "sbom_artifact_digest": sbom_artifact_digest,
+            "scope": scope,
+            "environment": environment,
+            "release": release,
+            "scanner_runs": scanner_runs,
+            "required_scanners": sorted(set(required_scanners)),
+            "exceptions": payload.get("exceptions", _security_exceptions()),
+        }
+    )
+    evidence = _cve_policy_api().evaluate(payload, policy, ROOT)
+    if payload.get("scanner_error"):
+        evidence["reasons"] = sorted(set([*evidence["reasons"], payload["scanner_error"]]))
+        evidence["final_result"] = "BLOCK"
+    relative = output_path or f".context/evidence/security/{head_sha}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("security evidence must remain under .context")
+    _cve_policy_api().write_evidence(destination, evidence)
+    print(json.dumps(evidence, indent=2, sort_keys=True))
+    return 0 if evidence["final_result"] == "PASS" else 1
+
+
+cve_evaluate_command = vulnerability_evaluate_command
 
 
 def _roadmap_followup_after_merge() -> int:
@@ -6917,6 +7535,24 @@ def source_check(head: str) -> int:
     return 0
 
 
+def qualification_tools_contract_check() -> int:
+    from qualification_tools import validate_contract
+
+    validate_contract(ROOT)
+    print("PASS qualification tools contract")
+    return 0
+
+
+def qualification_tools_smoke_check() -> int:
+    from qualification_tools import smoke
+
+    destination = ROOT / ".context/evidence/qualification-tools/smoke.json"
+    payload = smoke(destination)
+    print(f"PASS qualification tools smoke {destination.relative_to(ROOT)}")
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -6929,7 +7565,9 @@ def main() -> int:
         "lint",
         "test",
         "security",
-        "terraform",
+        "qualification-tools-contract",
+        "qualification-tools-smoke",
+        "opentofu",
         "ansible",
         "system",
         "doctor",
@@ -6946,6 +7584,39 @@ def main() -> int:
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
     sub.add_parser("roadmap-sync")
+    qce = sub.add_parser("qce-status")
+    qce.add_argument("--json", action="store_true")
+    qce.add_argument("--sector", default="")
+    qtrace = sub.add_parser("qce-trace")
+    qtrace.add_argument("--sector", default="")
+    sub.add_parser("qce-check")
+    metrics = sub.add_parser("engineering-metrics")
+    metrics.add_argument("--input", required=True)
+    metrics.add_argument("--output", default="")
+    datasets = sub.add_parser("security-datasets-sync")
+    datasets.add_argument("--output", default=".context/security-datasets")
+    govulncheck_scan = sub.add_parser("govulncheck-scan")
+    govulncheck_scan.add_argument("--target", required=True)
+    govulncheck_scan.add_argument("--mode", choices=["source", "binary"], required=True)
+    govulncheck_scan.add_argument("--output", required=True)
+    for command in ("vulnerability-evaluate", "cve-evaluate"):
+        vulnerability = sub.add_parser(command)
+        vulnerability.add_argument("--input", required=True)
+        vulnerability.add_argument("--format", choices=["normalized", "trivy"], default="normalized")
+        vulnerability.add_argument("--govulncheck", action="append", default=[])
+        vulnerability.add_argument("--output", default="")
+        vulnerability.add_argument("--artifact", default="repository")
+        vulnerability.add_argument("--artifact-digest", default="")
+        vulnerability.add_argument("--sbom", default="")
+        vulnerability.add_argument("--scope", default="repository_filesystem")
+        vulnerability.add_argument("--environment", default="development")
+        vulnerability.add_argument("--release", action="store_true")
+        vulnerability.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+        vulnerability.add_argument("--head", default=os.environ.get("HEAD", "HEAD"))
+    experiment = sub.add_parser("experiment")
+    experiment.add_argument("action", choices=["baseline", "evaluate", "status"])
+    experiment.add_argument("--input", required=True)
+    experiment.add_argument("--output", default="")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -7090,26 +7761,29 @@ def main() -> int:
             return test_all()
         if args.cmd == "security":
             return security()
-        if args.cmd == "terraform":
+        if args.cmd == "qualification-tools-contract":
+            return _run_cached_static_gate(
+                "qualification-tools", {}, qualification_tools_contract_check
+            )
+        if args.cmd == "qualification-tools-smoke":
+            return qualification_tools_smoke_check()
+        if args.cmd == "opentofu":
             if not terraform_source_files():
-                return terraform_check()
+                return opentofu_check()
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(
-                    "platform:terraform", ["terraform"]
+                    "platform:terraform", ["opentofu"]
                 )
             # Availability/provider identity must be checked fresh; deterministic
             # validation work may then be reused by content identity.
             tf_files = terraform_source_files()
             if tf_files:
-                formatter = source_quality_adapter("terraform")["formatter"]
-                approved = next(
-                    (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
-                    None,
-                )
-                if not approved:
-                    return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+                formatter = source_quality_adapter("opentofu")["formatter"]
+                if formatter.get("executable_preference") != ["tofu"]:
+                    return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+                require("tofu")
                 validate_terraform_lockfile_projections(terraform_provider_lock_contract())
-            return _run_cached_gate("platform:terraform", {}, terraform_check)
+            return _run_cached_gate("platform:terraform", {}, opentofu_check)
         if args.cmd == "ansible":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(
@@ -7228,6 +7902,35 @@ def main() -> int:
             return roadmap_check()
         if args.cmd == "roadmap-sync":
             return roadmap_sync()
+        if args.cmd == "qce-status":
+            return qce_status_command(json_output=args.json, sector=args.sector)
+        if args.cmd == "qce-trace":
+            return qce_status_command(json_output=True, sector=args.sector, trace=True)
+        if args.cmd == "qce-check":
+            return qce_check_command()
+        if args.cmd == "engineering-metrics":
+            return engineering_metrics_command(args.input, args.output)
+        if args.cmd == "security-datasets-sync":
+            return security_datasets_sync_command(args.output)
+        if args.cmd == "govulncheck-scan":
+            return govulncheck_scan_command(args.target, args.mode, args.output)
+        if args.cmd in {"vulnerability-evaluate", "cve-evaluate"}:
+            return vulnerability_evaluate_command(
+                args.input,
+                args.format,
+                args.govulncheck,
+                args.output,
+                args.artifact,
+                args.artifact_digest,
+                args.sbom,
+                args.scope,
+                args.environment,
+                args.release,
+                args.base,
+                args.head,
+            )
+        if args.cmd == "experiment":
+            return experiment_command(args.action, args.input, args.output)
         if args.cmd == "publish":
             return publish(args.base, args.message)
         if args.cmd == "publish-change":

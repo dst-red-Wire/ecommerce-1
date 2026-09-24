@@ -15,6 +15,9 @@ levels:
       - config/contracts/ci-topology.yaml
       - config/contracts/resilience-governance.yaml
       - config/contracts/security-trust-zones.yaml
+      - config/contracts/security-scan-policy.yaml
+      - config/contracts/service-slo.yaml
+      - config/contracts/engineering-metrics-policy.yaml
       - platform/**
       - gitops/**
       - security/**
@@ -32,6 +35,15 @@ levels:
       - iam
       - keycloak
       - security
+      - cve
+      - qce
+      - slo
+      - error budget
+      - engineering metrics
+      - context engineering
+      - kratix
+      - kustomize
+      - helm
       - tls
       - infrastructure
       - resilience
@@ -80,7 +92,11 @@ canonical:
     - config/contracts/ci-topology.yaml
     - config/contracts/resilience-governance.yaml
     - config/contracts/security-trust-zones.yaml
+    - config/contracts/security-scan-policy.yaml
+    - config/contracts/service-slo.yaml
+    - config/contracts/engineering-metrics-policy.yaml
     - config/infrastructure/deployment-waves.yaml
+    - config/infrastructure/kratix-platform.yaml
     - docs/architecture/AIOPS_TOPOLOGY_V1.md
     - docs/architecture/MLOPS_TOPOLOGY_V1.md
   L1:
@@ -89,3 +105,45 @@ canonical:
     - config/contracts/event-contracts.yaml
     - config/contracts/public-api-contracts.yaml
   L0: []
+
+agent_data_access:
+  authority: architecture.lock.yaml#machine_contracts.context_router
+  default_mode: read-only
+  least_privilege: required
+  auditability: required
+  exact_source_identity: required
+  secret_values: forbidden
+  production_credentials: forbidden
+  private_keys: forbidden
+  unbounded_environment_dump: forbidden
+  environment_capture: allowlist-only
+  output_root: .context
+  maximum_override_policy: may-reduce-never-increase-level-budget
+  forbidden_path_patterns:
+    - "(^|/)\\.env($|\\.)"
+    - "(^|/)(id_rsa|id_ed25519|.*\\.key)$"
+    - "(^|/)(kubeconfig|credentials)(\\.|$)"
+    - "(^|/)terraform\\.tfstate(\\.|$)"
+  redaction_patterns:
+    - "(?is)-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    - "(?i)(password|secret|token|api[_-]?key)\\s*[:=]\\s*[^\\s]+"
+  contract_references:
+    - architecture.lock.yaml#machine_contracts.context_router
+    - architecture.lock.yaml#machine_contracts.ci_evidence
+    - architecture.lock.yaml#machine_contracts.security_scan_policy
+    - architecture.lock.yaml#machine_contracts.service_slo
+    - architecture.lock.yaml#machine_contracts.engineering_metrics_policy
+  accessible_evidence:
+    - architecture
+    - contracts
+    - focused-diff
+    - relevant-code
+    - relevant-tests
+    - ci-evidence
+    - qce-evidence
+    - slo-evidence
+    - engineering-metrics
+    - incident-evidence
+    - dependency-graph
+    - ownership
+    - documentation
