@@ -16,7 +16,7 @@ MAKE = shutil.which("make")
 @unittest.skipUnless(MAKE, "make is required")
 class MakeManagedBinTest(unittest.TestCase):
     def _prepare_controller_prerequisites(self, system_bin: Path) -> None:
-        for name in ("git", "ruby"):
+        for name in ("git", "python3", "ruby"):
             resolved = shutil.which(name)
             self.assertIsNotNone(resolved, f"{name} is required for repoctl format-check tests")
             (system_bin / name).symlink_to(resolved)
