@@ -198,6 +198,12 @@ class OpenTofuAuthorityTests(unittest.TestCase):
                 "Remove forbidden Terraform CLI entry points from the managed user path"
             ]["ansible.builtin.file"]["path"],
         )
+        self.assertIn(
+            "item in ['/usr/local/bin/terraform', '/usr/bin/terraform']",
+            by_name["Validate privileged Terraform CLI removal paths"][
+                "ansible.builtin.assert"
+            ]["that"],
+        )
         self.assertEqual(
             "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}",
             by_name[
@@ -208,8 +214,13 @@ class OpenTofuAuthorityTests(unittest.TestCase):
             "Discover stale repository-managed Terraform CLI artifacts"
         ]["ansible.builtin.find"]
         self.assertEqual(
-            ["terraform-*", "terraform-provider-cache"], discovery["patterns"]
+            [
+                r"^terraform-[0-9]+\.[0-9]+\.[0-9]+(?:\.zip)?$",
+                "^terraform-provider-cache$",
+            ],
+            discovery["patterns"],
         )
+        self.assertTrue(discovery["use_regex"])
         self.assertFalse(discovery["recurse"])
         self.assertEqual(
             "absent",

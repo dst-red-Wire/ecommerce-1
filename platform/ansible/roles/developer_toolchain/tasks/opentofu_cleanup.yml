@@ -21,6 +21,13 @@
     path: "{{ local_bin }}/terraform"
     state: absent
 
+- name: Validate privileged Terraform CLI removal paths
+  ansible.builtin.assert:
+    that:
+      - item in ['/usr/local/bin/terraform', '/usr/bin/terraform']
+    fail_msg: "Refusing unsafe privileged Terraform CLI removal path: {{ item }}"
+  loop: "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}"
+
 - name: Remove forbidden Terraform CLI entry points from system paths
   ansible.builtin.file:
     path: "{{ item }}"
@@ -34,8 +41,9 @@
       - "{{ local_share }}/tools"
       - "{{ local_cache }}"
     patterns:
-      - terraform-*
-      - terraform-provider-cache
+      - '^terraform-[0-9]+\.[0-9]+\.[0-9]+(?:\.zip)?$'
+      - '^terraform-provider-cache$'
+    use_regex: true
     file_type: any
     recurse: false
   register: developer_toolchain_forbidden_terraform_cli_artifacts
