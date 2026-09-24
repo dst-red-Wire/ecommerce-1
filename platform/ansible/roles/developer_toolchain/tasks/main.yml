@@ -11,6 +11,10 @@
     - "{{ local_cache }}"
   tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
+- name: Reconcile forbidden legacy IaC artifacts
+  ansible.builtin.import_tasks: opentofu_cleanup.yml
+  tags: [toolchain, opentofu]
+
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
     name:

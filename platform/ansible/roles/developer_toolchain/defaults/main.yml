@@ -1,5 +1,8 @@
 ---
 versions_file: "{{ repo_root }}/config/toolchain/versions.env"
+developer_toolchain_architecture_lock_file: "{{ repo_root }}/architecture.lock.yaml"
+developer_toolchain_architecture_lock: >-
+  {{ lookup('ansible.builtin.file', developer_toolchain_architecture_lock_file) | from_yaml }}
 toolchain_lock_file: "{{ repo_root }}/config/contracts/toolchain-lock.json"
 toolchain_lock: "{{ lookup('ansible.builtin.file', toolchain_lock_file) | from_json }}"
 managed_tools: "{{ toolchain_lock.tools }}"
@@ -16,6 +19,9 @@ local_cache: >-
   {{ (managed_install_root + '/' + toolchain_lock.capability_policy.managed_install_root.cache_subdirectory)
      if managed_install_root_explicit
      else (toolchain_lock.capability_policy.managed_install_root.fallback_cache_root | regex_replace('^~', ansible_env.HOME)) }}
+developer_toolchain_forbidden_terraform_cli_system_paths:
+  - /usr/local/bin/terraform
+  - /usr/bin/terraform
 toolchain_offline: >-
   {{ lookup('ansible.builtin.env', toolchain_lock.capability_policy.managed_install_root.offline_environment)
      | default('false', true) | bool }}
