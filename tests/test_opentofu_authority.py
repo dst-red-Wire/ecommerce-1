@@ -188,9 +188,23 @@ class OpenTofuAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(
             "absent",
-            by_name["Remove the forbidden Terraform operating-system package"][
-                "ansible.builtin.apt"
-            ]["state"],
+            by_name[
+                "Remove the forbidden Terraform operating-system package when present"
+            ]["ansible.builtin.apt"]["state"],
+        )
+        package_probe = by_name[
+            "Probe for a forbidden Terraform operating-system package"
+        ]
+        self.assertEqual(
+            ["/usr/bin/dpkg-query", "--show", "terraform"],
+            package_probe["ansible.builtin.command"]["argv"],
+        )
+        self.assertFalse(package_probe["check_mode"])
+        self.assertEqual(
+            "developer_toolchain_terraform_package_probe.rc == 0",
+            by_name[
+                "Remove the forbidden Terraform operating-system package when present"
+            ]["when"],
         )
         self.assertEqual(
             "{{ local_bin }}/terraform",
@@ -206,9 +220,15 @@ class OpenTofuAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(
             "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}",
+            by_name["Inspect forbidden Terraform CLI entry points in system paths"][
+                "loop"
+            ],
+        )
+        self.assertEqual(
+            "item.stat.exists",
             by_name[
-                "Remove forbidden Terraform CLI entry points from system paths"
-            ]["loop"],
+                "Remove forbidden Terraform CLI entry points from system paths when present"
+            ]["when"],
         )
         discovery = by_name[
             "Discover stale repository-managed Terraform CLI artifacts"
@@ -228,12 +248,21 @@ class OpenTofuAuthorityTests(unittest.TestCase):
                 "ansible.builtin.file"
             ]["state"],
         )
+        path_probe = by_name[
+            "Probe for a residual Terraform CLI on the effective path"
+        ]
         self.assertEqual(
-            ["bash", "-lc", "command -v terraform"],
-            by_name["Probe for a residual Terraform CLI on the effective path"][
-                "ansible.builtin.command"
-            ]["argv"],
+            ["/usr/bin/python3", "-c"],
+            path_probe["ansible.builtin.command"]["argv"][:2],
         )
+        self.assertIn(
+            "shutil.which('terraform'",
+            path_probe["ansible.builtin.command"]["argv"][2],
+        )
+        self.assertEqual(
+            "{{ local_bin }}:{{ ansible_env.PATH }}", path_probe["environment"]["PATH"]
+        )
+        self.assertFalse(path_probe["check_mode"])
         self.assertIn(
             "developer_toolchain_terraform_cli_probe.rc != 0",
             by_name["Require Terraform CLI to be absent after reconciliation"][
