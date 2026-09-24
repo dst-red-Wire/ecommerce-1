@@ -1,0 +1,18 @@
+id: ecommerce-local-health-smoke
+
+info:
+  name: Ecommerce controlled local health smoke
+  author: ecommerce-1
+  severity: info
+  description: Matches only the repository-owned local smoke response.
+  tags: local,smoke
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/healthz"
+    matchers:
+      - type: word
+        part: body
+        words: ["ecommerce-qualified"]
+

@@ -58,6 +58,6 @@ platform_services:
   gitops: rancher-fleet
 
 bootstrap:
-  infrastructure: terraform-opentofu
+  infrastructure: opentofu
   configuration: ansible
   human_apply_gate: true

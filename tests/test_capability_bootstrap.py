@@ -42,7 +42,7 @@ class DeveloperWSLPreflightTest(unittest.TestCase):
         for run_tags in (["all"], ["workstation"], ["docker"]):
             with self.subTest(run_tags=run_tags):
                 self.assertTrue(self.selected(predicates[0], run_tags))
-        for run_tags in (["terraform"], ["helm"]):
+        for run_tags in (["opentofu"], ["helm"]):
             with self.subTest(run_tags=run_tags):
                 self.assertFalse(self.selected(predicates[0], run_tags))
 
@@ -439,7 +439,7 @@ class CapabilityAuditTest(unittest.TestCase):
             {"name": "kind", "requires": ["docker"], "command": "kind"},
             {"name": "oasdiff", "requires": [], "command": "oasdiff"},
             {"name": "ansible", "requires": [], "command": "ansible-playbook"},
-            {"name": "terraform", "requires": [], "command": "terraform"},
+            {"name": "opentofu", "requires": [], "command": "tofu"},
             {"name": "kubectl", "requires": [], "command": "kubectl"},
         ]
         results = self.auditor(items, {"docker": (1, "daemon unavailable")}).run(
@@ -447,7 +447,7 @@ class CapabilityAuditTest(unittest.TestCase):
         )
         self.assertEqual("BLOCKED", results["docker"].state)
         self.assertEqual("SKIP", results["kind"].state)
-        for independent in ("oasdiff", "ansible", "terraform", "kubectl"):
+        for independent in ("oasdiff", "ansible", "opentofu", "kubectl"):
             self.assertEqual("PASS", results[independent].state)
 
     def test_absent_tool_and_wrong_version_fail(self):
@@ -1076,22 +1076,22 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertIn('GOROOT: ""', tasks)
 
     def test_exact_installed_version_rejects_update_warning_substring_and_prerelease(self):
-        item = {"name": "terraform", "requires": [], "command": "terraform", "version_key": "TERRAFORM_VERSION"}
-        expected = MOD.load_versions()["TERRAFORM_VERSION"]
+        item = {"name": "opentofu", "requires": [], "command": "tofu", "version_key": "OPENTOFU_VERSION"}
+        expected = MOD.load_versions()["OPENTOFU_VERSION"]
         mutations = (
-            f"Terraform v1.15.0\nYour version is out of date! The latest version is {expected}",
-            f"Terraform v{expected}0",
-            f"Terraform v{expected}-rc1",
+            f"OpenTofu v1.11.0\nYour version is out of date! The latest version is {expected}",
+            f"OpenTofu v{expected}0",
+            f"OpenTofu v{expected}-rc1",
         )
         for output in mutations:
             with self.subTest(output=output):
-                result = self.auditor([item], {"/bin/terraform": (0, output)}).run(
+                result = self.auditor([item], {"/bin/tofu": (0, output)}).run(
                     bootstrap=False, os_name="linux", arch="amd64"
-                )["terraform"]
+                )["opentofu"]
                 self.assertEqual("FAIL", result.state)
-        exact = self.auditor([item], {"/bin/terraform": (0, "Terraform v" + expected)}).run(
+        exact = self.auditor([item], {"/bin/tofu": (0, "OpenTofu v" + expected)}).run(
             bootstrap=False, os_name="linux", arch="amd64"
-        )["terraform"]
+        )["opentofu"]
         self.assertEqual("PASS", exact.state)
 
     def test_checksum_invalid_is_rejected_by_existing_ansible_mechanism(self):
@@ -1104,7 +1104,7 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertIn("ANSIBLE_CORE_VERSION", values)
         canonical = MOD.load_contract()
         names = {item["name"]: item for item in canonical["capabilities"]}
-        for name in ("oasdiff", "ansible-playbook", "terraform", "kubectl", "helm", "kustomize"):
+        for name in ("oasdiff", "ansible-playbook", "opentofu", "kubectl", "helm", "kustomize"):
             self.assertNotIn("docker", names[name].get("requires", []))
         self.assertNotIn("kind", names)
         lifecycle = MOD.load_toolchain_lock()["tool_lifecycle"]
@@ -1216,114 +1216,24 @@ class CapabilityClosureTest(unittest.TestCase):
             self.assertIn("build-essential", apt_packages)
             self.assertIn("pipx", apt_packages)
 
-    @staticmethod
-    def terraform_archive_run(source, selected_tag, unzip_present, sudo_available=True):
-        probe = re.search(
-            r"- name: Detect Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",
-            source,
-            re.DOTALL,
-        )
-        prerequisite = re.search(
-            r"- name: Ensure Terraform archive extraction prerequisite\n(?P<body>.*?)(?=\n- name:)",
-            source,
-            re.DOTALL,
-        )
-        extraction = re.search(
-            r"- name: Extract pinned standalone gate tools\n(?P<body>.*?)(?=\n- name:)",
-            source,
-            re.DOTALL,
-        )
-        if probe is None or prerequisite is None or extraction is None:
-            return False, [], 0
-
-        events = []
-        privileged_installs = 0
-        probe_selected = selected_tag in re.findall(r"^  tags: \[([^]]+)\]$", probe.group("body"), re.MULTILINE)[
-            0
-        ].split(", ")
-        if probe_selected:
-            events.append("probe-unzip")
-        prerequisite_selected = selected_tag in re.findall(
-            r"^  tags: \[([^]]+)\]$", prerequisite.group("body"), re.MULTILINE
-        )[0].split(", ")
-        guarded_by_probe = "when: terraform_unzip_probe.rc != 0" in prerequisite.group("body")
-        if prerequisite_selected and (not guarded_by_probe or not unzip_present):
-            events.append("privileged-unzip-install")
-            privileged_installs += 1
-            if not sudo_available:
-                return False, events, privileged_installs
-            if not unzip_present:
-                unzip_present = True
-
-        extraction_selected = selected_tag in {
-            "gitleaks",
-            "helm",
-            "terraform",
-            "kustomize",
-        } and f"tag: {selected_tag}" in extraction.group("body")
-        if extraction_selected:
-            events.append(f"extract-{selected_tag}")
-            if selected_tag == "terraform" and not unzip_present:
-                return False, events, privileged_installs
-        return True, events, privileged_installs
-
-    def test_terraform_target_installs_missing_unzip_before_archive_extraction(self):
+    def test_opentofu_install_is_unprivileged_cached_signed_and_idempotent(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        passed, events, installs = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
-        self.assertTrue(passed)
-        self.assertEqual(["probe-unzip", "privileged-unzip-install", "extract-terraform"], events)
-        self.assertEqual(1, installs)
+        section = tasks[tasks.index("- name: Download pinned OpenTofu release verification assets") :]
+        section = section[: section.index("# These gate tools deliberately")]
+        self.assertIn("when: not toolchain_offline", section)
+        self.assertIn("Validate cached OpenTofu release artifact integrity", section)
+        self.assertIn("Verify the OpenTofu checksum manifest signature offline", section)
+        self.assertIn("Verify the OpenTofu archive against the authenticated manifest", section)
+        self.assertIn("creates:", section)
+        self.assertNotIn("become: true", section)
+        self.assertNotIn("terraform", section.lower())
 
-    def test_terraform_target_with_unzip_present_never_attempts_sudo_and_is_idempotent(self):
+    def test_helm_and_kustomize_remain_independent_from_opentofu(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        for _ in range(2):
-            passed, events, privileged_installs = self.terraform_archive_run(
-                tasks, "terraform", unzip_present=True, sudo_available=False
-            )
-            self.assertTrue(passed)
-            self.assertEqual(["probe-unzip", "extract-terraform"], events)
-            self.assertEqual(0, privileged_installs)
-
-    def test_unconditional_privileged_install_mutation_fails_then_restored_passes(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        guard = "  when: terraform_unzip_probe.rc != 0\n"
-        self.assertEqual(1, tasks.count(guard))
-        mutated = tasks.replace(guard, "", 1)
-        mutated_passed, mutated_events, mutated_installs = self.terraform_archive_run(
-            mutated, "terraform", unzip_present=True, sudo_available=False
-        )
-        self.assertFalse(mutated_passed)
-        self.assertEqual(["probe-unzip", "privileged-unzip-install"], mutated_events)
-        self.assertEqual(1, mutated_installs)
-        restored_passed, restored_events, restored_installs = self.terraform_archive_run(
-            tasks, "terraform", unzip_present=True, sudo_available=False
-        )
-        self.assertTrue(restored_passed)
-        self.assertEqual(["probe-unzip", "extract-terraform"], restored_events)
-        self.assertEqual(0, restored_installs)
-
-    def test_missing_terraform_prerequisite_tag_mutation_fails_then_restored_passes(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        prerequisite = re.search(
-            r"(- name: Ensure Terraform archive extraction prerequisite\n.*?  tags: )\[terraform\]",
-            tasks,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(prerequisite)
-        mutated = tasks[: prerequisite.start()] + prerequisite.group(1) + "[toolchain]" + tasks[prerequisite.end() :]
-        mutated_passed, mutated_events, _ = self.terraform_archive_run(mutated, "terraform", unzip_present=False)
-        self.assertFalse(mutated_passed)
-        self.assertEqual(["probe-unzip", "extract-terraform"], mutated_events)
-        restored_passed, _, _ = self.terraform_archive_run(tasks, "terraform", unzip_present=False)
-        self.assertTrue(restored_passed)
-
-    def test_independent_archive_capabilities_do_not_select_terraform_unzip_setup(self):
-        tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        for capability in ("helm", "kustomize"):
-            passed, events, installs = self.terraform_archive_run(tasks, capability, unzip_present=False)
-            self.assertTrue(passed)
-            self.assertEqual([f"extract-{capability}"], events)
-            self.assertEqual(0, installs)
+        standalone = tasks[tasks.index("- name: Download pinned standalone gate archives") :]
+        self.assertIn("tag: helm", standalone)
+        self.assertIn("tag: kustomize", standalone)
+        self.assertNotIn("tag: opentofu", standalone)
 
     def test_ansible_owner_rejects_direct_pip_mutation(self):
         canonical = MOD.load_contract()
@@ -1332,13 +1242,13 @@ class CapabilityClosureTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canonical provision owner is ansible, not pip"):
             MOD.validate_contract(canonical)
 
-    def test_standalone_tools_select_all_without_overselecting_targeted_tags(self):
+    def test_standalone_gate_archives_select_all_without_overselecting_targeted_tags(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        expected = {"gitleaks", "helm", "terraform", "kustomize"}
+        expected = {"helm", "kustomize"}
         self.assertEqual(4, tasks.count("'all' in ansible_run_tags or item.tag in ansible_run_tags"))
         select = lambda run_tags: {tag for tag in expected if "all" in run_tags or tag in run_tags}
         self.assertEqual(expected, select(["all"]))
-        self.assertEqual({"terraform"}, select(["terraform"]))
+        self.assertEqual({"helm"}, select(["helm"]))
         # Exact old predicate mutation: under Ansible's implicit `all`, every item vanished.
         old_select = lambda run_tags: {tag for tag in expected if tag in run_tags}
         self.assertNotEqual(expected, old_select(["all"]))
@@ -1426,7 +1336,7 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical = MOD.load_contract()
         MOD.validate_contract(canonical)
         names = {item["name"] for item in canonical["capabilities"]}
-        for name in ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize", "bazel"):
+        for name in ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "opentofu", "kustomize", "bazel"):
             self.assertIn(name, names)
 
     def test_unknown_gate_command_is_rejected(self):
@@ -1483,9 +1393,17 @@ class CapabilityClosureTest(unittest.TestCase):
         canonical = MOD.load_contract()
         names = {item["name"]: item for item in canonical["capabilities"]}
         versions = MOD.load_versions()
-        for name in ("cosign", "gitleaks", "kubectl", "helm", "terraform", "kustomize"):
+        checksum_keys = {
+            "cosign": "COSIGN_SHA256_LINUX_AMD64",
+            "gitleaks": "GITLEAKS_SHA256_LINUX_AMD64",
+            "kubectl": "KUBECTL_SHA256_LINUX_AMD64",
+            "helm": "HELM_SHA256_LINUX_AMD64",
+            "opentofu": "OPENTOFU_SHA256_LINUX_AMD64",
+            "kustomize": "KUSTOMIZE_SHA256_LINUX_AMD64",
+        }
+        for name, checksum_key in checksum_keys.items():
             self.assertEqual(["linux/amd64"], names[name]["platforms"])
-            self.assertIn(f"{name.upper()}_SHA256_LINUX_AMD64", versions)
+            self.assertIn(checksum_key, versions)
 
     def test_docker_buildx_is_a_pinned_user_local_cli_plugin(self):
         lock = MOD.load_toolchain_lock()
@@ -1499,7 +1417,7 @@ class CapabilityClosureTest(unittest.TestCase):
         self.assertIn("argv: [docker, buildx, version]", tasks)
 
     def test_docker_blockage_does_not_skip_independent_gate_tools(self):
-        names = ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "terraform", "kustomize")
+        names = ("cosign", "gitleaks", "oasdiff", "oapi-codegen", "kubectl", "helm", "opentofu", "kustomize")
         items = [{"name": "docker", "requires": [], "probe": ["docker", "info"], "external_failure": True}]
         items += [{"name": name, "requires": [], "command": name} for name in names]
         items += [{"name": "kind", "requires": ["docker"], "command": "kind"}]
@@ -1512,141 +1430,59 @@ class CapabilityClosureTest(unittest.TestCase):
         for name in names:
             self.assertEqual("PASS", results[name].state)
 
-    def terraform_audit(self, present, outcomes):
-        item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+    def opentofu_audit(self, present, outcomes):
+        item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "opentofu"))
         item.pop("provision_requires")
         item.pop("provision")
         auditor = CapabilityAuditTest().auditor([item], outcomes, present=present)
-        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
+        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["opentofu"]
         return item, auditor, result
 
-    def test_terraform_provider_selection_and_resolved_executable(self):
-        versions = MOD.load_versions()
+    def test_opentofu_is_the_only_resolved_iac_executable(self):
+        version = MOD.load_versions()["OPENTOFU_VERSION"]
         cases = (
-            (
-                "tofu only",
-                {"tofu"},
-                {"/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"])},
-                "PASS",
-                "/bin/tofu",
-            ),
-            (
-                "terraform only",
-                {"terraform"},
-                {"/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"])},
-                "PASS",
-                "/bin/terraform",
-            ),
-            (
-                "both valid",
-                {"tofu", "terraform"},
-                {
-                    "/bin/tofu": (0, "OpenTofu " + versions["OPENTOFU_VERSION"]),
-                    "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-                },
-                "PASS",
-                "/bin/tofu",
-            ),
-            (
-                "stale tofu",
-                {"tofu", "terraform"},
-                {
-                    "/bin/tofu": (0, "OpenTofu 0.1.0"),
-                    "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-                },
-                "FAIL",
-                None,
-            ),
-            ("stale terraform", {"terraform"}, {"/bin/terraform": (0, "Terraform v0.1.0")}, "FAIL", None),
+            ("exact tofu", {"tofu"}, {"/bin/tofu": (0, "OpenTofu v" + version)}, "PASS", "/bin/tofu"),
+            ("stale tofu", {"tofu"}, {"/bin/tofu": (0, "OpenTofu v0.1.0")}, "FAIL", None),
+            ("terraform only", {"terraform"}, {"/bin/terraform": (0, "Terraform v1.16.2")}, "FAIL", None),
         )
         for label, present, outcomes, state, executable in cases:
-            with self.subTest(label=label):
-                with mock.patch.object(MOD, "MANAGED_BIN_DIRS", ()):
-                    _, auditor, result = self.terraform_audit(present, outcomes)
+            with self.subTest(label=label), mock.patch.object(MOD, "MANAGED_BIN_DIRS", ()):
+                _, auditor, result = self.opentofu_audit(present, outcomes)
                 self.assertEqual(state, result.state)
-                self.assertEqual(executable, auditor.resolved_executables.get("terraform"))
+                self.assertEqual(executable, auditor.resolved_executables.get("opentofu"))
 
-    def test_terraform_provider_selection_matches_repoctl_path_lookup(self):
-        versions = MOD.load_versions()
+    def test_opentofu_resolution_prefers_managed_exact_binary(self):
+        version = MOD.load_versions()["OPENTOFU_VERSION"]
         with tempfile.TemporaryDirectory() as tmp:
             managed_bin = Path(tmp) / "managed"
             path_bin = Path(tmp) / "path"
             managed_bin.mkdir()
             path_bin.mkdir()
-            item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "terraform"))
+            managed = managed_bin / "tofu"
+            path_tool = path_bin / "tofu"
+            for executable in (managed, path_tool):
+                executable.write_text("stub", encoding="utf-8")
+                executable.chmod(0o755)
+            item = dict(next(item for item in MOD.load_contract()["capabilities"] if item["name"] == "opentofu"))
             item.pop("provision_requires")
             item.pop("provision")
-
-            cases = (
-                (
-                    "managed tofu valid",
-                    {"managed/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]},
-                    "PASS",
-                    "managed/tofu",
-                ),
-                (
-                    "managed tofu stale",
-                    {"managed/tofu": "0.1.0", "path/terraform": versions["TERRAFORM_VERSION"]},
-                    "FAIL",
-                    None,
-                ),
-                (
-                    "PATH tofu",
-                    {"path/tofu": versions["OPENTOFU_VERSION"], "path/terraform": versions["TERRAFORM_VERSION"]},
-                    "PASS",
-                    "path/tofu",
-                ),
-                (
-                    "managed terraform",
-                    {"managed/terraform": versions["TERRAFORM_VERSION"], "path/terraform": "0.1.0"},
-                    "PASS",
-                    "managed/terraform",
-                ),
-                ("PATH terraform", {"path/terraform": versions["TERRAFORM_VERSION"]}, "PASS", "path/terraform"),
-            )
-            for label, tools, expected_state, selected in cases:
-                with self.subTest(label=label):
-                    for directory in (managed_bin, path_bin):
-                        for executable in directory.iterdir():
-                            executable.unlink()
-                    outcomes = {}
-                    for location, version in tools.items():
-                        executable = Path(tmp) / location
-                        executable.write_text("stub", encoding="utf-8")
-                        executable.chmod(0o755)
-                        product = "OpenTofu " if executable.name == "tofu" else "Terraform v"
-                        outcomes[str(executable)] = (0, product + version)
-                    caller_path = str(path_bin)
-                    which = lambda command: shutil.which(command, path=caller_path)
-                    effective_path = os.pathsep.join((str(managed_bin), caller_path))
-                    repoctl_selected = shutil.which("tofu", path=effective_path) or shutil.which(
-                        "terraform", path=effective_path
-                    )
-                    with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
-                        auditor = MOD.Auditor(
-                            contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which
-                        )
-                        result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-                    self.assertEqual(expected_state, result.state)
-                    expected_executable = str(Path(tmp) / selected) if selected else None
-                    self.assertEqual(expected_executable, auditor.resolved_executables.get("terraform"))
-                    if result.state == "PASS":
-                        self.assertEqual(repoctl_selected, auditor.resolved_executables["terraform"])
-
-                    if label == "managed tofu stale":
-                        mutation_auditor = MOD.Auditor(
-                            contract([item]), runner=CapabilityAuditTest().runner(outcomes), which=which
-                        )
-                        mutation_auditor.resolve_repoctl_runtime = which
-                        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-                        self.assertEqual("PASS", mutation.state, "PATH-only mutation must reproduce the false PASS")
-                        self.assertEqual(
-                            str(path_bin / "terraform"), mutation_auditor.resolved_executables["terraform"]
-                        )
+            outcomes = {
+                str(managed): (0, "OpenTofu v" + version),
+                str(path_tool): (0, "OpenTofu v0.1.0"),
+            }
+            with mock.patch.object(MOD, "MANAGED_BIN_DIRS", (managed_bin,)):
+                auditor = MOD.Auditor(
+                    contract([item]),
+                    runner=CapabilityAuditTest().runner(outcomes),
+                    which=lambda command: shutil.which(command, path=str(path_bin)),
+                )
+                result = auditor.run(bootstrap=False, os_name="linux", arch="amd64")["opentofu"]
+            self.assertEqual("PASS", result.state)
+            self.assertEqual(str(managed), auditor.resolved_executables["opentofu"])
 
     def test_alternative_selection_policy_is_validated_when_present(self):
         base = {
-            "name": "terraform",
+            "name": "iac-selector",
             "requires": [],
             "any_of": [{"command": "tofu", "version_key": "OPENTOFU_VERSION"}],
         }
@@ -1658,19 +1494,12 @@ class CapabilityClosureTest(unittest.TestCase):
             ):
                 MOD.validate_contract(contract([{**base, "selection_policy": policy}]))
 
-    def test_terraform_legacy_fallback_mutation_is_caught(self):
-        versions = MOD.load_versions()
-        outcomes = {
-            "/bin/tofu": (0, "OpenTofu 0.1.0"),
-            "/bin/terraform": (0, "Terraform v" + versions["TERRAFORM_VERSION"]),
-        }
-        item, _, restored = self.terraform_audit({"tofu", "terraform"}, outcomes)
-        mutated = dict(item)
-        mutated.pop("selection_policy")
-        mutation_auditor = CapabilityAuditTest().auditor([mutated], outcomes, present={"tofu", "terraform"})
-        mutation = mutation_auditor.run(bootstrap=False, os_name="linux", arch="amd64")["terraform"]
-        self.assertEqual("PASS", mutation.state, "legacy fallback mutation must reproduce the false PASS")
-        self.assertEqual("FAIL", restored.state, "preferred stale tofu must fail closed")
+    def test_terraform_cli_fallback_is_absent_from_canonical_graph(self):
+        canonical = MOD.load_contract()
+        opentofu = next(item for item in canonical["capabilities"] if item["name"] == "opentofu")
+        self.assertEqual("tofu", opentofu["command"])
+        self.assertNotIn("any_of", opentofu)
+        self.assertNotIn("terraform", canonical["command_capabilities"])
 
 
 if __name__ == "__main__":

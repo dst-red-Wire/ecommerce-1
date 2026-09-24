@@ -28,12 +28,30 @@ capabilities:
     implementation: govulncheck
     status: active
     execution: affected-go-modules
+  os_compliance:
+    implementation: openscap
+    status: active
+    execution: qualified-rocky-rke2-node-only
+    profile_authority: architecture.lock.yaml#machine_contracts.qualification_tools
   kubernetes_cis:
     implementation: kube-bench
-    status: deferred
+    status: active
     execution: qualified-rke2-cluster-only
-    reason: no current qualified RKE2 campaign executes kube-bench
+    incompatible_profile_behavior: BLOCK
     policy_authority: architecture.lock.yaml#security
+  policy_as_code:
+    implementation: conftest
+    status: active
+    execution: qualification-tools-static
+  controlled_http_dast:
+    implementation: nuclei
+    status: active
+    execution: qualification-tools-smoke-local-or-contracted-project-target
+  network_policy_evidence:
+    implementation: hubble
+    status: active
+    execution: qualified-rke2-multinode-only
+    incompatible_client_behavior: BLOCK
 
 scan_scopes:
   repository_filesystem:
@@ -60,7 +78,19 @@ scan_scopes:
   kubernetes_runtime_cis:
     scanners: [kube-bench]
     execution: qualified-rke2-cluster-only
-    status: deferred
+    status: active-runtime-profile-blocked-until-compatible
+  rocky_os_compliance:
+    scanners: [openscap]
+    execution: qualified-rocky-rke2-node-only
+  policy_as_code:
+    scanners: [conftest, opa]
+    execution: repository-policy-fixtures-and-contracted-inputs
+  controlled_http_dast:
+    scanners: [nuclei]
+    execution: loopback-or-explicit-project-contract-only
+  network_policy_runtime:
+    scanners: [hubble]
+    execution: qualified-rke2-multinode-only
 
 advisory_identifiers:
   accepted_namespaces:

@@ -77,8 +77,25 @@
     "GOSEC_VERSION": "2.29.0",
     "GOSEC_SHA256_LINUX_AMD64": "6431b119741c1f4a50fdfcf94e782e16b9e642afc8c7fa9b5d39d48bf3003095",
     "GOVULNCHECK_VERSION": "1.8.0",
+    "OPENSCAP_VERSION": "1.4.4",
+    "SCAP_SECURITY_GUIDE_VERSION": "0.1.82",
     "KUBE_BENCH_VERSION": "0.16.0",
     "KUBE_BENCH_SHA256_LINUX_AMD64": "82dbc7e598740dc9344d41f8ad0b8210d57c4c00bdb2c5f1d8a69a2b98baddcf",
+    "CONFTEST_VERSION": "0.70.1",
+    "CONFTEST_SHA256_LINUX_AMD64": "613d124b8f6c1f3cee890491f7ab19114cca5a2102ca47cb2e6c35b4c23f9c8a",
+    "OPA_VERSION": "1.21.0",
+    "OPA_SHA256_LINUX_AMD64": "5eef70644868bb04d0556bcc795ee42f2ab379e73f51d1bfa30f83e1305bc9b9",
+    "K6_VERSION": "2.3.0",
+    "K6_SHA256_LINUX_AMD64": "39c3117b6af817592dcd0ce4242105c0a7af10948c2a425306f0be8f7a8a8ab1",
+    "NUCLEI_VERSION": "3.11.1",
+    "NUCLEI_SHA256_LINUX_AMD64": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+    "NUCLEI_TEMPLATES_VERSION": "10.4.9",
+    "NUCLEI_TEMPLATES_COMMIT": "893122ffce8ebf8e264f15d2cd3960cb1dd36d6c",
+    "NUCLEI_TEMPLATES_SHA256": "aa5fe63bccb1f57ec1e009b795050188b8c0f4cc1a50c92d413552fba569eceb",
+    "HUBBLE_VERSION": "1.19.4",
+    "HUBBLE_SHA256_LINUX_AMD64": "c7c37a5f27ed2ae2d5495c6ddbecc61cebbb841508e77af3c131e96f005ed247",
+    "PINT_VERSION": "0.88.0",
+    "PINT_SHA256_LINUX_AMD64": "ea40475e05162ce797be667f109682eaf11dcf2ab1fc8d68ab019cdef72f11df",
     "SOPS_VERSION": "3.13.3",
     "SOPS_SHA256_LINUX_AMD64": "e5bec3346a873ae91d871550f3e698c1aad962aff462a080e40f25fde17fef6b",
     "AGE_VERSION": "1.3.2",
@@ -87,9 +104,11 @@
     "KUBECTL_SHA256_LINUX_AMD64": "6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f",
     "HELM_VERSION": "4.2.4",
     "HELM_SHA256_LINUX_AMD64": "c306b46f719b0a4da32d0f78ee21bf90ce8d602f15b22ab753f0674d1670a7f3",
-    "TERRAFORM_VERSION": "1.16.2",
-    "TERRAFORM_SHA256_LINUX_AMD64": "0d17011f0c4664539b164b044903d04e296c86c13cb9f28040076c65cfb3985a",
-    "OPENTOFU_VERSION": "1.11.5",
+    "OPENTOFU_VERSION": "1.12.6",
+    "OPENTOFU_SHA256_LINUX_AMD64": "50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec",
+    "OPENTOFU_SHA256SUMS_SHA256": "6988e0cb8f4e9ebfa3b0999e44841549741b22d9b38873cb5b89074f1cddcb1c",
+    "OPENTOFU_SHA256SUMS_GPGSIG_SHA256": "5ab5d1f5d0a98534fa7204dfc89aece37ec2973c53aba35e04d8a87097d4b689",
+    "OPENTOFU_RELEASE_TRUST_ANCHOR_SHA256": "3b20a1ef48c34c1ecfdafbe14133e19a4fe5770472f5650d701744b4f6d9450f",
     "KUSTOMIZE_VERSION": "5.8.1",
     "KUSTOMIZE_SHA256_LINUX_AMD64": "029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d",
     "KIND_VERSION": "0.33.0",
@@ -168,8 +187,25 @@
     "GOSEC_VERSION": {"category": "active-tool", "owner": "gosec"},
     "GOSEC_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "gosec"},
     "GOVULNCHECK_VERSION": {"category": "active-tool", "owner": "govulncheck"},
-    "KUBE_BENCH_VERSION": {"category": "deferred-tool", "owner": "kube-bench"},
+    "OPENSCAP_VERSION": {"category": "active-tool", "owner": "openscap"},
+    "SCAP_SECURITY_GUIDE_VERSION": {"category": "active-tool", "owner": "scap-security-guide"},
+    "KUBE_BENCH_VERSION": {"category": "active-tool", "owner": "kube-bench"},
     "KUBE_BENCH_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "kube-bench"},
+    "CONFTEST_VERSION": {"category": "active-tool", "owner": "conftest"},
+    "CONFTEST_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "conftest"},
+    "OPA_VERSION": {"category": "active-tool", "owner": "opa"},
+    "OPA_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "opa"},
+    "K6_VERSION": {"category": "active-tool", "owner": "k6"},
+    "K6_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "k6"},
+    "NUCLEI_VERSION": {"category": "active-tool", "owner": "nuclei"},
+    "NUCLEI_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "nuclei"},
+    "NUCLEI_TEMPLATES_VERSION": {"category": "explicit-artifact-integrity-reference", "owner": "nuclei"},
+    "NUCLEI_TEMPLATES_COMMIT": {"category": "explicit-artifact-integrity-reference", "owner": "nuclei"},
+    "NUCLEI_TEMPLATES_SHA256": {"category": "explicit-artifact-integrity-reference", "owner": "nuclei"},
+    "HUBBLE_VERSION": {"category": "active-tool", "owner": "hubble"},
+    "HUBBLE_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "hubble"},
+    "PINT_VERSION": {"category": "active-tool", "owner": "pint"},
+    "PINT_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "pint"},
     "SOPS_VERSION": {"category": "deferred-tool", "owner": "sops"},
     "SOPS_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "sops"},
     "AGE_VERSION": {"category": "deferred-tool", "owner": "age"},
@@ -178,9 +214,11 @@
     "KUBECTL_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "kubectl"},
     "HELM_VERSION": {"category": "active-tool", "owner": "helm"},
     "HELM_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "helm"},
-    "TERRAFORM_VERSION": {"category": "active-tool", "owner": "terraform"},
-    "TERRAFORM_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "terraform"},
-    "OPENTOFU_VERSION": {"category": "active-tool", "owner": "terraform"},
+    "OPENTOFU_VERSION": {"category": "active-tool", "owner": "opentofu"},
+    "OPENTOFU_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "opentofu"},
+    "OPENTOFU_SHA256SUMS_SHA256": {"category": "explicit-artifact-integrity-reference", "owner": "opentofu"},
+    "OPENTOFU_SHA256SUMS_GPGSIG_SHA256": {"category": "explicit-artifact-integrity-reference", "owner": "opentofu"},
+    "OPENTOFU_RELEASE_TRUST_ANCHOR_SHA256": {"category": "explicit-artifact-integrity-reference", "owner": "opentofu"},
     "KUSTOMIZE_VERSION": {"category": "active-tool", "owner": "kustomize"},
     "KUSTOMIZE_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "kustomize"},
     "KIND_VERSION": {"category": "deferred-tool", "owner": "kind"},
@@ -220,7 +258,16 @@
       "trivy": {"capability": "trivy", "version_ref": "TRIVY_VERSION", "checksum_ref": "TRIVY_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "trivy"}, "scenario_policy": "required", "proofs": ["platform/tekton/tasks/product-supply-chain.yaml", "tests/test_repoctl_fastpath.py"]},
       "gosec": {"capability": "gosec", "version_ref": "GOSEC_VERSION", "checksum_ref": "GOSEC_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "gosec"}, "scenario_policy": "required", "proofs": ["tests/test_repoctl_fastpath.py"]},
       "govulncheck": {"capability": "govulncheck", "version_ref": "GOVULNCHECK_VERSION", "provision": {"type": "ansible", "tags": "govulncheck", "integrity": "go-checksum-database"}, "scenario_policy": "required", "proofs": ["tests/test_repoctl_fastpath.py"]},
-      "terraform": {"capability": "terraform", "version_ref": "TERRAFORM_VERSION", "checksum_ref": "TERRAFORM_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "terraform"}, "scenario_policy": "none"},
+      "openscap": {"capability": "openscap", "version_ref": "OPENSCAP_VERSION", "provision": {"type": "packer-bundle"}, "consumers": [{"type": "path", "path": "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl", "marker": "oscap --version"}], "scenario_policy": "runtime-only", "proofs": ["tests/test_qualification_tools.py", "tests/test_packer_image_contract.py"]},
+      "scap-security-guide": {"capability": "scap-security-guide", "version_ref": "SCAP_SECURITY_GUIDE_VERSION", "provision": {"type": "packer-bundle"}, "consumers": [{"type": "path", "path": "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl", "marker": "ssg-rl10-ds.xml"}], "scenario_policy": "runtime-only", "proofs": ["tests/test_qualification_tools.py", "tests/test_packer_image_contract.py"]},
+      "kube-bench": {"capability": "kube-bench", "version_ref": "KUBE_BENCH_VERSION", "checksum_ref": "KUBE_BENCH_SHA256_LINUX_AMD64", "provision": {"type": "packer-bundle"}, "consumers": [{"type": "path", "path": "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl", "marker": "kube-bench version"}], "scenario_policy": "runtime-only", "proofs": ["tests/test_qualification_tools.py", "tests/test_packer_image_contract.py"]},
+      "conftest": {"capability": "conftest", "version_ref": "CONFTEST_VERSION", "checksum_ref": "CONFTEST_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "conftest"}, "scenario_policy": "required", "proofs": ["tests/test_qualification_tools.py"]},
+      "opa": {"capability": "opa", "version_ref": "OPA_VERSION", "checksum_ref": "OPA_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "opa"}, "scenario_policy": "required", "proofs": ["tests/test_qualification_tools.py"]},
+      "k6": {"capability": "k6", "version_ref": "K6_VERSION", "checksum_ref": "K6_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "k6"}, "scenario_policy": "required", "proofs": ["tests/test_qualification_tools.py"]},
+      "nuclei": {"capability": "nuclei", "version_ref": "NUCLEI_VERSION", "checksum_ref": "NUCLEI_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "nuclei"}, "scenario_policy": "required", "proofs": ["tests/test_qualification_tools.py"]},
+      "hubble": {"capability": "hubble", "version_ref": "HUBBLE_VERSION", "checksum_ref": "HUBBLE_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "hubble"}, "scenario_policy": "runtime-only", "proofs": ["tests/test_qualification_tools.py", "platform/ansible/tests/mgmt_offline_vm"]},
+      "pint": {"capability": "pint", "version_ref": "PINT_VERSION", "checksum_ref": "PINT_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "pint"}, "scenario_policy": "required", "proofs": ["tests/test_qualification_tools.py"]},
+      "opentofu": {"capability": "opentofu", "version_ref": "OPENTOFU_VERSION", "checksum_ref": "OPENTOFU_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "opentofu"}, "consumers": [{"type": "path", "path": "scripts/repoctl.py", "marker": "require(\"tofu\")"}], "scenario_policy": "required", "proofs": ["tests/test_opentofu_authority.py", "tests/test_repoctl_fastpath.py"]},
       "kustomize": {"capability": "kustomize", "version_ref": "KUSTOMIZE_VERSION", "checksum_ref": "KUSTOMIZE_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "kustomize"}, "consumers": [{"type": "path", "path": "platform/fleet/bundles/kratix/kustomization.yaml", "marker": "kind: Kustomization"}], "scenario_policy": "required", "proofs": ["tests/test_kratix_platform.py"]},
       "gitleaks": {"capability": "gitleaks", "version_ref": "GITLEAKS_VERSION", "checksum_ref": "GITLEAKS_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "gitleaks"}, "scenario_policy": "required", "proofs": ["tests/test_repoctl_fastpath.py", "tests/delivery/test_worktree_evidence_promotion.py"]},
       "shfmt": {"capability": "shell-format-qualification", "version_ref": "SHFMT_VERSION", "checksum_ref": "SHFMT_SHA256_LINUX_AMD64", "provision": {"type": "packer-bundle"}, "consumers": [{"type": "path", "path": "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl", "marker": "shfmt --version"}], "scenario_policy": "runtime-only", "proofs": ["tests/test_packer_image_contract.py"]}
@@ -237,15 +284,12 @@
       "semgrep": {"version_ref": "SEMGREP_VERSION", "reason": "no distinct executable gate consumer"},
       "cve-bin-tool": {"version_ref": "CVE_BIN_TOOL_VERSION", "reason": "no distinct executable gate consumer"},
       "docker-buildx": {"version_ref": "DOCKER_BUILDX_VERSION", "reason": "BuildKit is active in Tekton through buildctl; no repository workflow invokes buildx"},
-      "kube-bench": {"version_ref": "KUBE_BENCH_VERSION", "reason": "must run only against a qualified RKE2 cluster; no current campaign executes it", "scenario_policy": "external-system", "proofs": ["platform/ansible/tests/mgmt_offline_vm"]},
       "sops": {"version_ref": "SOPS_VERSION", "reason": "no repository file-encryption workflow currently invokes SOPS"},
       "age": {"version_ref": "AGE_VERSION", "reason": "no repository recipient-cryptography workflow currently invokes age"},
       "kind": {"version_ref": "KIND_VERSION", "reason": "no current gate creates a Kind cluster"},
       "turbo": {"version_ref": "TURBO_VERSION", "reason": "no distinct repository command consumer"},
       "tflint": {"reason": "no contracted Terraform lint gate"},
-      "kubeconform": {"reason": "no contracted manifest validation gate"},
-      "conftest": {"reason": "no contracted policy gate"},
-      "opa": {"reason": "no contracted policy gate"}
+      "kubeconform": {"reason": "no contracted manifest validation gate"}
     },
     "rejected": {
       "hyperfine": {"reason": "duplicate with Go benchmarks and central qualification timing"},
@@ -268,6 +312,7 @@
       "diff": {"capability": "comparison-primitive", "probe": ["diff", "--version"], "required": true},
       "cc": {"capability": "native-compiler", "probe": ["cc", "--version"], "required": true},
       "curl": {"capability": "tls-download-primitive", "probe": ["curl", "--version"], "required": false},
+      "openpgp-verification-primitive": {"capability": "openpgp-verification-primitive", "probe": ["gpg", "--version"], "required": true},
       "unzip": {"capability": "archive-extraction-primitive", "probe": ["unzip", "-v"], "required": false}
     }
   },
@@ -365,6 +410,34 @@
       "binary": "shfmt",
       "version_command": ["shfmt", "--version"],
       "capability": "shell-format-qualification"
+    },
+    "opentofu": {
+      "version_ref": "OPENTOFU_VERSION",
+      "source": "https://github.com/opentofu/opentofu",
+      "artifact": {
+        "url": "https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_linux_amd64.tar.gz",
+        "filename": "tofu_1.12.6_linux_amd64.tar.gz",
+        "checksums_url": "https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_SHA256SUMS",
+        "checksums_filename": "tofu_1.12.6_SHA256SUMS",
+        "gpg_signature_url": "https://github.com/opentofu/opentofu/releases/download/v1.12.6/tofu_1.12.6_SHA256SUMS.gpgsig",
+        "gpg_signature_filename": "tofu_1.12.6_SHA256SUMS.gpgsig",
+        "gpg_key_url": "https://get.opentofu.org/opentofu.asc",
+        "gpg_key_filename": "opentofu-E3E6E43D84CB852EADB0051D0C0AF313E5FD9F80.asc"
+      },
+      "sha256_ref": "OPENTOFU_SHA256_LINUX_AMD64",
+      "supply_chain": {
+        "checksums_sha256_ref": "OPENTOFU_SHA256SUMS_SHA256",
+        "gpg_signature_sha256_ref": "OPENTOFU_SHA256SUMS_GPGSIG_SHA256",
+        "trust_anchor_sha256_ref": "OPENTOFU_RELEASE_TRUST_ANCHOR_SHA256",
+        "gpg_fingerprint": "E3E6E43D84CB852EADB0051D0C0AF313E5FD9F80"
+      },
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "qualification-controller"],
+      "install": {"type": "archive", "binary_relative": "tofu"},
+      "binary": "tofu",
+      "version_command": ["tofu", "version"],
+      "capability": "iac-engine"
     },
     "docker-buildx": {
       "version_ref": "DOCKER_BUILDX_VERSION",
@@ -465,6 +538,28 @@
       "version_command": ["govulncheck", "-version"],
       "capability": "reachable-go-vulnerability-analysis"
     },
+    "openscap": {
+      "version_ref": "OPENSCAP_VERSION",
+      "source": "https://download.rockylinux.org/pub/rocky/10.2/AppStream/x86_64/os/",
+      "integrity": "signed-rpm-package-lock",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-rke2"],
+      "install": {"type": "rpm-package", "package": "openscap-scanner"},
+      "binary": "oscap",
+      "version_command": ["oscap", "--version"],
+      "capability": "rocky-os-scap-evaluation"
+    },
+    "scap-security-guide": {
+      "version_ref": "SCAP_SECURITY_GUIDE_VERSION",
+      "source": "https://download.rockylinux.org/pub/rocky/10.2/AppStream/x86_64/os/",
+      "integrity": "signed-rpm-package-lock",
+      "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-rke2"],
+      "install": {"type": "rpm-package", "package": "scap-security-guide"},
+      "binary": "ssg-content",
+      "version_command": ["rpm", "-q", "scap-security-guide"],
+      "capability": "rocky-scap-security-guide-content"
+    },
     "kube-bench": {
       "version_ref": "KUBE_BENCH_VERSION",
       "source": "https://github.com/aquasecurity/kube-bench",
@@ -473,11 +568,116 @@
         "filename": "kube-bench_0.16.0_linux_amd64.tar.gz"
       },
       "sha256_ref": "KUBE_BENCH_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
       "platforms": ["linux/amd64"],
+      "scope": ["rocky-10.2-rke2"],
       "install": {"type": "archive", "binary_relative": "kube-bench"},
       "binary": "kube-bench",
       "version_command": ["kube-bench", "version"],
       "capability": "kubernetes-rke2-cis-control"
+    },
+    "conftest": {
+      "version_ref": "CONFTEST_VERSION",
+      "source": "https://github.com/open-policy-agent/conftest",
+      "artifact": {
+        "url": "https://github.com/open-policy-agent/conftest/releases/download/v0.70.1/conftest_0.70.1_Linux_x86_64.tar.gz",
+        "filename": "conftest_0.70.1_Linux_x86_64.tar.gz"
+      },
+      "sha256_ref": "CONFTEST_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller"],
+      "install": {"type": "archive", "binary_relative": "conftest"},
+      "binary": "conftest",
+      "version_command": ["conftest", "--version"],
+      "capability": "policy-as-code-document-evaluation"
+    },
+    "opa": {
+      "version_ref": "OPA_VERSION",
+      "source": "https://github.com/open-policy-agent/opa",
+      "artifact": {
+        "url": "https://github.com/open-policy-agent/opa/releases/download/v1.21.0/opa_linux_amd64_static",
+        "filename": "opa_linux_amd64_static_1.21.0"
+      },
+      "sha256_ref": "OPA_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller"],
+      "install": {"type": "binary"},
+      "binary": "opa",
+      "version_command": ["opa", "version"],
+      "capability": "rego-policy-engine"
+    },
+    "k6": {
+      "version_ref": "K6_VERSION",
+      "source": "https://github.com/grafana/k6",
+      "artifact": {
+        "url": "https://github.com/grafana/k6/releases/download/v2.3.0/k6-v2.3.0-linux-amd64.tar.gz",
+        "filename": "k6-v2.3.0-linux-amd64.tar.gz"
+      },
+      "sha256_ref": "K6_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller"],
+      "install": {"type": "archive", "binary_relative": "k6-v2.3.0-linux-amd64/k6"},
+      "binary": "k6",
+      "version_command": ["k6", "version"],
+      "capability": "bounded-http-performance-qualification"
+    },
+    "nuclei": {
+      "version_ref": "NUCLEI_VERSION",
+      "source": "https://github.com/projectdiscovery/nuclei",
+      "artifact": {
+        "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip",
+        "filename": "nuclei_3.11.1_linux_amd64.zip"
+      },
+      "sha256_ref": "NUCLEI_SHA256_LINUX_AMD64",
+      "templates": {
+        "version_ref": "NUCLEI_TEMPLATES_VERSION",
+        "commit_ref": "NUCLEI_TEMPLATES_COMMIT",
+        "url": "https://github.com/projectdiscovery/nuclei-templates/archive/893122ffce8ebf8e264f15d2cd3960cb1dd36d6c.tar.gz",
+        "filename": "nuclei-templates-893122ffce8ebf8e264f15d2cd3960cb1dd36d6c.tar.gz",
+        "sha256_ref": "NUCLEI_TEMPLATES_SHA256"
+      },
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller"],
+      "install": {"type": "archive", "binary_relative": "nuclei"},
+      "binary": "nuclei",
+      "version_command": ["nuclei", "-version"],
+      "capability": "authorized-local-http-dast"
+    },
+    "hubble": {
+      "version_ref": "HUBBLE_VERSION",
+      "source": "https://github.com/cilium/hubble",
+      "artifact": {
+        "url": "https://github.com/cilium/hubble/releases/download/v1.19.4/hubble-linux-amd64.tar.gz",
+        "filename": "hubble-linux-amd64-1.19.4.tar.gz"
+      },
+      "sha256_ref": "HUBBLE_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller", "rke2-runtime-only"],
+      "install": {"type": "archive", "binary_relative": "hubble"},
+      "binary": "hubble",
+      "version_command": ["hubble", "version"],
+      "capability": "cilium-flow-policy-observation"
+    },
+    "pint": {
+      "version_ref": "PINT_VERSION",
+      "source": "https://github.com/cloudflare/pint",
+      "artifact": {
+        "url": "https://github.com/cloudflare/pint/releases/download/v0.88.0/pint-0.88.0-linux-amd64.tar.gz",
+        "filename": "pint-0.88.0-linux-amd64.tar.gz"
+      },
+      "sha256_ref": "PINT_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["qualification-controller"],
+      "install": {"type": "archive", "binary_relative": "pint-linux-amd64"},
+      "binary": "pint",
+      "version_command": ["pint", "version"],
+      "capability": "prometheus-rule-lint"
     },
     "cosign": {
       "version_ref": "COSIGN_VERSION",
@@ -613,15 +813,16 @@
       "fallback": "~/.local",
       "bin_subdirectory": "bin",
       "share_subdirectory": "share/ecommerce-1",
-      "cache_subdirectory": "~/.cache/ecommerce-1"
+      "cache_subdirectory": "cache",
+      "fallback_cache_root": "~/.cache/ecommerce-1",
+      "offline_environment": "ECOMMERCE_TOOL_OFFLINE"
     },
     "command_capabilities": {
       "ansible": "ansible-core",
       "gofmt": "go",
       "pnpm": "pnpm",
       "docker": "docker",
-      "terraform": "terraform",
-      "tofu": "terraform",
+      "tofu": "opentofu",
       "sysctl": "container-network-forwarding",
       "bazel": "bazel"
     }

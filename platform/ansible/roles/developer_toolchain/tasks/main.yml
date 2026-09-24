@@ -9,7 +9,7 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, terraform, kustomize, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -318,12 +318,43 @@
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
   when:
     - item.key in active_tool_names
+    - item.key != 'opentofu'
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - not toolchain_offline
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
+
+- name: Inspect cached registry-managed archive tools
+  ansible.builtin.stat:
+    path: "{{ local_cache }}/{{ item.value.artifact.filename }}"
+    checksum_algorithm: sha256
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
+  register: registry_archive_cache
+  when:
+    - item.key in active_tool_names
+    - item.key != 'opentofu'
     - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
     - >-
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
+
+- name: Validate cached registry-managed archive tools
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.checksum == toolchain_lock.versions[item.item.value.sha256_ref]
+    fail_msg: >-
+      Cached tool {{ item.item.key }} is absent or does not match its central SHA-256;
+      online reconciliation is required before offline use.
+  loop: "{{ registry_archive_cache.results }}"
+  when: not (item.skipped | default(false))
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
 
 - name: Create registry-managed archive tool directories
   ansible.builtin.file:
@@ -333,12 +364,13 @@
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
   when:
     - item.key in active_tool_names
+    - item.key != 'opentofu'
     - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
     - >-
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
 
 - name: Extract registry-managed archive tools
   ansible.builtin.unarchive:
@@ -349,12 +381,13 @@
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
   when:
     - item.key in active_tool_names
+    - item.key != 'opentofu'
     - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
     - >-
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
 
 - name: Link registry-managed archive tools into the user path
   ansible.builtin.file:
@@ -365,12 +398,61 @@
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
   when:
     - item.key in active_tool_names
+    - item.key != 'opentofu'
     - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
     - >-
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age, conftest, k6, nuclei, hubble, pint]
+
+- name: Download the immutable Nuclei template snapshot
+  ansible.builtin.get_url:
+    url: "{{ managed_tools.nuclei.templates.url }}"
+    dest: "{{ local_cache }}/{{ managed_tools.nuclei.templates.filename }}"
+    checksum: "sha256:{{ toolchain_lock.versions[managed_tools.nuclei.templates.sha256_ref] }}"
+    mode: '0644'
+  when: not toolchain_offline
+  tags: [toolchain, nuclei]
+
+- name: Inspect the cached Nuclei template snapshot
+  ansible.builtin.stat:
+    path: "{{ local_cache }}/{{ managed_tools.nuclei.templates.filename }}"
+    checksum_algorithm: sha256
+  register: nuclei_templates_cache
+  tags: [toolchain, nuclei]
+
+- name: Validate the cached Nuclei template snapshot
+  ansible.builtin.assert:
+    that:
+      - nuclei_templates_cache.stat.exists
+      - nuclei_templates_cache.stat.isreg
+      - >-
+        nuclei_templates_cache.stat.checksum ==
+        toolchain_lock.versions[managed_tools.nuclei.templates.sha256_ref]
+    fail_msg: >-
+      The immutable Nuclei template snapshot is absent or does not match its
+      central SHA-256; online reconciliation is required before offline use.
+  tags: [toolchain, nuclei]
+
+- name: Create the versioned Nuclei template directory
+  ansible.builtin.file:
+    path: >-
+      {{ local_share }}/nuclei-templates/{{ toolchain_lock.versions[managed_tools.nuclei.templates.commit_ref] }}
+    state: directory
+    mode: '0755'
+  tags: [toolchain, nuclei]
+
+- name: Extract the immutable Nuclei template snapshot
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/{{ managed_tools.nuclei.templates.filename }}"
+    dest: >-
+      {{ local_share }}/nuclei-templates/{{ toolchain_lock.versions[managed_tools.nuclei.templates.commit_ref] }}
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: >-
+      {{ local_share }}/nuclei-templates/{{ toolchain_lock.versions[managed_tools.nuclei.templates.commit_ref] }}/README.md
+  tags: [toolchain, nuclei]
 
 - name: Download registry-managed standalone binaries
   ansible.builtin.get_url:
@@ -382,11 +464,40 @@
   when:
     - item.key in active_tool_names
     - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - not toolchain_offline
     - >-
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, docker_buildx, cosign, sops]
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops, opa]
+
+- name: Inspect cached registry-managed standalone binaries
+  ansible.builtin.stat:
+    path: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}"
+    checksum_algorithm: sha256
+  loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'binary') }}"
+  register: registry_binary_cache
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops, opa]
+
+- name: Validate cached registry-managed standalone binaries
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.checksum == toolchain_lock.versions[item.item.value.sha256_ref]
+    fail_msg: >-
+      Cached tool {{ item.item.key }} is absent or does not match its central SHA-256;
+      online reconciliation is required before offline use.
+  loop: "{{ registry_binary_cache.results }}"
+  when: not (item.skipped | default(false))
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops, opa]
 
 - name: Link registry-managed standalone binaries into the user path
   ansible.builtin.file:
@@ -402,7 +513,7 @@
       'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
       (item.key | replace('-', '_')) in ansible_run_tags or
       toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
-  tags: [toolchain, context_tools, docker_buildx, cosign, sops]
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops, opa]
 
 - name: Create the user-local Docker CLI plugin directory
   ansible.builtin.file:
@@ -667,25 +778,168 @@
 - name: Reconcile pinned source quality tools
   ansible.builtin.import_tasks: quality.yml
 
-# Terraform is distributed as a ZIP archive, so its targeted provisioning path
-# must establish the extractor without selecting the broader toolchain package set.
-- name: Detect Terraform archive extraction prerequisite
-  ansible.builtin.command:
-    argv: [/usr/bin/env, which, unzip]
-  register: terraform_unzip_probe
-  changed_when: false
-  failed_when: false
-  tags: [terraform]
+- name: Download pinned OpenTofu release verification assets
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ local_cache }}/{{ item.filename }}"
+    checksum: "sha256:{{ toolchain_lock.versions[item.sha256_ref] }}"
+    mode: '0644'
+  loop:
+    - url: "{{ managed_tools.opentofu.artifact.checksums_url }}"
+      filename: "{{ managed_tools.opentofu.artifact.checksums_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.checksums_sha256_ref }}"
+    - url: "{{ managed_tools.opentofu.artifact.gpg_signature_url }}"
+      filename: "{{ managed_tools.opentofu.artifact.gpg_signature_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.gpg_signature_sha256_ref }}"
+    - url: "{{ managed_tools.opentofu.artifact.gpg_key_url }}"
+      filename: "{{ managed_tools.opentofu.artifact.gpg_key_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.trust_anchor_sha256_ref }}"
+  when: not toolchain_offline
+  tags: [toolchain, opentofu]
 
-- name: Ensure Terraform archive extraction prerequisite
-  ansible.builtin.apt:
-    name: unzip
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
-  become: true
-  when: terraform_unzip_probe.rc != 0
-  tags: [terraform]
+- name: Download pinned OpenTofu archive
+  ansible.builtin.get_url:
+    url: "{{ managed_tools.opentofu.artifact.url }}"
+    dest: "{{ local_cache }}/{{ managed_tools.opentofu.artifact.filename }}"
+    checksum: "sha256:{{ toolchain_lock.versions[managed_tools.opentofu.sha256_ref] }}"
+    mode: '0644'
+  when: not toolchain_offline
+  tags: [toolchain, opentofu]
+
+- name: Inspect cached OpenTofu release artifacts
+  ansible.builtin.stat:
+    path: "{{ local_cache }}/{{ item.filename }}"
+    checksum_algorithm: sha256
+  loop:
+    - filename: "{{ managed_tools.opentofu.artifact.filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.sha256_ref }}"
+    - filename: "{{ managed_tools.opentofu.artifact.checksums_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.checksums_sha256_ref }}"
+    - filename: "{{ managed_tools.opentofu.artifact.gpg_signature_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.gpg_signature_sha256_ref }}"
+    - filename: "{{ managed_tools.opentofu.artifact.gpg_key_filename }}"
+      sha256_ref: "{{ managed_tools.opentofu.supply_chain.trust_anchor_sha256_ref }}"
+  register: opentofu_cached_artifacts
+  tags: [toolchain, opentofu]
+
+- name: Validate cached OpenTofu release artifact integrity
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.checksum == toolchain_lock.versions[item.item.sha256_ref]
+    fail_msg: >-
+      OpenTofu cache artifact {{ item.item.filename }} is absent or does not match
+      the pinned SHA-256; online reconciliation is required before offline use.
+  loop: "{{ opentofu_cached_artifacts.results }}"
+  tags: [toolchain, opentofu]
+
+- name: Verify the exact OpenTofu OpenPGP signing-key fingerprint
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --with-colons
+      - --show-keys
+      - --fingerprint
+      - "{{ local_cache }}/{{ managed_tools.opentofu.artifact.gpg_key_filename }}"
+  register: opentofu_gpg_key
+  changed_when: false
+  failed_when: >-
+    opentofu_gpg_key.rc != 0 or
+    ('fpr:::::::::' + managed_tools.opentofu.supply_chain.gpg_fingerprint + ':') not in
+    opentofu_gpg_key.stdout
+  tags: [toolchain, opentofu]
+
+- name: Create the versioned OpenTofu verification directory
+  ansible.builtin.file:
+    path: >-
+      {{ local_share }}/tools/opentofu-verification-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}
+    state: directory
+    mode: '0755'
+  tags: [toolchain, opentofu]
+
+- name: Materialize the exact OpenTofu OpenPGP keyring
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --yes
+      - --dearmor
+      - --output
+      - >-
+        {{ local_share }}/tools/opentofu-verification-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}/opentofu.gpg
+      - "{{ local_cache }}/{{ managed_tools.opentofu.artifact.gpg_key_filename }}"
+  changed_when: false
+  tags: [toolchain, opentofu]
+
+- name: Verify the OpenTofu checksum manifest signature offline
+  ansible.builtin.command:
+    argv:
+      - gpg
+      - --batch
+      - --no-default-keyring
+      - --keyring
+      - >-
+        {{ local_share }}/tools/opentofu-verification-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}/opentofu.gpg
+      - --verify
+      - "{{ local_cache }}/{{ managed_tools.opentofu.artifact.gpg_signature_filename }}"
+      - "{{ local_cache }}/{{ managed_tools.opentofu.artifact.checksums_filename }}"
+  changed_when: false
+  tags: [toolchain, opentofu]
+
+- name: Verify the OpenTofu archive against the authenticated manifest
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - >-
+        import pathlib,sys;
+        expected=sys.argv[1].lower(); name=sys.argv[2];
+        lines=pathlib.Path(sys.argv[3]).read_text(encoding='utf-8').splitlines();
+        matches=[line.split() for line in lines if line.split() and line.split()[-1].lstrip('*') == name];
+        raise SystemExit(0 if len(matches) == 1 and matches[0][0].lower() == expected else 1)
+      - "{{ toolchain_lock.versions[managed_tools.opentofu.sha256_ref] }}"
+      - "{{ managed_tools.opentofu.artifact.filename }}"
+      - "{{ local_cache }}/{{ managed_tools.opentofu.artifact.checksums_filename }}"
+  changed_when: false
+  tags: [toolchain, opentofu]
+
+- name: Create OpenTofu version directory
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/opentofu-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}"
+    state: directory
+    mode: '0755'
+  tags: [toolchain, opentofu]
+
+- name: Extract pinned OpenTofu archive
+  ansible.builtin.unarchive:
+    src: "{{ local_cache }}/{{ managed_tools.opentofu.artifact.filename }}"
+    dest: "{{ local_share }}/tools/opentofu-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}"
+    remote_src: true
+    creates: >-
+      {{ local_share }}/tools/opentofu-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}/tofu
+  tags: [toolchain, opentofu]
+
+- name: Link OpenTofu into the user path
+  ansible.builtin.file:
+    src: >-
+      {{ local_share }}/tools/opentofu-{{ toolchain_lock.versions[managed_tools.opentofu.version_ref] }}/tofu
+    dest: "{{ local_bin }}/tofu"
+    state: link
+    force: true
+  tags: [toolchain, opentofu]
+
+- name: Validate pinned OpenTofu version
+  ansible.builtin.command:
+    argv: ["{{ local_bin }}/tofu", version]
+  register: opentofu_version_output
+  changed_when: false
+  failed_when: >-
+    opentofu_version_output.rc != 0 or
+    ('OpenTofu v' + toolchain_lock.versions[managed_tools.opentofu.version_ref]) not in
+    opentofu_version_output.stdout
+  tags: [toolchain, opentofu]
 
 # These gate tools deliberately have distinct tags: one failed download must not
 # prevent the capability controller from reconciling unrelated source branches.
@@ -701,11 +955,6 @@
       archive: "helm-{{ helm_version }}.tar.gz"
       checksum: "{{ helm_sha256 }}"
       tag: helm
-    - name: terraform
-      url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
-      archive: "terraform-{{ terraform_version }}.zip"
-      checksum: "{{ terraform_sha256 }}"
-      tag: terraform
     - name: kustomize
       # yamllint disable-line rule:line-length
       url: "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv{{ kustomize_version }}/kustomize_v{{ kustomize_version }}_linux_amd64.tar.gz"
@@ -713,7 +962,7 @@
       checksum: "{{ kustomize_sha256 }}"
       tag: kustomize
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [helm, terraform, kustomize]
+  tags: [helm, kustomize]
 
 - name: Create standalone gate tool directories
   ansible.builtin.file:
@@ -722,10 +971,9 @@
     mode: '0755'
   loop:
     - {name: helm, version: "{{ helm_version }}", tag: helm}
-    - {name: terraform, version: "{{ terraform_version }}", tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [helm, terraform, kustomize]
+  tags: [helm, kustomize]
 
 - name: Extract pinned standalone gate tools
   ansible.builtin.unarchive:
@@ -735,10 +983,9 @@
     creates: "{{ local_share }}/tools/{{ item.name }}-{{ item.version }}/{{ item.creates }}"
   loop:
     - {name: helm, version: "{{ helm_version }}", archive: "helm-{{ helm_version }}.tar.gz", creates: linux-amd64/helm, tag: helm}
-    - {name: terraform, version: "{{ terraform_version }}", archive: "terraform-{{ terraform_version }}.zip", creates: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", archive: "kustomize-{{ kustomize_version }}.tar.gz", creates: kustomize, tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [helm, terraform, kustomize]
+  tags: [helm, kustomize]
 
 - name: Link standalone gate tools into the user path
   ansible.builtin.file:
@@ -748,10 +995,9 @@
     force: true
   loop:
     - {name: helm, version: "{{ helm_version }}", relative: linux-amd64/helm, tag: helm}
-    - {name: terraform, version: "{{ terraform_version }}", relative: terraform, tag: terraform}
     - {name: kustomize, version: "{{ kustomize_version }}", relative: kustomize, tag: kustomize}
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [helm, terraform, kustomize]
+  tags: [helm, kustomize]
 
 - name: Download pinned kubectl
   ansible.builtin.get_url:

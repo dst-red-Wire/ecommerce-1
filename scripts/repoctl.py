@@ -415,6 +415,72 @@ def toolchain_closure_violations(
     if len(capabilities) != len(capabilities_list):
         violations.append("capability graph contains duplicate or invalid capabilities")
 
+    # IaC execution is a closed set: OpenTofu/tofu is the only engine/command.
+    # Historical HCL identifiers such as `terraform {}`, `.terraform/`, and
+    # `terraform_remote_state` are deliberately outside this executable model.
+    def terraform_cli_identifier(value: object) -> bool:
+        token = str(value).strip().lower().replace("_", "-")
+        return token in {"terraform", "terraform-cli"}
+
+    def terraform_cli_command(value: object) -> bool:
+        parts = str(value).strip().split(maxsplit=1)
+        if not parts:
+            return False
+        command = parts[0].replace("\\", "/")
+        return command.rsplit("/", 1)[-1].lower() in {"terraform", "terraform.exe"}
+
+    forbidden_version_keys = sorted(
+        key
+        for key in versions
+        if re.search(r"(?:^|_)TERRAFORM(?:_|$)", str(key).upper())
+    )
+    if forbidden_version_keys:
+        violations.append("Terraform CLI version authority is forbidden: " + ", ".join(forbidden_version_keys))
+    lifecycle_entries = (
+        ("active", active),
+        ("deferred", deferred),
+        ("rejected", rejected),
+        ("platform-provided", platform_tools),
+    )
+    opentofu_lifecycle = [
+        status
+        for status, entries in lifecycle_entries
+        if isinstance(entries, dict) and "opentofu" in entries
+    ]
+    terraform_lifecycle = [
+        f"{status}:{name}"
+        for status, entries in lifecycle_entries
+        if isinstance(entries, dict)
+        for name in entries
+        if terraform_cli_identifier(name)
+    ]
+    if opentofu_lifecycle != ["active"] or terraform_lifecycle:
+        violations.append("OpenTofu must be the sole IaC engine lifecycle entry")
+    iac_capability = capabilities.get("opentofu")
+    if not isinstance(iac_capability, dict) or iac_capability.get("command") != "tofu":
+        violations.append("OpenTofu capability must execute the tofu command")
+    if any(terraform_cli_identifier(name) for name in capabilities):
+        violations.append("Terraform CLI capability is forbidden")
+    for capability in capabilities.values():
+        commands = [capability.get("command")]
+        commands.extend(
+            alternative.get("command")
+            for alternative in capability.get("any_of", [])
+            if isinstance(alternative, dict)
+        )
+        if any(terraform_cli_command(command) for command in commands if command):
+            violations.append("Terraform CLI command is forbidden in the capability graph")
+            break
+    for name, tool in lock.get("tools", {}).items():
+        version_command = tool.get("version_command", []) if isinstance(tool, dict) else []
+        if (
+            terraform_cli_identifier(name)
+            or (isinstance(tool, dict) and terraform_cli_command(tool.get("binary", "")))
+            or (isinstance(version_command, list) and version_command and terraform_cli_command(version_command[0]))
+        ):
+            violations.append("Terraform CLI tool definition is forbidden")
+            break
+
     execution_dependencies: dict[str, list[str]] = {}
     all_dependencies: dict[str, list[str]] = {}
     for name, capability in capabilities.items():
@@ -471,6 +537,14 @@ def toolchain_closure_violations(
     expected_aliases = lock.get("capability_policy", {}).get("command_capabilities", {})
     if graph.get("command_capabilities", {}) != expected_aliases:
         violations.append("capability graph command projection drift")
+    actual_aliases = graph.get("command_capabilities", {})
+    if (
+        expected_aliases.get("tofu") != "opentofu"
+        or any(terraform_cli_command(command) for command in expected_aliases)
+        or actual_aliases.get("tofu") != "opentofu"
+        or any(terraform_cli_command(command) for command in actual_aliases)
+    ):
+        violations.append("IaC command projection must expose tofu only")
     gate_commands = {
         str(command)
         for commands in gate_requirements.values()
@@ -502,14 +576,26 @@ def toolchain_closure_violations(
 
     try:
         security_statuses = _security_policy_tool_statuses(root)
-        security_commands = set(gate_requirements.get("security", []))
+        security_commands = {
+            str(command)
+            for commands in gate_requirements.values()
+            if isinstance(commands, list)
+            for command in commands
+        }
         for name, declared_status in security_statuses.items():
             if declared_status not in TOOLCHAIN_STATUSES:
                 violations.append(f"security policy tool {name} has invalid lifecycle status")
             elif lifecycle_index.get(name) != declared_status:
                 violations.append(f"security policy lifecycle drift: {name}")
-            if declared_status == "active" and name not in security_commands:
-                violations.append(f"active security tool {name} is absent from security gate")
+            provision_type = active.get(name, {}).get("provision", {}).get("type")
+            command = capabilities.get(name, {}).get("command")
+            if (
+                declared_status == "active"
+                and provision_type != "packer-bundle"
+                and name not in security_commands
+                and command not in security_commands
+            ):
+                violations.append(f"active security tool {name} is absent from a declared gate")
     except OSError:
         violations.append("security scan policy is missing")
 
@@ -700,6 +786,14 @@ def toolchain_closure_violations(
                 violations.append(f"architecture missing toolchain closure rule: {marker}")
         if "oci_runtime: podman" not in architecture_text or "oci_builder: buildah" not in architecture_text:
             violations.append("forbidden Podman/Buildah authorities are not locked")
+        for marker in (
+            "authority: opentofu",
+            "command: tofu",
+            "terraform_cli: forbidden",
+            "iac_engine: terraform-cli",
+        ):
+            if marker not in architecture_text:
+                violations.append(f"architecture missing sole OpenTofu authority marker: {marker}")
     except OSError:
         violations.append("architecture authority is missing")
 
@@ -740,6 +834,12 @@ def toolchain_closure() -> int:
     print("PASS platform-provided tools have probes")
     print("PASS projections are exact")
     print("PASS doctor derives from registry")
+    print("IAC_AUTHORITY=OpenTofu")
+    print("TOFU=PINNED")
+    print("TERRAFORM_CLI=ABSENT")
+    print("PROVIDER_LOCK=.terraform.lock.hcl")
+    print("DUAL_IAC_ENGINE=false")
+    print("GOVERNANCE=PASS")
     print("PASS toolchain closure")
     return 0
 
@@ -1751,7 +1851,7 @@ def validate_workstation_projections(policy: dict | None = None) -> None:
 
 
 def validate_terraform_lockfile_projections(provider_contract: dict | None = None) -> None:
-    """Verify committed Terraform lockfiles project the canonical provider identity."""
+    """Verify committed OpenTofu-compatible lockfiles project the canonical provider identity."""
     contract = provider_contract or terraform_provider_lock_contract()
     expected = contract.get("providers", {})
     lockfiles = (
@@ -1790,6 +1890,15 @@ def repository_authority_check() -> int:
     registry = lock.get("machine_contracts", {})
     if not isinstance(registry, dict):
         raise RuntimeError("architecture.lock.yaml machine_contracts must be a mapping")
+
+    iac_authority = lock.get("tooling", {}).get("iac", {})
+    if iac_authority != {
+        "authority": "opentofu",
+        "command": "tofu",
+        "terraform_cli": "forbidden",
+        "provider_lock": ".terraform.lock.hcl",
+    }:
+        raise RuntimeError("architecture.lock.yaml must define OpenTofu/tofu as the sole IaC execution authority")
 
     model = repository_authority_model()
     for domain, entry in model.get("domains", {}).items():
@@ -1981,7 +2090,7 @@ _TERRAFORM_PROVIDER_LOCK: dict | None = None
 
 
 def terraform_provider_lock_contract() -> dict:
-    """Load and validate the single canonical Terraform provider lock contract."""
+    """Load and validate the OpenTofu provider lock contract."""
     global _TERRAFORM_PROVIDER_LOCK
     if _TERRAFORM_PROVIDER_LOCK is None:
         lock = ruby_yaml("architecture.lock.yaml")
@@ -1995,50 +2104,59 @@ def terraform_provider_lock_contract() -> dict:
             or contract.get("scope") != "platform/terraform"
             or contract.get("status") != "exact"
         ):
-            raise RuntimeError("Terraform provider lock must inherit architecture.lock.yaml for platform/terraform")
+            raise RuntimeError("OpenTofu provider lock must inherit architecture.lock.yaml for platform/terraform")
 
-        quality_authority = source_quality_adapter("terraform").get("validation", {}).get("provider_lock_authority")
+        iac_engine = contract.get("iac_engine", {})
+        if iac_engine != {
+            "authority": "opentofu",
+            "command": "tofu",
+            "version_authority": "config/contracts/toolchain-lock.json#versions.OPENTOFU_VERSION",
+            "terraform_cli": "forbidden",
+        }:
+            raise RuntimeError("OpenTofu must be the sole canonical IaC execution engine")
+
+        quality_authority = source_quality_adapter("opentofu").get("validation", {}).get("provider_lock_authority")
         if quality_authority != "architecture.lock.yaml#machine_contracts.terraform_provider_lock":
-            raise RuntimeError("Terraform quality validation must delegate provider resolution to the central lock contract")
+            raise RuntimeError("OpenTofu quality validation must delegate provider resolution to the central lock contract")
 
         providers = contract.get("providers")
         if not isinstance(providers, dict) or not providers:
-            raise RuntimeError("Terraform provider lock must declare at least one provider")
+            raise RuntimeError("OpenTofu provider lock must declare at least one provider")
 
         for name, provider in providers.items():
             if not isinstance(name, str) or not name.strip() or not isinstance(provider, dict):
-                raise RuntimeError("Terraform provider lock entries must be named mappings")
+                raise RuntimeError("OpenTofu provider lock entries must be named mappings")
             for field in ("source", "version", "constraints"):
                 value = provider.get(field)
                 if not isinstance(value, str) or not value.strip():
-                    raise RuntimeError(f"Terraform provider {name} must declare {field}")
+                    raise RuntimeError(f"OpenTofu provider {name} must declare {field}")
             hashes = provider.get("hashes")
             if not isinstance(hashes, list) or not hashes or any(not isinstance(value, str) or not value for value in hashes):
-                raise RuntimeError(f"Terraform provider {name} must declare non-empty hashes")
+                raise RuntimeError(f"OpenTofu provider {name} must declare non-empty hashes")
             if not any(value.startswith("h1:") for value in hashes) or not any(value.startswith("zh:") for value in hashes):
-                raise RuntimeError(f"Terraform provider {name} must include both h1 and zh hashes")
+                raise RuntimeError(f"OpenTofu provider {name} must include both h1 and zh hashes")
 
         qualification = contract.get("qualification")
         if not isinstance(qualification, dict):
-            raise RuntimeError("Terraform provider lock must declare qualification behavior")
+            raise RuntimeError("OpenTofu provider lock must declare qualification behavior")
         if qualification.get("canonical_lockfile_materialization") != "required":
-            raise RuntimeError("Terraform qualification must materialize the canonical provider lock")
+            raise RuntimeError("OpenTofu qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
-            raise RuntimeError("Terraform qualification provider lock must be readonly")
+            raise RuntimeError("OpenTofu qualification provider lock must be readonly")
         repository_context_paths = qualification.get("repository_context_paths")
         if (
             not isinstance(repository_context_paths, list)
             or not repository_context_paths
             or any(not isinstance(value, str) or not value.strip() for value in repository_context_paths)
         ):
-            raise RuntimeError("Terraform qualification must declare non-empty repository_context_paths")
+            raise RuntimeError("OpenTofu qualification must declare non-empty repository_context_paths")
 
         _TERRAFORM_PROVIDER_LOCK = contract
     return copy.deepcopy(_TERRAFORM_PROVIDER_LOCK)
 
 
 def write_terraform_provider_lock(path: Path, contract: dict | None = None) -> None:
-    """Materialize Terraform's native lockfile from the canonical YAML authority."""
+    """Materialize OpenTofu's compatible .terraform.lock.hcl from the canonical authority."""
     provider_lock = contract or terraform_provider_lock_contract()
     lines = [
         "# Generated from architecture.lock.yaml#machine_contracts.terraform_provider_lock.",
@@ -2067,11 +2185,11 @@ def terraform_provider_plugin_cache_dir(contract: dict | None = None) -> Path | 
     env_name = str(cache.get("root_source", "ECOMMERCE_TOOL_HOME"))
     configured = os.environ.get(env_name, "").strip()
     base = Path(configured).expanduser() if configured else Path(str(cache.get("fallback_root", "~/.cache/ecommerce-1"))).expanduser()
-    destination = base / str(cache.get("subdirectory", "terraform-provider-cache/v1"))
+    destination = base / str(cache.get("subdirectory", "opentofu-provider-cache/v1"))
     try:
         destination.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        print(f"ADVISORY terraform provider cache unavailable: {exc}", file=sys.stderr)
+        print(f"ADVISORY OpenTofu provider cache unavailable: {exc}", file=sys.stderr)
         return None
     return destination
 
@@ -3536,27 +3654,24 @@ def terraform_source_files() -> list[Path]:
     return [p for p in terraform_root.rglob("*.tf") if ".terraform" not in p.parts]
 
 
-def terraform_check() -> int:
+def opentofu_check() -> int:
     terraform_root = ROOT / "platform" / "terraform"
     tf_files = terraform_source_files()
     if not tf_files:
-        print("SKIP terraform: no Terraform files found")
+        print("SKIP OpenTofu: no compatible .tf sources found")
         return 0
 
-    policy = source_quality_adapter("terraform")
+    policy = source_quality_adapter("opentofu")
     formatter = policy["formatter"]
     provider_lock = terraform_provider_lock_contract()
     qualification = provider_lock["qualification"]
 
-    tool = next(
-        (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
-        None,
-    )
-    if not tool:
-        return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+    if formatter.get("executable_preference") != ["tofu"]:
+        return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+    tool = require("tofu")
 
     advisory_exit_check(
-        "terraform fmt",
+        "tofu fmt",
         [tool, *formatter["args"]],
         drift_exit_codes=formatter["drift_exit_codes"],
     )
@@ -3567,7 +3682,7 @@ def terraform_check() -> int:
         env["TF_PLUGIN_CACHE_DIR"] = str(provider_cache)
 
     directories = sorted({p.parent for p in tf_files})
-    with tempfile.TemporaryDirectory(prefix="ecommerce-terraform-validation-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="ecommerce-opentofu-validation-") as temp_dir:
         temp_repo_root = Path(temp_dir) / "repository"
         temp_root = temp_repo_root / "platform" / "terraform"
         temp_root.parent.mkdir(parents=True, exist_ok=True)
@@ -3580,7 +3695,7 @@ def terraform_check() -> int:
             source = ROOT / str(relative_context)
             destination = temp_repo_root / str(relative_context)
             if not source.exists():
-                raise RuntimeError(f"Terraform qualification repository context is missing: {relative_context}")
+                raise RuntimeError(f"OpenTofu qualification repository context is missing: {relative_context}")
             destination.parent.mkdir(parents=True, exist_ok=True)
             if source.is_dir():
                 shutil.copytree(source, destination)
@@ -3591,7 +3706,7 @@ def terraform_check() -> int:
             relative = directory.relative_to(terraform_root)
             validation_dir = temp_root / relative
             write_terraform_provider_lock(validation_dir / ".terraform.lock.hcl", provider_lock)
-            print(f"CHECK terraform: {relative}")
+            print(f"CHECK OpenTofu: {relative}")
             run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
             run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
 
@@ -3599,8 +3714,8 @@ def terraform_check() -> int:
         f"{name}={provider['version']}"
         for name, provider in sorted(provider_lock["providers"].items())
     )
-    print(f"PASS terraform provider lock {providers}")
-    print("PASS terraform checks completed")
+    print(f"PASS OpenTofu provider lock {providers}")
+    print("PASS OpenTofu checks completed")
     return 0
 def _ansible_static_check() -> int:
     require("ansible-lint")
@@ -3777,17 +3892,14 @@ def format_check() -> int:
 
     tf_files = [p for p in ROOT.rglob("*.tf") if ".terraform" not in p.parts]
     if tf_files:
-        terraform_policy = source_quality_adapter("terraform")["formatter"]
-        tool = next(
-            (shutil.which(name) for name in terraform_policy["executable_preference"] if shutil.which(name)),
-            None,
-        )
-        if not tool:
-            return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+        opentofu_policy = source_quality_adapter("opentofu")["formatter"]
+        if opentofu_policy.get("executable_preference") != ["tofu"]:
+            return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+        tool = require("tofu")
         advisory_exit_check(
-            "terraform fmt",
-            [tool, *terraform_policy["args"]],
-            drift_exit_codes=terraform_policy["drift_exit_codes"],
+            "tofu fmt",
+            [tool, *opentofu_policy["args"]],
+            drift_exit_codes=opentofu_policy["drift_exit_codes"],
         )
 
     print("PASS source format diagnostics completed")
@@ -5474,7 +5586,7 @@ def failure_context(gate: str, component: str) -> int:
         elif component.startswith("frontend:"):
             cmd = [sys.executable, "scripts/repoctl.py", "frontend", "check", component.split(":", 1)[1]]
         elif component == "platform:terraform":
-            cmd = [sys.executable, "scripts/repoctl.py", "terraform"]
+            cmd = [sys.executable, "scripts/repoctl.py", "opentofu"]
         elif component == "platform:ansible":
             cmd = [sys.executable, "scripts/repoctl.py", "ansible"]
         else:
@@ -5488,7 +5600,7 @@ def failure_context(gate: str, component: str) -> int:
             "lint",
             "test",
             "security",
-            "terraform",
+            "opentofu",
             "ansible",
             "system",
             "automation-policy",
@@ -7420,6 +7532,24 @@ def source_check(head: str) -> int:
     return 0
 
 
+def qualification_tools_contract_check() -> int:
+    from qualification_tools import validate_contract
+
+    validate_contract(ROOT)
+    print("PASS qualification tools contract")
+    return 0
+
+
+def qualification_tools_smoke_check() -> int:
+    from qualification_tools import smoke
+
+    destination = ROOT / ".context/evidence/qualification-tools/smoke.json"
+    payload = smoke(destination)
+    print(f"PASS qualification tools smoke {destination.relative_to(ROOT)}")
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -7432,7 +7562,9 @@ def main() -> int:
         "lint",
         "test",
         "security",
-        "terraform",
+        "qualification-tools-contract",
+        "qualification-tools-smoke",
+        "opentofu",
         "ansible",
         "system",
         "doctor",
@@ -7626,26 +7758,29 @@ def main() -> int:
             return test_all()
         if args.cmd == "security":
             return security()
-        if args.cmd == "terraform":
+        if args.cmd == "qualification-tools-contract":
+            return _run_cached_static_gate(
+                "qualification-tools", {}, qualification_tools_contract_check
+            )
+        if args.cmd == "qualification-tools-smoke":
+            return qualification_tools_smoke_check()
+        if args.cmd == "opentofu":
             if not terraform_source_files():
-                return terraform_check()
+                return opentofu_check()
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(
-                    "platform:terraform", ["terraform"]
+                    "platform:terraform", ["opentofu"]
                 )
             # Availability/provider identity must be checked fresh; deterministic
             # validation work may then be reused by content identity.
             tf_files = terraform_source_files()
             if tf_files:
-                formatter = source_quality_adapter("terraform")["formatter"]
-                approved = next(
-                    (shutil.which(name) for name in formatter["executable_preference"] if shutil.which(name)),
-                    None,
-                )
-                if not approved:
-                    return fail("Terraform sources exist but no centrally approved Terraform/OpenTofu executable is installed")
+                formatter = source_quality_adapter("opentofu")["formatter"]
+                if formatter.get("executable_preference") != ["tofu"]:
+                    return fail("OpenTofu source-quality policy must authorize only the tofu executable")
+                require("tofu")
                 validate_terraform_lockfile_projections(terraform_provider_lock_contract())
-            return _run_cached_gate("platform:terraform", {}, terraform_check)
+            return _run_cached_gate("platform:terraform", {}, opentofu_check)
         if args.cmd == "ansible":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 return _execute_direct_gate_with_runtime(

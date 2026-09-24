@@ -1,0 +1,6 @@
+groups:
+  - name: qualification_fixture
+    rules:
+      - alert: MissingExpression
+        labels:
+          severity: warning

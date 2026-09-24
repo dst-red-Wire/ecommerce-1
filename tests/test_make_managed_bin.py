@@ -95,13 +95,13 @@ class MakeManagedBinTest(unittest.TestCase):
             self._prepare_controller_prerequisites(system_bin)
             self._write_tool(managed_bin, "ruff", log)
             self._write_tool(managed_bin, "gofmt", log)
-            self._write_tool(managed_bin, "terraform", log)
+            self._write_tool(managed_bin, "tofu", log)
 
             result = self._run_format_check(home, system_bin)
 
             self.assertEqual(0, result.returncode, result.stdout)
             invoked = [line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(["ruff", "gofmt", "terraform"], invoked)
+            self.assertEqual(["ruff", "gofmt", "tofu"], invoked)
 
     def test_format_check_fails_closed_when_gofmt_is_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -114,7 +114,7 @@ class MakeManagedBinTest(unittest.TestCase):
             system_bin.mkdir()
             self._prepare_controller_prerequisites(system_bin)
             self._write_tool(managed_bin, "ruff", log)
-            self._write_tool(managed_bin, "terraform", log)
+            self._write_tool(managed_bin, "tofu", log)
 
             result = self._run_format_check(home, system_bin)
 
@@ -132,7 +132,7 @@ class MakeManagedBinTest(unittest.TestCase):
             system_bin.mkdir()
             self._prepare_controller_prerequisites(system_bin)
             self._write_tool(managed_bin, "ruff", log)
-            self._write_tool(managed_bin, "terraform", log)
+            self._write_tool(managed_bin, "tofu", log)
             gofmt = managed_bin / "gofmt"
             gofmt.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(19)\n", encoding="utf-8")
             gofmt.chmod(0o755)
@@ -156,14 +156,14 @@ class MakeManagedBinTest(unittest.TestCase):
             managed_bin.mkdir(parents=True)
             system_bin.mkdir()
             self._prepare_controller_prerequisites(system_bin)
-            for name in ("ruff", "gofmt", "terraform"):
+            for name in ("ruff", "gofmt", "tofu"):
                 self._write_tool(managed_bin, name, log)
 
             result = self._run_format_check(home, system_bin)
 
             self.assertEqual(0, result.returncode, result.stdout)
             invoked = [line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(["ruff", "gofmt", "terraform"], invoked)
+            self.assertEqual(["ruff", "gofmt", "tofu"], invoked)
 
     def test_format_check_fails_when_managed_tool_is_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -176,7 +176,7 @@ class MakeManagedBinTest(unittest.TestCase):
             system_bin.mkdir()
             self._prepare_controller_prerequisites(system_bin)
             self._write_tool(managed_bin, "gofmt", log)
-            self._write_tool(managed_bin, "terraform", log)
+            self._write_tool(managed_bin, "tofu", log)
 
             result = self._run_format_check(home, system_bin)
 

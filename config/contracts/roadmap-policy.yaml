@@ -252,7 +252,7 @@ milestones:
     section_heading: "### M3 — PREPROD Infrastructure"
     objective: provision reproducible JIT infrastructure foundation
     entry_gate: M2.5 PROVEN; exact infrastructure contracts already merged
-    exit_gate: Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified
+    exit_gate: OpenTofu/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified
     requires: [M2.5]
     requirements:
       implementation_paths: [config/infrastructure/preprod-inventory.yaml, platform/terraform/environments/qualification]

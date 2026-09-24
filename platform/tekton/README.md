@@ -7,7 +7,7 @@
 - `global`: architecture/governance, API contracts, secret scan and shell automation.
 - `frontend`: Storefront or Admin, parameterized by scope and using the PNPM workspace.
 - `go-service`: one autonomous `services/<service>` Go module at a time.
-- `platform`: Terraform or Ansible validation without performing apply/mutation.
+- `platform`: OpenTofu or Ansible validation without performing apply/mutation.
 - `product-release`: M2 golden path from exact-SHA Product gates to multi-architecture OCI build, Harbor push, Trivy, Syft, and Cosign signature/attestation. It never deploys or mutates Fleet state.
 
 Changed paths are classified with `scripts/ci-affected.rb` (`make affected BASE=<sha> HEAD=<sha>`). The classifier uses the canonical ownership/API contracts and fails closed for unknown service or OpenAPI paths. CI-control changes fan out to every component class.

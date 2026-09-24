@@ -24,11 +24,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             with self.assertRaisesRegex(MOD.MissingRunnerPrerequisite, "runner prerequisite missing: ruby"):
                 MOD.require("ruby")
 
-    def test_terraform_check_prefers_tofu_when_both_providers_exist(self):
+    def test_opentofu_check_uses_only_tofu(self):
         calls = []
         policy = {
             "formatter": {
-                "executable_preference": ["tofu", "terraform"],
+                "executable_preference": ["tofu"],
                 "args": ["fmt", "-check", "-recursive", "-diff"],
                 "drift_exit_codes": [3],
             },
@@ -39,7 +39,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         provider_lock = {
             "providers": {
                 "hcloud": {
-                    "source": "registry.terraform.io/hetznercloud/hcloud",
+                    "source": "registry.opentofu.org/hetznercloud/hcloud",
                     "version": "1.68.0",
                     "constraints": "1.68.0",
                     "hashes": ["h1:test", "zh:test"],
@@ -54,7 +54,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         }
 
         def fake_which(command):
-            return {"tofu": "/opt/bin/tofu", "terraform": "/opt/bin/terraform"}.get(command)
+            return {"tofu": "/opt/bin/tofu"}.get(command)
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
@@ -73,7 +73,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             mock.patch.object(MOD.shutil, "which", side_effect=fake_which),
             mock.patch.object(MOD, "run", side_effect=fake_run),
         ):
-            self.assertEqual(0, MOD.terraform_check())
+            self.assertEqual(0, MOD.opentofu_check())
 
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
@@ -83,9 +83,12 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("architecture.lock.yaml", contract["architecture_authority"])
         self.assertEqual("platform/terraform", contract["scope"])
         self.assertEqual("exact", contract["status"])
+        self.assertEqual("opentofu", contract["iac_engine"]["authority"])
+        self.assertEqual("tofu", contract["iac_engine"]["command"])
+        self.assertEqual("forbidden", contract["iac_engine"]["terraform_cli"])
 
         provider = contract["providers"]["hcloud"]
-        self.assertEqual("registry.terraform.io/hetznercloud/hcloud", provider["source"])
+        self.assertEqual("registry.opentofu.org/hetznercloud/hcloud", provider["source"])
         self.assertEqual("1.68.0", provider["version"])
         self.assertEqual("1.68.0", provider["constraints"])
         self.assertTrue(any(value.startswith("h1:") for value in provider["hashes"]))
@@ -103,7 +106,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             MOD.write_terraform_provider_lock(path)
             text = path.read_text(encoding="utf-8")
 
-        self.assertIn('provider "registry.terraform.io/hetznercloud/hcloud"', text)
+        self.assertIn('provider "registry.opentofu.org/hetznercloud/hcloud"', text)
         self.assertIn('version     = "1.68.0"', text)
         self.assertIn('constraints = "1.68.0"', text)
         self.assertIn("h1:KOFp1JbzZ6Xj2K80QL7HGJM6oG+oEo7tx3lIx3d5POM=", text)
@@ -135,7 +138,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         )
         self.assertEqual(
             "architecture.lock.yaml#machine_contracts.terraform_provider_lock",
-            policy["adapters"]["terraform"]["validation"]["provider_lock_authority"],
+            policy["adapters"]["opentofu"]["validation"]["provider_lock_authority"],
         )
 
     def test_repository_maximal_authority_model_is_root(self):
@@ -382,15 +385,15 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertIn('"F82"', text)
 
     def test_declared_formatter_drift_is_advisory_but_execution_errors_block(self):
-        command = ["terraform", "fmt", "-check", "-recursive", "-diff"]
+        command = ["tofu", "fmt", "-check", "-recursive", "-diff"]
         drift = subprocess.CompletedProcess(command, 3, "format diff", "")
         with mock.patch.object(MOD, "run", return_value=drift):
-            MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
+            MOD.advisory_exit_check("tofu fmt", command, drift_exit_codes=[3])
 
         failure = subprocess.CompletedProcess(command, 2, "", "formatter crashed")
         with mock.patch.object(MOD, "run", return_value=failure):
             with self.assertRaisesRegex(RuntimeError, "formatter crashed"):
-                MOD.advisory_exit_check("terraform fmt", command, drift_exit_codes=[3])
+                MOD.advisory_exit_check("tofu fmt", command, drift_exit_codes=[3])
 
     def test_exact_state_skips_ansible_startup(self):
         with (

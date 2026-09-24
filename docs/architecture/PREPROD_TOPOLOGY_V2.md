@@ -112,7 +112,7 @@ External watchdog owns TTL enforcement. Standard campaign TTL <=24 h. Endurance 
 
 ## Source-of-truth boundaries
 
-Permanent MGMT remains external to PREPROD and owns Git/Gitea, Harbor, Fleet source configuration, OpenBao, NetBox, Grafana and Terraform state prerequisites.
+Permanent MGMT remains external to PREPROD and owns Git/Gitea, Harbor, Fleet source configuration, OpenBao, NetBox, Grafana and OpenTofu state prerequisites.
 
 PREPROD never becomes the durable source of truth for its own desired state.
 

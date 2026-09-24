@@ -291,8 +291,8 @@ module ArchitectureValidator
     end
     profile_prefixes = expect_mapping(mgmt["vm_profiles"], "mgmt-inventory.yaml vm_profiles").keys.map { |name| name.split("-", 2).first }.uniq
     check_equal(errors, "MGMT Kubernetes", [management["kubernetes"]], profile_prefixes)
-    check_equal(errors, "MGMT Terraform/OpenTofu bootstrap", true, management.dig("bootstrap", "terraform_opentofu"))
-    check_equal(errors, "MGMT inventory Terraform/OpenTofu bootstrap", "terraform-opentofu", mgmt.dig("bootstrap", "infrastructure"))
+    check_equal(errors, "MGMT OpenTofu bootstrap", true, management.dig("bootstrap", "opentofu"))
+    check_equal(errors, "MGMT inventory OpenTofu bootstrap", "opentofu", mgmt.dig("bootstrap", "infrastructure"))
     check_equal(errors, "MGMT Ansible bootstrap", true, management.dig("bootstrap", "ansible"))
     check_equal(errors, "MGMT inventory Ansible bootstrap", "ansible", mgmt.dig("bootstrap", "configuration"))
     check_equal(errors, "MGMT human apply gate", true, management.dig("bootstrap", "requires_human_apply_gate"))

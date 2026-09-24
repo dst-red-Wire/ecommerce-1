@@ -10,7 +10,7 @@ Must exist before PREPROD `CREATE`:
 
 - Git/Gitea sources reachable;
 - Harbor registry and required OCI artifacts available by immutable digest;
-- Terraform state backend reachable;
+- OpenTofu state backend reachable;
 - OpenBao bootstrap path available;
 - version locks/checksums available;
 - Ansible collections and RKE2 air-gap artifacts prepared;

@@ -164,12 +164,12 @@ def validate_repository_text() -> list[str]:
         errors.append("hcloud provider is not exactly pinned")
     canonical_ip = re.compile(r"10\.243\.\d+\.\d+")
     if canonical_ip.search(tf):
-        errors.append("Terraform duplicates canonical MGMT IP constants")
+        errors.append("OpenTofu duplicates canonical MGMT IP constants")
     if re.search(r'port\s*=\s*"22"[\s\S]{0,160}source_ips\s*=\s*\[[^]]*0\.0\.0\.0/0', tf):
         errors.append("unrestricted management SSH")
     forbidden_ownership = re.compile(r"(remote-exec|local-exec|install-rke2|rke2-server\.service)", re.I)
     if forbidden_ownership.search(tf):
-        errors.append("Terraform attempts Ansible/RKE2 ownership")
+        errors.append("OpenTofu attempts Ansible/RKE2 ownership")
     module = (ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf").read_text(encoding="utf-8")
     if "bootstrap_ssh_allowed_cidrs" not in module or 'dynamic "rule"' not in module:
         errors.append("temporary wg-01 bootstrap SSH lifecycle is not modeled")

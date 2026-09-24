@@ -174,19 +174,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             )
             self.assertEqual("SKIP", record["records"][0]["status"])
 
-    def test_empty_terraform_area_skips_before_runtime_requirement(self):
+    def test_empty_opentofu_area_skips_before_runtime_requirement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "platform" / "terraform").mkdir(parents=True)
             with (
-                mock.patch.object(sys, "argv", ["repoctl.py", "terraform"]),
+                mock.patch.object(sys, "argv", ["repoctl.py", "opentofu"]),
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,
                 redirect_stdout(io.StringIO()) as output,
             ):
                 self.assertEqual(0, MOD.main())
             runtime.assert_not_called()
-            self.assertIn("SKIP terraform: no Terraform files found", output.getvalue())
+            self.assertIn("SKIP OpenTofu: no compatible .tf sources found", output.getvalue())
 
     def test_qualification_identity_handles_stopped_docker_deterministically(self):
         unavailable = subprocess.CompletedProcess(
@@ -1386,7 +1386,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
     def test_top_level_commands_and_ci_fanout_are_contract_driven(self):
         globals_ = MOD._policy_gate_names("global")
         self.assertEqual(
-            ["governance", "runtime-efficiency", "contracts", "automation", "security"],
+            ["governance", "runtime-efficiency", "contracts", "automation", "security", "qualification-tools"],
             globals_,
         )
         self.assertEqual(globals_, MOD._policy_gate_names("global", ci_fanout_only=True))
@@ -1401,7 +1401,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(["service", "product"], product[-2:])
 
     def test_global_gate_order_is_stable_when_cached_mapping_keys_are_sorted(self):
-        expected = ["governance", "runtime-efficiency", "contracts", "automation", "security"]
+        expected = ["governance", "runtime-efficiency", "contracts", "automation", "security", "qualification-tools"]
         policy = MOD.qualification_execution_policy()
         policy["gates"] = dict(sorted(policy["gates"].items()))
         with mock.patch.object(MOD, "qualification_execution_policy", return_value=policy):
@@ -1535,11 +1535,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ansible["fresh_prechecks"],
         )
         self.assertEqual(
-            ["approved-terraform-executable-availability", "canonical-provider-lock-contract"],
+            ["approved-opentofu-executable-availability", "canonical-provider-lock-contract"],
             terraform["fresh_prechecks"],
         )
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
-        self.assertIn('TemporaryDirectory(prefix="ecommerce-terraform-validation-")', source)
+        self.assertIn('TemporaryDirectory(prefix="ecommerce-opentofu-validation-")', source)
         self.assertIn('collections_install_root', (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
 
     def test_tekton_finalizer_rejects_skip_for_planned_fresh_gate(self):

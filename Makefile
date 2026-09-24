@@ -5,7 +5,7 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -34,7 +34,7 @@ help: ## Show the available checks
 ci: ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks
+ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
 
 ci-global: ## Run canonical global gates through the central execution planner
 	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
@@ -67,6 +67,13 @@ system: ## Run cross-system repository tests without replaying component suites
 security: ## Scan working tree for secrets
 	@$(PYTHON) scripts/repoctl.py security
 
+qualification-tools: ## Validate qualification tool contracts and evidence parsers
+	@$(PYTHON) scripts/repoctl.py qualification-tools-contract
+
+qualification-tools-smoke: ## Reconcile and run bounded controller-side qualification tool smoke tests
+	@$(PYTHON) scripts/repoctl.py reconcile --tags conftest,opa,k6,nuclei,hubble,pint
+	@$(PYTHON) scripts/repoctl.py qualification-tools-smoke
+
 qce-status: ## Render the derived nine-sector QCE status projection
 	@$(PYTHON) scripts/repoctl.py qce-status $(if $(SECTOR),--sector "$(SECTOR)",) $(if $(JSON),--json,)
 
@@ -82,15 +89,15 @@ engineering-metrics: ## Calculate contract-defined engineering metrics from INPU
 experiment: ## Run ACTION=baseline|evaluate|status for INPUT=<experiment.json>
 	@$(PYTHON) scripts/repoctl.py experiment "$(ACTION)" --input "$(INPUT)" $(if $(OUTPUT),--output "$(OUTPUT)",)
 
-terraform: ## Validate Terraform/OpenTofu sources when present
-	@$(PYTHON) scripts/repoctl.py terraform
+opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC engine
+	@$(PYTHON) scripts/repoctl.py opentofu
 
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
 .PHONY: mgmt-runtime-inventory
 
-mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from Terraform MGMT outputs
+mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
 
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check

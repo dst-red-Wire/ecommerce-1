@@ -1,0 +1,219 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+toolchain_authority: config/contracts/toolchain-lock.json
+scope: qualification-tools
+
+principles:
+  version_and_checksum_authority: toolchain-lock-only
+  missing_required_scanner: FAIL
+  invalid_structured_output: FAIL
+  blocking_finding: FAIL
+  unsupported_profile: BLOCK
+  runtime_observation_without_assertion: BLOCK
+  static_result_must_not_claim_runtime_proof: true
+  evidence_directory: .context/evidence/qualification-tools
+
+tools:
+  openscap:
+    owner: platform-security
+    input_contract:
+      target: rocky-10.2-rke2-node
+      datastream: /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.openscap
+      content_registry_ref: config/contracts/toolchain-lock.json#tools.scap-security-guide
+      placement: rocky-10.2-rke2-image
+    policy:
+      profile: xccdf_org.ssgproject.content_profile_cis_server_l1
+      content_status: draft
+      support: supported-with-limitations
+      fail_results: [fail, error, unknown]
+      non_proving_results: [notchecked, notapplicable, notselected, informational]
+    output_contract:
+      format: openscap-arf-xml
+      parser: scripts/qualification_tools.py#parse_openscap
+    evidence:
+      required_fields: [tool, version, target, profile, result_counts, final_result]
+      runtime_required_for_pass: true
+    gate: rke2-runtime-security
+
+  scap-security-guide:
+    owner: platform-security
+    input_contract:
+      os: rocky-10.2
+      package: scap-security-guide
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.scap-security-guide
+      placement: rocky-10.2-rke2-image
+    policy:
+      required_datastream: /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml
+      selected_profile_owner: qualification-tools.yaml#tools.openscap.policy.profile
+    output_contract:
+      format: rpm-and-datastream-inventory
+    evidence:
+      required_fields: [package_version, datastream_sha256, profile]
+      runtime_required_for_pass: true
+    gate: rke2-runtime-security
+
+  kube-bench:
+    owner: platform-security
+    input_contract:
+      kubernetes: "1.37"
+      distribution: rke2
+      role: [control-plane, worker]
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.kube-bench
+      placement: rocky-10.2-rke2-image
+    policy:
+      available_profile: rke2-cis-1.9
+      required_profile: rke2-cis-1.12
+      compatibility: unsupported
+      reason: kube-bench-0.16.0-does-not-ship-rke2-cis-1.12
+      unsupported_behavior: BLOCK
+      finding_statuses: [FAIL, WARN]
+    output_contract:
+      format: kube-bench-json
+      parser: scripts/qualification_tools.py#parse_kube_bench
+    evidence:
+      required_fields: [tool, version, target_role, benchmark, totals, final_result]
+      runtime_required_for_pass: true
+    gate: rke2-runtime-security
+
+  conftest:
+    owner: repository-governance
+    input_contract:
+      formats: [yaml, json, hcl]
+      policies: config/policies/qualification
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.conftest
+      placement: ECOMMERCE_TOOL_HOME
+    policy:
+      engine: opa
+      query_namespace: data.qualification
+      source_authority: repository-rego
+    output_contract:
+      format: conftest-json
+    evidence:
+      required_fields: [tool, version, input_sha256, policy_sha256, failures, final_result]
+      runtime_required_for_pass: false
+    gate: qualification-tools-static
+
+  opa:
+    owner: repository-governance
+    input_contract:
+      policies: config/policies/qualification
+      fixtures: tests/fixtures/qualification-tools/opa
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.opa
+      placement: ECOMMERCE_TOOL_HOME
+    policy:
+      rego_version: v1
+      compile_check: required
+      conftest_policy_authority: shared
+    output_contract:
+      format: opa-json
+    evidence:
+      required_fields: [tool, version, bundle_sha256, tests, final_result]
+      runtime_required_for_pass: false
+    gate: qualification-tools-static
+
+  k6:
+    owner: performance-engineering
+    input_contract:
+      script: tests/fixtures/qualification-tools/k6/smoke.js
+      target: loopback-only
+      slo_authority: config/contracts/service-slo.yaml#profiles.normal
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.k6
+      placement: ECOMMERCE_TOOL_HOME
+    policy:
+      smoke: {virtual_users: 1, iterations: 1, duration_limit_seconds: 10}
+      baseline: runtime-campaign-only
+      load: runtime-campaign-only
+      stress: explicitly-authorized-runtime-campaign-only
+      thresholds:
+        http_req_failed: service-slo.yaml#profiles.normal.error_rate_percent
+        http_req_duration_p95: service-slo.yaml#profiles.normal.latency_p95_ms
+    output_contract:
+      format: k6-summary-json
+      parser: scripts/qualification_tools.py#parse_k6
+    evidence:
+      required_fields: [tool, version, scenario, target, thresholds, metrics, final_result]
+      runtime_required_for_pass: true
+    gate: qualification-tools-smoke
+
+  nuclei:
+    owner: application-security
+    input_contract:
+      targets: [localhost, 127.0.0.0/8]
+      project_lab_targets_from_contract: true
+      arbitrary_internet: forbidden
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.nuclei
+      placement: ECOMMERCE_TOOL_HOME
+      templates: immutable-commit-snapshot
+    policy:
+      automatic_update: forbidden
+      interactsh: forbidden
+      unsafe_templates: forbidden
+      destructive_templates: forbidden
+      smoke_template: tests/fixtures/qualification-tools/nuclei/local-smoke.yaml
+    output_contract:
+      format: nuclei-jsonl
+      parser: scripts/qualification_tools.py#parse_nuclei
+    evidence:
+      required_fields: [tool, version, template_commit, targets, findings, final_result]
+      runtime_required_for_pass: true
+    gate: qualification-tools-smoke
+
+  hubble:
+    owner: network-platform
+    input_contract:
+      cilium_runtime: "1.20.1"
+      environment: qualified-rke2-multinode
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.hubble
+      placement: ECOMMERCE_TOOL_HOME
+    policy:
+      cli_release: "1.19.4"
+      compatibility: unverified
+      unsupported_behavior: BLOCK
+      assertions: [expected-allow, expected-drop, expected-dns, policy-enforcement]
+    output_contract:
+      format: hubble-json
+      parser: scripts/qualification_tools.py#parse_hubble
+    evidence:
+      required_fields: [tool, version, cilium_version, assertions, observations, final_result]
+      runtime_required_for_pass: true
+    gate: rke2-runtime-network-policy
+
+  pint:
+    owner: observability-platform
+    input_contract:
+      prometheus_rule_globs: []
+    tool:
+      registry_ref: config/contracts/toolchain-lock.json#tools.pint
+      placement: ECOMMERCE_TOOL_HOME
+    policy:
+      mandatory_when_matching_inputs: true
+      current_repository_scope: availability-and-fixtures-only
+      synthetic_repository_rules: forbidden
+    output_contract:
+      format: pint-exit-and-json-when-available
+    evidence:
+      required_fields: [tool, version, matched_rule_files, diagnostics, final_result]
+      runtime_required_for_pass: false
+    gate: qualification-tools-static
+
+placement:
+  rocky-10.2-rke2-image: [openscap, scap-security-guide, kube-bench]
+  ECOMMERCE_TOOL_HOME: [conftest, opa, k6, nuclei, hubble, pint]
+  forbidden_in_all_images: [conftest, opa, k6, nuclei, hubble, pint]
+
+cache:
+  root: ECOMMERCE_TOOL_HOME
+  fallback: ~/.cache/ecommerce-1
+  checksums_required: true
+  offline_environment: ECOMMERCE_TOOL_OFFLINE
+  offline_missing_artifact: FAIL

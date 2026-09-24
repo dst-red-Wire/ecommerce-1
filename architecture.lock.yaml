@@ -86,7 +86,7 @@ management_plane:
   gitops: rancher-fleet
   developer_portal: backstage
   bootstrap:
-    terraform_opentofu: true
+    opentofu: true
     ansible: true
     requires_human_apply_gate: true
 
@@ -104,7 +104,7 @@ developer_platform:
     gitops: rancher-fleet
     infrastructure_api: crossplane
     progressive_delivery: argo-rollouts
-    foundation_iac: terraform-opentofu
+    foundation_iac: opentofu
   runtime_boundary:
     commerce_runtime_nodejs: forbidden
     backstage_management_plane_nodejs: allowed-required
@@ -122,7 +122,7 @@ developer_platform:
       - force-push
       - approve-pull-request
       - merge-pull-request
-      - terraform-apply
+      - tofu-apply
       - kubectl-apply
       - crossplane-apply
       - direct-workload-deploy
@@ -245,7 +245,7 @@ developer_platform:
     fleet_reconciles_git: true
     crossplane_materializes_platform_api: true
   infrastructure_ownership:
-    terraform_opentofu: foundation
+    opentofu: foundation
     crossplane: self-service-platform-resources
   preview_lifecycle:
     creation: gitops-reconciliation
@@ -461,22 +461,32 @@ tooling:
   machine_images:
     builder: packer
     contract: architecture.lock.yaml#machine_contracts.machine_image_lock
+  iac:
+    authority: opentofu
+    command: tofu
+    terraform_cli: forbidden
+    provider_lock: .terraform.lock.hcl
   security:
     container_and_filesystem: trivy
     secret_detection: gitleaks
     go_static_analysis: gosec
     go_vulnerabilities: govulncheck
+    os_compliance: openscap-scap-security-guide
     kubernetes_cis: kube-bench
+    policy_as_code: opa-conftest
+    controlled_http_dast: nuclei
+    network_policy_evidence: hubble
   secrets:
     static_file_encryption: sops
     recipient_crypto: age
     runtime_authority: openbao-via-eso
   performance:
-    authority: central-qualification-metrics-and-go-benchmarks
+    authority: central-qualification-metrics-go-benchmarks-and-k6
     hyperfine: rejected-no-distinct-consumer
   forbidden_authorities:
     oci_runtime: podman
     oci_builder: buildah
+    iac_engine: terraform-cli
 
 topology_contracts:
   exact_index: docs/architecture/EXACT_TOPOLOGY_V5.md
@@ -527,6 +537,7 @@ machine_contracts:
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
   qualification_execution_policy: config/contracts/qualification-execution-policy.yaml
+  qualification_tools: config/contracts/qualification-tools.yaml
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
   roadmap_policy: config/contracts/roadmap-policy.yaml

@@ -109,7 +109,7 @@ secrets:
     access: separately-controlled
 
 ownership:
-  provider_vm_network_firewall: terraform
+  provider_vm_network_firewall: opentofu
   rocky_wireguard_routing_firewall: ansible
   secret_retrieval_and_host_render: ansible
   secret_authority: openbao

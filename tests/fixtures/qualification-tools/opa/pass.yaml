@@ -1,0 +1,6 @@
+kind: QualificationSample
+metadata:
+  name: valid-sample
+  labels:
+    owner: platform-security
+

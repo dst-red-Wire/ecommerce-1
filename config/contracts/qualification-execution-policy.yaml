@@ -226,7 +226,7 @@ runtime_orchestration:
         restore: none
         verify_restore: none
       evidence_fields: [satisfied, command, exit_code]
-    terraform-runtime:
+    opentofu-runtime:
       handler: command
       requires: []
       mutation_class: none
@@ -234,9 +234,7 @@ runtime_orchestration:
       privilege: none
       global_lock: false
       parameters:
-        commands:
-          - [tofu, version]
-          - [terraform, version]
+        command: [tofu, version]
       operations:
         detector: version-probe
         preflight: read-only-availability
@@ -389,6 +387,7 @@ execution:
     - contracts
     - automation
     - security
+    - qualification-tools
   local_max_workers: 4
   python_unittest_method_shard_min_tests: 4
   ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
@@ -629,6 +628,27 @@ gates:
       - scripts/security_policy.py
     fresh_prechecks:
       - exact-git-history-and-worktree-scan
+  qualification-tools:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: qualification-tools-contract
+    ci_fanout: true
+    tools: [python3]
+    validators:
+      - scripts/qualification_tools.py
+      - scripts/repoctl.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/qualification-tools.yaml
+      - config/contracts/toolchain-lock.json
+      - config/contracts/service-slo.yaml
+      - config/policies/qualification/**/*
+      - scripts/qualification_tools.py
+      - tests/fixtures/qualification-tools/**/*
+      - tests/test_qualification_tools.py
   system:
     scope: component
     parallel_safe: false
@@ -694,8 +714,8 @@ gates:
     cache_mode: content-pass
     dependencies: []
     command:
-      action: terraform
-    tools: [tofu, terraform]
+      action: opentofu
+    tools: [tofu]
     validators:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
@@ -709,10 +729,10 @@ gates:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
     fresh_prechecks:
-      - approved-terraform-executable-availability
+      - approved-opentofu-executable-availability
       - canonical-provider-lock-contract
     runtime_capabilities:
-      - terraform-runtime
+      - opentofu-runtime
   "frontend:*":
     scope: component
     parallel_safe: true

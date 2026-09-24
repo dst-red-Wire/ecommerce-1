@@ -1,4 +1,4 @@
-# M1 qualification Terraform handoff
+# M1 qualification OpenTofu handoff
 
 This independent state root declares two disposable Ubuntu 24.04 x86_64
 servers, one network/subnet, and two firewalls: a private-only qualification
@@ -36,19 +36,19 @@ while apt negotiates package access:
 | `go.dev`, `dl.google.com`, `storage.googleapis.com` | developer toolchain | official pinned Go archive and redirects |
 | `nodejs.org`, `registry.npmjs.org` | frontend bootstrap | pinned Node archive and pnpm packages |
 | `get.helm.sh` | developer toolchain | pinned Helm archive |
-| `releases.hashicorp.com` | developer toolchain | pinned Terraform archive |
+| `releases.hashicorp.com` | developer toolchain | pinned Packer archive |
 | `dl.k8s.io` | developer toolchain | pinned kubectl binary |
 | `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com` | Docker/Testcontainers | registry authentication, manifests, and legacy layer delivery |
 | `docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com` | Docker Hub image layer delivery | mandatory PostgreSQL Testcontainers image pull over HTTPS (TCP 443) |
 
 ## Trusted two-hop SSH enrollment and provisioning
 
-After a separately authorized apply, record the non-secret Terraform outputs
+After a separately authorized `tofu apply`, record the non-secret OpenTofu outputs
 for gateway public address/user, runner private address/user, ProxyJump, and
 both inventory lines. Obtain each server's ED25519 SHA256 fingerprint from the
 provider console or another authenticated out-of-band source. Never use the
 scan itself as the trust authority and never place a private key, token, or
-fabricated fingerprint in Terraform.
+fabricated fingerprint in OpenTofu configuration or state.
 
 The following operator procedure first verifies the public gateway, then uses
 only that verified gateway to scan and independently verify the private runner:
@@ -157,8 +157,8 @@ qualification file is therefore the only host-key trust source, with no
 global-store, configured-command, or agent-forwarding fallback.
 
 The inventory must contain groups `qualification_gateways` and
-`qualification_runners`, populated from the two Terraform inventory outputs.
-The required order is Terraform static topology, minimal gateway account,
+`qualification_runners`, populated from the two OpenTofu inventory outputs.
+The required order is OpenTofu static topology, minimal gateway account,
 trusted gateway reconciliation, runner proxy-client reconciliation, canonical
 `qualification-runner.yml`, and finally the PR #77 qualification. The canonical
 #78 files remain unchanged.

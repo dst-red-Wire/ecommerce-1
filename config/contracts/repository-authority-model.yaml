@@ -124,7 +124,7 @@ orchestration_adapters:
       - ruff
       - gitleaks
       - ansible-lint
-      - terraform fmt
+      - tofu fmt
 
 component_manifests:
   - pattern: go.work

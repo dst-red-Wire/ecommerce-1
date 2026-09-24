@@ -148,6 +148,7 @@ V5_SECTION_KEYS = {
             "gate_executable_inventory",
             "container",
             "machine_images",
+            "iac",
             "security",
             "secrets",
             "performance",
@@ -170,7 +171,7 @@ V5_SECTION_KEYS = {
     ),
     "management_plane.bootstrap": frozenset(
         {
-            "terraform_opentofu",
+            "opentofu",
             "ansible",
             "requires_human_apply_gate",
         }
@@ -315,7 +316,7 @@ V5_SECTION_KEYS = {
             "crossplane_materializes_platform_api",
         }
     ),
-    "developer_platform.infrastructure_ownership": frozenset({"terraform_opentofu", "crossplane"}),
+    "developer_platform.infrastructure_ownership": frozenset({"opentofu", "crossplane"}),
     "developer_platform.preview_lifecycle": frozenset(
         {
             "creation",
@@ -1504,8 +1505,8 @@ def validate(root):
                 errors.append(f"management_plane.{field} contradicts subordinate MGMT contracts")
         bootstrap = management.get("bootstrap", {})
         if (
-            bootstrap.get("terraform_opentofu") is not True
-            or inventory.get("bootstrap", {}).get("infrastructure") != "terraform-opentofu"
+            bootstrap.get("opentofu") is not True
+            or inventory.get("bootstrap", {}).get("infrastructure") != "opentofu"
             or bootstrap.get("ansible") is not True
             or inventory.get("bootstrap", {}).get("configuration") != "ansible"
         ):

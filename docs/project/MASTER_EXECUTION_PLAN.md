@@ -38,7 +38,7 @@ Only these statuses are allowed:
 | M1 Monorepo Bootstrap | #13 | Codex | create minimal maintainable monorepo skeleton | M0 merged | exactly 19 services + 2 frontends represented, repo checks green | DERIVED — run make roadmap-check |
 | M2 Golden Service Product | #14 | Codex | prove one production-grade Go service pattern | M1 PROVEN | Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN | DERIVED — run make roadmap-check |
 | M2.5 Persistent MGMT Bootstrap | #32 | Codex | bootstrap the persistent management plane required before PREPROD | M1 PROVEN | persistent MGMT bootstrap PROVEN under the canonical architecture contracts | DERIVED — run make roadmap-check |
-| M3 PREPROD Infrastructure | #16 | Codex | provision reproducible JIT infrastructure foundation | M2.5 PROVEN; exact infrastructure contracts already merged | Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | DERIVED — run make roadmap-check |
+| M3 PREPROD Infrastructure | #16 | Codex | provision reproducible JIT infrastructure foundation | M2.5 PROVEN; exact infrastructure contracts already merged | OpenTofu/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified | DERIVED — run make roadmap-check |
 | M4 Platform Baseline | #17 | Codex | deploy security, delivery, observability and stateful platform baseline | M3 PROVEN | platform services healthy, declarative, observable, secured, restore prerequisites present | DERIVED — run make roadmap-check |
 | M5 Commerce Vertical Slice | #18 | Codex | deliver first end-to-end commerce path | M2 + M4 PROVEN | Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance | DERIVED — run make roadmap-check |
 | M6 Full Application | #19 | Codex | complete 19 services + Storefront + Admin | M5 PROVEN | all scoped business capabilities implemented with contracts/tests/ownership | DERIVED — run make roadmap-check |
@@ -120,7 +120,7 @@ Implement directly from the exact topology and machine-readable contracts alread
 Required implementation domains:
 
 1. provider inputs and environment variables;
-2. IPAM/network inventory consumed by Terraform/Ansible/NetBox-compatible data;
+2. IPAM/network inventory consumed by OpenTofu/Ansible/NetBox-compatible data;
 3. bare-metal provisioning assumptions;
 4. Proxmox VE 9 configuration;
 5. Rocky Linux 10.2 Packer templates/bootstrap;
