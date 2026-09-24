@@ -104,6 +104,10 @@ class CapabilityGraphTest(unittest.TestCase):
         self.assertEqual(set(lock["capability_policy"]["classifications"]), MOD.CLASSIFICATIONS)
         self.assertEqual(set(lock["capability_policy"]["requirements"]), MOD.REQUIREMENTS)
         self.assertEqual(set(lock["capability_policy"]["managed_provision_types"]), MOD.MANAGED_PROVISION_TYPES)
+        self.assertEqual(
+            {("linux/amd64",), ("windows/amd64",)},
+            {tuple(tool["platforms"]) for tool in lock["tools"].values()},
+        )
         MOD.validate_toolchain_projections(lock)
 
     def test_versions_env_projection_drift_fails_closed(self):

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -22,12 +23,24 @@ def _digest(path: Path) -> str:
     return checksum.hexdigest()
 
 
+def _windows_path(path: Path) -> str:
+    rendered = subprocess.check_output(
+        ["wslpath", "-w", str(path)], text=True, timeout=15
+    ).strip()
+    if not re.fullmatch(r"[A-Za-z]:\\[^\r\n]+", rendered):
+        raise ValueError("Packer Windows staging path is not a local drive path")
+    return rendered
+
+
 def render(
     contract_path: Path,
     bundle: Path,
     build_public_key_file: Path,
     build_private_key_file: Path,
     output: Path,
+    *,
+    target_platform: str = "linux",
+    artifact_dir: Path | None = None,
 ) -> None:
     contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
     image = contract["packer_image"]
@@ -64,12 +77,31 @@ def render(
         is None
     ):
         raise ValueError("temporary Packer SSH public key is invalid")
+    if target_platform == "windows":
+        if artifact_dir is None or not artifact_dir.is_dir():
+            raise ValueError("Windows Packer artifact directory must already exist")
+        iso_path = _windows_path(iso.resolve())
+        iso_url = "file:///" + iso_path.replace("\\", "/")
+        bundle_path = _windows_path(bundle.resolve())
+        private_key_path = _windows_path(build_private_key_file.resolve())
+        artifact_path = _windows_path(artifact_dir.resolve())
+    elif target_platform == "linux":
+        if artifact_dir is None:
+            artifact_dir = output.parent / "artifacts"
+            artifact_dir.mkdir(exist_ok=True)
+        iso_url = iso.resolve().as_uri()
+        bundle_path = str(bundle.resolve())
+        private_key_path = str(build_private_key_file.resolve())
+        artifact_path = str(artifact_dir.resolve())
+    else:
+        raise ValueError(f"unsupported Packer target platform: {target_platform}")
     body = (
-        f"iso_url      = {json.dumps(iso.resolve().as_uri())}\n"
+        f"iso_url      = {json.dumps(iso_url)}\n"
         f"iso_checksum = {json.dumps(checksum)}\n"
-        f"offline_bundle_dir = {json.dumps(str(bundle.resolve()))}\n"
+        f"offline_bundle_dir = {json.dumps(bundle_path)}\n"
+        f"artifact_dir = {json.dumps(artifact_path)}\n"
         f"build_ssh_public_key = {json.dumps(public_key)}\n"
-        f"build_ssh_private_key_file = {json.dumps(str(build_private_key_file.resolve()))}\n"
+        f"build_ssh_private_key_file = {json.dumps(private_key_path)}\n"
     )
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -90,6 +122,10 @@ def main() -> int:
     parser.add_argument("--build-public-key-file", required=True, type=Path)
     parser.add_argument("--build-private-key-file", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--target-platform", choices=("linux", "windows"), default="linux"
+    )
+    parser.add_argument("--artifact-dir", type=Path)
     args = parser.parse_args()
     render(
         args.contract.resolve(),
@@ -97,6 +133,8 @@ def main() -> int:
         args.build_public_key_file.resolve(),
         args.build_private_key_file.resolve(),
         args.output.resolve(),
+        target_platform=args.target_platform,
+        artifact_dir=args.artifact_dir.resolve() if args.artifact_dir else None,
     )
     print(args.output)
     return 0

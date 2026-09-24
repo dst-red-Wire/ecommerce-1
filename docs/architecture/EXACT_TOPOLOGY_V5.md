@@ -196,6 +196,16 @@ The derived role assignments below mirror the lock’s `observability` mapping e
 
 ## Build dependencies
 
+The local Rocky 10.2 image pipeline mirrors the two explicit profiles under
+`architecture.lock.yaml#tooling.local_vm_image_pipeline`. The Windows profile is WSL2
+Make/Git -> PowerShell -> native Windows Packer -> VirtualBox, with Vagrant owning
+only disposable lifecycle/smoke testing. The native Ubuntu 24.04 profile is
+Make/Git -> Python/repoctl -> Packer -> QEMU/KVM, with a disposable qcow2 overlay for smoke
+testing. Ansible remains the sole guest and RKE2 configuration authority in both
+profiles. Packer, VirtualBox and Vagrant are forbidden as parallel WSL2
+toolchains, and the Linux profile rejects WSL. Operational detail is in
+`docs/engineering/LOCAL_VM_IMAGE_PIPELINE.md`.
+
 M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
 
 The lock’s `milestone_dependencies` maps each milestone to its prerequisites: M0 → M1; M1 → M2 and M2.5; M2.5 → M3 → M4; M2 + M4 → M5 → M6 → M7 → M8 → M9.

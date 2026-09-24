@@ -227,6 +227,12 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertEqual("forbidden", credential["committed_private_key"])
         self.assertEqual("forbidden", credential["committed_password_or_hash"])
         self.assertEqual("forbidden", credential["password_authentication"])
+        self.assertEqual(
+            "host-local-outside-repository",
+            credential["private_key_storage"],
+        )
+        self.assertEqual("required", credential["private_key_cleanup_after_qualification"])
+        self.assertEqual("forbidden", credential["released_artifact_private_key_exists"])
         self.assertNotIn("build_password", self.packer)
         self.assertNotIn("ssh_password", self.packer)
         self.assertIn("ssh_private_key_file", self.packer)
@@ -237,8 +243,9 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn("user --name=packer --groups=wheel --lock", self.kickstart)
         self.assertNotRegex(self.kickstart, r"\$[156]\$")
         self.assertIn("PasswordAuthentication no", self.kickstart)
-        self.assertIn("usermod --lock --shell /sbin/nologin packer", self.packer)
-        self.assertIn("rm -rf /home/packer/.ssh", self.packer)
+        self.assertIn("passwd --status packer", self.packer)
+        self.assertIn("test -s /home/packer/.ssh/authorized_keys", self.packer)
+        self.assertNotIn("/home/packer/.ssh/id_", self.packer)
 
     def test_rke2_profile_excludes_admin_tools_and_credentials(self):
         forbidden = set(self.image["profiles"]["rke2"]["forbidden_tools"])

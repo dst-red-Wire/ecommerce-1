@@ -116,7 +116,7 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
             raise ValueError(f"{name}: artifact integrity authority is required")
         if checksum_ref is not None and not re.fullmatch(r"[0-9a-f]{64}", versions.get(checksum_ref, "")):
             raise ValueError(f"{name}: invalid central SHA256")
-        if tool.get("platforms") != ["linux/amd64"]:
+        if tool.get("platforms") not in (["linux/amd64"], ["windows/amd64"]):
             raise ValueError(f"{name}: unsupported platform contract")
         if not tool.get("install") or not tool.get("binary") or not tool.get("version_command"):
             raise ValueError(f"{name}: install and version verification contract is incomplete")

@@ -155,13 +155,20 @@ packer_image:
 
   build:
     packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
+    host_tool_versions:
+      virtualbox: config/contracts/toolchain-lock.json#versions.VIRTUALBOX_VERSION
+      vagrant: config/contracts/toolchain-lock.json#versions.VAGRANT_VERSION
+      qemu: config/contracts/toolchain-lock.json#versions.QEMU_VERSION
     credential:
       type: runtime-injected-temporary-ssh-key
       committed_private_key: forbidden
       committed_password_or_hash: forbidden
       password_authentication: forbidden
-      authorized_key_removed_before_export: required
-      build_user_final_state: locked-nologin
+      private_key_storage: host-local-outside-repository
+      private_key_cleanup_after_qualification: required
+      released_artifact_private_key_exists: forbidden
+      authorized_public_key_purpose: build-and-local-qualification-only
+      build_user_final_state: password-locked-key-only
     virtualbox:
       version: 7.2.18
       plugin:
@@ -178,6 +185,17 @@ packer_image:
 
   outputs:
     logical_base: rocky-10.2-base
+    local_artifact_root: .artifacts/packer/rocky-10.2
+    local_evidence_root: .context/evidence/rocky-image/rocky-10.2
+    evidence_by_profile:
+      windows:
+        build: .context/evidence/rocky-image/rocky-10.2/windows/build.json
+        qualification: .context/evidence/rocky-image/rocky-10.2/windows/qualification.json
+        release: .context/evidence/rocky-image/rocky-10.2/windows/release.json
+      linux:
+        build: .context/evidence/rocky-image/rocky-10.2/linux/build.json
+        qualification: .context/evidence/rocky-image/rocky-10.2/linux/qualification.json
+        release: .context/evidence/rocky-image/rocky-10.2/linux/release.json
     rke2:
       virtualbox: rocky-10.2-rke2-virtualbox.box
       qemu_kvm: rocky-10.2-rke2-kvm.qcow2
@@ -190,8 +208,9 @@ packer_image:
     machine_id: cleaned-before-export
     ssh_host_keys: regenerate-on-first-boot
     private_keys: forbidden
-    build_authorized_keys: removed-before-export
-    build_user: locked-nologin
+    build_authorized_keys: ephemeral-public-half-only
+    build_private_key: destroyed-after-qualification-before-release
+    build_user: password-locked-key-only
     secrets: forbidden
     rke2_token: forbidden
 
@@ -217,6 +236,67 @@ packer_image:
       openscap_datastream: /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml
       kube_bench_profile: rke2-cis-1.9
       kube_bench_profile_status: unsupported-for-rke2-v1.37
+
+  local_pipeline:
+    source_root: platform/packer/rocky-10.2
+    vagrant_smoke_root: platform/vagrant/rocky-image-smoke
+    windows_scripts_root: scripts/windows
+    linux_orchestrator: scripts/linux_image_pipeline.py
+    windows_stage_root: LOCALAPPDATA/ecommerce-1/packer/rocky-10.2
+    linux_stage_root: .context/packer-linux/rocky-10.2
+    profiles:
+      windows:
+        builder: virtualbox-iso
+        artifact_root: .artifacts/packer/rocky-10.2/windows
+        artifact: rocky-10.2-rke2-virtualbox.box
+        repository_entrypoints:
+          preflight: image-rocky-windows-preflight
+          build: image-rocky-windows-build
+          qualification: image-rocky-windows-qualify
+          release: image-rocky-windows-release
+      linux:
+        host_os: ubuntu-24.04-x86_64
+        builder: qemu
+        artifact_root: .artifacts/packer/rocky-10.2/linux
+        artifact: rocky-10.2-rke2-kvm.qcow2
+        repository_entrypoints:
+          preflight: image-rocky-linux-preflight
+          build: image-rocky-linux-build
+          qualification: image-rocky-linux-qualify
+          release: image-rocky-linux-release
+    stages: [preflight, build, qualification, release]
+    separation:
+      build_is_qualification: false
+      qualification_is_release: false
+      release_publishes_remote_artifact: false
+    timeouts_seconds:
+      command_probe: 15
+      packer_init: 300
+      packer_validate: 120
+      packer_build: 7200
+      vagrant_box_add: 600
+      vagrant_boot: 900
+      ssh_probe: 120
+      guest_probe: 120
+      cleanup: 300
+    retries:
+      ssh_attempts: 12
+      delay_seconds: 5
+    evidence:
+      encoding: utf-8-no-bom
+      schema: 1
+      exact_artifact_sha256: required
+      runtime_pass_may_be_static: false
+    path_policy:
+      windows_program_working_directory_unc: forbidden
+      local_windows_staging_required_for_unc_repository: true
+      wsl_to_windows_conversion: wslpath
+      linux_profile_requires_native_host: true
+    network_policy:
+      packer_plugins_initialized_before_isolated_guest_provisioning: required
+      guest_package_network_access: forbidden
+      vagrant_smoke_nat: ephemeral-cleaned
+      qemu_smoke_user_nat: ephemeral-cleaned
 
 responsibility_boundary:
   packer:
@@ -247,3 +327,8 @@ rules:
   rke2_token_in_image: forbidden
   network_identity_in_image: forbidden
   generated_images_in_git: forbidden
+  one_responsibility_one_authority: required
+  packer_execution_must_match_selected_host_profile: required
+  packer_in_wsl2: forbidden
+  vagrant_provisioning: forbidden
+  release_without_build_and_qualification_evidence: forbidden

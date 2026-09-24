@@ -65,6 +65,27 @@ native_projections:
   - path: platform/packer/rocky-10.2/http/rocky-10.2.ks
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: platform/vagrant/rocky-image-smoke/Vagrantfile
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/RockyImagePipeline.psm1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/packer-preflight.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/build-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/qualify-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/release-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/linux_image_pipeline.py
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
   - path: config/toolchain/versions.env
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.toolchain_lock

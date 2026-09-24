@@ -1,0 +1,31 @@
+require "json"
+
+runtime = JSON.parse(File.read(File.join(__dir__, "runtime.json")))
+name = runtime.fetch("name")
+raise "invalid owned smoke VM name" unless name.match?(/\Aecommerce-rocky-10-2-smoke-[0-9a-f]{12}\z/)
+
+Vagrant.require_version "= #{runtime.fetch("vagrant_version")}"
+Vagrant.configure("2") do |config|
+  config.vm.box = runtime.fetch("box_name")
+  config.vm.box_check_update = false
+  config.vm.boot_timeout = Integer(runtime.fetch("boot_timeout_seconds"))
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  config.ssh.username = "packer"
+  config.ssh.private_key_path = runtime.fetch("private_key")
+  config.ssh.insert_key = false
+  config.ssh.keep_alive = true
+  config.ssh.connect_timeout = Integer(runtime.fetch("ssh_timeout_seconds"))
+
+  config.vm.provider "virtualbox" do |vm|
+    vm.name = name
+    vm.memory = Integer(runtime.fetch("memory_mib"))
+    vm.cpus = Integer(runtime.fetch("cpus"))
+    vm.linked_clone = false
+    vm.check_guest_additions = false
+    vm.customize ["modifyvm", :id, "--ioapic", "on"]
+    vm.customize ["modifyvm", :id, "--nic1", "nat"]
+    (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
+    vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]
+  end
+end
