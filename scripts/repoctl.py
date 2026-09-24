@@ -12,6 +12,7 @@ import argparse
 import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import functools
 import hashlib
 import json
@@ -31,6 +32,28 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+
+
+_MODERN_ENGINEERING = None
+_CVE_POLICY = None
+
+
+def _modern_engineering_api():
+    global _MODERN_ENGINEERING
+    if _MODERN_ENGINEERING is None:
+        import modern_engineering
+
+        _MODERN_ENGINEERING = modern_engineering
+    return _MODERN_ENGINEERING
+
+
+def _cve_policy_api():
+    global _CVE_POLICY
+    if _CVE_POLICY is None:
+        import security_policy
+
+        _CVE_POLICY = security_policy
+    return _CVE_POLICY
 
 
 def _missing_repository_delivery(*_args, **_kwargs):
@@ -1895,12 +1918,25 @@ def repository_authority_check() -> int:
     validate_terraform_lockfile_projections()
 
     security_policy = security_scan_policy()
+    _cve_policy_api().validate_policy(security_policy)
     scanner = security_policy.get("scanner", {})
     version_key = scanner.get("version_key")
     checksum_key = scanner.get("checksum_key")
     for key in (version_key, checksum_key):
         if not isinstance(key, str) or key not in toolchain["versions"]:
             raise RuntimeError(f"security scan policy references missing toolchain key: {key!r}")
+
+    metrics_policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    _modern_engineering_api().validate_metrics_policy(metrics_policy)
+    _modern_engineering_api().validate_service_slo_policy(
+        ruby_yaml(str(registry["service_slo"])), lock["business"]["services"]
+    )
+    _modern_engineering_api().validate_qce_traceability(
+        lock,
+        ruby_yaml(str(registry["roadmap_policy"])),
+        qualification_execution_policy(),
+        ROOT,
+    )
 
     print("PASS repository maximal authority model")
     return 0
@@ -3243,6 +3279,10 @@ def service_check(service: str) -> int:
 
 def security() -> int:
     policy = security_scan_policy()
+    _cve_policy_api().validate_policy(policy)
+    scanner_runs: list[dict] = []
+    required_vulnerability_scanners: list[str] = []
+    toolchain_versions = _raw_toolchain_lock()["versions"]
     scanner = policy.get("scanner", {})
     command = str(scanner.get("name", "gitleaks"))
     require(command)
@@ -3273,6 +3313,14 @@ def security() -> int:
             run([command, "dir", *flags, "."])
 
     print("PASS gitleaks secret scan completed")
+    scanner_runs.append(
+        {
+            "name": "gitleaks",
+            "status": "PASS",
+            "version": toolchain_versions.get("GITLEAKS_VERSION"),
+            "checksum": toolchain_versions.get("GITLEAKS_SHA256_LINUX_AMD64"),
+        }
+    )
 
     base = os.environ.get("BASE", "origin/main").strip() or "origin/main"
     head = os.environ.get("HEAD", "WORKTREE").strip() or "WORKTREE"
@@ -3289,6 +3337,7 @@ def security() -> int:
                 trivy_targets.add(str(candidate.parent))
     if trivy_targets:
         require("trivy")
+        required_vulnerability_scanners.append("trivy")
         for relative in sorted(trivy_targets):
             run(
                 [
@@ -3302,6 +3351,14 @@ def security() -> int:
                 ]
             )
         print("PASS trivy affected configuration scan completed")
+        scanner_runs.append(
+            {
+                "name": "trivy",
+                "status": "PASS",
+                "version": toolchain_versions.get("TRIVY_VERSION"),
+                "checksum": toolchain_versions.get("TRIVY_SHA256_LINUX_AMD64"),
+            }
+        )
     else:
         print("SKIP trivy: no affected container or configuration input")
 
@@ -3323,6 +3380,7 @@ def security() -> int:
     if affected_modules:
         require("gosec")
         require("govulncheck")
+        required_vulnerability_scanners.append("govulncheck")
         env = os.environ.copy()
         env.pop("GOROOT", None)
         env.pop("GOTOOLDIR", None)
@@ -3330,9 +3388,56 @@ def security() -> int:
             run(["gosec", "./..."], cwd=module, env=env)
             run(["govulncheck", "./..."], cwd=module, env=env)
         print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
+        scanner_runs.extend(
+            [
+                {
+                    "name": "gosec",
+                    "status": "PASS",
+                    "version": toolchain_versions.get("GOSEC_VERSION"),
+                    "checksum": toolchain_versions.get("GOSEC_SHA256_LINUX_AMD64"),
+                },
+                {
+                    "name": "govulncheck",
+                    "status": "PASS",
+                    "version": toolchain_versions.get("GOVULNCHECK_VERSION"),
+                    "checksum": "go-checksum-database",
+                },
+            ]
+        )
     else:
         print("SKIP gosec/govulncheck: no affected Go module")
-    return 0
+    base_sha = subprocess.check_output(["git", "rev-parse", base], cwd=ROOT, text=True).strip()
+    head_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD" if head == "WORKTREE" else head], cwd=ROOT, text=True
+    ).strip()
+    tree_sha = (
+        worktree_tree_sha()
+        if head == "WORKTREE"
+        else subprocess.check_output(["git", "rev-parse", f"{head_sha}^{{tree}}"], cwd=ROOT, text=True).strip()
+    )
+    evidence = _cve_policy_api().evaluate(
+        {
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "source_head_sha": head_sha,
+            "head_tree_sha": tree_sha,
+            "artifact": "repository",
+            "artifact_digest": "sha256:" + hashlib.sha256(tree_sha.encode()).hexdigest(),
+            "scope": "repository_filesystem",
+            "environment": "development",
+            "release": False,
+            "scanner_runs": scanner_runs,
+            "required_scanners": sorted(set(required_vulnerability_scanners)),
+            "findings": [],
+            "exceptions": _security_exceptions(),
+        },
+        policy,
+        ROOT,
+    )
+    destination = CONTEXT / "evidence" / "security" / ("worktree.json" if head == "WORKTREE" else f"{head_sha}.json")
+    _cve_policy_api().write_evidence(destination, evidence)
+    print(f"PASS deterministic CVE policy evidence {destination.relative_to(ROOT)}")
+    return 0 if evidence["final_result"] == "PASS" else fail("CVE policy evaluation blocked", 1)
 
 def terraform_source_files() -> list[Path]:
     terraform_root = ROOT / "platform" / "terraform"
@@ -5651,6 +5756,217 @@ def roadmap_sync() -> int:
     return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
 
 
+def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bool = False) -> int:
+    payload = _modern_engineering_api().qce_status(ROOT, sector=sector)
+    destination = _modern_engineering_api().write_qce_status(ROOT, payload)
+    if json_output or trace:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for item in payload["sectors"]:
+            print(f"{item['sector']:<32} {item['status']}")
+        print(f"EVIDENCE {destination.relative_to(ROOT)}")
+    return 0
+
+
+def qce_check_command() -> int:
+    lock, roadmap, qualification = _modern_engineering_api()._qce_contracts(ROOT)
+    _modern_engineering_api().validate_qce_traceability(lock, roadmap, qualification, ROOT)
+    _modern_engineering_api().qce_status(ROOT)
+    print("PASS QCE traceability derives exactly nine sectors from architecture.lock.yaml")
+    return 0
+
+
+def engineering_metrics_command(input_path: str, output_path: str) -> int:
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("engineering metrics input is missing or malformed") from exc
+    events = payload.get("events") if isinstance(payload, dict) else None
+    policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    metrics = _modern_engineering_api().calculate_dora(events, policy)
+    requested_metrics = payload.get("requested_metrics", []) if isinstance(payload, dict) else []
+    if requested_metrics:
+        _modern_engineering_api().reject_forbidden_metrics(requested_metrics, policy)
+    head = git("rev-parse", "HEAD").strip()
+    tree = git("rev-parse", "HEAD^{tree}").strip()
+    evidence = {
+        "schema_version": int(policy["evidence"]["schema_version"]),
+        "head_sha": head,
+        "head_tree_sha": tree,
+        "policy_sha256": hashlib.sha256(
+            (ROOT / "config/contracts/engineering-metrics-policy.yaml").read_bytes()
+        ).hexdigest(),
+        "input_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "window": {"days": metrics["window_days"]},
+        "metrics": metrics,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    relative = output_path or f".context/evidence/engineering-metrics/{head}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("engineering metrics evidence must remain under .context")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(evidence, indent=2, sort_keys=True))
+    return 0
+
+
+def experiment_command(action: str, input_path: str, output_path: str) -> int:
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    try:
+        experiment = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("experiment input is missing or malformed") from exc
+    if not isinstance(experiment, dict):
+        raise RuntimeError("experiment input must be a JSON object")
+    policy = _modern_engineering_api().load_metrics_policy(ROOT)
+    _modern_engineering_api().validate_experiment(experiment, policy)
+    if action == "baseline":
+        payload = {**experiment, "lifecycle_status": "BASELINED"}
+    elif action == "evaluate":
+        payload = {**_modern_engineering_api().evaluate_experiment(experiment, policy), "lifecycle_status": "EVALUATED"}
+    elif action == "status":
+        payload = {**experiment, "lifecycle_status": "EVALUATED" if experiment.get("decision") in policy["experiments"]["decisions"] else "PENDING"}
+    else:
+        raise RuntimeError(f"unknown experiment action: {action}")
+    relative = output_path or f".context/experiments/{experiment['experiment_id']}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("experiment evidence must remain under .context")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def security_datasets_sync_command(output_path: str) -> int:
+    policy = security_scan_policy()
+    destination = Path(output_path or ".context/security-datasets")
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("security datasets must remain under .context")
+    manifest = _cve_policy_api().sync_datasets(policy, destination)
+    print(f"PASS security datasets synchronized with verified manifest {manifest.relative_to(ROOT)}")
+    return 0
+
+
+def _security_exceptions() -> list[dict]:
+    root = ROOT / str(security_scan_policy()["exceptions"]["root"])
+    if not root.is_dir():
+        return []
+    values = []
+    for path in sorted(root.glob("*.json")):
+        value = _cve_policy_api().load_json(path, f"security exception {path.name}")
+        values.append(value)
+    return values
+
+
+def cve_evaluate_command(
+    input_path: str,
+    input_format: str,
+    output_path: str,
+    artifact: str,
+    artifact_digest: str,
+    sbom_path: str,
+    scope: str,
+    environment: str,
+    release: bool,
+    base_ref: str,
+    head_ref: str,
+) -> int:
+    policy = security_scan_policy()
+    source = Path(input_path)
+    if not source.is_absolute():
+        source = ROOT / source
+    base_sha = git("rev-parse", base_ref).strip()
+    head_sha = git("rev-parse", head_ref).strip()
+    tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    resolved_digest = artifact_digest
+    if not resolved_digest and "@sha256:" in artifact:
+        resolved_digest = "sha256:" + artifact.rsplit("@sha256:", 1)[1]
+    try:
+        raw = _cve_policy_api().load_json(source, f"{input_format} scanner output")
+        if input_format == "trivy":
+            findings = _cve_policy_api().trivy_findings(raw, artifact=artifact, scope=scope)
+            toolchain = _raw_toolchain_lock()["versions"]
+            scanner_runs = [
+                {
+                    "name": "trivy",
+                    "status": "PASS",
+                    "version": toolchain["TRIVY_VERSION"],
+                    "checksum": toolchain["TRIVY_SHA256_LINUX_AMD64"],
+                }
+            ]
+            required_scanners = ["trivy"]
+            payload = {"findings": findings}
+        else:
+            payload = raw
+            scanner_runs = list(payload.get("scanner_runs", []))
+            required_scanners = list(payload.get("required_scanners", []))
+    except ValueError as exc:
+        payload = {"findings": []}
+        scanner_runs = [{"name": input_format, "status": "FAIL", "version": None, "checksum": None}]
+        required_scanners = [input_format]
+        payload["scanner_error"] = str(exc)
+    sbom_digest = None
+    sbom_artifact_digest = None
+    if sbom_path:
+        sbom = Path(sbom_path)
+        if not sbom.is_absolute():
+            sbom = ROOT / sbom
+        try:
+            sbom_digest, sbom_artifact_digest = _cve_policy_api().sbom_identity(sbom, resolved_digest)
+            scanner_runs.append({"name": "syft", "status": "PASS", "version": "image-pinned", "checksum": None})
+            if "syft" not in required_scanners:
+                required_scanners.append("syft")
+        except OSError:
+            scanner_runs.append({"name": "syft", "status": "FAIL", "version": "image-pinned", "checksum": None})
+            required_scanners.append("syft")
+    payload.update(
+        {
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "source_head_sha": head_sha,
+            "head_tree_sha": tree_sha,
+            "artifact": artifact,
+            "artifact_digest": resolved_digest or None,
+            "sbom_digest": sbom_digest,
+            "sbom_artifact_digest": sbom_artifact_digest,
+            "scope": scope,
+            "environment": environment,
+            "release": release,
+            "scanner_runs": scanner_runs,
+            "required_scanners": sorted(set(required_scanners)),
+            "exceptions": payload.get("exceptions", _security_exceptions()),
+        }
+    )
+    evidence = _cve_policy_api().evaluate(payload, policy, ROOT)
+    if payload.get("scanner_error"):
+        evidence["reasons"] = sorted(set([*evidence["reasons"], payload["scanner_error"]]))
+        evidence["final_result"] = "BLOCK"
+    relative = output_path or f".context/evidence/security/{head_sha}.json"
+    destination = ROOT / relative
+    context_root = CONTEXT.resolve()
+    resolved = destination.resolve()
+    if resolved != context_root and context_root not in resolved.parents:
+        raise RuntimeError("security evidence must remain under .context")
+    _cve_policy_api().write_evidence(destination, evidence)
+    print(json.dumps(evidence, indent=2, sort_keys=True))
+    return 0 if evidence["final_result"] == "PASS" else 1
+
+
 def _roadmap_followup_after_merge() -> int:
     check_rc = roadmap_check(quiet=True)
     if check_rc == 0:
@@ -6946,6 +7262,33 @@ def main() -> int:
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
     sub.add_parser("roadmap-sync")
+    qce = sub.add_parser("qce-status")
+    qce.add_argument("--json", action="store_true")
+    qce.add_argument("--sector", default="")
+    qtrace = sub.add_parser("qce-trace")
+    qtrace.add_argument("--sector", default="")
+    sub.add_parser("qce-check")
+    metrics = sub.add_parser("engineering-metrics")
+    metrics.add_argument("--input", required=True)
+    metrics.add_argument("--output", default="")
+    datasets = sub.add_parser("security-datasets-sync")
+    datasets.add_argument("--output", default=".context/security-datasets")
+    cve = sub.add_parser("cve-evaluate")
+    cve.add_argument("--input", required=True)
+    cve.add_argument("--format", choices=["normalized", "trivy"], default="normalized")
+    cve.add_argument("--output", default="")
+    cve.add_argument("--artifact", default="repository")
+    cve.add_argument("--artifact-digest", default="")
+    cve.add_argument("--sbom", default="")
+    cve.add_argument("--scope", default="repository_filesystem")
+    cve.add_argument("--environment", default="development")
+    cve.add_argument("--release", action="store_true")
+    cve.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    cve.add_argument("--head", default=os.environ.get("HEAD", "HEAD"))
+    experiment = sub.add_parser("experiment")
+    experiment.add_argument("action", choices=["baseline", "evaluate", "status"])
+    experiment.add_argument("--input", required=True)
+    experiment.add_argument("--output", default="")
     c = sub.add_parser("contracts")
     c.add_argument("--base", default=os.environ.get("BASE", ""))
     c.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -7228,6 +7571,32 @@ def main() -> int:
             return roadmap_check()
         if args.cmd == "roadmap-sync":
             return roadmap_sync()
+        if args.cmd == "qce-status":
+            return qce_status_command(json_output=args.json, sector=args.sector)
+        if args.cmd == "qce-trace":
+            return qce_status_command(json_output=True, sector=args.sector, trace=True)
+        if args.cmd == "qce-check":
+            return qce_check_command()
+        if args.cmd == "engineering-metrics":
+            return engineering_metrics_command(args.input, args.output)
+        if args.cmd == "security-datasets-sync":
+            return security_datasets_sync_command(args.output)
+        if args.cmd == "cve-evaluate":
+            return cve_evaluate_command(
+                args.input,
+                args.format,
+                args.output,
+                args.artifact,
+                args.artifact_digest,
+                args.sbom,
+                args.scope,
+                args.environment,
+                args.release,
+                args.base,
+                args.head,
+            )
+        if args.cmd == "experiment":
+            return experiment_command(args.action, args.input, args.output)
         if args.cmd == "publish":
             return publish(args.base, args.message)
         if args.cmd == "publish-change":

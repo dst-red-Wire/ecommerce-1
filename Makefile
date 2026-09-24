@@ -5,7 +5,7 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -66,6 +66,21 @@ system: ## Run cross-system repository tests without replaying component suites
 
 security: ## Scan working tree for secrets
 	@$(PYTHON) scripts/repoctl.py security
+
+qce-status: ## Render the derived nine-sector QCE status projection
+	@$(PYTHON) scripts/repoctl.py qce-status $(if $(SECTOR),--sector "$(SECTOR)",) $(if $(JSON),--json,)
+
+qce-check: ## Validate QCE traceability, closed statuses and derived labels
+	@$(PYTHON) scripts/repoctl.py qce-check
+
+security-datasets-sync: ## Explicitly refresh verified KEV/EPSS snapshots outside qualification
+	@$(PYTHON) scripts/repoctl.py security-datasets-sync --output "$${OUTPUT:-.context/security-datasets}"
+
+engineering-metrics: ## Calculate contract-defined engineering metrics from INPUT=<events.json>
+	@$(PYTHON) scripts/repoctl.py engineering-metrics --input "$(INPUT)" $(if $(OUTPUT),--output "$(OUTPUT)",)
+
+experiment: ## Run ACTION=baseline|evaluate|status for INPUT=<experiment.json>
+	@$(PYTHON) scripts/repoctl.py experiment "$(ACTION)" --input "$(INPUT)" $(if $(OUTPUT),--output "$(OUTPUT)",)
 
 terraform: ## Validate Terraform/OpenTofu sources when present
 	@$(PYTHON) scripts/repoctl.py terraform

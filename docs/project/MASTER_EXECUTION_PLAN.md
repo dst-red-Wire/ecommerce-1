@@ -139,7 +139,7 @@ Canonical tracker: GitHub issue `#17`.
 
 Delivery order:
 
-`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton -> observability/security logging -> data platform`.
+`RKE2 -> Cilium/Hubble -> Fleet -> Kyverno/Pod Security -> SPIRE -> Istio -> OpenBao/ESO -> Harbor -> Tekton + cert-manager -> Kratix/Kustomize/Helm -> observability/security logging -> data platform`.
 
 Stateful components follow the locked architecture: CNPG/PostgreSQL, Strimzi Kafka KRaft, RabbitMQ Quorum Queues, Redis Cluster, OpenSearch and SeaweedFS S3. Ceph is conditional only for an explicitly approved block/RWX need.
 

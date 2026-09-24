@@ -68,9 +68,11 @@ metadata:
   name: ecommerce-product-scan-sbom
 spec:
   params:
+    - {name: runner-image, type: string}
     - {name: trivy-image, type: string}
     - {name: syft-image, type: string}
     - {name: image-reference, type: string}
+    - {name: base, type: string}
     - {name: head, type: string}
     - {name: registry-auth-secret, type: string}
   workspaces:
@@ -82,7 +84,7 @@ spec:
       env:
         - {name: DOCKER_CONFIG, value: /var/run/registry}
       command: [trivy]
-      args: [image, --exit-code, "1", --ignore-unfixed, --severity, HIGH,CRITICAL, --format, json, --output, .context/product-trivy-$(params.head).json, $(params.image-reference)]
+      args: [image, --exit-code, "0", --format, json, --output, .context/product-trivy-$(params.head).json, $(params.image-reference)]
       volumeMounts:
         - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
     - name: syft
@@ -94,6 +96,31 @@ spec:
       args: [$(params.image-reference), --output, spdx-json=.context/product-sbom-$(params.head).spdx.json]
       volumeMounts:
         - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+    - name: evaluate-vulnerability-policy
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args:
+        - cve-evaluate
+        - --input
+        - .context/product-trivy-$(params.head).json
+        - --format
+        - trivy
+        - --artifact
+        - $(params.image-reference)
+        - --sbom
+        - .context/product-sbom-$(params.head).spdx.json
+        - --scope
+        - oci_images
+        - --environment
+        - release
+        - --release
+        - --base
+        - $(params.base)
+        - --head
+        - $(params.head)
+        - --output
+        - .context/evidence/security/product-$(params.head).json
   volumes:
     - name: registry-auth
       secret:

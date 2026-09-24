@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -192,6 +193,42 @@ class RoadmapSyncTests(unittest.TestCase):
         with mock.patch.object(ROADMAP, "run", side_effect=fake_run):
             with self.assertRaisesRegex(RuntimeError, "must be a GitHub issue"):
                 ROADMAP.tracker_states("gh", policy)
+
+    def test_qce_snapshot_derives_valid_labels_and_pr_sha(self):
+        lock = {
+            "developer_platform": {
+                "quality_cloud_engineering": {
+                    "sectors": {name: {} for name in (
+                        "continuous_testing", "test_first", "test_strategy", "automation",
+                        "monitoring_observability", "release_governance_automation", "golden_path",
+                        "developer_hub", "measuring_engineering",
+                    )}
+                }
+            }
+        }
+        policy = {"qce_traceability": {"github_metadata_snapshot": ".context/qce/github-metadata.json"}}
+        issue = subprocess.CompletedProcess(
+            [], 0, json.dumps([{"number": 13, "labels": [{"name": "qce:automation"}], "milestone": None}]), ""
+        )
+        pull = subprocess.CompletedProcess(
+            [], 0, json.dumps([{
+                "number": 126,
+                "labels": [{"name": "qce:continuous-testing"}],
+                "milestone": {"title": "M1"},
+                "headRefOid": "a" * 40,
+            }]), ""
+        )
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(ROADMAP, "ROOT", Path(directory)),
+            mock.patch.object(ROADMAP, "load_yaml", return_value=lock),
+            mock.patch.object(ROADMAP, "github_name_with_owner", return_value="dst-red-Wire/ecommerce-1"),
+            mock.patch.object(ROADMAP, "run", side_effect=[issue, pull]),
+        ):
+            destination = ROADMAP.qce_metadata_snapshot("gh", policy)
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertEqual([13], [item["number"] for item in payload["issues"]])
+        self.assertEqual("a" * 40, payload["pull_requests"][0]["head_sha"])
 
 
     def test_post_merge_does_not_treat_check_error_as_drift(self):

@@ -60,7 +60,7 @@ Controls:
 
 ### Z5 — Permanent MGMT
 
-Gitea, Harbor, Rancher/Fleet management, Tekton control integrations, OpenBao administrative plane, NetBox, Grafana administrative plane, Terraform state backend, Backstage and supporting control services.
+Gitea, Harbor, Rancher/Fleet management, Tekton control integrations, OpenBao administrative plane, NetBox, Grafana administrative plane, Terraform state backend, Backstage, Kratix and supporting control services.
 
 Controls:
 - workforce IAM only;

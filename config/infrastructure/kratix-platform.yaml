@@ -1,0 +1,141 @@
+version: 1
+status: exact
+architecture_authority: architecture.lock.yaml
+scope: developer-platform-orchestration
+
+component:
+  name: kratix-oss
+  owner: cloud-platform
+  license: Apache-2.0
+  implementation_milestone: M4-platform-baseline
+  proof_milestone: M5-commerce-vertical-slice
+  deployment_status: contracted-blocked-upstream-cve
+
+upstream:
+  repository: https://github.com/syntasso/kratix.git
+  commit: d50cebceb33defc1f6b9882a009bb1436f0aa3f4
+  source_path: config/default
+  release_asset: kratix.yaml
+  release_asset_sha256: 8d429db854e593c14a5b7502a3e894d6c28f7e7ec7c84496351872acf7ca62ce
+  mutable_ref_runtime_use: forbidden
+
+controller_image:
+  repository: syntasso-community.docker.reo.dev/syntasso/kratix-platform
+  index_digest: sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7
+  reference: syntasso-community.docker.reo.dev/syntasso/kratix-platform@sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7
+  platforms:
+    linux_amd64: sha256:bbd4ffce818149be0090f44f4ed7a8d28bc55d46c72bf5391620a12263fc4854
+    linux_arm64: sha256:8bc551a6c3185a16350e9abc69ef6ebff2707a39ee00e52a9a8d45461bb0d063
+  mutable_tags: forbidden
+  harbor_mirror_before_runtime_activation: required
+  mirrored_digest_must_match: true
+
+installation:
+  owner: rancher-fleet
+  bundle: platform/fleet/bundles/kratix
+  composition: kustomize
+  kustomize_version_authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  kustomize_version_key: KUSTOMIZE_VERSION
+  source_ref: exact-upstream-commit
+  image_ref: exact-oci-index-digest
+  direct_kubectl_apply: forbidden
+  fleet_bundle_paused: true
+
+promise_packaging:
+  format: helm
+  helm_version_authority: architecture.lock.yaml#machine_contracts.toolchain_lock
+  helm_version_key: HELM_VERSION
+  chart_versions: immutable
+  chart_source: approved-git-or-harbor-oci
+  mutable_chart_versions: forbidden
+
+state_store:
+  kind: GitStateStore
+  provider: gitea
+  repository: platform/kratix-state
+  url: git@gitea-ssh.gitea.svc.cluster.local:platform/kratix-state.git
+  branch: main
+  path: destinations
+  generated_projection: true
+  direct_human_edit: forbidden
+  source_request: approved-pull-request
+  writer_secret_ref: kratix-platform-system/kratix-gitea-writer
+  reader_secret_ref: fleet-default/kratix-gitea-reader
+  credentials_source: openbao-via-eso
+  writer_permissions: repository-contents-read-write-only
+  reader_permissions: repository-contents-read-only
+  shared_write_identity: forbidden
+  known_hosts_required: true
+
+reconciliation:
+  sole_gitops_authority: rancher-fleet
+  state_consumers:
+    - platform/fleet/bundles/kratix/git-state-store.yaml#GitRepo/kratix-state-lab
+    - platform/fleet/bundles/kratix/git-state-store.yaml#GitRepo/kratix-state-preprod
+    - platform/fleet/bundles/kratix/git-state-store.yaml#GitRepo/kratix-state-prod
+  watched_paths:
+    - destinations/lab/dependencies
+    - destinations/lab/resources
+    - destinations/preprod/dependencies
+    - destinations/preprod/resources
+    - destinations/prod/dependencies
+    - destinations/prod/resources
+  direct_kratix_deploy: forbidden
+  bundled_flux: forbidden
+  bundled_object_store: forbidden
+
+destinations:
+  lab:
+    runtime: rke2
+    substrate: virtualbox-example
+    path: lab
+    fleet_cluster_selector: {environment: lab}
+  preprod:
+    runtime: rke2
+    substrate: canonical-preprod-jit
+    path: preprod
+    fleet_cluster_selector: {environment: preprod}
+  prod:
+    runtime: rke2
+    substrate: canonical-prod-a-and-prod-b
+    path: prod
+    fleet_cluster_selector: {environment: prod}
+
+security_qualification:
+  evaluated_at: "2026-09-24T12:05:44Z"
+  scanner: trivy
+  scanner_version: 0.74.0
+  policy: architecture.lock.yaml#machine_contracts.security_scan_policy
+  exact_image_digest: sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7
+  final_result: BLOCK
+  blocking_findings:
+    - id: CVE-2026-93990
+      severity: HIGH
+      cvss: 7.5
+      package: libexpat
+      installed_version: 2.8.4-r0
+      fixed_version: 2.8.5-r0
+      fix_available: true
+  automatic_exception: forbidden
+  deployment_permitted: false
+  resolution:
+    required: upstream-or-governed-rebuild-with-fixed-libexpat
+    replacement_digest_must_be_exact: true
+    replacement_must_pass_current_cve_policy: true
+    contract_and_kustomize_update_required: true
+    fleet_unpause_requires_reviewed_pull_request: true
+
+runtime_prerequisites:
+  required_ready: [gitea, rancher-fleet, cert-manager, openbao, external-secrets]
+  gitea_repository_preprovisioned: required
+  least_privilege_credentials_materialized: required
+  controller_image_mirrored_to_harbor: required
+  exact_digest_verified_after_mirror: required
+
+evidence:
+  contract_validation: deterministic-offline
+  render_validation: exact-commit-networked-source-fetch
+  runtime_readiness: required-before-M4-proof
+  git_state_store_ready_condition: required
+  fleet_bundle_ready_condition: required
+  no_runtime_evidence_interpretation: CONTRACTED

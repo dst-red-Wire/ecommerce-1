@@ -419,6 +419,9 @@ gates:
       - tests/test_qualification_cache.py
       - tests/test_qualification_execution_policy.py
       - tests/test_runtime_orchestration.py
+      - tests/test_modern_engineering.py
+      - tests/test_security_policy.py
+      - tests/test_kratix_platform.py
       - tests/architecture_validator_test.rb
       - tests/observability_topology_test.rb
       - tests/ci_authority_test.rb
@@ -428,6 +431,8 @@ gates:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
       - scripts/architecture_authority.py
+      - scripts/modern_engineering.py
+      - scripts/security_policy.py
       - scripts/validate-architecture.rb
       - scripts/validate-architecture-boundaries.rb
       - scripts/validate-service-policy-chain.rb
@@ -442,6 +447,8 @@ gates:
       - contracts/**/*
       - docs/architecture/**/*
       - scripts/architecture_authority.py
+      - scripts/modern_engineering.py
+      - scripts/security_policy.py
       - scripts/validate-architecture.rb
       - scripts/validate-architecture-boundaries.rb
       - scripts/validate-service-policy-chain.rb
@@ -468,6 +475,7 @@ gates:
     tools: [python3, git, ruby]
     validators:
       - scripts/repoctl.py
+      - scripts/security_policy.py
       - scripts/qualification_cache.py
       - scripts/architecture_authority.py
     inputs:
@@ -614,9 +622,11 @@ gates:
     tools: [gitleaks, trivy, gosec, govulncheck, git]
     validators:
       - scripts/repoctl.py
+      - scripts/security_policy.py
     inputs:
       - architecture.lock.yaml
       - config/contracts/security-scan-policy.yaml
+      - scripts/security_policy.py
     fresh_prechecks:
       - exact-git-history-and-worktree-scan
   system:
