@@ -185,7 +185,7 @@ Application
 Tests
 Docker
 Ansible
-Terraform
+OpenTofu
 Kubernetes
 CI/CD
 Diagnostic
@@ -296,7 +296,7 @@ npm test
 npm run lint
 pytest
 docker compose ps
-terraform validate
+tofu validate
 ansible-lint
 ```
 
@@ -389,7 +389,7 @@ Codex
   │      └── outils natifs du projet
   │
   ├── Provisionnement infrastructure
-  │      └── Terraform
+  │      └── OpenTofu
   │
   ├── Configuration des machines
   │      └── Ansible
@@ -404,9 +404,9 @@ Codex
          └── pipelines automatisés
 ```
 
-Ne pas utiliser Terraform pour effectuer le travail d'Ansible.
+Ne pas utiliser OpenTofu pour effectuer le travail d'Ansible.
 
-Ne pas utiliser Ansible pour remplacer inutilement Terraform.
+Ne pas utiliser Ansible pour remplacer inutilement OpenTofu.
 
 Ne pas utiliser Bash pour maintenir une configuration système complexe qui devrait être déclarative et idempotente.
 
@@ -490,7 +490,7 @@ Sont notamment considérés comme secrets :
 - credentials cloud ;
 - credentials Docker Registry ;
 - secrets Kubernetes ;
-- secrets Terraform ;
+- secrets d'état OpenTofu ;
 - secrets Ansible ;
 - credentials CI/CD ;
 - webhook secrets ;
@@ -513,7 +513,7 @@ Un secret réel ne doit jamais être :
 - écrit dans `.env.example` ;
 - codé en dur dans le code ;
 - écrit dans un Dockerfile ;
-- écrit dans Terraform ;
+- écrit dans la configuration OpenTofu ;
 - écrit en clair dans Ansible ;
 - écrit dans Kubernetes ;
 - affiché volontairement dans les logs.
@@ -901,7 +901,7 @@ Les outils Linux doivent être exécutés depuis cet environnement lorsque perti
 - GitHub CLI ;
 - Ansible ;
 - Docker ;
-- Terraform ;
+- OpenTofu (`tofu`) ;
 - outils de développement.
 
 Éviter de mélanger inutilement les identités SSH/Git Windows et WSL.
@@ -978,9 +978,9 @@ Les commandes utiles réellement exécutées avec succès doivent être ajoutée
 
 ---
 
-# 32. Terraform
+# 32. OpenTofu
 
-Terraform doit être privilégié pour le provisionnement d'infrastructure.
+OpenTofu, via la commande `tofu`, est l'unique moteur autorisé pour le provisionnement d'infrastructure. Terraform CLI est interdit.
 
 Exemples :
 
@@ -1096,7 +1096,7 @@ Repository
 
 Provisionnement
         │
-        └── Terraform
+        └── OpenTofu
 
 Configuration
         │
@@ -1181,7 +1181,7 @@ Codex ne doit pas :
 - contourner `.gitignore` ;
 - exposer `.env` ;
 - écrire un secret dans Ansible ;
-- écrire un secret dans Terraform ;
+- écrire un secret dans la configuration OpenTofu ;
 - écrire un secret dans Docker ;
 - écrire un secret dans Kubernetes ;
 - supprimer des tests pour faire passer une validation ;
@@ -1213,7 +1213,7 @@ Pour chaque tâche significative :
         │
         ├── Shell → opération ponctuelle
         ├── Ansible → configuration reproductible
-        ├── Terraform → provisionnement
+        ├── OpenTofu (`tofu`) → provisionnement
         ├── Docker → conteneurisation
         └── Kubernetes → orchestration si nécessaire
         ↓
@@ -1285,7 +1285,7 @@ Lorsqu'une opération est réalisée plusieurs fois, Codex doit se demander :
 Si oui :
 
 - configuration système → Ansible ;
-- infrastructure → Terraform ;
+- infrastructure → OpenTofu (`tofu`) ;
 - environnement applicatif → Docker/Compose lorsque pertinent ;
 - validation répétitive → script ou tâche adaptée ;
 - pipeline répétitif → CI/CD.
@@ -1368,7 +1368,7 @@ Codex doit maintenant :
 10. créer la structure Ansible uniquement au niveau nécessaire ;
 11. examiner les opérations répétitives existantes et identifier celles qui devraient être automatisées avec Ansible ;
 12. conserver Shell/Bash pour les opérations ponctuelles ;
-13. utiliser Terraform pour le provisionnement lorsque nécessaire ;
+13. utiliser exclusivement OpenTofu (`tofu`) pour le provisionnement lorsque nécessaire ;
 14. vérifier qu'aucun secret n'est actuellement suivi par Git ;
 15. signaler immédiatement tout secret potentiellement déjà versionné ;
 16. exécuter les validations pertinentes disponibles ;

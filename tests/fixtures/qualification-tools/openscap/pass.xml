@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TestResult xmlns="http://checklists.nist.gov/xccdf/1.2" id="pass">
+  <rule-result idref="xccdf_rule_one"><result>pass</result></rule-result>
+  <rule-result idref="xccdf_rule_two"><result>pass</result></rule-result>
+</TestResult>
+

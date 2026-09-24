@@ -9,5 +9,5 @@ users:
     ssh_authorized_keys:
       - ${jsonencode(ssh_public_key)}
 
-# Terraform owns only the explicit gateway account and SSH bootstrap. The
+# OpenTofu owns only the explicit gateway account and SSH bootstrap. The
 # trusted controller's qualification_gateway role owns every stateful change.

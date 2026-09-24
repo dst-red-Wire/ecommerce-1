@@ -15,9 +15,12 @@ waves:
     components: [rancher-fleet, argo-rollouts, istio]
   - id: 40-secrets-registry-ci
     requires: [30-gitops-identity]
-    components: [openbao, external-secrets, harbor, tekton]
-  - id: 50-observability
+    components: [openbao, external-secrets, harbor, tekton, cert-manager]
+  - id: 45-developer-platform-orchestration
     requires: [40-secrets-registry-ci]
+    components: [kratix-oss]
+  - id: 50-observability
+    requires: [45-developer-platform-orchestration]
     components: [opentelemetry-collector, rotel, vmagent, victoriametrics, victorialogs, clickhouse, hyperdx, mongodb-oss-self-hosted, vmalert, alertmanager, grafana, data-prepper, opensearch-security, wazuh]
   - id: 60-stateful
     requires: [40-secrets-registry-ci, 20-network-security]

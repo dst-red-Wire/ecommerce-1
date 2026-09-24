@@ -100,13 +100,19 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
         if version_ref not in versions or versions[version_ref].lower() == "latest":
             raise ValueError(f"{name}: missing exact central version")
         artifact = tool.get("artifact")
-        if not isinstance(artifact, dict) or not str(artifact.get("url", "")).startswith("https://"):
-            raise ValueError(f"{name}: deterministic HTTPS artifact is required")
-        if "latest" in artifact["url"].lower():
-            raise ValueError(f"{name}: floating artifact URL is forbidden")
+        install_type = tool.get("install", {}).get("type")
+        rpm_package = install_type == "rpm-package" and tool.get("integrity") == "signed-rpm-package-lock"
+        if rpm_package:
+            if not str(tool.get("source", "")).startswith("https://"):
+                raise ValueError(f"{name}: signed RPM package source must use HTTPS")
+        else:
+            if not isinstance(artifact, dict) or not str(artifact.get("url", "")).startswith("https://"):
+                raise ValueError(f"{name}: deterministic HTTPS artifact is required")
+            if "latest" in artifact["url"].lower():
+                raise ValueError(f"{name}: floating artifact URL is forbidden")
         checksum_ref = tool.get("sha256_ref")
         integrity = tool.get("integrity")
-        if checksum_ref is None and integrity != "go-checksum-database":
+        if checksum_ref is None and integrity not in {"go-checksum-database", "signed-rpm-package-lock"}:
             raise ValueError(f"{name}: artifact integrity authority is required")
         if checksum_ref is not None and not re.fullmatch(r"[0-9a-f]{64}", versions.get(checksum_ref, "")):
             raise ValueError(f"{name}: invalid central SHA256")

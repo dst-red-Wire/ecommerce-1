@@ -226,7 +226,7 @@ runtime_orchestration:
         restore: none
         verify_restore: none
       evidence_fields: [satisfied, command, exit_code]
-    terraform-runtime:
+    opentofu-runtime:
       handler: command
       requires: []
       mutation_class: none
@@ -234,9 +234,7 @@ runtime_orchestration:
       privilege: none
       global_lock: false
       parameters:
-        commands:
-          - [tofu, version]
-          - [terraform, version]
+        command: [tofu, version]
       operations:
         detector: version-probe
         preflight: read-only-availability
@@ -389,6 +387,7 @@ execution:
     - contracts
     - automation
     - security
+    - qualification-tools
   local_max_workers: 4
   python_unittest_method_shard_min_tests: 4
   ci_max_workers_env: ECOMMERCE_QUALIFICATION_MAX_WORKERS
@@ -419,6 +418,9 @@ gates:
       - tests/test_qualification_cache.py
       - tests/test_qualification_execution_policy.py
       - tests/test_runtime_orchestration.py
+      - tests/test_modern_engineering.py
+      - tests/test_security_policy.py
+      - tests/test_kratix_platform.py
       - tests/architecture_validator_test.rb
       - tests/observability_topology_test.rb
       - tests/ci_authority_test.rb
@@ -428,6 +430,8 @@ gates:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
       - scripts/architecture_authority.py
+      - scripts/modern_engineering.py
+      - scripts/security_policy.py
       - scripts/validate-architecture.rb
       - scripts/validate-architecture-boundaries.rb
       - scripts/validate-service-policy-chain.rb
@@ -442,6 +446,8 @@ gates:
       - contracts/**/*
       - docs/architecture/**/*
       - scripts/architecture_authority.py
+      - scripts/modern_engineering.py
+      - scripts/security_policy.py
       - scripts/validate-architecture.rb
       - scripts/validate-architecture-boundaries.rb
       - scripts/validate-service-policy-chain.rb
@@ -468,6 +474,7 @@ gates:
     tools: [python3, git, ruby]
     validators:
       - scripts/repoctl.py
+      - scripts/security_policy.py
       - scripts/qualification_cache.py
       - scripts/architecture_authority.py
     inputs:
@@ -614,11 +621,34 @@ gates:
     tools: [gitleaks, trivy, gosec, govulncheck, git]
     validators:
       - scripts/repoctl.py
+      - scripts/security_policy.py
     inputs:
       - architecture.lock.yaml
       - config/contracts/security-scan-policy.yaml
+      - scripts/security_policy.py
     fresh_prechecks:
       - exact-git-history-and-worktree-scan
+  qualification-tools:
+    scope: global
+    parallel_safe: true
+    cache_mode: content-pass
+    dependencies: []
+    command:
+      action: qualification-tools-contract
+    ci_fanout: true
+    tools: [python3]
+    validators:
+      - scripts/qualification_tools.py
+      - scripts/repoctl.py
+    inputs:
+      - architecture.lock.yaml
+      - config/contracts/qualification-tools.yaml
+      - config/contracts/toolchain-lock.json
+      - config/contracts/service-slo.yaml
+      - config/policies/qualification/**/*
+      - scripts/qualification_tools.py
+      - tests/fixtures/qualification-tools/**/*
+      - tests/test_qualification_tools.py
   system:
     scope: component
     parallel_safe: false
@@ -684,8 +714,8 @@ gates:
     cache_mode: content-pass
     dependencies: []
     command:
-      action: terraform
-    tools: [tofu, terraform]
+      action: opentofu
+    tools: [tofu]
     validators:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
@@ -699,10 +729,10 @@ gates:
       - scripts/repoctl.py
       - scripts/qualification_cache.py
     fresh_prechecks:
-      - approved-terraform-executable-availability
+      - approved-opentofu-executable-availability
       - canonical-provider-lock-contract
     runtime_capabilities:
-      - terraform-runtime
+      - opentofu-runtime
   "frontend:*":
     scope: component
     parallel_safe: true

@@ -23,7 +23,7 @@ Permanent administrative access to Z5 uses a dedicated WireGuard gateway named `
 - Kubernetes membership: false;
 - public endpoint value: provider runtime output only.
 
-The M2.5 Terraform implementation consumes this dedicated inventory and requires an explicit provider server-type mapping for the canonical `wireguard-gateway` profile. Static qualification performs no provider apply.
+The M2.5 OpenTofu implementation consumes this dedicated inventory and requires an explicit provider server-type mapping for the canonical `wireguard-gateway` profile. Static qualification performs no provider apply.
 
 ## Network boundary
 
@@ -61,7 +61,7 @@ The attribution consequence is explicit: downstream MGMT services see `10.243.1.
 
 WireGuard is only the encrypted network transport. Authorization to issue or revoke privileged operator access belongs to workforce IAM. Customer identities are never accepted for this path, and privileged workforce authorization requires the hardware-backed WebAuthn/passkey policy already defined for Z5.
 
-OpenBao is the permanent secret authority for gateway material and centrally controlled peer metadata. Before OpenBao exists, the temporary governed bootstrap authority is the local `wg-01` host: Ansible generates a cryptographically secure, root-owned mode `0600` key there and stages only operator-device-owned peers' public records. The bootstrap private key never enters Git, Terraform state, inventory, logs, or controller output. Ansible owns both phase-specific reconciliation paths; ESO is explicitly not used for `wg-01`.
+OpenBao is the permanent secret authority for gateway material and centrally controlled peer metadata. Before OpenBao exists, the temporary governed bootstrap authority is the local `wg-01` host: Ansible generates a cryptographically secure, root-owned mode `0600` key there and stages only operator-device-owned peers' public records. The bootstrap private key never enters Git, OpenTofu state, inventory, logs, or controller output. Ansible owns both phase-specific reconciliation paths; ESO is explicitly not used for `wg-01`.
 
 Canonical secret references are names/paths only; secret values never enter Git:
 
@@ -70,13 +70,13 @@ Canonical secret references are names/paths only; secret values never enter Git:
 - operator peer private keys: generated/stored on the operator device only; central storage is forbidden;
 - break-glass private keys: OpenBao KV prefix `mgmt/wireguard/break-glass/`, separately controlled.
 
-Ansible authenticates to OpenBao using a runtime-injected, non-persisted credential and renders gateway secret state with root-only mode `0600`. No WireGuard private key material is committed, logged, placed in Terraform state, or passed through Kubernetes/ESO for this host.
+Ansible authenticates to OpenBao using a runtime-injected, non-persisted credential and renders gateway secret state with root-only mode `0600`. No WireGuard private key material is committed, logged, placed in OpenTofu state, or passed through Kubernetes/ESO for this host.
 
 The authority transition is mandatory and belongs to later governed M4 qualification: establish persistent OpenBao records, rotate the gateway to a new OpenBao-controlled key, switch Ansible to runtime OpenBao reads, delete the bootstrap key, remove bootstrap peer staging, confirm SSH teardown, and remove temporary public TCP/22. Copying the original bootstrap key into OpenBao is not a rotation and is forbidden. M2.5 implements readiness but executes no real OpenBao initialization, read, or write.
 
 ## Ownership
 
-Terraform/OpenTofu owns provider resources: the `wg-01` VM, provider network attachment, runtime public endpoint and provider firewall. Ansible owns Rocky Linux state: WireGuard package/configuration, stateful forwarding/SNAT, host firewall, OpenBao secret retrieval and root-only host rendering. OpenBao owns the authoritative centrally managed secret records. Kubernetes/Fleet is not an authority for this host.
+OpenTofu owns provider resources: the `wg-01` VM, provider network attachment, runtime public endpoint and provider firewall. Ansible owns Rocky Linux state: WireGuard package/configuration, stateful forwarding/SNAT, host firewall, OpenBao secret retrieval and root-only host rendering. OpenBao owns the authoritative centrally managed secret records. Kubernetes/Fleet is not an authority for this host.
 
 This M2.5 implementation encodes the resources and phase-ready Ansible reconciliation. Static qualification does not create a VM, open ingress, modify a real host, retrieve real secrets, or generate a real key.
 
@@ -118,4 +118,4 @@ Runtime acceptance for the later implementation requires evidence that:
 - peer-to-flow audit correlation is present on `wg-01`;
 - Pod/Service CIDRs are not routed or NATed;
 - no unapproved public management endpoint remains active;
-- OpenBao retrieval leaves no secret value in Git, Terraform state or logs.
+- OpenBao retrieval leaves no secret value in Git, OpenTofu state or logs.

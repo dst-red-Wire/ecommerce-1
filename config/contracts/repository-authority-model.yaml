@@ -23,6 +23,10 @@ domains:
     machine_contract: qualification_execution_policy
   roadmap:
     machine_contract: roadmap_policy
+  engineering_metrics:
+    machine_contract: engineering_metrics_policy
+  platform_orchestration:
+    machine_contract: kratix_platform
   security_scan:
     machine_contract: security_scan_policy
   terraform_provider:
@@ -120,7 +124,7 @@ orchestration_adapters:
       - ruff
       - gitleaks
       - ansible-lint
-      - terraform fmt
+      - tofu fmt
 
 component_manifests:
   - pattern: go.work

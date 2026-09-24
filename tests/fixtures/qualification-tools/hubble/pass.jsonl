@@ -1,0 +1,4 @@
+{"flow":{"verdict":"FORWARDED","source":{"namespace":"store"},"destination":{"namespace":"product"},"l4":{"TCP":{"destination_port":8080}}}}
+{"flow":{"verdict":"DROPPED","source":{"namespace":"untrusted"},"destination":{"namespace":"payment"},"drop_reason_desc":"POLICY_DENIED"}}
+{"flow":{"verdict":"FORWARDED","l7":{"dns":{"query":"product.svc.cluster.local."}}}}
+

@@ -74,7 +74,7 @@ class ToolchainClosureTests(unittest.TestCase):
 
     def test_security_policy_status_must_match_tool_lifecycle(self):
         lock = copy.deepcopy(self.lock)
-        kube_bench = lock["tool_lifecycle"]["deferred"].pop("kube-bench")
+        kube_bench = lock["tool_lifecycle"]["active"].pop("kube-bench")
         lock["tool_lifecycle"]["rejected"]["kube-bench"] = kube_bench
         self.assertViolation(self.violations(lock), "security policy lifecycle drift: kube-bench")
 
