@@ -415,7 +415,7 @@
     that:
       - mgmt_transport_phase == 'steady-state'
     fail_msg: >-
-      OpenBao authority cannot become permanent until Terraform runtime transport
+      OpenBao authority cannot become permanent until OpenTofu runtime transport
       proves temporary public bootstrap SSH is disabled.
   when:
     - wireguard_secret_mode == 'runtime-openbao-read'

@@ -1,8 +1,51 @@
-version: 1
+version: 2
 status: provisional
 architecture_authority: architecture.lock.yaml
 traffic_class_policy: config/contracts/traffic-class-policy.yaml
 source: policy-targets-not-measured-performance
+
+model:
+  sequence: [SLI, SLO, error-budget, burn-rate, release-reliability-decision]
+  objective: profile-availability-target
+  window_days: 28
+  indicator:
+    synchronous: successful-non-policy-rejected-requests
+    asynchronous: successfully-processed-messages
+  good_events: indicator-good-events
+  total_events: indicator-eligible-events
+  attainment_formula: good_events/total_events*100
+  error_budget_formula: total_events*(1-objective_ratio)
+  remaining_budget_formula: allowed_bad_events-observed_bad_events
+  burn_rate_formula: observed_bad_event_ratio/allowed_bad_event_ratio
+  missing_telemetry_behavior: NOT_PROVEN-and-release-risk-restriction-when-decision-required
+
+burn_rate_windows:
+  fast:
+    short_window_minutes: 5
+    long_window_minutes: 60
+    threshold: 14.4
+  sustained:
+    short_window_minutes: 30
+    long_window_minutes: 360
+    threshold: 6.0
+  slow:
+    short_window_minutes: 120
+    long_window_minutes: 1440
+    threshold: 1.0
+
+release_governance:
+  milestone_activation:
+    M1: contract
+    M4: implementation
+    M5: proof
+  healthy_budget:
+    decision: normal-innovation-and-release
+  high_burn:
+    decision: elevated-risk-signal
+  exhausted_budget:
+    decision: reliability-work-and-release-restriction
+  pre-runtime_contract_only_must_not_claim_blocking_proof: true
+  exact_sha_telemetry_evidence_required: true
 
 profiles:
   critical:
@@ -57,3 +100,23 @@ rules:
   slo-change-requires-observability-query-update: true
   hpa-keda-alerting-may-consume-only-versioned-slo: true
   external-provider-latency-must-be-reported-separately: true
+  slo-contract-does-not-prove-runtime-attainment: true
+  missing-telemetry-never-means-healthy: true
+  release-decision-must-record-budget-state: true
+
+evidence:
+  schema_version: 1
+  required_fields:
+    - service
+    - environment
+    - head_sha
+    - window_start
+    - window_end
+    - good_events
+    - total_events
+    - objective_percent
+    - attainment_percent
+    - error_budget_remaining
+    - burn_rate
+    - release_decision
+    - generated_at

@@ -81,7 +81,7 @@ class MgmtRuntimeInventoryTests(unittest.TestCase):
             module.write_overlay(output, value)
             payload = json.loads(output.read_text())
             self.assertFalse(payload["contains_secrets"])
-            self.assertEqual("terraform-output:runtime_transport", payload["source"])
+            self.assertEqual("opentofu-output:runtime_transport", payload["source"])
             self.assertEqual(0o600, output.stat().st_mode & 0o777)
 
     def test_unknown_provenance_fails(self):

@@ -1,0 +1,7 @@
+defaultNamespace: kratix-platform-system
+paused: true
+kustomize:
+  dir: .
+labels:
+  platform.ecommerce.io/component: kratix-oss
+  platform.ecommerce.io/owner: cloud-platform

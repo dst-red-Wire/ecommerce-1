@@ -61,9 +61,11 @@ spec:
       taskRef:
         name: ecommerce-product-scan-sbom
       params:
+        - {name: runner-image, value: $(params.runner-image)}
         - {name: trivy-image, value: $(params.trivy-image)}
         - {name: syft-image, value: $(params.syft-image)}
         - {name: image-reference, value: $(params.image-repository)@$(tasks.build-push.results.image-digest)}
+        - {name: base, value: $(params.base)}
         - {name: head, value: $(params.head)}
         - {name: registry-auth-secret, value: $(params.registry-auth-secret)}
       workspaces:

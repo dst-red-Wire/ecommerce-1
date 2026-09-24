@@ -1,9 +1,9 @@
-# Persistent MGMT Terraform root
+# Persistent MGMT OpenTofu root
 
 This root consumes canonical MGMT inventory, access-gateway, and network YAML.
 It is static IaC only until a human authorizes the deferred cloud qualification.
 
-First provisioning deliberately uses Terraform's local backend on an encrypted,
+First provisioning deliberately uses OpenTofu's local backend on an encrypted,
 operator-controlled workstation. Do not commit state, plans, backend credentials,
 provider mappings, or runtime output. After MGMT exists and the governed
 SeaweedFS S3 state service is independently ready, a human-reviewed backend
@@ -20,8 +20,8 @@ the canonical intent.
 The SSH key IDs are a nonempty list of positive provider identifiers for keys
 already registered by the operator. Both the gateway and private nodes receive
 these public keys at creation so that the governed ProxyJump bootstrap works.
-Terraform neither generates nor receives private SSH key material.
+OpenTofu neither generates nor receives private SSH key material.
 
-`terraform test` uses a mock provider and plan-only runs to check the canonical
+`tofu test` uses a mock provider and plan-only runs to check the canonical
 node set, restricted SSH CIDRs (including rejection of host-bit `/0` spellings),
 and required SSH key IDs. These tests create no cloud resources.

@@ -86,7 +86,7 @@ management_plane:
   gitops: rancher-fleet
   developer_portal: backstage
   bootstrap:
-    terraform_opentofu: true
+    opentofu: true
     ansible: true
     requires_human_apply_gate: true
 
@@ -104,7 +104,7 @@ developer_platform:
     gitops: rancher-fleet
     infrastructure_api: crossplane
     progressive_delivery: argo-rollouts
-    foundation_iac: terraform-opentofu
+    foundation_iac: opentofu
   runtime_boundary:
     commerce_runtime_nodejs: forbidden
     backstage_management_plane_nodejs: allowed-required
@@ -122,12 +122,72 @@ developer_platform:
       - force-push
       - approve-pull-request
       - merge-pull-request
-      - terraform-apply
+      - tofu-apply
       - kubectl-apply
       - crossplane-apply
       - direct-workload-deploy
       - direct-environment-promotion
     gitea_pull_request_action: ecommerce:gitea:pull-request
+  golden_paths:
+    status: contract-locked-in-m1-implemented-from-m4
+    implementation_milestone: M4-platform-baseline
+    proof_milestone: M5-commerce-vertical-slice
+    change_authority: git-pull-request
+    properties:
+      - safe-by-default
+      - secure-by-default
+      - observable-by-default
+      - versioned
+      - reproducible
+      - policy-compliant
+    request_kinds:
+      - new-service
+      - new-api
+      - new-database
+      - new-event-topic
+      - new-secret
+      - new-workload
+      - new-environment
+      - new-slo-dashboard
+      - new-dependency
+  developer_hub:
+    implementation: backstage
+    status: contracted
+    implementation_milestone: M4-platform-baseline
+    proof_milestone: M5-commerce-vertical-slice
+    exposes:
+      - catalog
+      - ownership
+      - templates
+      - golden-paths
+      - documentation
+      - qce-status
+      - slo-error-budget
+      - ci-status
+      - security-state
+      - deployment-state
+      - dependencies
+      - platform-requests
+      - promises
+      - multi-cluster-environments
+    mutation_authority: developer_platform.backstage_pr_contract
+  platform_orchestrator:
+    implementation: kratix-oss
+    status: contracted
+    implementation_milestone: M4-platform-baseline
+    proof_milestone: M5-commerce-vertical-slice
+    role: promise-and-platform-request-orchestration
+    request_source: developer-hub
+    machine_contract: architecture.lock.yaml#machine_contracts.kratix_platform
+    state_store: gitea-gitstatestore
+    deployment_authority: rancher-fleet
+    manifest_composition: kustomize
+    package_format: helm
+    target_runtime: rke2
+    destinations: [lab, preprod, prod]
+    direct_cluster_apply: forbidden
+    bundled_flux: forbidden
+    bundled_object_store: forbidden
   git_contract:
     default_branch: main
     request_branch_pattern: platform/<request-kind>/<component>/<request-id>
@@ -185,7 +245,7 @@ developer_platform:
     fleet_reconciles_git: true
     crossplane_materializes_platform_api: true
   infrastructure_ownership:
-    terraform_opentofu: foundation
+    opentofu: foundation
     crossplane: self-service-platform-resources
   preview_lifecycle:
     creation: gitops-reconciliation
@@ -261,6 +321,23 @@ developer_platform:
         applies_to_all_sectors: true
         explicit_ownership_required: true
         documentation_as_code_required: true
+      data_driven:
+        owner: developer-experience
+        applies_to_all_sectors: true
+        decision_model:
+          - observe
+          - measure
+          - detect
+          - hypothesis
+          - small-experiment
+          - measure-outcome
+          - keep-rollback-improve
+          - standardise
+        measurement_owner: measuring_engineering
+        evidence_required: true
+        continuous_improvement_required: true
+        small_batch_delivery: advisory-data-driven
+        universal_size_limit: forbidden
       ai_agent:
         owner: platform-engineering
         applies_to_all_sectors: true
@@ -269,6 +346,14 @@ developer_platform:
         may_bypass_required_gates: false
         may_merge: false
         may_deploy_production_directly: false
+        human_accountability: required
+        user_centric_focus: required
+        strong_version_control: required
+        small_batch_delivery: required
+        ai_stance: assist-with-human-verification
+        internal_platform: quality-required
+        data_ecosystem: healthy-required
+        ai_accessible_internal_data: read-only-least-privilege-audited
   milestone_contract:
     M1-monorepo-bootstrap:
       outcome: stable-pr-driven-contract-locked
@@ -296,6 +381,8 @@ developer_platform:
         - tekton
         - harbor
         - rancher-fleet
+        - cert-manager
+        - kratix-oss
         - crossplane
         - argo-rollouts
     M5-commerce-vertical-slice:
@@ -374,22 +461,32 @@ tooling:
   machine_images:
     builder: packer
     contract: architecture.lock.yaml#machine_contracts.machine_image_lock
+  iac:
+    authority: opentofu
+    command: tofu
+    terraform_cli: forbidden
+    provider_lock: .terraform.lock.hcl
   security:
     container_and_filesystem: trivy
     secret_detection: gitleaks
     go_static_analysis: gosec
     go_vulnerabilities: govulncheck
+    os_compliance: openscap-scap-security-guide
     kubernetes_cis: kube-bench
+    policy_as_code: opa-conftest
+    controlled_http_dast: nuclei
+    network_policy_evidence: hubble
   secrets:
     static_file_encryption: sops
     recipient_crypto: age
     runtime_authority: openbao-via-eso
   performance:
-    authority: central-qualification-metrics-and-go-benchmarks
+    authority: central-qualification-metrics-go-benchmarks-and-k6
     hyperfine: rejected-no-distinct-consumer
   forbidden_authorities:
     oci_runtime: podman
     oci_builder: buildah
+    iac_engine: terraform-cli
 
 topology_contracts:
   exact_index: docs/architecture/EXACT_TOPOLOGY_V5.md
@@ -427,17 +524,20 @@ machine_contracts:
   edge_protocol_policy: config/contracts/edge-protocol-policy.yaml
   egress_policy: config/contracts/egress-policy.yaml
   egress_runtime_policy: config/contracts/egress-runtime-policy.yaml
+  engineering_metrics_policy: config/contracts/engineering-metrics-policy.yaml
   event_contracts: config/contracts/event-contracts.yaml
   identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
   mesh_observability_policy: config/contracts/mesh-observability-policy.yaml
   mesh_policy_authority: config/contracts/mesh-policy-authority.yaml
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
+  kratix_platform: config/infrastructure/kratix-platform.yaml
   machine_image_lock: config/contracts/machine-image-lock.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
   qualification_execution_policy: config/contracts/qualification-execution-policy.yaml
+  qualification_tools: config/contracts/qualification-tools.yaml
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
   roadmap_policy: config/contracts/roadmap-policy.yaml
