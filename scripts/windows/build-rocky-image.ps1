@@ -144,7 +144,7 @@ try {
         '--artifact-dir', "$stageWsl/artifacts",
         '--target-platform', 'windows',
         '--output', $varFileWsl
-    ) -TimeoutSeconds 120
+    ) -TimeoutSeconds 300
     Assert-ProcessSuccess -Result $render -Operation 'Packer Windows variable rendering'
     $varFile = Join-Path $stageRoot 'rocky-10.2.auto.pkrvars.hcl'
 

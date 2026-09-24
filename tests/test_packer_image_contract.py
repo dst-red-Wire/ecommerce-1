@@ -17,11 +17,17 @@ KICKSTART = ROOT / "platform/packer/rocky-10.2/http/rocky-10.2.ks"
 MATERIALIZER_PATH = ROOT / "scripts/materialize_packer_rpm_repo.py"
 INSTALLER = ROOT / "scripts/install_packer_tools.py"
 GENERATOR = ROOT / "scripts/generate_packer_rpm_lock.py"
+REPOCTL_PATH = ROOT / "scripts/repoctl.py"
 SPEC = importlib.util.spec_from_file_location(
     "materialize_packer_rpm_repo", MATERIALIZER_PATH
 )
 MATERIALIZER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATERIALIZER)
+REPOCTL_SPEC = importlib.util.spec_from_file_location(
+    "repoctl_image_artifact_transport", REPOCTL_PATH
+)
+REPOCTL = importlib.util.module_from_spec(REPOCTL_SPEC)
+REPOCTL_SPEC.loader.exec_module(REPOCTL)
 
 
 def manifest_is_valid(document):
@@ -40,6 +46,7 @@ class PackerImageContractTest(unittest.TestCase):
         cls.package_lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
         cls.packer = PACKER.read_text(encoding="utf-8")
         cls.kickstart = KICKSTART.read_text(encoding="utf-8")
+        cls.repoctl = REPOCTL_PATH.read_text(encoding="utf-8")
 
     def test_exact_rocky_10_2_dvd_and_x86_64_v3(self):
         self.assertEqual(
@@ -184,6 +191,104 @@ class PackerImageContractTest(unittest.TestCase):
             gh["qualification"]["stdout_contains"], ["--paginate", "--slurp"]
         )
         self.assertEqual(gh["qualification"]["network"], "forbidden")
+
+    def test_oras_and_rsync_are_exact_distribution_tools(self):
+        distribution = self.image["distribution"]
+        self.assertEqual("oras", distribution["authority"])
+        self.assertEqual("harbor", distribution["registry"])
+        self.assertEqual("ORAS_CACHE", distribution["cache"]["environment"])
+        self.assertEqual("rsync", distribution["cache"]["synchronization"])
+        self.assertEqual(
+            "sha256-before-and-after-sync", distribution["cache"]["integrity"]
+        )
+        self.assertIn("published-exact-source-sha", distribution["push"]["requires"])
+        self.assertEqual("forbidden", distribution["pull"]["mutable_tag"])
+        expected = {
+            "oras": (
+                "1.3.3",
+                "9ce999f8d2de03fc03968b29d743077a58783e545e5eaa53917ca177352d0e59",
+            ),
+            "rsync": (
+                "3.2.7",
+                "8f952895697d19a6f1caa71f17c7d4e8c1f1fb485eb824ffe3e4c77dd587b338",
+            ),
+        }
+        for name, (version, checksum) in expected.items():
+            tool = self.toolchain["tools"][name]
+            lifecycle = self.toolchain["tool_lifecycle"]["active"][name]
+            self.assertEqual(version, self.toolchain["versions"][tool["version_ref"]])
+            self.assertEqual(checksum, self.toolchain["versions"][tool["sha256_ref"]])
+            self.assertEqual("required", lifecycle["scenario_policy"])
+            self.assertIn("tests/test_packer_image_contract.py", lifecycle["proofs"])
+        self.assertEqual(
+            "3.2.7-1ubuntu1.5",
+            self.toolchain["versions"][
+                self.toolchain["tools"]["rsync"]["artifact"]["package_version_ref"]
+            ],
+        )
+
+    def test_oras_references_are_fail_closed(self):
+        repository = "harbor.example.com:443/machine-images/rocky"
+        self.assertEqual(repository, REPOCTL._validate_oras_repository(repository))
+        digest = "sha256:" + ("a" * 64)
+        self.assertEqual(
+            (repository, digest),
+            REPOCTL._validate_oras_digest_reference(f"{repository}@{digest}"),
+        )
+        for invalid in (
+            "https://harbor.example.com/machine-images/rocky",
+            "harbor.example.com/machine-images/rocky:latest",
+            "harbor.example.com/machine-images/rocky@sha256:" + ("A" * 64),
+            "harbor.example.com/machine-images/rocky:git-deadbeef",
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                REPOCTL._validate_oras_digest_reference(invalid)
+
+    def test_oras_cache_sync_is_sha256_verified_and_non_destructive(self):
+        self.assertIn('environment["ORAS_CACHE"] = str(cache)', self.repoctl)
+        for flag in ("--archive", "--checksum", "--partial", "--delay-updates"):
+            self.assertIn(f'"{flag}"', self.repoctl)
+        self.assertNotIn('"--delete"', self.repoctl)
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "rocky.box"
+            artifact.write_bytes(b"exact machine image")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            checksums = Path(directory) / "SHA256SUMS"
+            checksums.write_text(f"{digest}  rocky.box\n", encoding="utf-8")
+            self.assertEqual(
+                digest, REPOCTL._verified_artifact_sha256(artifact, checksums)
+            )
+            cache = Path(directory) / "cache"
+            cache.mkdir()
+            sentinel = cache / "preserved.txt"
+            sentinel.write_text("preserve", encoding="utf-8")
+            synced_artifact, synced_checksums, synced_digest = (
+                REPOCTL._rsync_artifact_pair(
+                    artifact, checksums, cache, timeout_seconds=30
+                )
+            )
+            self.assertEqual(digest, synced_digest)
+            self.assertEqual(digest, REPOCTL._file_sha256(synced_artifact))
+            self.assertEqual(
+                digest,
+                REPOCTL._verified_artifact_sha256(
+                    synced_artifact, synced_checksums
+                ),
+            )
+            self.assertTrue(sentinel.is_file())
+            artifact.write_bytes(b"tampered")
+            with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+                REPOCTL._verified_artifact_sha256(artifact, checksums)
+            checksums.write_bytes(b"x" * 4097)
+            with self.assertRaisesRegex(RuntimeError, "4096-byte safety limit"):
+                REPOCTL._verified_artifact_sha256(artifact, checksums)
+
+    def test_oras_make_entrypoints_are_explicit(self):
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("image-rocky-oras-push:", makefile)
+        self.assertIn("image-rocky-oras-pull:", makefile)
+        self.assertIn("ORAS_REPOSITORY", makefile)
+        self.assertIn("ORAS_REF", makefile)
 
     def test_packer_plugins_profiles_and_outputs_are_exact(self):
         expected = {"virtualbox": "1.1.5", "qemu": "1.1.6", "vagrant": "1.1.7"}

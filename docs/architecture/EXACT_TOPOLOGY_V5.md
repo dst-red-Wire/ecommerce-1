@@ -206,6 +206,12 @@ profiles. Packer, VirtualBox and Vagrant are forbidden as parallel WSL2
 toolchains, and the Linux profile rejects WSL. Operational detail is in
 `docs/engineering/LOCAL_VM_IMAGE_PIPELINE.md`.
 
+Machine-image distribution is a separate post-release responsibility. ORAS is
+the sole OCI artifact transport to Harbor, pushes are labelled with the exact
+source SHA, pulls require an immutable `@sha256:` reference, and the local
+content cache is selected through `ORAS_CACHE`, synchronized with `rsync`, and
+verified with SHA-256 before and after synchronization.
+
 M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
 
 The lock’s `milestone_dependencies` maps each milestone to its prerequisites: M0 → M1; M1 → M2 and M2.5; M2.5 → M3 → M4; M2 + M4 → M5 → M6 → M7 → M8 → M9.

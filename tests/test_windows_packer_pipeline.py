@@ -149,6 +149,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("TimeoutSeconds", self.module)
         self.assertIn("WaitForExit($TimeoutSeconds * 1000)", self.module)
         self.assertIn("-TimeoutSeconds 60", self.module)
+        self.assertIn(") -TimeoutSeconds 300", self.build)
         self.assertIn("taskkill.exe", self.module)
         self.assertIn("$attempt -le 12", self.qualify)
         self.assertIn("Start-Sleep -Seconds 5", self.qualify)

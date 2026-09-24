@@ -7064,6 +7064,396 @@ def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
     return run(command, cwd=ROOT, check=False).returncode
 
 
+_ORAS_REPOSITORY = re.compile(
+    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
+)
+_ORAS_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _validate_oras_repository(value: str) -> str:
+    repository = value.strip()
+    if not repository or _ORAS_REPOSITORY.fullmatch(repository) is None:
+        raise RuntimeError(
+            "ORAS repository must be a lowercase registry/repository without scheme, tag or digest"
+        )
+    return repository
+
+
+def _validate_oras_digest_reference(value: str) -> tuple[str, str]:
+    reference = value.strip()
+    if reference.count("@") != 1:
+        raise RuntimeError("ORAS pull requires repository@sha256:<64 lowercase hex characters>")
+    repository, digest = reference.rsplit("@", 1)
+    _validate_oras_repository(repository)
+    if _ORAS_DIGEST.fullmatch(digest) is None:
+        raise RuntimeError("ORAS pull requires repository@sha256:<64 lowercase hex characters>")
+    return repository, digest
+
+
+def _machine_image_transport_contract() -> tuple[dict, dict]:
+    contract = ruby_yaml("config/contracts/machine-image-lock.yaml")
+    image = contract.get("packer_image")
+    if not isinstance(image, dict):
+        raise TypeError("machine-image contract has no packer_image mapping")
+    distribution = image.get("distribution")
+    if not isinstance(distribution, dict) or distribution.get("authority") != "oras":
+        raise RuntimeError("machine-image distribution authority must be ORAS")
+    cache = distribution.get("cache")
+    if not isinstance(cache, dict) or cache.get("environment") != "ORAS_CACHE":
+        raise RuntimeError("machine-image distribution must declare ORAS_CACHE")
+    if cache.get("synchronization") != "rsync" or cache.get("integrity") != "sha256-before-and-after-sync":
+        raise RuntimeError("machine-image cache must use rsync with SHA-256 verification")
+    return image, distribution
+
+
+def _machine_image_transport_profile(profile: str) -> tuple[dict, dict, dict]:
+    image, distribution = _machine_image_transport_contract()
+    pipeline_profiles = image.get("local_pipeline", {}).get("profiles", {})
+    distribution_profiles = distribution.get("profiles", {})
+    pipeline_profile = pipeline_profiles.get(profile)
+    distribution_profile = distribution_profiles.get(profile)
+    if not isinstance(pipeline_profile, dict) or not isinstance(distribution_profile, dict):
+        raise TypeError(f"unsupported machine-image distribution profile: {profile}")
+    if pipeline_profile.get("artifact") != distribution_profile.get("artifact"):
+        raise RuntimeError(f"machine-image artifact drift for profile: {profile}")
+    return image, distribution, pipeline_profile | distribution_profile
+
+
+def _machine_image_transport_paths(
+    profile: str, action: str
+) -> tuple[Path, Path, Path, dict, dict]:
+    _, distribution, profile_contract = _machine_image_transport_profile(profile)
+    artifact_root = ROOT / profile_contract["artifact_root"]
+    artifact = artifact_root / profile_contract["artifact"]
+    checksums = artifact_root / "SHA256SUMS"
+    evidence_relative = distribution.get("evidence_by_profile", {}).get(profile, {}).get(action)
+    if not isinstance(evidence_relative, str) or not evidence_relative:
+        raise RuntimeError(f"missing ORAS {action} evidence path for profile: {profile}")
+    return artifact, checksums, ROOT / evidence_relative, distribution, profile_contract
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"regular artifact file required: {path}")
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _verified_artifact_sha256(artifact: Path, checksums: Path) -> str:
+    if not checksums.is_file() or checksums.is_symlink():
+        raise RuntimeError(f"regular SHA256SUMS file required: {checksums}")
+    if checksums.stat().st_size > 4096:
+        raise RuntimeError("SHA256SUMS exceeds the 4096-byte safety limit")
+    match = re.fullmatch(
+        rf"([0-9a-f]{{64}})  {re.escape(artifact.name)}\n?",
+        checksums.read_text(encoding="utf-8"),
+    )
+    if match is None:
+        raise RuntimeError(f"SHA256SUMS must contain exactly one entry for {artifact.name}")
+    actual = _file_sha256(artifact)
+    if actual != match.group(1):
+        raise RuntimeError(f"artifact SHA-256 mismatch: {artifact.name}")
+    return actual
+
+
+def _oras_cache_root(distribution: dict) -> Path:
+    cache_contract = distribution["cache"]
+    environment = cache_contract["environment"]
+    configured = os.environ.get(environment, "").strip()
+    raw = configured or cache_contract.get("default", "")
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError("ORAS cache path is empty")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    cache = candidate.resolve(strict=False)
+    forbidden = {Path("/").resolve(), Path.home().resolve(), ROOT.resolve()}
+    if cache in forbidden:
+        raise RuntimeError("ORAS_CACHE must be a dedicated cache directory")
+    if candidate.is_symlink():
+        raise RuntimeError("ORAS_CACHE must not be a symbolic link")
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return cache
+
+
+def _run_bounded_transport(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str] | None,
+    timeout_seconds: int,
+    operation: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{operation} timed out after {timeout_seconds}s") from exc
+    if result.returncode:
+        detail = " ".join((result.stderr or result.stdout or "").split())[:1024]
+        raise RuntimeError(f"{operation} failed: {detail or f'exit {result.returncode}'}")
+    return result
+
+
+def _rsync_artifact_pair(
+    artifact: Path,
+    checksums: Path,
+    destination: Path,
+    *,
+    timeout_seconds: int,
+) -> tuple[Path, Path, str]:
+    rsync = require("rsync")
+    digest = _verified_artifact_sha256(artifact, checksums)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _run_bounded_transport(
+        [
+            rsync,
+            "--archive",
+            "--checksum",
+            "--partial",
+            "--delay-updates",
+            "--",
+            str(artifact),
+            str(checksums),
+            f"{destination}{os.sep}",
+        ],
+        cwd=ROOT,
+        environment=None,
+        timeout_seconds=timeout_seconds,
+        operation="rsync machine-image artifact cache synchronization",
+    )
+    synced_artifact = destination / artifact.name
+    synced_checksums = destination / checksums.name
+    if _verified_artifact_sha256(synced_artifact, synced_checksums) != digest:
+        raise RuntimeError("artifact SHA-256 changed during rsync synchronization")
+    return synced_artifact, synced_checksums, digest
+
+
+def _write_machine_image_transport_evidence(path: Path, evidence: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _released_machine_image(profile: str, artifact: Path, digest: str, image: dict) -> str:
+    status = git("status", "--porcelain", "--untracked-files=all").strip()
+    if status:
+        raise RuntimeError("ORAS push requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise RuntimeError("ORAS push could not resolve the exact source SHA")
+    upstream = git("rev-parse", "@{upstream}").strip()
+    if upstream != head:
+        raise RuntimeError("ORAS push requires the exact source SHA to be published upstream")
+    release_relative = image.get("outputs", {}).get("evidence_by_profile", {}).get(profile, {}).get("release")
+    if not isinstance(release_relative, str) or not release_relative:
+        raise RuntimeError(f"release evidence path is missing for profile: {profile}")
+    try:
+        release = json.loads((ROOT / release_relative).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read release evidence for {profile}: {exc}") from exc
+    if (
+        release.get("status") != "PASS"
+        or release.get("source_sha") != head
+        or release.get("artifact") != artifact.name
+        or release.get("artifact_sha256") != digest
+        or release.get("remote_publication") != "NOT_PERFORMED"
+    ):
+        raise RuntimeError("ORAS push requires PASS release evidence for the exact SHA-256 artifact")
+    return head
+
+
+def _oras_json(result: subprocess.CompletedProcess[str], operation: str) -> dict:
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{operation} did not return JSON") from exc
+    if not isinstance(document, dict):
+        raise TypeError(f"{operation} returned an invalid JSON document")
+    return document
+
+
+def image_oras_push(profile: str, repository: str) -> int:
+    artifact, checksums, evidence_path, distribution, profile_contract = _machine_image_transport_paths(
+        profile, "push"
+    )
+    evidence = {
+        "schema": 1,
+        "action": "push",
+        "profile": profile,
+        "artifact": artifact.name,
+        "artifact_sha256": None,
+        "source_sha": None,
+        "oras_manifest_digest": None,
+        "immutable_reference": None,
+        "cache_environment": "ORAS_CACHE",
+        "status": "FAIL",
+        "completed_at": None,
+        "error": None,
+    }
+    try:
+        repository = _validate_oras_repository(repository)
+        oras = require("oras")
+        digest = _verified_artifact_sha256(artifact, checksums)
+        head = _released_machine_image(profile, artifact, digest, _machine_image_transport_contract()[0])
+        cache = _oras_cache_root(distribution)
+        timeout = distribution["timeouts_seconds"]
+        cached_root = cache / "materialized" / "sha256" / digest
+        cached_artifact, _, synced_digest = _rsync_artifact_pair(
+            artifact,
+            checksums,
+            cached_root,
+            timeout_seconds=timeout["rsync"],
+        )
+        target = f"{repository}:git-{head}"
+        environment = dict(os.environ)
+        environment["ORAS_CACHE"] = str(cache)
+        result = _run_bounded_transport(
+            [
+                oras,
+                "push",
+                target,
+                "--artifact-type",
+                distribution["artifact_type"],
+                "--annotation",
+                f"org.opencontainers.image.revision={head}",
+                "--format",
+                "json",
+                "--no-tty",
+                f"{cached_artifact.name}:{profile_contract['layer_media_type']}",
+                "SHA256SUMS:text/plain",
+            ],
+            cwd=cached_root,
+            environment=environment,
+            timeout_seconds=timeout["oras"],
+            operation="ORAS machine-image push",
+        )
+        response = _oras_json(result, "ORAS machine-image push")
+        manifest_digest = response.get("digest")
+        immutable_reference = response.get("reference")
+        if not isinstance(manifest_digest, str) or _ORAS_DIGEST.fullmatch(manifest_digest) is None:
+            raise RuntimeError("ORAS push returned an invalid manifest digest")
+        if immutable_reference != f"{repository}@{manifest_digest}":
+            raise RuntimeError("ORAS push did not return the expected immutable reference")
+        evidence.update(
+            {
+                "artifact_sha256": synced_digest,
+                "source_sha": head,
+                "oras_manifest_digest": manifest_digest,
+                "immutable_reference": immutable_reference,
+                "status": "PASS",
+            }
+        )
+    except (KeyError, OSError, RuntimeError, TypeError) as exc:
+        evidence["error"] = str(exc)[:1024]
+    evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _write_machine_image_transport_evidence(evidence_path, evidence)
+    if evidence["status"] != "PASS":
+        return fail(f"image-rocky-oras-push: {evidence['error']}", 1)
+    print(
+        f"PASS image-rocky-oras-push profile={profile} "
+        f"reference={evidence['immutable_reference']} artifact_sha256={evidence['artifact_sha256']}"
+    )
+    return 0
+
+
+def image_oras_pull(profile: str, reference: str) -> int:
+    artifact, checksums, evidence_path, distribution, _ = _machine_image_transport_paths(profile, "pull")
+    evidence = {
+        "schema": 1,
+        "action": "pull",
+        "profile": profile,
+        "artifact": artifact.name,
+        "artifact_sha256": None,
+        "requested_reference": None,
+        "oras_manifest_digest": None,
+        "cache_environment": "ORAS_CACHE",
+        "status": "FAIL",
+        "completed_at": None,
+        "error": None,
+    }
+    try:
+        _, requested_digest = _validate_oras_digest_reference(reference)
+        evidence["requested_reference"] = reference
+        oras = require("oras")
+        require("rsync")
+        cache = _oras_cache_root(distribution)
+        timeout = distribution["timeouts_seconds"]
+        temporary_root = ROOT / ".context" / "oras-pull"
+        temporary_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        environment = dict(os.environ)
+        environment["ORAS_CACHE"] = str(cache)
+        with tempfile.TemporaryDirectory(prefix=f"{profile}-", dir=temporary_root) as directory:
+            pulled = Path(directory)
+            result = _run_bounded_transport(
+                [
+                    oras,
+                    "pull",
+                    reference,
+                    "--output",
+                    str(pulled),
+                    "--format",
+                    "json",
+                    "--no-tty",
+                ],
+                cwd=ROOT,
+                environment=environment,
+                timeout_seconds=timeout["oras"],
+                operation="ORAS digest-addressed machine-image pull",
+            )
+            response = _oras_json(result, "ORAS digest-addressed machine-image pull")
+            if response.get("reference") != reference:
+                raise RuntimeError("ORAS pull resolved a reference different from the requested digest")
+            entries = {path.name: path for path in pulled.iterdir()}
+            if set(entries) != {artifact.name, "SHA256SUMS"}:
+                raise RuntimeError("ORAS pull must contain exactly the artifact and SHA256SUMS")
+            pulled_artifact = entries[artifact.name]
+            pulled_checksums = entries["SHA256SUMS"]
+            digest = _verified_artifact_sha256(pulled_artifact, pulled_checksums)
+            cached_root = cache / "materialized" / "sha256" / digest
+            cached_artifact, cached_checksums, synced_digest = _rsync_artifact_pair(
+                pulled_artifact,
+                pulled_checksums,
+                cached_root,
+                timeout_seconds=timeout["rsync"],
+            )
+            _rsync_artifact_pair(
+                cached_artifact,
+                cached_checksums,
+                artifact.parent,
+                timeout_seconds=timeout["rsync"],
+            )
+        if _verified_artifact_sha256(artifact, checksums) != synced_digest:
+            raise RuntimeError("artifact SHA-256 changed after final rsync synchronization")
+        evidence.update(
+            {
+                "artifact_sha256": synced_digest,
+                "oras_manifest_digest": requested_digest,
+                "status": "PASS",
+            }
+        )
+    except (KeyError, OSError, RuntimeError, TypeError) as exc:
+        evidence["error"] = str(exc)[:1024]
+    evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _write_machine_image_transport_evidence(evidence_path, evidence)
+    if evidence["status"] != "PASS":
+        return fail(f"image-rocky-oras-pull: {evidence['error']}", 1)
+    print(
+        f"PASS image-rocky-oras-pull profile={profile} reference={reference} "
+        f"artifact_sha256={evidence['artifact_sha256']}"
+    )
+    return 0
+
+
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
     vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
     result = run([vbox, "list", "vms"], check=False, capture=True)
@@ -7717,6 +8107,20 @@ def main() -> int:
     image_linux_build.add_argument("--offline", action="store_true")
     sub.add_parser("image-rocky-linux-qualify")
     sub.add_parser("image-rocky-linux-release")
+    image_oras_push_parser = sub.add_parser("image-rocky-oras-push")
+    image_oras_push_parser.add_argument(
+        "--profile", choices=("windows", "linux"), default=os.environ.get("PROFILE", "windows")
+    )
+    image_oras_push_parser.add_argument(
+        "--repository", default=os.environ.get("ORAS_REPOSITORY", "")
+    )
+    image_oras_pull_parser = sub.add_parser("image-rocky-oras-pull")
+    image_oras_pull_parser.add_argument(
+        "--profile", choices=("windows", "linux"), default=os.environ.get("PROFILE", "windows")
+    )
+    image_oras_pull_parser.add_argument(
+        "--reference", default=os.environ.get("ORAS_REF", "")
+    )
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -7921,6 +8325,10 @@ def main() -> int:
             return linux_image_pipeline("qualify")
         if args.cmd == "image-rocky-linux-release":
             return linux_image_pipeline("release")
+        if args.cmd == "image-rocky-oras-push":
+            return image_oras_push(args.profile, args.repository)
+        if args.cmd == "image-rocky-oras-pull":
+            return image_oras_pull(args.profile, args.reference)
         if args.cmd == "rke2-local-virtualbox-qualification":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 input_path = Path(args.inputs)

@@ -95,7 +95,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
@@ -131,6 +131,12 @@ image-rocky-linux-qualify: ## Boot and smoke-test the exact qcow2 through bounde
 
 image-rocky-linux-release: ## Verify exact Linux build and qualification evidence without remote publication
 	@$(PYTHON) scripts/repoctl.py image-rocky-linux-release
+
+image-rocky-oras-push: ## Push PROFILE=windows|linux release to ORAS_REPOSITORY and report its immutable digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-push --profile "$${PROFILE:-windows}" --repository "$${ORAS_REPOSITORY:-}"
+
+image-rocky-oras-pull: ## Pull PROFILE=windows|linux from immutable ORAS_REF=repository@sha256:digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-pull --profile "$${PROFILE:-windows}" --reference "$${ORAS_REF:-}"
 
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 

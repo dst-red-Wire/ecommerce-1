@@ -496,6 +496,16 @@ tooling:
     repository_entrypoint:
       authority: make
       execution_environment: developer-environment
+    artifact_distribution:
+      authority: oras
+      execution_environment: developer-environment
+      registry: harbor
+      push_reference: exact-source-sha-tag
+      pull_reference: sha256-digest-only
+      cache:
+        environment: ORAS_CACHE
+        synchronization: rsync
+        integrity: sha256
     rules:
       duplicate_authority: forbidden
       packer_in_wsl2: forbidden
@@ -503,6 +513,7 @@ tooling:
       vagrant_in_wsl2: forbidden
       packer_may_replace_ansible: forbidden
       vagrant_may_provision_guest: forbidden
+      mutable_artifact_pull_reference: forbidden
   iac:
     authority: opentofu
     command: tofu

@@ -311,9 +311,35 @@
       "version_key": "ORAS_VERSION",
       "provision": {
         "type": "ansible",
-        "tags": "agent_tools"
+        "tags": "artifact_transport"
       },
+      "platforms": [
+        "linux/amd64"
+      ],
       "classification": "managed",
+      "checksum_key": "ORAS_SHA256_LINUX_AMD64",
+      "requirement": "required-static"
+    },
+    {
+      "name": "rsync",
+      "requires": [],
+      "provision_requires": [
+        "ansible-playbook"
+      ],
+      "command": "rsync",
+      "version_args": [
+        "--version"
+      ],
+      "version_key": "RSYNC_VERSION",
+      "provision": {
+        "type": "ansible",
+        "tags": "artifact_transport"
+      },
+      "platforms": [
+        "linux/amd64"
+      ],
+      "classification": "managed",
+      "checksum_key": "RSYNC_SHA256_LINUX_AMD64",
       "requirement": "required-static"
     },
     {
@@ -812,6 +838,7 @@
     "fd": "ansible",
     "ast-grep": "ansible",
     "oras": "ansible",
+    "rsync": "ansible",
     "gh": "ansible",
     "bazel": "ansible",
     "nx": "ansible",
@@ -1011,6 +1038,7 @@
       "git",
       "gh",
       "oras",
+      "rsync",
       "cosign"
     ]
   },

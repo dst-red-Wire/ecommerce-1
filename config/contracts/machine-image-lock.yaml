@@ -203,6 +203,47 @@ packer_image:
       virtualbox: rocky-10.2-admin-qualification-virtualbox.box
       qemu_kvm: rocky-10.2-admin-qualification-kvm.qcow2
 
+  distribution:
+    authority: oras
+    registry: harbor
+    artifact_type: application/vnd.ecommerce.rocky-machine-image.v1
+    repository_entrypoints:
+      push: image-rocky-oras-push
+      pull: image-rocky-oras-pull
+    push:
+      repository_environment: ORAS_REPOSITORY
+      tag_format: git-{source_sha}
+      output_reference: repository@sha256:digest
+      requires: [release-evidence-pass, clean-exact-source-sha, published-exact-source-sha, artifact-sha256]
+    pull:
+      reference_environment: ORAS_REF
+      reference_format: repository@sha256:digest
+      mutable_tag: forbidden
+    cache:
+      environment: ORAS_CACHE
+      default: .context/cache/oras
+      layout: materialized/sha256/{artifact_sha256}
+      synchronization: rsync
+      synchronization_flags: [--archive, --checksum, --partial, --delay-updates]
+      integrity: sha256-before-and-after-sync
+    profiles:
+      windows:
+        artifact: rocky-10.2-rke2-virtualbox.box
+        layer_media_type: application/vnd.hashicorp.vagrant.box
+      linux:
+        artifact: rocky-10.2-rke2-kvm.qcow2
+        layer_media_type: application/vnd.qemu.qcow2
+    evidence_by_profile:
+      windows:
+        push: .context/evidence/rocky-image/rocky-10.2/windows/oras-push.json
+        pull: .context/evidence/rocky-image/rocky-10.2/windows/oras-pull.json
+      linux:
+        push: .context/evidence/rocky-image/rocky-10.2/linux/oras-push.json
+        pull: .context/evidence/rocky-image/rocky-10.2/linux/oras-pull.json
+    timeouts_seconds:
+      oras: 7200
+      rsync: 7200
+
   clone_hygiene:
     hostname: rocky-10-2-base
     machine_id: cleaned-before-export
@@ -269,9 +310,11 @@ packer_image:
       build_is_qualification: false
       qualification_is_release: false
       release_publishes_remote_artifact: false
+      distribution_is_explicit_after_release: true
     timeouts_seconds:
       command_probe: 15
       wsl_bridge: 60
+      wsl_render: 300
       packer_init: 300
       packer_validate: 120
       packer_build: 7200

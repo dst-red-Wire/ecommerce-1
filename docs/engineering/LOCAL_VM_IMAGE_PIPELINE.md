@@ -193,6 +193,42 @@ process is bounded. The overlay, process and ephemeral key are removed before
 qualification can pass. `OFFLINE=1` has the same fail-closed cache semantics as
 the Windows profile.
 
+## ORAS distribution and local cache
+
+Release validation remains local and never publishes an artifact. Distribution
+is a separate, explicit step shared by the Windows and Linux profiles. Reconcile
+the pinned ORAS and rsync tools through Ansible, then select a dedicated cache:
+
+```console
+python3 scripts/repoctl.py reconcile --tags artifact_transport
+export ORAS_CACHE="$PWD/.context/cache/oras"
+```
+
+Push accepts a Harbor repository without a scheme, tag, or digest. The
+controller requires PASS release evidence for the clean current SHA, synchronizes
+the artifact and `SHA256SUMS` into the SHA-256-addressed cache with `rsync`,
+verifies both copies, and derives the push tag as `git-<source-sha>`:
+
+```console
+PROFILE=windows ORAS_REPOSITORY=harbor.example.com/machine-images/rocky make image-rocky-oras-push
+PROFILE=linux ORAS_REPOSITORY=harbor.example.com/machine-images/rocky make image-rocky-oras-push
+```
+
+The command reports and records the immutable manifest reference returned by
+ORAS. Pull accepts only that `repository@sha256:<digest>` form; mutable tags such
+as `latest` or `git-<sha>` are rejected at the pull boundary:
+
+```console
+PROFILE=windows ORAS_REF='harbor.example.com/machine-images/rocky@sha256:<digest>' make image-rocky-oras-pull
+```
+
+ORAS uses `ORAS_CACHE` as its content-addressable cache. The controller also
+keeps materialized artifacts below
+`$ORAS_CACHE/materialized/sha256/<artifact-sha256>/`, uses bounded `rsync`
+operations without deletion, and verifies SHA-256 before and after every cache
+or artifact synchronization. Registry authentication remains external to this
+workflow; passwords and tokens are never accepted as command arguments.
+
 Generated outputs are ignored by Git:
 
 ```text
@@ -205,8 +241,8 @@ Generated outputs are ignored by Git:
     SHA256SUMS
 
 .context/evidence/rocky-image/rocky-10.2/
-  windows/{preflight,build,qualification,release}.json
-  linux/{preflight,build,qualification,release}.json
+  windows/{preflight,build,qualification,release,oras-push,oras-pull}.json
+  linux/{preflight,build,qualification,release,oras-push,oras-pull}.json
 ```
 
 ## Windows/WSL path boundary
