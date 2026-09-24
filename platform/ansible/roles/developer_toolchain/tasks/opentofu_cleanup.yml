@@ -9,12 +9,21 @@
       Refusing destructive IaC reconciliation without the canonical
       OpenTofu-only architecture authority.
 
-- name: Remove the forbidden Terraform operating-system package
+- name: Probe for a forbidden Terraform operating-system package
+  ansible.builtin.command:
+    argv: [/usr/bin/dpkg-query, --show, terraform]
+  register: developer_toolchain_terraform_package_probe
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Remove the forbidden Terraform operating-system package when present
   ansible.builtin.apt:
     name: terraform
     state: absent
     purge: true
   become: true
+  when: developer_toolchain_terraform_package_probe.rc == 0
 
 - name: Remove forbidden Terraform CLI entry points from the managed user path
   ansible.builtin.file:
@@ -28,12 +37,20 @@
     fail_msg: "Refusing unsafe privileged Terraform CLI removal path: {{ item }}"
   loop: "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}"
 
-- name: Remove forbidden Terraform CLI entry points from system paths
-  ansible.builtin.file:
+- name: Inspect forbidden Terraform CLI entry points in system paths
+  ansible.builtin.stat:
     path: "{{ item }}"
-    state: absent
+    follow: false
   loop: "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}"
+  register: developer_toolchain_terraform_system_path_probes
+
+- name: Remove forbidden Terraform CLI entry points from system paths when present
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    state: absent
+  loop: "{{ developer_toolchain_terraform_system_path_probes.results }}"
   become: true
+  when: item.stat.exists
 
 - name: Discover stale repository-managed Terraform CLI artifacts
   ansible.builtin.find:
@@ -65,10 +82,20 @@
 
 - name: Probe for a residual Terraform CLI on the effective path
   ansible.builtin.command:
-    argv: [bash, -lc, command -v terraform]
+    argv:
+      - /usr/bin/python3
+      - -c
+      - >-
+        import os,shutil,sys;
+        path=shutil.which('terraform', path=os.environ.get('PATH', ''));
+        print(path or '');
+        raise SystemExit(0 if path else 1)
   register: developer_toolchain_terraform_cli_probe
   changed_when: false
   failed_when: false
+  check_mode: false
+  environment:
+    PATH: "{{ local_bin }}:{{ ansible_env.PATH }}"
 
 - name: Require Terraform CLI to be absent after reconciliation
   ansible.builtin.assert:
