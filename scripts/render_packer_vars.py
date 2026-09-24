@@ -32,6 +32,19 @@ def _windows_path(path: Path) -> str:
     return rendered
 
 
+def _bounded_contract_integer(
+    values: dict, key: str, *, minimum: int, maximum: int
+) -> int:
+    value = values.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"Packer resource {key} must be an integer")
+    if value < minimum or value > maximum:
+        raise ValueError(
+            f"Packer resource {key} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
 def render(
     contract_path: Path,
     bundle: Path,
@@ -52,6 +65,13 @@ def render(
         character not in "0123456789abcdef" for character in checksum
     ):
         raise ValueError("Packer ISO SHA256 is invalid")
+    resources = image["build"]["resources"]
+    if resources.get("authority") != "shared-all-hypervisors":
+        raise ValueError("Packer resources must have one shared hypervisor authority")
+    vm_cpus = _bounded_contract_integer(resources, "vcpus", minimum=1, maximum=64)
+    vm_memory_mib = _bounded_contract_integer(
+        resources, "memory_mib", minimum=2048, maximum=262144
+    )
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError("output must be a new path below an existing directory")
     iso = bundle / "iso" / source["iso"]
@@ -100,6 +120,8 @@ def render(
         f"iso_checksum = {json.dumps(checksum)}\n"
         f"offline_bundle_dir = {json.dumps(bundle_path)}\n"
         f"artifact_dir = {json.dumps(artifact_path)}\n"
+        f"vm_cpus = {vm_cpus}\n"
+        f"vm_memory_mib = {vm_memory_mib}\n"
         f"build_ssh_public_key = {json.dumps(public_key)}\n"
         f"build_ssh_private_key_file = {json.dumps(private_key_path)}\n"
     )

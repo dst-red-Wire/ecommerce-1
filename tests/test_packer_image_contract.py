@@ -14,8 +14,10 @@ MACHINE_LOCK = ROOT / "config/contracts/machine-image-lock.yaml"
 TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
 PACKAGE_LOCK = ROOT / "config/artifacts/rocky-10.2-base-packages.lock.json"
 PACKER = ROOT / "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl"
+PACKER_VARIABLES = ROOT / "platform/packer/rocky-10.2/variables.pkr.hcl"
 KICKSTART = ROOT / "platform/packer/rocky-10.2/http/rocky-10.2.ks"
 MATERIALIZER_PATH = ROOT / "scripts/materialize_packer_rpm_repo.py"
+RENDERER_PATH = ROOT / "scripts/render_packer_vars.py"
 INSTALLER = ROOT / "scripts/install_packer_tools.py"
 GENERATOR = ROOT / "scripts/generate_packer_rpm_lock.py"
 REPOCTL_PATH = ROOT / "scripts/repoctl.py"
@@ -24,6 +26,11 @@ SPEC = importlib.util.spec_from_file_location(
 )
 MATERIALIZER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MATERIALIZER)
+RENDERER_SPEC = importlib.util.spec_from_file_location(
+    "render_packer_vars", RENDERER_PATH
+)
+RENDERER = importlib.util.module_from_spec(RENDERER_SPEC)
+RENDERER_SPEC.loader.exec_module(RENDERER)
 REPOCTL_SPEC = importlib.util.spec_from_file_location(
     "repoctl_image_artifact_transport", REPOCTL_PATH
 )
@@ -45,7 +52,9 @@ class PackerImageContractTest(unittest.TestCase):
         cls.image = cls.contract["packer_image"]
         cls.toolchain = json.loads(TOOLCHAIN_LOCK.read_text(encoding="utf-8"))
         cls.package_lock = json.loads(PACKAGE_LOCK.read_text(encoding="utf-8"))
-        cls.packer = PACKER.read_text(encoding="utf-8")
+        cls.packer = PACKER.read_text(encoding="utf-8") + "\n" + PACKER_VARIABLES.read_text(
+            encoding="utf-8"
+        )
         cls.kickstart = KICKSTART.read_text(encoding="utf-8")
         cls.repoctl = REPOCTL_PATH.read_text(encoding="utf-8")
 
@@ -60,6 +69,80 @@ class PackerImageContractTest(unittest.TestCase):
             },
         )
         self.assertEqual(self.image["os"]["architecture"], "x86_64-v3")
+
+    def test_vm_resources_have_one_contract_authority(self):
+        self.assertEqual(
+            {
+                "authority": "shared-all-hypervisors",
+                "vcpus": 2,
+                "memory_mib": 4096,
+            },
+            self.image["build"]["resources"],
+        )
+        self.assertEqual(2, self.packer.count("cpus                 = var.vm_cpus"))
+        self.assertEqual(
+            2, self.packer.count("memory               = var.vm_memory_mib")
+        )
+        self.assertNotIn("cpus                 = 2", self.packer)
+        self.assertNotIn("memory               = 4096", self.packer)
+
+    def test_renderer_projects_shared_vm_resources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            iso = bundle / "iso" / "source.iso"
+            iso.parent.mkdir(parents=True)
+            iso.write_bytes(b"test-iso")
+            (bundle / "rpms/base").mkdir(parents=True)
+            (bundle / "tools/base").mkdir(parents=True)
+            (bundle / "evidence.json").write_text("{}\n", encoding="utf-8")
+            (bundle / "rpms/base/SHA256SUMS").write_text("", encoding="utf-8")
+            (bundle / "tools/base/SHA256SUMS").write_text("", encoding="utf-8")
+            contract = {
+                "packer_image": {
+                    "id": "rocky-10.2-base",
+                    "source": {
+                        "iso": iso.name,
+                        "sha256": hashlib.sha256(b"test-iso").hexdigest(),
+                        "mutable_aliases": "forbidden",
+                    },
+                    "build": {
+                        "resources": {
+                            "authority": "shared-all-hypervisors",
+                            "vcpus": 4,
+                            "memory_mib": 8192,
+                        }
+                    },
+                }
+            }
+            contract_path = root / "contract.yaml"
+            contract_path.write_text(yaml.safe_dump(contract), encoding="utf-8")
+            public_key = root / "build.pub"
+            private_key = root / "build"
+            public_key.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
+            private_key.write_text("test\n", encoding="utf-8")
+            output = root / "generated.pkrvars.hcl"
+            RENDERER.render(
+                contract_path,
+                bundle,
+                public_key,
+                private_key,
+                output,
+                target_platform="linux",
+            )
+            rendered = output.read_text(encoding="utf-8")
+            self.assertIn("vm_cpus = 4\n", rendered)
+            self.assertIn("vm_memory_mib = 8192\n", rendered)
+
+    def test_renderer_rejects_invalid_vm_resources(self):
+        with self.assertRaisesRegex(TypeError, "vcpus must be an integer"):
+            RENDERER._bounded_contract_integer(
+                {"vcpus": True}, "vcpus", minimum=1, maximum=64
+            )
+        with self.assertRaisesRegex(ValueError, "memory_mib must be between"):
+            RENDERER._bounded_contract_integer(
+                {"memory_mib": 1024}, "memory_mib", minimum=2048, maximum=262144
+            )
 
     def test_profile_roots_have_one_central_definition(self):
         profiles = self.image["profiles"]

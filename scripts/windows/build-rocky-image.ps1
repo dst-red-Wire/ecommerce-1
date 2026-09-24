@@ -96,7 +96,9 @@ try {
     $buildArtifacts = Join-Path $stageRoot 'artifacts'
     [void](New-Item -ItemType Directory -Path $sourceRoot)
     [void](New-Item -ItemType Directory -Path $buildArtifacts)
-    Copy-Item -LiteralPath (Join-Path $root 'platform\packer\rocky-10.2\rocky-10.2.pkr.hcl') -Destination $sourceRoot
+    foreach ($definition in @('rocky-10.2.pkr.hcl', 'variables.pkr.hcl')) {
+        Copy-Item -LiteralPath (Join-Path $root "platform\packer\rocky-10.2\$definition") -Destination $sourceRoot
+    }
     Copy-Item -LiteralPath (Join-Path $root 'platform\packer\rocky-10.2\http') -Destination $sourceRoot -Recurse
     $initialMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $stageRoot
     $ownedBuildVm = 'ecommerce-rocky-10-2-build-rke2'

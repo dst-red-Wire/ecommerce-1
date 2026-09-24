@@ -493,6 +493,10 @@ tooling:
     guest_configuration:
       authority: ansible
       execution_environment: developer-environment
+    build_resources:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.resources
+      projection: generated-packer-variables
+      overrides: forbidden
     repository_entrypoint:
       authority: make
       execution_environment: developer-environment

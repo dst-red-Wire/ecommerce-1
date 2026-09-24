@@ -6,6 +6,10 @@ artifact, architecture, checksum, scope and installation method. The RPM lock in
 `config/artifacts/rocky-10.2-base-packages.lock.json` is a generated projection,
 not a second authority.
 
+`variables.pkr.hcl` is the typed Packer interface. Its values are rendered from
+the central contract into a host-local `rocky-10.2.auto.pkrvars.hcl`; generated
+paths, checksums and temporary key material are never committed.
+
 ## Profiles
 
 - `rocky-10.2-base` is a logical shared component: minimal administration,

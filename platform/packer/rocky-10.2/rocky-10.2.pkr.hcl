@@ -16,58 +16,6 @@ packer {
   }
 }
 
-variable "iso_url" {
-  type = string
-}
-
-variable "iso_checksum" {
-  type      = string
-  sensitive = true
-}
-
-variable "build_ssh_public_key" {
-  type      = string
-  sensitive = true
-
-  validation {
-    condition     = can(regex("^ssh-(ed25519|rsa) [A-Za-z0-9+/]+={0,3}(?: [A-Za-z0-9._@-]+)?$", trimspace(var.build_ssh_public_key)))
-    error_message = "The build SSH public key must contain one OpenSSH public key."
-  }
-}
-
-variable "build_ssh_private_key_file" {
-  type      = string
-  sensitive = true
-
-  validation {
-    condition     = length(trimspace(var.build_ssh_private_key_file)) > 0
-    error_message = "The build SSH private key file must reference the runtime-injected private key."
-  }
-}
-
-variable "offline_bundle_dir" {
-  type = string
-}
-
-variable "artifact_dir" {
-  type = string
-
-  validation {
-    condition     = length(trimspace(var.artifact_dir)) > 3
-    error_message = "Artifact_dir must reference a host-local build staging directory."
-  }
-}
-
-variable "image_profile" {
-  type    = string
-  default = "rke2"
-
-  validation {
-    condition     = contains(["rke2", "admin-qualification"], var.image_profile)
-    error_message = "Image_profile must be rke2 or admin-qualification."
-  }
-}
-
 locals {
   image_name = "rocky-10.2-${var.image_profile}"
   vm_name    = "ecommerce-rocky-10-2-build-${var.image_profile}"
@@ -96,8 +44,8 @@ source "virtualbox-iso" "base" {
   shutdown_command     = "true"
   guest_additions_mode = "disable"
   disk_size            = 32768
-  cpus                 = 2
-  memory               = 4096
+  cpus                 = var.vm_cpus
+  memory               = var.vm_memory_mib
   hard_drive_interface = "sata"
   format               = "ova"
   output_directory     = "${var.artifact_dir}/${local.image_name}-virtualbox"
@@ -122,8 +70,8 @@ source "qemu" "base" {
   disk_size            = "32G"
   disk_interface       = "virtio"
   format               = "qcow2"
-  cpus                 = 2
-  memory               = 4096
+  cpus                 = var.vm_cpus
+  memory               = var.vm_memory_mib
   net_device           = "virtio-net"
   output_directory     = "${var.artifact_dir}/${local.image_name}-kvm"
 }

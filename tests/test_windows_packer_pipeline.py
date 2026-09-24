@@ -11,6 +11,7 @@ MACHINE_LOCK = ROOT / "config/contracts/machine-image-lock.yaml"
 TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
 CAPABILITIES = ROOT / "config/toolchain/capabilities.json"
 PACKER = ROOT / "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl"
+PACKER_VARIABLES = ROOT / "platform/packer/rocky-10.2/variables.pkr.hcl"
 VAGRANTFILE = ROOT / "platform/vagrant/rocky-image-smoke/Vagrantfile"
 WINDOWS = ROOT / "scripts/windows"
 
@@ -22,7 +23,9 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         cls.machine = yaml.safe_load(MACHINE_LOCK.read_text(encoding="utf-8"))
         cls.toolchain = json.loads(TOOLCHAIN_LOCK.read_text(encoding="utf-8"))
         cls.capabilities = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
-        cls.packer = PACKER.read_text(encoding="utf-8")
+        cls.packer = PACKER.read_text(encoding="utf-8") + "\n" + PACKER_VARIABLES.read_text(
+            encoding="utf-8"
+        )
         cls.vagrant = VAGRANTFILE.read_text(encoding="utf-8")
         cls.preflight = (WINDOWS / "packer-preflight.ps1").read_text(encoding="utf-8")
         cls.build = (WINDOWS / "build-rocky-image.ps1").read_text(encoding="utf-8")
@@ -101,6 +104,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             self.assertIn(f'version = "= {version}"', block.group("body"))
         self.assertIn("artifact_dir", self.packer)
         self.assertIn("ecommerce-rocky-10-2-build-${var.image_profile}", self.packer)
+        self.assertIn("'variables.pkr.hcl'", self.build)
 
     def test_build_qualification_and_release_are_separate(self):
         self.assertNotIn("qualify-rocky-image.ps1", self.build)

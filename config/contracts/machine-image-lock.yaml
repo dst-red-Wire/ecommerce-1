@@ -155,6 +155,10 @@ packer_image:
 
   build:
     packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
+    resources:
+      authority: shared-all-hypervisors
+      vcpus: 2
+      memory_mib: 4096
     host_tool_versions:
       virtualbox: config/contracts/toolchain-lock.json#versions.VIRTUALBOX_VERSION
       vagrant: config/contracts/toolchain-lock.json#versions.VAGRANT_VERSION

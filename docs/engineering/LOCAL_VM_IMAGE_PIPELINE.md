@@ -88,6 +88,7 @@ produce the same logical Rocky base and never invoke Ansible from Packer.
 ```text
 platform/packer/rocky-10.2/
   rocky-10.2.pkr.hcl
+  variables.pkr.hcl
   http/rocky-10.2.ks
 
 platform/vagrant/rocky-image-smoke/
@@ -107,6 +108,12 @@ The repository forbids tracked Shell automation, so there is deliberately no
 `provision.sh`. Kickstart installs the minimal bootable base. Packer's inline,
 checksum-gated offline commands establish only immutable image state. Ansible
 remains the guest and cluster configuration authority.
+
+The generated `rocky-10.2.auto.pkrvars.hcl` exists only in the host-local build
+staging directory. It is a deterministic projection of the central contract plus
+ephemeral paths and SSH key material, so it is never source-controlled. Likewise,
+the staged `SHA256SUMS` files are generated from the locked ISO/RPM/tool manifests
+rather than maintained as a competing checksum authority.
 
 ## Windows/WSL2 prerequisites and preflight
 
@@ -192,6 +199,14 @@ loopback-only forwarded SSH port. Every external command, SSH attempt and QEMU
 process is bounded. The overlay, process and ephemeral key are removed before
 qualification can pass. `OFFLINE=1` has the same fail-closed cache semantics as
 the Windows profile.
+
+## Shared VM resource authority
+
+`config/contracts/machine-image-lock.yaml#packer_image.build.resources` is the
+only configurable authority for VM vCPU and memory sizing. The renderer emits
+`vm_cpus` and `vm_memory_mib` into the generated `.pkrvars.hcl`; both the
+VirtualBox and QEMU builders consume those variables and local overrides are
+forbidden.
 
 ## ORAS distribution and local cache
 
