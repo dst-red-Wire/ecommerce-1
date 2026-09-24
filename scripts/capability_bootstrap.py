@@ -114,8 +114,8 @@ def load_toolchain_lock(path: Path = TOOLCHAIN_LOCK) -> dict:
             raise ValueError(f"{name}: unsupported platform contract")
         if not tool.get("install") or not tool.get("binary") or not tool.get("version_command"):
             raise ValueError(f"{name}: install and version verification contract is incomplete")
-    rejected = contract.get("rejected_tools", {})
-    if rejected.get("hyperfine", {}).get("install") != "forbidden-until-a-distinct-consumer-is-contracted":
+    rejected = contract.get("tool_lifecycle", {}).get("rejected", {})
+    if "hyperfine" not in rejected:
         raise ValueError("hyperfine must remain rejected while qualification timing owns the capability")
     return contract
 
@@ -412,7 +412,19 @@ Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
 def default_runner(command: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join(
+            [*(str(path) for path in MANAGED_BIN_DIRS), env.get("PATH", "")]
+        )
+        return subprocess.run(
+            command,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
     except OSError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 

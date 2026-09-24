@@ -352,8 +352,16 @@ supply_chain:
 
 tooling:
   registry: architecture.lock.yaml#machine_contracts.toolchain_lock
-  registry_scope: versions-sources-checksums-platforms-installation
+  registry_scope: lifecycle-versions-sources-checksums-platforms-installation-consumers-scenarios
   architecture_scope: capabilities-responsibilities-authorities-relations
+  closure: mandatory-fail-closed
+  undeclared_tool: forbidden
+  incomplete_active_tool: forbidden
+  orphan_version_or_checksum: forbidden
+  parallel_tool_authority: forbidden
+  doctor_inventory: derived-from-toolchain-registry-and-capability-graph
+  installer_inventory: derived-from-toolchain-registry
+  gate_executable_inventory: closed-by-capability-graph
   container:
     local_runtime: {authority: docker-engine, mode: rootless, environment: wsl2}
     image_builder:

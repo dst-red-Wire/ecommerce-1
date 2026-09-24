@@ -9,7 +9,7 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, kube_bench, cosign, sops, age, kubectl, helm, terraform, kustomize, kind, ansible_lint, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, terraform, kustomize, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -36,7 +36,7 @@
   register: ansible_lint_pipx_probe
   failed_when: false
   changed_when: false
-  tags: [toolchain, ansible_lint]
+  tags: [toolchain, ansible_lint, pre_commit]
 
 - name: Ensure ansible-lint pipx prerequisite
   ansible.builtin.apt:
@@ -46,7 +46,7 @@
     cache_valid_time: 86400
   become: true
   when: ansible_lint_pipx_probe.rc != 0
-  tags: [toolchain, ansible_lint]
+  tags: [toolchain, ansible_lint, pre_commit]
 
 - name: Download pinned Node archive
   ansible.builtin.get_url:
@@ -174,22 +174,6 @@
     force: true
   tags: [toolchain, sqlc]
 
-- name: Download pinned yq
-  ansible.builtin.get_url:
-    url: "https://github.com/mikefarah/yq/releases/download/v{{ yq_version }}/yq_linux_amd64"
-    dest: "{{ local_share }}/tools/yq-{{ yq_version }}"
-    checksum: "sha256:{{ yq_sha256 }}"
-    mode: '0755'
-  tags: [toolchain, context_tools]
-
-- name: Link yq into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/yq-{{ yq_version }}"
-    dest: "{{ local_bin }}/yq"
-    state: link
-    force: true
-  tags: [toolchain, context_tools]
-
 - name: Download pinned ripgrep archive
   ansible.builtin.get_url:
     url: "https://github.com/BurntSushi/ripgrep/releases/download/{{ ripgrep_version }}/ripgrep-{{ ripgrep_version }}-x86_64-unknown-linux-musl.tar.gz"
@@ -210,30 +194,6 @@
   ansible.builtin.file:
     src: "{{ local_share }}/tools/ripgrep-{{ ripgrep_version }}-x86_64-unknown-linux-musl/rg"
     dest: "{{ local_bin }}/rg"
-    state: link
-    force: true
-  tags: [toolchain, context_tools]
-
-- name: Download pinned fd archive
-  ansible.builtin.get_url:
-    url: "https://github.com/sharkdp/fd/releases/download/v{{ fd_version }}/fd-v{{ fd_version }}-x86_64-unknown-linux-musl.tar.gz"
-    dest: "{{ local_cache }}/fd-{{ fd_version }}.tar.gz"
-    checksum: "sha256:{{ fd_sha256 }}"
-    mode: '0644'
-  tags: [toolchain, context_tools]
-
-- name: Extract pinned fd
-  ansible.builtin.unarchive:
-    src: "{{ local_cache }}/fd-{{ fd_version }}.tar.gz"
-    dest: "{{ local_share }}/tools"
-    remote_src: true
-    creates: "{{ local_share }}/tools/fd-v{{ fd_version }}-x86_64-unknown-linux-musl/fd"
-  tags: [toolchain, context_tools]
-
-- name: Link fd into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/fd-v{{ fd_version }}-x86_64-unknown-linux-musl/fd"
-    dest: "{{ local_bin }}/fd"
     state: link
     force: true
   tags: [toolchain, context_tools]
@@ -356,8 +316,14 @@
     checksum: "sha256:{{ toolchain_lock.versions[item.value.sha256_ref] }}"
     mode: '0644'
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
 
 - name: Create registry-managed archive tool directories
   ansible.builtin.file:
@@ -365,8 +331,14 @@
     state: directory
     mode: '0755'
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
 
 - name: Extract registry-managed archive tools
   ansible.builtin.unarchive:
@@ -375,8 +347,14 @@
     remote_src: true
     creates: "{{ local_share }}/tools/{{ item.key }}-{{ toolchain_lock.versions[item.value.version_ref] }}/{{ item.value.install.binary_relative }}"
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
 
 - name: Link registry-managed archive tools into the user path
   ansible.builtin.file:
@@ -385,8 +363,14 @@
     state: link
     force: true
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'archive') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, packer, trivy, gitleaks, gosec, kube_bench, age]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, packer, trivy, gitleaks, gosec, kube_bench, age]
 
 - name: Download registry-managed standalone binaries
   ansible.builtin.get_url:
@@ -395,8 +379,14 @@
     checksum: "sha256:{{ toolchain_lock.versions[item.value.sha256_ref] }}"
     mode: '0755'
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'binary') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, docker_buildx, cosign, sops]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops]
 
 - name: Link registry-managed standalone binaries into the user path
   ansible.builtin.file:
@@ -405,8 +395,14 @@
     state: link
     force: true
   loop: "{{ managed_tools | dict2items | selectattr('value.install.type', 'equalto', 'binary') }}"
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or (item.key | replace('-', '_')) in ansible_run_tags"
-  tags: [toolchain, docker_buildx, cosign, sops]
+  when:
+    - item.key in active_tool_names
+    - toolchain_lock.tool_lifecycle.active[item.key].provision.type == 'ansible'
+    - >-
+      'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or
+      (item.key | replace('-', '_')) in ansible_run_tags or
+      toolchain_lock.tool_lifecycle.active[item.key].provision.tags in ansible_run_tags
+  tags: [toolchain, context_tools, docker_buildx, cosign, sops]
 
 - name: Create the user-local Docker CLI plugin directory
   ansible.builtin.file:
@@ -414,6 +410,7 @@
     state: directory
     mode: '0755'
   tags: [toolchain, docker_buildx]
+  when: "'docker-buildx' in active_tool_names"
 
 - name: Link the pinned Buildx binary as a Docker CLI plugin
   ansible.builtin.file:
@@ -422,6 +419,7 @@
     state: link
     force: true
   tags: [toolchain, docker_buildx]
+  when: "'docker-buildx' in active_tool_names"
 
 - name: Validate the pinned Docker Buildx CLI plugin
   ansible.builtin.command:
@@ -433,6 +431,7 @@
     ('v' ~ toolchain_lock.versions[managed_tools['docker-buildx'].version_ref]) not in
     (docker_buildx_current.stdout ~ docker_buildx_current.stderr)
   tags: [toolchain, docker_buildx]
+  when: "'docker-buildx' in active_tool_names"
 
 - name: Download the exact Skopeo distribution package
   ansible.builtin.get_url:
@@ -627,74 +626,33 @@
     force: true
   tags: [toolchain, agent_tools]
 
-- name: Define isolated Python CLI pins
-  ansible.builtin.set_fact:
-    developer_pipx_packages:
-      - { name: ansible-lint, package: ansible-lint, version: "{{ ansible_lint_version }}", spec: "ansible-lint=={{ ansible_lint_version }}" }
-      - { name: pre-commit, package: pre-commit, version: "{{ pre_commit_version }}", spec: "pre-commit=={{ pre_commit_version }}" }
-      - { name: molecule, package: molecule, version: "{{ molecule_version }}", spec: "molecule=={{ molecule_version }}" }
-      - { name: ansible-runner, package: ansible-runner, version: "{{ ansible_runner_version }}", spec: "ansible-runner=={{ ansible_runner_version }}" }
-      - { name: ansible-builder, package: ansible-builder, version: "{{ ansible_builder_version }}", spec: "ansible-builder=={{ ansible_builder_version }}" }
-      - name: ansible-navigator
-        package: ansible-navigator
-        version: "{{ ansible_navigator_version }}"
-        spec: "ansible-navigator=={{ ansible_navigator_version }}"
-      - { name: ggshield, package: ggshield, version: "{{ ggshield_version }}", spec: "ggshield=={{ ggshield_version }}" }
-      - { name: checkov, package: checkov, version: "{{ checkov_version }}", spec: "checkov=={{ checkov_version }}" }
-      - { name: semgrep, package: semgrep, version: "{{ semgrep_version }}", spec: "semgrep=={{ semgrep_version }}" }
-      - { name: cve-bin-tool, package: cve-bin-tool, version: "{{ cve_bin_tool_version }}", spec: "cve-bin-tool=={{ cve_bin_tool_version }}" }
-  tags: [toolchain, ansible_lint]
-
 - name: Read installed pipx package versions
   ansible.builtin.command:
-    argv: [pipx, runpip, "{{ item.name }}", show, "{{ item.package }}"]
-  loop: >-
-    {{ developer_pipx_packages | selectattr('name', 'equalto', 'ansible-lint') | list
-       if 'ansible_lint' in ansible_run_tags and 'all' not in ansible_run_tags and 'toolchain' not in ansible_run_tags
-       else developer_pipx_packages }}
+    argv: [pipx, runpip, "{{ item.key }}", show, "{{ item.value.provision.package }}"]
+  loop: "{{ toolchain_lock.tool_lifecycle.active | dict2items }}"
   register: developer_pipx_checks
   failed_when: false
   changed_when: false
-  tags: [toolchain, ansible_lint]
+  when:
+    - item.value.provision.type == 'pipx'
+    - "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or item.value.provision.tags in ansible_run_tags"
+  tags: [toolchain, ansible_lint, pre_commit]
 
 - name: Install only missing or mismatched pipx packages
   ansible.builtin.command:
-    argv: [pipx, install, --force, "{{ item.item.spec }}"]
-  loop: "{{ developer_pipx_checks.results }}"
-  when: "item.rc != 0 or ('Version: ' + item.item.version) not in item.stdout"
-  changed_when: true
-  tags: [toolchain, ansible_lint]
-
-- name: Check Molecule Docker plugin version
-  ansible.builtin.command:
-    argv: [pipx, runpip, molecule, show, molecule-plugins]
-  register: molecule_plugins_check
-  failed_when: false
-  changed_when: false
-  tags: [toolchain]
-
-- name: Check Molecule Testinfra version
-  ansible.builtin.command:
-    argv: [pipx, runpip, molecule, show, pytest-testinfra]
-  register: testinfra_check
-  failed_when: false
-  changed_when: false
-  tags: [toolchain]
-
-- name: Inject pinned Molecule Docker and Testinfra helpers when needed
-  ansible.builtin.command:
     argv:
       - pipx
-      - inject
+      - install
       - --force
-      - molecule
-      - "molecule-plugins[docker]=={{ molecule_docker_version }}"
-      - "pytest-testinfra=={{ testinfra_version }}"
-  when: >-
-    molecule_plugins_check.rc != 0 or ('Version: ' + molecule_docker_version) not in molecule_plugins_check.stdout or
-    testinfra_check.rc != 0 or ('Version: ' + testinfra_version) not in testinfra_check.stdout
+      - "{{ item.item.value.provision.package }}=={{ toolchain_lock.versions[item.item.value.version_ref] }}"
+  loop: "{{ developer_pipx_checks.results }}"
+  when:
+    - not (item.skipped | default(false))
+    - >-
+      item.rc != 0 or
+      ('Version: ' + toolchain_lock.versions[item.item.value.version_ref]) not in item.stdout
   changed_when: true
-  tags: [toolchain]
+  tags: [toolchain, ansible_lint, pre_commit]
 
 - name: Validate pinned Bazel version file
   ansible.builtin.command:
@@ -810,28 +768,3 @@
     state: link
     force: true
   tags: [kubectl]
-
-- name: Download pinned kind
-  ansible.builtin.get_url:
-    url: "https://github.com/kubernetes-sigs/kind/releases/download/v{{ kind_version }}/kind-linux-amd64"
-    dest: "{{ local_share }}/tools/kind-{{ kind_version }}"
-    checksum: "sha256:{{ kind_sha256 }}"
-    mode: '0755'
-  tags: [kind]
-
-- name: Link kind into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/kind-{{ kind_version }}"
-    dest: "{{ local_bin }}/kind"
-    state: link
-    force: true
-  tags: [kind]
-
-- name: Install distribution-provided Docker client
-  ansible.builtin.apt:
-    name: docker.io
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
-  become: true
-  tags: [docker_client]

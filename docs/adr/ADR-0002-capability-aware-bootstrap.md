@@ -10,8 +10,10 @@ is not a prerequisite for API contract tooling, Ansible, Terraform or Kubernetes
 
 ## Decision
 
-`config/toolchain/capabilities.json` is the machine-readable capability contract and
-`config/toolchain/versions.env` remains the sole version authority. The contract separates:
+`config/contracts/toolchain-lock.json` is the unique machine-readable lifecycle, version,
+checksum, provision and scenario authority. `config/toolchain/capabilities.json` is its
+operational capability projection, and `config/toolchain/versions.env` is a generated native
+projection. The capability contract separates:
 
 - runtime `requires`, which determine whether a capability is usable;
 - `provision_requires`, which describe only the mechanism needed to install it;
@@ -27,6 +29,10 @@ absent or version-drifted tools are `FAIL`; unsupported OS/architecture pairs ar
 The public interface is `make bootstrap` for reconciliation and `make env-check` for the
 side-effect-free audit. Reconciliation first probes exact state and does not reinstall
 compliant capabilities. A later run naturally resumes nodes that were blocked.
+
+`scripts/repoctl.py toolchain-closure` closes the registry, capability graph, doctor,
+installers, gates and proofs before bootstrap or qualification. Undeclared tools, incomplete
+active tools, orphan versions/checksums and projection drift fail closed.
 
 OS (`linux`, `darwin`, `windows`), architecture (`amd64`, `arm64`) and execution context
 (`native`, `wsl2`, `ci`, or an explicit `BOOTSTRAP_CONTEXT`) are normalized independently.

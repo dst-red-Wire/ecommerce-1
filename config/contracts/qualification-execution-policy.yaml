@@ -609,7 +609,7 @@ gates:
     command:
       action: security
     ci_fanout: true
-    tools: [gitleaks, git]
+    tools: [gitleaks, trivy, gosec, govulncheck, git]
     validators:
       - scripts/repoctl.py
     inputs:
