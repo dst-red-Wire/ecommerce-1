@@ -227,6 +227,31 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertNotIn("--scanners", trivy_calls[0])
         self.assertEqual("platform/tekton/tasks", trivy_calls[0][-1])
 
+    def test_security_scans_every_go_module_when_workspace_changes(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs.get("cwd")))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            mock.patch.object(MOD, "require", return_value="/managed/tool"),
+            mock.patch.object(MOD, "changed_paths", return_value=["go.work"]),
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+            mock.patch.dict(os.environ, {"BASE": "origin/main", "HEAD": "HEAD"}, clear=False),
+        ):
+            self.assertEqual(0, MOD.security())
+
+        modules = {
+            path
+            for path in [MOD.ROOT / "frontend", *sorted((MOD.ROOT / "services").glob("*"))]
+            if (path / "go.mod").is_file()
+        }
+        gosec_modules = {cwd for argv, cwd in calls if argv[:1] == ["gosec"]}
+        govulncheck_modules = {cwd for argv, cwd in calls if argv[:1] == ["govulncheck"]}
+        self.assertEqual(modules, gosec_modules)
+        self.assertEqual(modules, govulncheck_modules)
+
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "ruff.toml"

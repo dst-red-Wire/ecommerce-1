@@ -12,6 +12,7 @@ import argparse
 import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import functools
 import hashlib
 import json
 import math
@@ -251,6 +252,72 @@ def _security_policy_tool_statuses(root: Path) -> dict[str, str]:
     return statuses
 
 
+@functools.lru_cache(maxsize=None)
+def _ansible_installer_tags(root: Path) -> frozenset[str]:
+    """Return tags attached to an actual installer task, including static imports."""
+    tasks_root = (root / "platform/ansible/roles/developer_toolchain/tasks").resolve()
+    pending = [tasks_root / "main.yml"]
+    visited: set[Path] = set()
+    installer_tags: set[str] = set()
+    installer_modules = {
+        "ansible.builtin.apt",
+        "ansible.builtin.copy",
+        "ansible.builtin.get_url",
+        "ansible.builtin.unarchive",
+    }
+    ruby = require("ruby")
+    loader = (
+        "require 'psych'; require 'json'; "
+        "value = Psych.safe_load_file(ARGV.fetch(0), permitted_classes: [], aliases: true); "
+        "STDOUT.write(JSON.generate(value))"
+    )
+
+    while pending:
+        path = pending.pop().resolve()
+        if path in visited:
+            continue
+        if not path.is_relative_to(tasks_root) or not path.is_file():
+            raise ValueError(f"invalid developer toolchain task import: {path}")
+        visited.add(path)
+        raw = subprocess.run(
+            [ruby, "-e", loader, str(path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if raw.returncode:
+            raise ValueError(raw.stderr.strip() or f"cannot parse Ansible tasks: {path}")
+        tasks = json.loads(raw.stdout)
+        if not isinstance(tasks, list):
+            raise ValueError(f"Ansible task file must contain a list: {path}")
+        for task in tasks:
+            if not isinstance(task, dict):
+                raise ValueError(f"Ansible task file contains a non-mapping task: {path}")
+            imported = task.get("ansible.builtin.import_tasks") or task.get("import_tasks")
+            if isinstance(imported, str) and "{{" not in imported:
+                pending.append(path.parent / imported)
+
+            tags = task.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                raise ValueError(f"Ansible task has invalid tags: {task.get('name', path.name)}")
+            modules = {key for key in task if isinstance(key, str) and "." in key}
+            command_install = (
+                "ansible.builtin.command" in modules
+                and str(task.get("name", "")).lower().startswith("install ")
+            )
+            linked_binary = False
+            file_action = task.get("ansible.builtin.file")
+            if isinstance(file_action, dict):
+                linked_binary = file_action.get("state") == "link"
+            if modules & installer_modules or command_install or linked_binary:
+                installer_tags.update(tags)
+
+    return frozenset(installer_tags)
+
+
 def toolchain_closure_violations(
     lock: dict | None = None,
     graph: dict | None = None,
@@ -325,6 +392,49 @@ def toolchain_closure_violations(
     if len(capabilities) != len(capabilities_list):
         violations.append("capability graph contains duplicate or invalid capabilities")
 
+    execution_dependencies: dict[str, list[str]] = {}
+    all_dependencies: dict[str, list[str]] = {}
+    for name, capability in capabilities.items():
+        normalized: dict[str, list[str]] = {}
+        for field in ("requires", "provision_requires"):
+            dependencies = capability.get(field, [])
+            if (
+                not isinstance(dependencies, list)
+                or not all(isinstance(dependency, str) and dependency for dependency in dependencies)
+                or len(dependencies) != len(set(dependencies))
+            ):
+                violations.append(f"capability {name} has invalid {field}")
+                normalized[field] = []
+                continue
+            normalized[field] = dependencies
+            for dependency in dependencies:
+                if dependency not in capabilities:
+                    violations.append(f"capability {name} requires unknown capability: {dependency}")
+        execution_dependencies[name] = normalized["requires"]
+        all_dependencies[name] = normalized["requires"] + normalized["provision_requires"]
+
+    marks: dict[str, int] = {}
+    reported_cycles: set[frozenset[str]] = set()
+
+    def visit_capability(name: str, trail: list[str]) -> None:
+        if marks.get(name) == 1:
+            cycle = trail[trail.index(name) :] + [name]
+            identity = frozenset(cycle)
+            if identity not in reported_cycles:
+                violations.append("capability dependency cycle: " + " -> ".join(cycle))
+                reported_cycles.add(identity)
+            return
+        if marks.get(name) == 2:
+            return
+        marks[name] = 1
+        for dependency in all_dependencies.get(name, []):
+            if dependency in capabilities:
+                visit_capability(dependency, trail + [name])
+        marks[name] = 2
+
+    for name in capabilities:
+        visit_capability(name, [])
+
     for name, capability in capabilities.items():
         if capability.get("virtual"):
             continue
@@ -393,13 +503,19 @@ def toolchain_closure_violations(
     while changed:
         previous_gates = {name: frozenset(gates) for name, gates in gates_by_capability.items()}
         for name, capability in capabilities.items():
-            for dependency in capability.get("requires", []):
+            for dependency in execution_dependencies.get(name, []):
                 if dependency in gates_by_capability:
                     gates_by_capability[dependency].update(gates_by_capability[name])
             provider = capability.get("provider")
             if provider in gates_by_capability:
                 gates_by_capability[provider].update(gates_by_capability[name])
         changed = any(previous_gates[name] != gates_by_capability[name] for name in gates_by_capability)
+
+    try:
+        installer_tags = _ansible_installer_tags(root)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        installer_tags = frozenset()
+        violations.append(f"developer toolchain installer tags cannot be audited: {exc}")
 
     approved_non_graph_provisioners = {"packer-bundle"}
     for name, entry in active.items():
@@ -423,6 +539,20 @@ def toolchain_closure_violations(
                 violations.append(f"active managed tool {name} has no installer")
             elif provision.get("tags") != projected.get("tags"):
                 violations.append(f"capability installer projection drift: {name}")
+        if isinstance(provision, dict) and provision.get("type") == "ansible":
+            raw_tags = provision.get("tags")
+            declared_tags = (
+                [tag.strip() for tag in raw_tags.split(",") if tag.strip()]
+                if isinstance(raw_tags, str)
+                else []
+            )
+            if not declared_tags:
+                violations.append(f"active tool {name} has no Ansible provision tag")
+            for tag in declared_tags:
+                if tag not in installer_tags:
+                    violations.append(
+                        f"active tool {name} provision tag selects no installer task: {tag}"
+                    )
         checksum_ref = entry.get("checksum_ref")
         if checksum_ref is not None and checksum_ref not in versions:
             violations.append(f"active tool {name} references missing checksum: {checksum_ref}")
@@ -3176,14 +3306,18 @@ def security() -> int:
         print("SKIP trivy: no affected container or configuration input")
 
     module_roots = [ROOT / "frontend", *sorted((ROOT / "services").glob("*"))]
+    scan_all_go_modules = "go.work" in security_paths
     affected_modules = [
         module
         for module in module_roots
         if (module / "go.mod").is_file()
-        and any(
-            path == str(module.relative_to(ROOT))
-            or path.startswith(str(module.relative_to(ROOT)) + "/")
-            for path in security_paths
+        and (
+            scan_all_go_modules
+            or any(
+                path == str(module.relative_to(ROOT))
+                or path.startswith(str(module.relative_to(ROOT)) + "/")
+                for path in security_paths
+            )
         )
     ]
     if affected_modules:

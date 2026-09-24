@@ -165,6 +165,32 @@ class ToolchainClosureTests(unittest.TestCase):
         graph["command_capabilities"]["new-command"] = "go"
         self.assertViolation(self.violations(graph=graph), "capability graph command projection drift")
 
+    def test_unknown_capability_dependency_is_rejected(self):
+        graph = copy.deepcopy(self.graph)
+        graph["capabilities"][0]["requires"] = ["missing-capability"]
+        self.assertViolation(
+            self.violations(graph=graph),
+            "capability python requires unknown capability: missing-capability",
+        )
+
+    def test_capability_dependency_cycle_is_rejected(self):
+        graph = copy.deepcopy(self.graph)
+        by_name = {item["name"]: item for item in graph["capabilities"]}
+        by_name["python"]["requires"] = ["ruby"]
+        by_name["ruby"]["requires"] = ["python"]
+        self.assertViolation(self.violations(graph=graph), "capability dependency cycle:")
+
+    def test_each_ansible_provision_tag_must_select_an_installer_task(self):
+        lock = copy.deepcopy(self.lock)
+        graph = copy.deepcopy(self.graph)
+        lock["tool_lifecycle"]["active"]["trivy"]["provision"]["tags"] = "trivyy"
+        by_name = {item["name"]: item for item in graph["capabilities"]}
+        by_name["trivy"]["provision"]["tags"] = "trivyy"
+        self.assertViolation(
+            self.violations(lock, graph),
+            "active tool trivy provision tag selects no installer task: trivyy",
+        )
+
     def test_molecule_active_without_scenario_is_rejected(self):
         lock = copy.deepcopy(self.lock)
         lock["tool_lifecycle"]["deferred"].pop("molecule")
