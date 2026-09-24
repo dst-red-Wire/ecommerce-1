@@ -126,6 +126,20 @@ class PackerImageContractTest(unittest.TestCase):
             [sources["rocky"]["signing_key"], sources["epel"]["signing_key"]],
         )
 
+    def test_kernel_nevra_matches_the_approved_package_lock(self):
+        kernels = [
+            entry
+            for entry in self.package_lock["profiles"]["base"]["packages"]
+            if entry["package"] == "kernel"
+        ]
+        self.assertEqual(1, len(kernels))
+        kernel = kernels[0]
+        expected = (
+            f"{kernel['package']}-{kernel['epoch']}:{kernel['version']}-"
+            f"{kernel['release']}.{kernel['architecture']}"
+        )
+        self.assertEqual(expected, self.image["kernel"]["nevra"])
+
     def test_materializer_reports_expected_and_actual_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "gh.rpm"

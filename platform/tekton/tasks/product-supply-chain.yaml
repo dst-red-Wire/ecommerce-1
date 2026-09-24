@@ -108,6 +108,11 @@ spec:
         - source
         - --output
         - .context/product-govulncheck-$(params.head).json
+    - name: sync-security-risk-datasets
+      image: $(params.runner-image)
+      workingDir: $(workspaces.source.path)
+      command: [python3, scripts/repoctl.py]
+      args: [security-datasets-sync]
     - name: evaluate-vulnerability-policy
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)

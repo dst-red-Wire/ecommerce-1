@@ -2143,6 +2143,8 @@ def terraform_provider_lock_contract() -> dict:
             raise RuntimeError("OpenTofu qualification must materialize the canonical provider lock")
         if qualification.get("init_lockfile_mode") != "readonly":
             raise RuntimeError("OpenTofu qualification provider lock must be readonly")
+        if qualification.get("providers_args") != ["providers"]:
+            raise RuntimeError("OpenTofu qualification must inspect providers with tofu providers")
         repository_context_paths = qualification.get("repository_context_paths")
         if (
             not isinstance(repository_context_paths, list)
@@ -3709,6 +3711,7 @@ def opentofu_check() -> int:
             print(f"CHECK OpenTofu: {relative}")
             run([tool, *qualification["init_args"]], cwd=validation_dir, env=env)
             run([tool, *qualification["validate_args"]], cwd=validation_dir, env=env)
+            run([tool, *qualification["providers_args"]], cwd=validation_dir, env=env)
 
     providers = ", ".join(
         f"{name}={provider['version']}"

@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
+import math
 import re
 import shutil
 import subprocess
 import sys
-from typing import Any
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 
@@ -316,7 +317,11 @@ def _runtime_evidence_result(
     ):
         return False, f"runtime evidence identity is invalid: {relative}"
     created = evidence.get("created_at_epoch")
-    if isinstance(created, bool) or not isinstance(created, (int, float)):
+    if (
+        isinstance(created, bool)
+        or not isinstance(created, (int, float))
+        or not math.isfinite(float(created))
+    ):
         return False, f"runtime evidence timestamp is invalid: {relative}"
     age = now.timestamp() - float(created)
     if age < 0 or age > maximum_age:

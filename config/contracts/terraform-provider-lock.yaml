@@ -60,6 +60,8 @@ qualification:
     - -lockfile=readonly
   validate_args:
     - validate
+  providers_args:
+    - providers
   provider_plugin_cache:
     root_source: ECOMMERCE_TOOL_HOME
     fallback_root: ~/.cache/ecommerce-1

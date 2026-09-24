@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest import mock
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("roadmap_sync_test", ROOT / "scripts" / "roadmap_sync.py")
@@ -163,6 +163,7 @@ class RoadmapSyncTests(unittest.TestCase):
         for mutation, expected in (
             ({}, "PROVEN"),
             ({"created_at_epoch": (now - timedelta(days=2)).timestamp()}, "IMPLEMENTED"),
+            ({"created_at_epoch": float("nan")}, "IMPLEMENTED"),
             ({"head_sha": "c" * 40}, "IMPLEMENTED"),
             ({"environment": "prod-a"}, "IMPLEMENTED"),
         ):

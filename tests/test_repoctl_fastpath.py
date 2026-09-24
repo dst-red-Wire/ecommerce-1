@@ -48,6 +48,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             "qualification": {
                 "init_args": ["init", "-backend=false", "-input=false", "-lockfile=readonly"],
                 "validate_args": ["validate"],
+                "providers_args": ["providers"],
                 "provider_plugin_cache": {},
                 "repository_context_paths": ["config/infrastructure"],
             },
@@ -77,6 +78,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         self.assertTrue(calls)
         self.assertTrue(all(call[0] == "/opt/bin/tofu" for call in calls))
+        self.assertTrue(any(call[1:] == ["providers"] for call in calls))
 
     def test_terraform_provider_lock_is_central_and_exact(self):
         contract = MOD.terraform_provider_lock_contract()
@@ -98,6 +100,7 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertEqual("non-authoritative", qualification["repository_lockfiles"]["authority"])
         self.assertFalse(qualification["repository_lockfiles"]["qualification_input"])
         self.assertIn("-lockfile=readonly", qualification["init_args"])
+        self.assertEqual(["providers"], qualification["providers_args"])
         self.assertEqual(["config/infrastructure"], qualification["repository_context_paths"])
 
     def test_terraform_native_lockfile_is_generated_from_central_contract(self):

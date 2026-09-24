@@ -10,10 +10,10 @@ import re
 import statistics
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from collections.abc import Callable
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -509,6 +509,10 @@ def evaluate_experiment(
         not isinstance(result, dict)
         or not isinstance(result.get("baseline"), (int, float))
         or not isinstance(result.get("measured"), (int, float))
+        or isinstance(result.get("baseline"), bool)
+        or isinstance(result.get("measured"), bool)
+        or not math.isfinite(float(result["baseline"]))
+        or not math.isfinite(float(result["measured"]))
     ):
         raise TypeError(
             "experiment result must define numeric baseline and measured values"
@@ -796,7 +800,11 @@ def _runtime_capability_evidence(
     if evidence.get("head_sha") != head or evidence.get("head_tree_sha") != tree:
         return False, f"runtime evidence has wrong SHA or tree: {relative}"
     created = evidence.get("created_at_epoch")
-    if not isinstance(created, (int, float)):
+    if (
+        isinstance(created, bool)
+        or not isinstance(created, (int, float))
+        or not math.isfinite(float(created))
+    ):
         return False, f"runtime evidence timestamp is invalid: {relative}"
     age = now.timestamp() - float(created)
     if age < 0 or age > maximum_age:

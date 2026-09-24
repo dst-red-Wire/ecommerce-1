@@ -18,7 +18,7 @@ Policy version 3 corrects a governance inconsistency in the earlier evaluator: t
 
 KEV and EPSS are refreshed explicitly with `make security-datasets-sync`. The command records official source URLs, snapshot time, checksum, and provenance below `.context/security-datasets/`. Qualification never calls those volatile endpoints. Missing, corrupt, or stale datasets block decisions that need enrichment. An absence of findings records `NOT_REQUIRED_NO_FINDINGS`; it is not represented as a verified dataset.
 
-Exceptions are JSON records below `.context/security-exceptions/`, are bound to the finding and artifact, and expire automatically. Their approval uses the repository's existing exact-SHA owner-authorization syntax. `ignore: true` is not an exception.
+Exceptions are JSON records below `.context/security-exceptions/`, are bound to the finding and artifact, and expire automatically. Their approval uses the repository's existing exact-SHA owner-authorization syntax and must be supplied by a trusted out-of-band verifier; a predictable command copied into local JSON is never sufficient. `ignore: true` is not an exception.
 
 ## Metrics, SLOs, and product outcomes
 

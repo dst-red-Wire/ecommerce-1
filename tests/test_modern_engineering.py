@@ -1,7 +1,6 @@
 import copy
 import importlib.util
 import json
-import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -213,6 +212,7 @@ class ModernEngineeringTest(unittest.TestCase):
                     {"created_at_epoch": (NOW - timedelta(days=2)).timestamp()},
                     "stale or future-dated",
                 ),
+                ({"created_at_epoch": float("nan")}, "timestamp is invalid"),
                 ({"capabilities": ["another-capability"]}, "does not claim"),
                 ({"environment": "development"}, "invalid environment"),
                 ({"runtime_identity": {"kind": "rke2-cluster"}}, "identity is invalid"),
@@ -450,6 +450,17 @@ class ModernEngineeringTest(unittest.TestCase):
         invalid["change_sha"] = "HEAD"
         with self.assertRaisesRegex(ValueError, "exact"):
             MOD.validate_experiment(invalid, self.policy)
+        for invalid_result in (
+            {"baseline": True, "measured": 70},
+            {"baseline": 100, "measured": float("nan")},
+            {"baseline": float("inf"), "measured": 70},
+        ):
+            with self.subTest(result=invalid_result), self.assertRaisesRegex(
+                TypeError, "numeric baseline"
+            ):
+                MOD.evaluate_experiment(
+                    {**experiment, "result": invalid_result}, self.policy
+                )
 
 
 if __name__ == "__main__":

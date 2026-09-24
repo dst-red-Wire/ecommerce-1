@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+import architecture_authority
 import qualification_cache
 
 UTC = timezone.utc
@@ -145,6 +146,9 @@ def validate_policy(policy: dict[str, Any]) -> None:
     if (
         not isinstance(exceptions, dict)
         or set(exceptions.get("required_fields", [])) != required
+        or exceptions.get("approval_authentication")
+        != "trusted-out-of-band-owner-record-required"
+        or exceptions.get("untrusted_local_record") != "BLOCK"
     ):
         raise ValueError("security exception required fields are invalid")
     evidence = policy.get("evidence")
@@ -858,6 +862,7 @@ def _exception_for(
     head_sha: str,
     environment: str,
     now: datetime,
+    trusted_owner_authorizations: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     matches = [
@@ -901,10 +906,23 @@ def _exception_for(
             errors.append(f"exception {finding['finding_id']} is expired")
     except ValueError as exc:
         errors.append(str(exc))
-    expected_approval = f"/owner-authorization approve scope=vulnerability-exception:{finding['finding_id']} sha={head_sha}"
-    if item["approval"] != expected_approval:
+    approval_scope = f"vulnerability-exception:{finding['finding_id']}"
+    trust = trusted_owner_authorizations.get(item["approval"])
+    if not isinstance(trust, dict):
         errors.append(
-            f"exception {finding['finding_id']} approval is not exact-SHA owner authorization"
+            f"exception {finding['finding_id']} owner authorization is not authenticated"
+        )
+    else:
+        authorization_errors = architecture_authority.owner_authorization_errors(
+            item["approval"],
+            expected_scope=approval_scope,
+            head_sha=head_sha,
+            decision_authority=trust.get("decision_authority"),
+            recording_agent=trust.get("recording_agent"),
+            explicit_owner_instruction=trust.get("explicit_owner_instruction") is True,
+        )
+        errors.extend(
+            f"exception {finding['finding_id']} {error}" for error in authorization_errors
         )
     return (item if not errors else None), errors
 
@@ -915,6 +933,7 @@ def evaluate(
     root: Path,
     *,
     now: datetime | None = None,
+    trusted_owner_authorizations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     validate_policy(policy)
     evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
@@ -962,11 +981,16 @@ def evaluate(
     if not isinstance(scanner_runs, list):
         scanner_runs = []
         reasons.append("scanner run inventory is malformed")
-    scanner_index = {
-        str(item.get("name")): item
-        for item in scanner_runs
-        if isinstance(item, dict) and item.get("name")
-    }
+    scanner_index: dict[str, dict[str, Any]] = {}
+    for item in scanner_runs:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name or name != name.strip():
+            reasons.append("scanner run is malformed")
+            continue
+        if name in scanner_index:
+            reasons.append(f"duplicate scanner run: {name}")
+            continue
+        scanner_index[name] = item
     claimed_scanners = payload.get("required_scanners", [])
     if not isinstance(claimed_scanners, list) or not all(
         isinstance(scanner, str) and scanner for scanner in claimed_scanners
@@ -1045,6 +1069,11 @@ def evaluate(
     if not isinstance(exceptions, list):
         reasons.append("security exceptions are malformed")
         exceptions = []
+    if trusted_owner_authorizations is None:
+        trusted_owner_authorizations = {}
+    elif not isinstance(trusted_owner_authorizations, dict):
+        reasons.append("trusted owner authorization inventory is malformed")
+        trusted_owner_authorizations = {}
     decisions: list[dict[str, Any]] = []
     exceptions_used: list[dict[str, Any]] = []
     threshold = float(policy["vulnerability_policy"]["epss_blocking_threshold"])
@@ -1148,6 +1177,7 @@ def evaluate(
             head_sha=head_sha,
             environment=environment,
             now=evaluated_at,
+            trusted_owner_authorizations=trusted_owner_authorizations,
         )
         reasons.extend(exception_errors)
         if decision == "BLOCK" and exception is not None:
@@ -1192,16 +1222,8 @@ def evaluate(
     if any(item["decision"] == "BLOCK" for item in decisions):
         reasons.append("one or more vulnerability policy decisions are blocking")
     final = "BLOCK" if reasons else "PASS"
-    versions = {
-        str(item.get("name")): item.get("version")
-        for item in scanner_runs
-        if isinstance(item, dict)
-    }
-    checksums = {
-        str(item.get("name")): item.get("checksum")
-        for item in scanner_runs
-        if isinstance(item, dict)
-    }
+    versions = {name: item.get("version") for name, item in scanner_index.items()}
+    checksums = {name: item.get("checksum") for name, item in scanner_index.items()}
     return {
         "schema_version": int(policy["evidence"]["schema_version"]),
         "base_sha": base_sha,

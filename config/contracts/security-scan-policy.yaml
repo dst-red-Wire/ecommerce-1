@@ -181,6 +181,8 @@ risk_datasets:
 exceptions:
   format: machine-readable-json
   authority: architecture.lock.yaml#repository_governance.owner_authorization
+  approval_authentication: trusted-out-of-band-owner-record-required
+  untrusted_local_record: BLOCK
   root: .context/security-exceptions
   required_fields:
     - finding_id

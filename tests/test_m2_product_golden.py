@@ -182,8 +182,19 @@ class ProductGoldenServiceContractTest(unittest.TestCase):
         )
         self.assertNotIn("buildah", commands)
         self.assertIn("govulncheck-scan", source)
+        self.assertIn("security-datasets-sync", source)
         self.assertIn("vulnerability-evaluate", source)
         self.assertNotIn("cve-evaluate", source)
+        scan_task = next(
+            task
+            for task in tasks
+            if task["metadata"]["name"] == "ecommerce-product-scan-sbom"
+        )
+        scan_steps = [step["name"] for step in scan_task["spec"]["steps"]]
+        self.assertLess(
+            scan_steps.index("sync-security-risk-datasets"),
+            scan_steps.index("evaluate-vulnerability-policy"),
+        )
         self.assertIn(
             "$(params.image-repository)@$(tasks.build-push.results.image-digest)",
             source,

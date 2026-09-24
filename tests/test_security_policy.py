@@ -118,8 +118,13 @@ class SecurityPolicyTest(unittest.TestCase):
         return payload
 
     def evaluate(self, findings, **values):
+        trusted_owner_authorizations = values.pop("_trusted_owner_authorizations", None)
         return SECURITY.evaluate(
-            self.payload(findings, **values), POLICY, self.root, now=NOW
+            self.payload(findings, **values),
+            POLICY,
+            self.root,
+            now=NOW,
+            trusted_owner_authorizations=trusted_owner_authorizations,
         )
 
     def exception(self, finding, **values):
@@ -189,12 +194,36 @@ class SecurityPolicyTest(unittest.TestCase):
     def test_valid_temporary_exception_is_exact_and_expiring(self):
         finding = self.finding("HIGH")
         self.datasets(scores={finding["finding_id"]: 0.1})
-        evidence = self.evaluate([finding], exceptions=[self.exception(finding)])
+        exception = self.exception(finding)
+        evidence = self.evaluate(
+            [finding],
+            exceptions=[exception],
+            _trusted_owner_authorizations={
+                exception["approval"]: {
+                    "decision_authority": "repository-owner",
+                    "recording_agent": "ChatGPT",
+                    "explicit_owner_instruction": True,
+                }
+            },
+        )
         self.assertEqual("PASS", evidence["final_result"])
         self.assertEqual(
             "ACCEPTED_TEMPORARILY", evidence["policy_decisions"][0]["decision"]
         )
         self.assertEqual(1, len(evidence["exceptions_used"]))
+
+    def test_local_exception_cannot_forge_owner_authorization(self):
+        finding = self.finding("HIGH")
+        self.datasets(scores={finding["finding_id"]: 0.1})
+        evidence = self.evaluate([finding], exceptions=[self.exception(finding)])
+        self.assertEqual("BLOCK", evidence["final_result"])
+        self.assertTrue(
+            any(
+                "owner authorization is not authenticated" in reason
+                for reason in evidence["reasons"]
+            )
+        )
+        self.assertEqual([], evidence["exceptions_used"])
 
     def test_exception_validation_is_fail_closed(self):
         finding = self.finding("HIGH")
@@ -243,6 +272,18 @@ class SecurityPolicyTest(unittest.TestCase):
                 self.assertTrue(
                     any(expected in reason for reason in evidence["reasons"])
                 )
+
+    def test_duplicate_and_malformed_scanner_runs_fail_closed(self):
+        duplicate = self.payload([])["scanner_runs"] * 2
+        for runs, expected in (
+            (duplicate, "duplicate scanner run: trivy"),
+            ([{"name": " trivy", "status": "PASS"}], "scanner run is malformed"),
+            (["trivy"], "scanner run is malformed"),
+        ):
+            with self.subTest(expected=expected):
+                evidence = self.evaluate([], scanner_runs=runs)
+                self.assertEqual("BLOCK", evidence["final_result"])
+                self.assertIn(expected, evidence["reasons"])
 
     def test_required_scanners_are_derived_from_scope(self):
         for scope, required in (
