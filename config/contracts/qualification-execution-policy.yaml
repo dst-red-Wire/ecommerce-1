@@ -415,6 +415,7 @@ gates:
     ci_fanout: true
     owned_tests:
       - tests/test_architecture_authority.py
+      - tests/test_commit_provenance.py
       - tests/test_qualification_cache.py
       - tests/test_qualification_execution_policy.py
       - tests/test_runtime_orchestration.py
@@ -448,6 +449,7 @@ gates:
       - scripts/validate-contract-consistency.rb
       - scripts/validate-observability.rb
       - tests/test_architecture_authority.py
+      - tests/test_commit_provenance.py
       - tests/test_qualification_cache.py
       - tests/test_runtime_orchestration.py
       - tests/architecture_validator_test.rb
@@ -609,7 +611,7 @@ gates:
     command:
       action: security
     ci_fanout: true
-    tools: [gitleaks, git]
+    tools: [gitleaks, trivy, gosec, govulncheck, git]
     validators:
       - scripts/repoctl.py
     inputs:

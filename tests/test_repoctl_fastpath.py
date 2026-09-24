@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -201,6 +202,30 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertIn("useDefault = true", text)
         self.assertIn("tests/fixtures/", text)
         self.assertIn("node_modules/", text)
+
+    def test_security_routes_configuration_changes_to_supported_trivy_config_command(self):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            mock.patch.object(MOD, "require", return_value="/managed/tool"),
+            mock.patch.object(
+                MOD,
+                "changed_paths",
+                return_value=["platform/tekton/tasks/product-supply-chain.yaml"],
+            ),
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+            mock.patch.dict(os.environ, {"BASE": "origin/main", "HEAD": "HEAD"}, clear=False),
+        ):
+            self.assertEqual(0, MOD.security())
+
+        trivy_calls = [call for call in calls if call[:2] == ["trivy", "config"]]
+        self.assertEqual(1, len(trivy_calls))
+        self.assertNotIn("--scanners", trivy_calls[0])
+        self.assertEqual("platform/tekton/tasks", trivy_calls[0][-1])
 
     def test_ruff_adapter_config_is_derived_from_central_policy(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -157,6 +157,440 @@ def fail(message: str, code: int = 2) -> int:
     return code
 
 
+TOOLCHAIN_STATUSES = ("active", "deferred", "rejected", "platform-provided")
+TOOLCHAIN_SCENARIO_POLICIES = {"none", "required", "runtime-only", "external-system"}
+TOOLCHAIN_VERSION_CATEGORIES = {
+    "active-tool",
+    "deferred-tool",
+    "rejected-tool",
+    "platform-provided",
+    "seed-prerequisite",
+    "native-projection",
+    "language-runtime-contract",
+    "explicit-artifact-integrity-reference",
+}
+
+
+def _toolchain_lifecycle_index(lock: dict) -> tuple[dict[str, str], list[str]]:
+    lifecycle = lock.get("tool_lifecycle", {})
+    violations: list[str] = []
+    if not isinstance(lifecycle, dict) or set(lifecycle) != set(TOOLCHAIN_STATUSES):
+        return {}, ["toolchain lifecycle must declare exactly active, deferred, rejected and platform-provided"]
+    index: dict[str, str] = {}
+    for status in TOOLCHAIN_STATUSES:
+        entries = lifecycle.get(status)
+        if not isinstance(entries, dict):
+            violations.append(f"toolchain lifecycle {status} must be a mapping")
+            continue
+        for name, entry in entries.items():
+            if not isinstance(name, str) or not name or not isinstance(entry, dict):
+                violations.append(f"toolchain lifecycle {status} contains an invalid entry")
+                continue
+            if name in index:
+                violations.append(f"tool {name} has multiple lifecycle statuses")
+            index[name] = status
+    return index, violations
+
+
+def centrally_derived_doctor_set(lock: dict | None = None, graph: dict | None = None) -> set[str]:
+    """Return the only valid doctor inventory, derived from the two central contracts."""
+    lock = _raw_toolchain_lock() if lock is None else lock
+    graph = (
+        json.loads((ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+        if graph is None
+        else graph
+    )
+    capabilities = {item["name"]: item for item in graph.get("capabilities", [])}
+    expected: set[str] = set()
+    for name, entry in lock.get("tool_lifecycle", {}).get("active", {}).items():
+        capability = capabilities.get(str(entry.get("capability", "")))
+        if capability and capability.get("requirement") == "required-static":
+            expected.add(name)
+    for name, entry in lock.get("tool_lifecycle", {}).get("platform-provided", {}).items():
+        if entry.get("required") is True:
+            expected.add(name)
+    return expected
+
+
+def _toolchain_consumer_exists(consumer: object, root: Path) -> bool:
+    if not isinstance(consumer, dict) or consumer.get("type") != "path":
+        return False
+    relative = consumer.get("path")
+    marker = consumer.get("marker")
+    if not isinstance(relative, str) or not relative or not isinstance(marker, str) or not marker:
+        return False
+    resolved_root = root.resolve()
+    path = (resolved_root / relative).resolve()
+    if not path.is_relative_to(resolved_root):
+        return False
+    if not path.exists():
+        return False
+    if path.is_dir():
+        return any(
+            marker in candidate.read_text(encoding="utf-8", errors="ignore")
+            for candidate in path.rglob("*")
+            if candidate.is_file()
+        )
+    return marker in path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _security_policy_tool_statuses(root: Path) -> dict[str, str]:
+    """Read only implementation/status pairs without adding a second YAML authority."""
+    text = (root / "config/contracts/security-scan-policy.yaml").read_text(encoding="utf-8")
+    statuses: dict[str, str] = {}
+    pending: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("implementation:"):
+            pending = stripped.partition(":")[2].strip()
+        elif pending and stripped.startswith("status:"):
+            statuses[pending] = stripped.partition(":")[2].strip()
+            pending = None
+    if pending:
+        statuses[pending] = ""
+    return statuses
+
+
+def toolchain_closure_violations(
+    lock: dict | None = None,
+    graph: dict | None = None,
+    *,
+    root: Path = ROOT,
+    check_projections: bool = True,
+    doctor_expected: set[str] | None = None,
+) -> list[str]:
+    """Pure closed-world validation for versions, installers, gates, consumers and proofs."""
+    lock = copy.deepcopy(lock if lock is not None else _raw_toolchain_lock())
+    graph = copy.deepcopy(
+        graph
+        if graph is not None
+        else json.loads((root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+    )
+    violations: list[str] = []
+    versions = lock.get("versions", {})
+    owners = lock.get("version_owners", {})
+    if not isinstance(versions, dict):
+        return ["toolchain versions must be a mapping"]
+    if not isinstance(owners, dict):
+        owners = {}
+
+    for key in sorted(set(versions) - set(owners)):
+        noun = "checksum" if re.search(r"(?:SHA256|DIGEST)", key, re.I) else "version"
+        violations.append(f"orphan toolchain {noun}: {key}")
+    for key in sorted(set(owners) - set(versions)):
+        violations.append(f"version owner references missing key: {key}")
+    for key, owner in owners.items():
+        if not isinstance(owner, dict) or owner.get("category") not in TOOLCHAIN_VERSION_CATEGORIES:
+            violations.append(f"version owner has invalid category: {key}")
+        if not isinstance(owner, dict) or not isinstance(owner.get("owner"), str) or not owner.get("owner"):
+            violations.append(f"version owner is incomplete: {key}")
+    floating = {"latest", "stable", "main", "master", "head", "edge", "nightly", "*"}
+    for key, raw in versions.items():
+        value = str(raw).strip()
+        if value.lower() in floating or value.endswith(".x") or any(token in value for token in ("<", ">", "^", "~", "*")):
+            violations.append(f"floating toolchain version: {key}={value}")
+        if re.search(r"(?:SHA256|DIGEST)", key, re.I) and not re.fullmatch(r"[0-9a-f]{64}", value.lower()):
+            violations.append(f"invalid toolchain checksum: {key}")
+
+    lifecycle_index, lifecycle_errors = _toolchain_lifecycle_index(lock)
+    violations.extend(lifecycle_errors)
+    lifecycle = lock.get("tool_lifecycle", {})
+    active = lifecycle.get("active", {}) if isinstance(lifecycle, dict) else {}
+    deferred = lifecycle.get("deferred", {}) if isinstance(lifecycle, dict) else {}
+    rejected = lifecycle.get("rejected", {}) if isinstance(lifecycle, dict) else {}
+    platform_tools = lifecycle.get("platform-provided", {}) if isinstance(lifecycle, dict) else {}
+
+    category_status = {
+        "active-tool": "active",
+        "deferred-tool": "deferred",
+        "rejected-tool": "rejected",
+        "platform-provided": "platform-provided",
+    }
+    for key, declaration in owners.items():
+        if not isinstance(declaration, dict):
+            continue
+        expected_status = category_status.get(str(declaration.get("category")))
+        owner_name = declaration.get("owner")
+        if expected_status and lifecycle_index.get(owner_name) != expected_status:
+            violations.append(f"version owner does not match lifecycle: {key}")
+
+    capabilities_list = graph.get("capabilities", [])
+    if not isinstance(capabilities_list, list):
+        return violations + ["capability graph capabilities must be a list"]
+    capabilities = {
+        item.get("name"): item
+        for item in capabilities_list
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if len(capabilities) != len(capabilities_list):
+        violations.append("capability graph contains duplicate or invalid capabilities")
+
+    for name, capability in capabilities.items():
+        if capability.get("virtual"):
+            continue
+        status = lifecycle_index.get(name)
+        if status is None:
+            violations.append(f"capability has no central lifecycle status: {name}")
+        elif status in {"deferred", "rejected"}:
+            violations.append(f"{status} tool {name} remains in capability graph")
+
+    gate_requirements = graph.get("gate_requirements", {})
+    expected_aliases = lock.get("capability_policy", {}).get("command_capabilities", {})
+    if graph.get("command_capabilities", {}) != expected_aliases:
+        violations.append("capability graph command projection drift")
+    gate_commands = {
+        str(command)
+        for commands in gate_requirements.values()
+        if isinstance(commands, list)
+        for command in commands
+    }
+    command_to_capability: dict[str, str] = {}
+    for name, capability in capabilities.items():
+        command = capability.get("command")
+        if isinstance(command, str) and command:
+            command_to_capability[command] = name
+        probe = capability.get("probe")
+        if not command and isinstance(probe, list) and probe and isinstance(probe[0], str):
+            command_to_capability.setdefault(probe[0], name)
+    command_to_capability.update(
+        {str(command): str(capability) for command, capability in graph.get("command_capabilities", {}).items()}
+    )
+    external_commands = {
+        str(item.get("command"))
+        for key in ("seed_prerequisites", "platform_primitives")
+        for item in graph.get(key, [])
+        if isinstance(item, dict) and item.get("command")
+    }
+    for command in sorted(gate_commands):
+        capability_name = command_to_capability.get(command, command if command in external_commands else "")
+        status = lifecycle_index.get(capability_name) or lifecycle_index.get(command)
+        if status not in {"active", "platform-provided"}:
+            violations.append(f"gate executes undeclared or inactive tool: {command}")
+
+    try:
+        security_statuses = _security_policy_tool_statuses(root)
+        security_commands = set(gate_requirements.get("security", []))
+        for name, declared_status in security_statuses.items():
+            if declared_status not in TOOLCHAIN_STATUSES:
+                violations.append(f"security policy tool {name} has invalid lifecycle status")
+            elif lifecycle_index.get(name) != declared_status:
+                violations.append(f"security policy lifecycle drift: {name}")
+            if declared_status == "active" and name not in security_commands:
+                violations.append(f"active security tool {name} is absent from security gate")
+    except OSError:
+        violations.append("security scan policy is missing")
+
+    gates_by_capability: dict[str, set[str]] = {name: set() for name in capabilities}
+    for gate, commands in gate_requirements.items():
+        if not isinstance(commands, list):
+            violations.append(f"gate requirements must be a list: {gate}")
+            continue
+        for command in commands:
+            capability_name = command_to_capability.get(str(command))
+            if capability_name in gates_by_capability:
+                gates_by_capability[capability_name].add(str(gate))
+    changed = True
+    while changed:
+        previous_gates = {name: frozenset(gates) for name, gates in gates_by_capability.items()}
+        for name, capability in capabilities.items():
+            for dependency in capability.get("requires", []):
+                if dependency in gates_by_capability:
+                    gates_by_capability[dependency].update(gates_by_capability[name])
+            provider = capability.get("provider")
+            if provider in gates_by_capability:
+                gates_by_capability[provider].update(gates_by_capability[name])
+        changed = any(previous_gates[name] != gates_by_capability[name] for name in gates_by_capability)
+
+    approved_non_graph_provisioners = {"packer-bundle"}
+    for name, entry in active.items():
+        capability_name = entry.get("capability")
+        capability = capabilities.get(capability_name)
+        if not isinstance(capability_name, str) or not capability_name:
+            violations.append(f"active tool {name} has no capability")
+        elif capability is None and entry.get("provision", {}).get("type") not in approved_non_graph_provisioners:
+            violations.append(f"active tool {name} references missing capability: {capability_name}")
+        version_ref = entry.get("version_ref")
+        if not isinstance(version_ref, str) or version_ref not in versions:
+            violations.append(f"active tool {name} has no version authority")
+        elif capability and capability.get("version_key") and capability.get("version_key") != version_ref:
+            violations.append(f"capability version projection drift: {name}")
+        provision = entry.get("provision")
+        if not isinstance(provision, dict) or not provision.get("type"):
+            violations.append(f"active managed tool {name} has no installer")
+        elif capability and capability.get("classification") == "managed":
+            projected = capability.get("provision")
+            if not isinstance(projected, dict):
+                violations.append(f"active managed tool {name} has no installer")
+            elif provision.get("tags") != projected.get("tags"):
+                violations.append(f"capability installer projection drift: {name}")
+        checksum_ref = entry.get("checksum_ref")
+        if checksum_ref is not None and checksum_ref not in versions:
+            violations.append(f"active tool {name} references missing checksum: {checksum_ref}")
+        elif checksum_ref is not None and owners.get(checksum_ref, {}).get("owner") not in {
+            name,
+            capability_name,
+        }:
+            violations.append(f"active tool {name} checksum authority mismatch: {checksum_ref}")
+        has_gate_consumer = bool(capability and gates_by_capability.get(str(capability_name)))
+        consumers = entry.get("consumers", [])
+        valid_consumers = [consumer for consumer in consumers if _toolchain_consumer_exists(consumer, root)]
+        if not has_gate_consumer and not valid_consumers:
+            violations.append(f"active tool {name} has no executable consumer")
+        if len(valid_consumers) != len(consumers):
+            violations.append(f"active tool {name} references a missing consumer")
+        has_probe = bool(
+            capability
+            and (
+                capability.get("probe")
+                or (capability.get("command") and capability.get("version_args"))
+                or capability.get("provider")
+                or capability.get("any_of")
+            )
+        )
+        registry_tool = lock.get("tools", {}).get(name, {})
+        has_probe = has_probe or bool(registry_tool.get("version_command"))
+        if not has_probe:
+            violations.append(f"active tool {name} has no version probe")
+        scenario_policy = entry.get("scenario_policy")
+        if scenario_policy not in TOOLCHAIN_SCENARIO_POLICIES:
+            violations.append(f"active tool {name} has no valid scenario policy")
+        proofs = entry.get("proofs", [])
+        if scenario_policy in {"required", "runtime-only", "external-system"}:
+            if not proofs or any(not isinstance(path, str) or not (root / path).exists() for path in proofs):
+                violations.append(f"active tool {name} has no scenario or proof")
+
+    for status_name, entries in (("deferred", deferred), ("rejected", rejected)):
+        for name, entry in entries.items():
+            if not isinstance(entry.get("reason"), str) or not entry.get("reason"):
+                violations.append(f"{status_name} tool {name} has no reason")
+            if entry.get("provision") or entry.get("install"):
+                violations.append(f"{status_name} tool {name} is provisioned")
+            capability = capabilities.get(name)
+            if capability and capability.get("provision"):
+                violations.append(f"{status_name} tool {name} is provisioned")
+            for gate, commands in gate_requirements.items():
+                if name in commands or (capability and capability.get("command") in commands):
+                    violations.append(f"{status_name} tool {name} is required by gate {gate}")
+
+    for name, entry in platform_tools.items():
+        probe = entry.get("probe")
+        if not isinstance(probe, list) or not probe or not all(isinstance(part, str) and part for part in probe):
+            violations.append(f"platform-provided tool {name} requires deterministic probe")
+        elif "/" in probe[0] and not _toolchain_consumer_exists(
+            {"type": "path", "path": probe[0], "marker": probe[1] if len(probe) > 1 else ""},
+            root,
+        ):
+            violations.append(f"platform-provided tool {name} static probe does not prove the capability")
+        if not isinstance(entry.get("required"), bool):
+            violations.append(f"platform-provided tool {name} must declare required boolean")
+        capability = capabilities.get(str(entry.get("capability", "")))
+        if capability and capability.get("provision"):
+            violations.append(f"platform-provided tool {name} must not be repository provisioned")
+
+    tools = lock.get("tools", {})
+    checksum_authorities: dict[str, set[str]] = {}
+    for name, tool in tools.items():
+        artifact = tool.get("artifact", {})
+        url = str(artifact.get("url", ""))
+        if url and ("latest" in url.lower() or any(f"/{token}/" in url.lower() for token in ("main", "master", "stable"))):
+            violations.append(f"floating artifact URL: {name}")
+        checksum_ref = tool.get("sha256_ref")
+        if artifact and not checksum_ref and tool.get("integrity") != "go-checksum-database":
+            violations.append(f"downloaded tool without checksum: {name}")
+        if checksum_ref:
+            checksum_authorities.setdefault(str(checksum_ref), set()).add(name)
+            owner = owners.get(checksum_ref, {}).get("owner")
+            if owner not in {name, tool.get("binary")}:
+                violations.append(f"checksum authority owner mismatch: {checksum_ref}")
+    for checksum, authorities in checksum_authorities.items():
+        if len(authorities) > 1:
+            violations.append(f"checksum has contradictory authorities: {checksum}")
+
+    derived_doctor = centrally_derived_doctor_set(lock, graph)
+    if doctor_expected is not None:
+        for name in sorted(doctor_expected - derived_doctor):
+            violations.append(f"doctor requires undeclared tool: {name}")
+        for name in sorted(derived_doctor - doctor_expected):
+            violations.append(f"doctor omits centrally required tool: {name}")
+    try:
+        tree = ast.parse((root / "scripts/repoctl.py").read_text(encoding="utf-8"))
+        doctor_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "doctor")
+        for node in ast.walk(doctor_node):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(isinstance(target, ast.Name) and target.id in {"expected", "expected_tools"} for target in targets):
+                    violations.append("doctor contains a parallel hardcoded expected tool list")
+    except (OSError, SyntaxError, StopIteration):
+        violations.append("doctor implementation cannot be audited")
+
+    installer = root / "platform/ansible/roles/developer_toolchain/tasks/main.yml"
+    try:
+        installer_text = installer.read_text(encoding="utf-8")
+        if "developer_pipx_packages:" in installer_text:
+            violations.append("installer contains an independent pipx tool list")
+        if "toolchain_lock.tool_lifecycle.active | dict2items" not in installer_text:
+            violations.append("pipx installer is not registry driven")
+        if installer_text.count("item.key in active_tool_names") < 6:
+            violations.append("registry artifact installer is not restricted to active tools")
+    except OSError:
+        violations.append("developer toolchain installer is missing")
+
+    architecture = root / "architecture.lock.yaml"
+    try:
+        architecture_text = architecture.read_text(encoding="utf-8")
+        for marker in (
+            "closure: mandatory-fail-closed",
+            "undeclared_tool: forbidden",
+            "parallel_tool_authority: forbidden",
+        ):
+            if marker not in architecture_text:
+                violations.append(f"architecture missing toolchain closure rule: {marker}")
+        if "oci_runtime: podman" not in architecture_text or "oci_builder: buildah" not in architecture_text:
+            violations.append("forbidden Podman/Buildah authorities are not locked")
+    except OSError:
+        violations.append("architecture authority is missing")
+
+    if lifecycle_index.get("hyperfine") != "rejected":
+        violations.append("hyperfine must remain rejected without a distinct consumer")
+    if lifecycle_index.get("podman") != "rejected" or lifecycle_index.get("buildah") != "rejected":
+        violations.append("Podman and Buildah must remain rejected authorities")
+
+    if check_projections:
+        try:
+            from capability_bootstrap import validate_toolchain_projections
+
+            validate_toolchain_projections(lock)
+        except (OSError, RuntimeError, ValueError) as exc:
+            violations.append(f"toolchain projection drift: {exc}")
+
+    return list(dict.fromkeys(violations))
+
+
+def toolchain_closure() -> int:
+    violations = toolchain_closure_violations()
+    if violations:
+        for violation in violations:
+            print(f"FAIL {violation}", file=sys.stderr)
+        print(f"FAIL toolchain closure: {len(violations)} violation(s)", file=sys.stderr)
+        return 1
+    print("PASS no orphan version")
+    print("PASS no orphan checksum")
+    print("PASS no undeclared doctor tool")
+    print("PASS no undeclared installer tool")
+    print("PASS no undeclared gate tool")
+    print("PASS active tools have capabilities")
+    print("PASS active tools have consumers")
+    print("PASS active managed tools have installers")
+    print("PASS required scenarios/proofs exist")
+    print("PASS deferred tools are not provisioned")
+    print("PASS rejected tools are not provisioned")
+    print("PASS platform-provided tools have probes")
+    print("PASS projections are exact")
+    print("PASS doctor derives from registry")
+    print("PASS toolchain closure")
+    return 0
+
+
 def _supports_color() -> bool:
     return (
         "NO_COLOR" not in os.environ
@@ -1753,6 +2187,12 @@ def _governance_authority() -> int:
     return 0
 
 
+def _governance_commit_provenance() -> int:
+    base = os.environ.get("BASE", "origin/main")
+    head = os.environ.get("HEAD", "WORKTREE")
+    return commit_provenance_check(base, head, include_local_identity=head == "WORKTREE")
+
+
 def _governance_validator(relative: str) -> int:
     require("ruby")
     run(["ruby", relative])
@@ -1772,8 +2212,11 @@ def _governance_documentation() -> int:
 
 
 def governance() -> int:
+    if toolchain_closure():
+        return 1
     steps: list[tuple[str, object]] = [
         ("governance:authority", lambda: _run_cached_gate("governance:authority", {}, _governance_authority)),
+        ("governance:commit-provenance", _governance_commit_provenance),
         (
             "governance:documentation",
             lambda: _run_cached_gate("governance:documentation", {}, _governance_documentation),
@@ -2381,6 +2824,8 @@ def site() -> int:
 
 
 def reconcile(tags: str, target_repo_root: str = "") -> int:
+    if toolchain_closure():
+        return 1
     selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
     if not selected:
         return fail("reconcile requires at least one Ansible tag")
@@ -2697,7 +3142,62 @@ def security() -> int:
         else:
             run([command, "dir", *flags, "."])
 
-    print("PASS secret scan completed")
+    print("PASS gitleaks secret scan completed")
+
+    base = os.environ.get("BASE", "origin/main").strip() or "origin/main"
+    head = os.environ.get("HEAD", "WORKTREE").strip() or "WORKTREE"
+    security_paths = changed_paths(base, head)
+
+    trivy_targets: set[str] = set()
+    for path in security_paths:
+        candidate = Path(path)
+        parts = candidate.parts
+        if candidate.name in {"Containerfile", "Dockerfile"} or candidate.suffix in {".tf", ".hcl"}:
+            trivy_targets.add(str(candidate.parent))
+        elif candidate.suffix in {".yaml", ".yml"} and parts and parts[0] == "platform":
+            if len(parts) > 1 and parts[1] in {"fleet", "helm", "kubernetes", "tekton"}:
+                trivy_targets.add(str(candidate.parent))
+    if trivy_targets:
+        require("trivy")
+        for relative in sorted(trivy_targets):
+            run(
+                [
+                    "trivy",
+                    "config",
+                    "--exit-code",
+                    "1",
+                    "--severity",
+                    "HIGH,CRITICAL",
+                    relative,
+                ]
+            )
+        print("PASS trivy affected configuration scan completed")
+    else:
+        print("SKIP trivy: no affected container or configuration input")
+
+    module_roots = [ROOT / "frontend", *sorted((ROOT / "services").glob("*"))]
+    affected_modules = [
+        module
+        for module in module_roots
+        if (module / "go.mod").is_file()
+        and any(
+            path == str(module.relative_to(ROOT))
+            or path.startswith(str(module.relative_to(ROOT)) + "/")
+            for path in security_paths
+        )
+    ]
+    if affected_modules:
+        require("gosec")
+        require("govulncheck")
+        env = os.environ.copy()
+        env.pop("GOROOT", None)
+        env.pop("GOTOOLDIR", None)
+        for module in affected_modules:
+            run(["gosec", "./..."], cwd=module, env=env)
+            run(["govulncheck", "./..."], cwd=module, env=env)
+        print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
+    else:
+        print("SKIP gosec/govulncheck: no affected Go module")
     return 0
 
 def terraform_source_files() -> list[Path]:
@@ -4451,6 +4951,8 @@ def write_evidence(
 
 
 def verify_change(base: str, head: str) -> int:
+    if toolchain_closure():
+        return 1
     source_head_sha: str | None = None
     source_tree_sha: str | None = None
     if head != "WORKTREE":
@@ -4463,6 +4965,9 @@ def verify_change(base: str, head: str) -> int:
     else:
         source_head_sha = git("rev-parse", "HEAD").strip()
         source_tree_sha = worktree_tree_sha()
+
+    if commit_provenance_check(base, head, include_local_identity=head == "WORKTREE"):
+        return 1
 
     paths = changed_paths(base, head)
     components = affected(base, head)
@@ -4683,69 +5188,36 @@ def failure_context(gate: str, component: str) -> int:
 
 
 def doctor() -> int:
-    expected = [
-        "git",
-        "make",
-        "go",
-        "gofmt",
-        "python3",
-        "pipx",
-        "pre-commit",
-        "ansible",
-        "ansible-lint",
-        "molecule",
-        "terraform",
-        "tflint",
-        "trivy",
-        "skopeo",
-        "packer",
-        "checkov",
-        "gitleaks",
-        "gosec",
-        "govulncheck",
-        "kube-bench",
-        "ggshield",
-        "semgrep",
-        "syft",
-        "cosign",
-        "sops",
-        "age",
-        "oras",
-        "rg",
-        "fd",
-        "yq",
-        "ast-grep",
-        "kubeconform",
-        "conftest",
-        "opa",
-        "kubectl",
-        "helm",
-        "kustomize",
-        "docker",
-        "bazel",
-        "bazelisk",
-        "nx",
-        "oasdiff",
-        "oapi-codegen",
-        "oxlint",
-        "oxfmt",
-        "ruff",
-    ]
+    if toolchain_closure():
+        return 1
+    from capability_bootstrap import Auditor, load_contract
+
+    lock = _raw_toolchain_lock()
+    contract = load_contract()
+    expected_names = centrally_derived_doctor_set(lock, contract)
+    auditor = Auditor(contract)
     rc = 0
-    for cmd in expected:
-        path = shutil.which(cmd)
-        print(f"{'PASS' if path else 'FAIL'} {cmd:24} {path or 'missing'}")
-        rc |= 0 if path else 1
-    if shutil.which("docker") and run(["docker", "info"], check=False, capture=True).returncode == 0:
-        print("PASS docker-daemon reachable")
-    else:
-        print("FAIL docker-daemon unreachable")
-        rc = 1
-    if shutil.which("docker") and run(["docker", "buildx", "version"], check=False, capture=True).returncode == 0:
-        print("PASS docker-buildx available")
-    else:
-        print("FAIL docker-buildx unavailable")
-        rc = 1
+    checked: set[str] = set()
+    for capability_name in auditor.graph.order():
+        if capability_name not in expected_names:
+            continue
+        result = auditor.check(auditor.graph.items[capability_name], capability_name)
+        print(f"{result.state:<11} {capability_name:<25} {result.detail}")
+        checked.add(capability_name)
+        rc |= 0 if result.state == "PASS" else 1
+    platform_tools = lock["tool_lifecycle"]["platform-provided"]
+    for name in sorted(expected_names - checked):
+        probe = platform_tools[name]["probe"]
+        executable = shutil.which(probe[0])
+        if not executable:
+            print(f"FAIL        {name:<25} tool absent")
+            rc = 1
+            continue
+        result = run([executable, *probe[1:]], check=False, capture=True)
+        detail = " ".join((result.stdout or result.stderr).strip().split())[:160]
+        state = "PASS" if result.returncode == 0 else "FAIL"
+        print(f"{state:<11} {name:<25} {detail or executable}")
+        rc |= 0 if result.returncode == 0 else 1
     rc |= ansible_collections_check()
     return rc
 
@@ -5109,10 +5581,58 @@ def git_sync() -> int:
     return 0
 
 
+def _validate_commit_provenance_policy(policy: object) -> dict:
+    expected = {
+        "authority_source": "architecture.lock.yaml#machine_contracts.review_policy",
+        "required_for_default_branch_delivery": True,
+        "identity": {
+            "author_required": True,
+            "committer_required": True,
+            "placeholder_identity_forbidden": True,
+            "placeholder_email_domains_forbidden": [
+                "example.invalid",
+                "example.com",
+                "example.org",
+            ],
+            "reserved_email_tlds_forbidden": ["invalid"],
+            "explicit_placeholder_names_forbidden": [
+                "test",
+                "test user",
+                "test account",
+                "fake",
+                "fake user",
+                "fake account",
+                "example",
+                "example user",
+                "example account",
+            ],
+        },
+        "remote_verification": {
+            "provider": "github",
+            "required_before_delivery": True,
+            "required_before_merge": True,
+            "exact_sha": True,
+            "accepted_reasons": ["valid"],
+            "unavailable_in_network_workflow": "blocking",
+            "offline_qualification": "local-identity-only",
+        },
+        "historical_evidence": {
+            "sha": "9037b2c6442ae68c6bc10d41ffa254e01a1791df",
+            "relation": "predates-commit-provenance-gate-on-governance-toolchain-closure",
+            "retention": "visible-in-original-branch-history",
+            "delivery_handling": "report-and-block-until-clean-replay-from-default-branch",
+        },
+        "failure_mode": "blocking",
+    }
+    if policy != expected:
+        raise RuntimeError("invalid repository_delivery contract: commit provenance policy drift")
+    return copy.deepcopy(policy)
+
+
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
-    required_sections = {"publish", "pull_request", "merge", "cleanup", "post_merge"}
+    required_sections = {"commit_provenance", "publish", "pull_request", "merge", "cleanup", "post_merge"}
     missing = sorted(required_sections - set(policy))
     if missing:
         raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
@@ -5120,6 +5640,8 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         raise RuntimeError("repository_delivery forge must be github")
     if not str(policy.get("default_branch", "")).strip():
         raise RuntimeError("repository_delivery default_branch is required")
+
+    _validate_commit_provenance_policy(policy["commit_provenance"])
 
     publish_policy = policy["publish"]
     pull_request_policy = policy["pull_request"]
@@ -5210,6 +5732,162 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 def repository_delivery_policy() -> dict:
     review_policy = ruby_yaml("config/contracts/review-policy.yaml")
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
+
+
+def commit_provenance_policy() -> dict:
+    return copy.deepcopy(repository_delivery_policy()["commit_provenance"])
+
+
+def _exact_commit_sha(ref: str) -> str:
+    sha = git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError(f"commit provenance ref did not resolve to an exact SHA: {ref}")
+    return sha
+
+
+def _commit_identity_records(base: str, head: str) -> tuple[str, str, list[dict[str, str]]]:
+    base_sha = _exact_commit_sha(base)
+    head_ref = "HEAD" if head == "WORKTREE" else head
+    head_sha = _exact_commit_sha(head_ref)
+    raw = git(
+        "log",
+        "--reverse",
+        "--format=%x1e%H%x00%an%x00%ae%x00%cn%x00%ce",
+        f"{base_sha}..{head_sha}",
+    )
+    records: list[dict[str, str]] = []
+    for encoded in raw.split("\x1e"):
+        encoded = encoded.strip("\r\n")
+        if not encoded:
+            continue
+        fields = encoded.split("\x00")
+        if len(fields) != 5 or not re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+            raise RuntimeError("git returned malformed structured commit identity data")
+        records.append(
+            {
+                "sha": fields[0],
+                "author_name": fields[1],
+                "author_email": fields[2],
+                "committer_name": fields[3],
+                "committer_email": fields[4],
+            }
+        )
+    return base_sha, head_sha, records
+
+
+_GIT_IDENT_RE = re.compile(r"^(?P<name>.*) <(?P<email>[^<>]*)> [0-9]+ [+-][0-9]{4}$")
+
+
+def _current_git_identities() -> dict[str, tuple[str, str]]:
+    identities: dict[str, tuple[str, str]] = {}
+    for role, variable in (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT")):
+        result = run(["git", "var", variable], check=False, capture=True)
+        match = _GIT_IDENT_RE.fullmatch((result.stdout or "").strip()) if result.returncode == 0 else None
+        identities[role] = match.group("name", "email") if match else ("", "")
+    return identities
+
+
+def _identity_provenance_error(role: str, name: str, email: str, identity_policy: dict) -> str | None:
+    clean_name = " ".join(name.split())
+    clean_email = email.strip()
+    if identity_policy.get(f"{role}_required") is True and (not clean_name or not clean_email):
+        return f"missing {role} identity"
+    if "@" not in clean_email or clean_email.startswith("@") or clean_email.endswith("@"):
+        return f"invalid {role} email {clean_email or '<empty>'}"
+    local_part, domain = clean_email.rsplit("@", 1)
+    domain = domain.rstrip(".").casefold()
+    if not local_part or not domain:
+        return f"invalid {role} email {clean_email}"
+    forbidden_domains = {
+        str(value).casefold()
+        for value in identity_policy.get("placeholder_email_domains_forbidden", [])
+    }
+    forbidden_tlds = {
+        str(value).lstrip(".").casefold()
+        for value in identity_policy.get("reserved_email_tlds_forbidden", [])
+    }
+    if domain in forbidden_domains or domain.rsplit(".", 1)[-1] in forbidden_tlds:
+        return f"placeholder {role} email {clean_email}"
+    placeholder_names = {
+        " ".join(str(value).split()).casefold()
+        for value in identity_policy.get("explicit_placeholder_names_forbidden", [])
+    }
+    if clean_name.casefold() in placeholder_names:
+        return f"placeholder {role} name {clean_name}"
+    return None
+
+
+def commit_provenance_check(
+    base: str,
+    head: str,
+    *,
+    include_local_identity: bool = False,
+    policy: dict | None = None,
+) -> int:
+    provenance = policy or commit_provenance_policy()
+    identity_policy = provenance["identity"]
+    base_sha, head_sha, records = _commit_identity_records(base, head)
+    failures: list[tuple[str, str]] = []
+    for record in records:
+        sha = record["sha"]
+        for role in ("author", "committer"):
+            error = _identity_provenance_error(
+                role,
+                record[f"{role}_name"],
+                record[f"{role}_email"],
+                identity_policy,
+            )
+            if error:
+                failures.append((sha, error))
+    if include_local_identity:
+        for role, (name, email) in _current_git_identities().items():
+            error = _identity_provenance_error(role, name, email, identity_policy)
+            if error:
+                failures.append(("WORKTREE", error))
+    if failures:
+        for sha, error in failures:
+            print(f"FAIL commit provenance {sha}: {error}", file=sys.stderr)
+        return 1
+    for record in records:
+        print(f"PASS commit provenance {record['sha']}")
+    if include_local_identity:
+        print("PASS commit provenance WORKTREE")
+    if not records and not include_local_identity:
+        print(f"PASS commit provenance {base_sha}..{head_sha}: no introduced commits")
+    return 0
+
+
+def remote_commit_provenance_check(gh: str, base: str, head: str) -> int:
+    provenance = commit_provenance_policy()
+    remote_policy = provenance["remote_verification"]
+    _base_sha, _head_sha, records = _commit_identity_records(base, head)
+    accepted_reasons = {str(value) for value in remote_policy["accepted_reasons"]}
+    for record in records:
+        sha = record["sha"]
+        response = run(
+            [gh, "api", f"repos/{{owner}}/{{repo}}/commits/{sha}"],
+            check=False,
+            capture=True,
+        )
+        if response.returncode:
+            detail = (response.stderr or response.stdout or "").strip()
+            return fail(
+                f"remote commit provenance unavailable for {sha}: {detail or 'GitHub API request failed'}"
+            )
+        try:
+            payload = json.loads(response.stdout or "{}")
+        except json.JSONDecodeError:
+            return fail(f"remote commit provenance returned invalid JSON for {sha}")
+        if payload.get("sha") != sha:
+            return fail(
+                f"remote commit provenance exact-SHA mismatch: requested {sha}, got {payload.get('sha')!r}"
+            )
+        verification = (payload.get("commit") or {}).get("verification") or {}
+        reason = str(verification.get("reason") or "missing")
+        if verification.get("verified") is not True or reason not in accepted_reasons:
+            return fail(f"remote commit provenance: {sha} is not verified reason={reason}")
+        print(f"PASS remote commit provenance {sha}: verified reason={reason}")
+    return 0
 
 
 def pull_request_review_policy() -> dict:
@@ -5360,6 +6038,8 @@ def _remote_ref_sha(ref: str) -> str:
 
 
 def publish(base: str, message: str) -> int:
+    if toolchain_closure():
+        return 1
     policy = repository_delivery_policy()
     default_branch = str(policy["default_branch"])
     base_name = base.removeprefix("origin/")
@@ -5372,6 +6052,8 @@ def publish(base: str, message: str) -> int:
     base_ref = f"origin/{base_name}"
     if run(["git", "merge-base", "--is-ancestor", base_ref, "HEAD"], check=False).returncode:
         return fail(f"branch is not based on current {base_ref}")
+    if commit_provenance_check(base_ref, "WORKTREE", include_local_identity=True):
+        return 1
 
     dirty = bool(git("status", "--porcelain", "--untracked-files=all").strip())
     promotable = _load_promotable_worktree_evidence(base_ref) if dirty else None
@@ -5421,6 +6103,8 @@ def deliver(base: str, title: str, message: str) -> int:
         return fail("GitHub CLI missing")
     branch = git("branch", "--show-current").strip()
     head = git("rev-parse", "HEAD").strip()
+    if remote_commit_provenance_check(gh, f"origin/{base_name}", head):
+        return 1
     evidence = CONTEXT / "evidence" / f"{head}.json"
     if not evidence.is_file():
         return fail(f"exact evidence missing for {head}")
@@ -5856,6 +6540,8 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 
 def finish_pr(base: str) -> int:
+    if toolchain_closure():
+        return 1
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
     default_branch = str(policy["default_branch"])
@@ -5881,6 +6567,10 @@ def finish_pr(base: str) -> int:
     remote_head = _remote_ref_sha(f"origin/{branch}")
     if remote_head != head:
         return fail(f"finish-pr remote head mismatch: local {head}, origin/{branch} {remote_head or 'missing'}")
+    if commit_provenance_check(base_ref, head):
+        return 1
+    if remote_commit_provenance_check(gh, base_ref, head):
+        return 1
 
     evidence = _valid_exact_evidence(base_ref, head)
     if evidence is None:
@@ -6098,6 +6788,7 @@ def main() -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in [
         "governance",
+        "toolchain-closure",
         "runtime-efficiency",
         "automation-policy",
         "format-check",
@@ -6232,6 +6923,8 @@ def main() -> int:
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
     try:
+        if args.cmd == "toolchain-closure":
+            return toolchain_closure()
         if args.cmd == "governance":
             return governance()
         if args.cmd == "runtime-efficiency":

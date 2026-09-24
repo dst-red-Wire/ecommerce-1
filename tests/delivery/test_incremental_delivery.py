@@ -100,6 +100,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
             with (
                 mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "commit_provenance_check", return_value=0),
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),
@@ -190,6 +191,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 {"ECOMMERCE_FORCE_FULL_QUALIFICATION": "1"},
                 clear=False,
             ),
+            mock.patch.object(REPOCTL, "commit_provenance_check", return_value=0),
             mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
             mock.patch.object(REPOCTL, "changed_paths", return_value=["scripts/resource-sizing.rb"]),
             mock.patch.object(REPOCTL, "affected", return_value=["global"]),
@@ -258,6 +260,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
 
             with (
                 mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "commit_provenance_check", return_value=0),
                 mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
                 mock.patch.object(REPOCTL, "changed_paths", side_effect=fake_changed_paths),
                 mock.patch.object(REPOCTL, "affected", side_effect=fake_affected),

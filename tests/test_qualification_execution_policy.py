@@ -1296,8 +1296,9 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_system_tests_are_owned_once_and_dynamic_cache_targets_exact_file(self):
         owners = MOD._dedicated_test_owners()
-        self.assertEqual(12, len(owners))
+        self.assertEqual(13, len(owners))
         self.assertEqual("governance", owners["tests/test_architecture_authority.py"])
+        self.assertEqual("governance", owners["tests/test_commit_provenance.py"])
         self.assertEqual("governance", owners["tests/test_runtime_orchestration.py"])
         self.assertEqual("contracts", owners["tests/openapi_validator_test.rb"])
         self.assertEqual("runtime-efficiency", owners["tests/runtime_efficiency_test.rb"])
@@ -1340,12 +1341,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             self.assertEqual(0, MOD.governance())
         names = [name for name, _producer in captured["regular"] + captured["internal"]]
         self.assertIn("governance:authority", names)
+        self.assertIn("governance:commit-provenance", names)
         self.assertIn("governance:documentation", names)
         self.assertIn("governance:validator:scripts/validate-architecture.rb", names)
         self.assertIn("governance:test:tests/test_architecture_authority.py", names)
+        self.assertIn("governance:test:tests/test_commit_provenance.py", names)
         self.assertIn("governance:test:tests/test_qualification_execution_policy.py", names)
         self.assertIn("governance:test:tests/test_runtime_orchestration.py", names)
-        self.assertEqual(16, len(names))
+        self.assertEqual(18, len(names))
         self.assertIn(
             "governance:test:tests/test_architecture_authority.py",
             [name for name, _producer in captured["internal"]],

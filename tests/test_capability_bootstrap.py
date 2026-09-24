@@ -859,8 +859,10 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("YQ_VERSION", yq["version_key"])
         self.assertEqual({"type": "ansible", "tags": "context_tools"}, yq["provision"])
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
-        self.assertIn('checksum: "sha256:{{ yq_sha256 }}"', tasks)
-        self.assertIn('dest: "{{ local_bin }}/yq"', tasks)
+        self.assertIn("Download registry-managed standalone binaries", tasks)
+        self.assertIn("toolchain_lock.versions[item.value.sha256_ref]", tasks)
+        self.assertIn("toolchain_lock.tool_lifecycle.active[item.key].provision.tags", tasks)
+        self.assertNotIn("yq_sha256", tasks)
 
     def test_gh_is_pinned_ansible_managed_and_requires_slurp(self):
         canonical = MOD.load_contract()
@@ -1104,7 +1106,9 @@ class CapabilityAuditTest(unittest.TestCase):
         names = {item["name"]: item for item in canonical["capabilities"]}
         for name in ("oasdiff", "ansible-playbook", "terraform", "kubectl", "helm", "kustomize"):
             self.assertNotIn("docker", names[name].get("requires", []))
-        self.assertEqual(["docker"], names["kind"]["requires"])
+        self.assertNotIn("kind", names)
+        lifecycle = MOD.load_toolchain_lock()["tool_lifecycle"]
+        self.assertIn("kind", lifecycle["deferred"])
 
 
 class CapabilityClosureTest(unittest.TestCase):

@@ -5,9 +5,12 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security terraform ansible system
 
-seed: ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
+toolchain-closure: ## Validate the fail-closed central toolchain registry
+	@$(PYTHON) scripts/repoctl.py toolchain-closure
+
+seed: toolchain-closure ## Reconcile the hash-locked Python/Ansible seed environment without requiring Ansible
 	@$(PYTHON) -I -S scripts/capability_bootstrap.py seed
 
 bootstrap: seed ## Reconcile required static capabilities independently in dependency order
@@ -16,11 +19,11 @@ bootstrap: seed ## Reconcile required static capabilities independently in depen
 bootstrap-runtime: seed ## Reconcile and require optional external runtime capabilities
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py bootstrap --profile runtime
 
-env-check: ## Audit capabilities without changing the workstation
+env-check: toolchain-closure ## Audit capabilities without changing the workstation
 	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile static
 
-env-check-runtime: ## Audit and require optional external runtime capabilities
+env-check-runtime: toolchain-closure ## Audit and require optional external runtime capabilities
 	@test -x "$(QUALIFICATION_PYTHON)" || { printf '%s\n' 'BLOCKED qualification seed missing: run `make seed`'; exit 1; }
 	@PATH="$(QUALIFICATION_BIN):$$PATH" $(QUALIFICATION_PYTHON) scripts/capability_bootstrap.py env-check --profile runtime
 
