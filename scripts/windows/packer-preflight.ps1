@@ -93,7 +93,7 @@ try {
         if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
             throw 'Invalid WSL distribution or repository path'
         }
-        $probe = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @('-c', 'import pathlib,shutil,sys; candidates=[shutil.which("packer"), str(pathlib.Path.home()/".local/bin/packer") if (pathlib.Path.home()/".local/bin/packer").exists() else None]; found=next((p for p in candidates if p), ""); print(found); sys.exit(1 if found else 0)') -TimeoutSeconds 15
+        $probe = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @('-c', 'import pathlib,shutil,sys; candidates=[shutil.which("packer"), str(pathlib.Path.home()/".local/bin/packer") if (pathlib.Path.home()/".local/bin/packer").exists() else None]; found=next((p for p in candidates if p), ""); print(found); sys.exit(1 if found else 0)') -TimeoutSeconds 60
         if ($probe.ExitCode -ne 0) {
             throw "A competing Packer executable exists in WSL2: $($probe.StdOut.Trim())"
         }

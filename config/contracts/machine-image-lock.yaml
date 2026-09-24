@@ -271,6 +271,7 @@ packer_image:
       release_publishes_remote_artifact: false
     timeouts_seconds:
       command_probe: 15
+      wsl_bridge: 60
       packer_init: 300
       packer_validate: 120
       packer_build: 7200

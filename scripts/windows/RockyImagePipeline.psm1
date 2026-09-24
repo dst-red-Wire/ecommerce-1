@@ -247,9 +247,9 @@ function Get-GitState {
         [Parameter(Mandatory = $true)][string]$Distribution,
         [Parameter(Mandatory = $true)][string]$WslRepoRoot
     )
-    $head = Invoke-WslProcess -Distribution $Distribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD') -TimeoutSeconds 15
+    $head = Invoke-WslProcess -Distribution $Distribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD') -TimeoutSeconds 60
     Assert-ProcessSuccess -Result $head -Operation 'Git HEAD resolution'
-    $status = Invoke-WslProcess -Distribution $Distribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('status', '--porcelain=v1', '--untracked-files=all') -TimeoutSeconds 15
+    $status = Invoke-WslProcess -Distribution $Distribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('status', '--porcelain=v1', '--untracked-files=all') -TimeoutSeconds 60
     Assert-ProcessSuccess -Result $status -Operation 'Git worktree inspection'
     return [pscustomobject]@{
         Head = $head.StdOut.Trim()

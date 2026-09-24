@@ -148,6 +148,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
     def test_all_external_processes_and_retries_are_bounded(self):
         self.assertIn("TimeoutSeconds", self.module)
         self.assertIn("WaitForExit($TimeoutSeconds * 1000)", self.module)
+        self.assertIn("-TimeoutSeconds 60", self.module)
         self.assertIn("taskkill.exe", self.module)
         self.assertIn("$attempt -le 12", self.qualify)
         self.assertIn("Start-Sleep -Seconds 5", self.qualify)
