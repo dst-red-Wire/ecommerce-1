@@ -157,6 +157,79 @@ class OpenTofuAuthorityTests(unittest.TestCase):
         self.assertIn("toolchain_offline", installer)
         self.assertNotIn("releases.hashicorp.com/terraform", installer)
 
+    def test_ansible_reconciliation_removes_forbidden_terraform_cli(self):
+        main_tasks = yaml.safe_load(
+            (
+                ROOT
+                / "platform/ansible/roles/developer_toolchain/tasks/main.yml"
+            ).read_text(encoding="utf-8")
+        )
+        import_task = next(
+            task
+            for task in main_tasks
+            if task["name"] == "Reconcile forbidden legacy IaC artifacts"
+        )
+        self.assertEqual(
+            "opentofu_cleanup.yml", import_task["ansible.builtin.import_tasks"]
+        )
+        tasks = yaml.safe_load(
+            (
+                ROOT
+                / "platform/ansible/roles/developer_toolchain/tasks/opentofu_cleanup.yml"
+            ).read_text(encoding="utf-8")
+        )
+        by_name = {task["name"]: task for task in tasks}
+        authority = by_name[
+            "Require central OpenTofu-only authority before Terraform CLI removal"
+        ]["ansible.builtin.assert"]["that"]
+        self.assertIn(
+            "developer_toolchain_architecture_lock.tooling.iac.terraform_cli == 'forbidden'",
+            authority,
+        )
+        self.assertEqual(
+            "absent",
+            by_name["Remove the forbidden Terraform operating-system package"][
+                "ansible.builtin.apt"
+            ]["state"],
+        )
+        self.assertEqual(
+            "{{ local_bin }}/terraform",
+            by_name[
+                "Remove forbidden Terraform CLI entry points from the managed user path"
+            ]["ansible.builtin.file"]["path"],
+        )
+        self.assertEqual(
+            "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}",
+            by_name[
+                "Remove forbidden Terraform CLI entry points from system paths"
+            ]["loop"],
+        )
+        discovery = by_name[
+            "Discover stale repository-managed Terraform CLI artifacts"
+        ]["ansible.builtin.find"]
+        self.assertEqual(
+            ["terraform-*", "terraform-provider-cache"], discovery["patterns"]
+        )
+        self.assertFalse(discovery["recurse"])
+        self.assertEqual(
+            "absent",
+            by_name["Remove stale repository-managed Terraform CLI artifacts"][
+                "ansible.builtin.file"
+            ]["state"],
+        )
+        self.assertEqual(
+            ["bash", "-lc", "command -v terraform"],
+            by_name["Probe for a residual Terraform CLI on the effective path"][
+                "ansible.builtin.command"
+            ]["argv"],
+        )
+        self.assertIn(
+            "developer_toolchain_terraform_cli_probe.rc != 0",
+            by_name["Require Terraform CLI to be absent after reconciliation"][
+                "ansible.builtin.assert"
+            ]["that"],
+        )
+
     def test_hcl_required_version_projects_the_central_pin(self):
         version = self.toolchain["versions"]["OPENTOFU_VERSION"]
         for relative in (

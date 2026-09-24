@@ -1,0 +1,71 @@
+---
+- name: Require central OpenTofu-only authority before Terraform CLI removal
+  ansible.builtin.assert:
+    that:
+      - developer_toolchain_architecture_lock.tooling.iac.authority == 'opentofu'
+      - developer_toolchain_architecture_lock.tooling.iac.command == 'tofu'
+      - developer_toolchain_architecture_lock.tooling.iac.terraform_cli == 'forbidden'
+    fail_msg: >-
+      Refusing destructive IaC reconciliation without the canonical
+      OpenTofu-only architecture authority.
+
+- name: Remove the forbidden Terraform operating-system package
+  ansible.builtin.apt:
+    name: terraform
+    state: absent
+    purge: true
+  become: true
+
+- name: Remove forbidden Terraform CLI entry points from the managed user path
+  ansible.builtin.file:
+    path: "{{ local_bin }}/terraform"
+    state: absent
+
+- name: Remove forbidden Terraform CLI entry points from system paths
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ developer_toolchain_forbidden_terraform_cli_system_paths }}"
+  become: true
+
+- name: Discover stale repository-managed Terraform CLI artifacts
+  ansible.builtin.find:
+    paths:
+      - "{{ local_share }}/tools"
+      - "{{ local_cache }}"
+    patterns:
+      - terraform-*
+      - terraform-provider-cache
+    file_type: any
+    recurse: false
+  register: developer_toolchain_forbidden_terraform_cli_artifacts
+
+- name: Validate stale Terraform CLI artifact removal paths
+  ansible.builtin.assert:
+    that:
+      - >-
+        item.path.startswith(local_share + '/tools/') or
+        item.path.startswith(local_cache + '/')
+    fail_msg: "Refusing unsafe Terraform CLI artifact removal path: {{ item.path }}"
+  loop: "{{ developer_toolchain_forbidden_terraform_cli_artifacts.files }}"
+
+- name: Remove stale repository-managed Terraform CLI artifacts
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ developer_toolchain_forbidden_terraform_cli_artifacts.files }}"
+
+- name: Probe for a residual Terraform CLI on the effective path
+  ansible.builtin.command:
+    argv: [bash, -lc, command -v terraform]
+  register: developer_toolchain_terraform_cli_probe
+  changed_when: false
+  failed_when: false
+
+- name: Require Terraform CLI to be absent after reconciliation
+  ansible.builtin.assert:
+    that:
+      - developer_toolchain_terraform_cli_probe.rc != 0
+    fail_msg: >-
+      Terraform CLI remains reachable at
+      {{ developer_toolchain_terraform_cli_probe.stdout | default('an unknown path', true) }}.
