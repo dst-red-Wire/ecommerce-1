@@ -1,0 +1,1 @@
+{"metrics":{"http_req_duration":{"p(95)":2.1,"thresholds":{"p(95)<=1000":false}},"http_req_failed":{"value":0,"thresholds":{"rate<=0.01":false}}}}

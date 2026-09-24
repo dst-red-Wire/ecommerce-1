@@ -1,4 +1,4 @@
-version: 1
+version: 3
 status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
@@ -28,12 +28,213 @@ capabilities:
     implementation: govulncheck
     status: active
     execution: affected-go-modules
+  os_compliance:
+    implementation: openscap
+    status: active
+    execution: qualified-rocky-rke2-node-only
+    profile_authority: architecture.lock.yaml#machine_contracts.qualification_tools
   kubernetes_cis:
     implementation: kube-bench
-    status: deferred
+    status: active
     execution: qualified-rke2-cluster-only
-    reason: no current qualified RKE2 campaign executes kube-bench
+    incompatible_profile_behavior: BLOCK
     policy_authority: architecture.lock.yaml#security
+  policy_as_code:
+    implementation: conftest
+    status: active
+    execution: qualification-tools-static
+  controlled_http_dast:
+    implementation: nuclei
+    status: active
+    execution: qualification-tools-smoke-local-or-contracted-project-target
+  network_policy_evidence:
+    implementation: hubble
+    status: active
+    execution: qualified-rke2-multinode-only
+    incompatible_client_behavior: BLOCK
+
+scan_scopes:
+  repository_filesystem:
+    scanners: [trivy]
+    execution: affected-source-and-dependency-manifests
+  configuration_iac:
+    scanners: [trivy]
+    execution: affected-terraform-kubernetes-and-tekton-inputs
+  go_dependencies:
+    scanners: [trivy]
+    execution: affected-go-modules
+  reachable_go_vulnerabilities:
+    scanners: [govulncheck]
+    execution: affected-go-modules
+  oci_images:
+    scanners: [trivy]
+    execution: immutable-release-digest
+  sbom:
+    scanners: [syft, trivy]
+    execution: immutable-release-digest
+  kubernetes_configuration:
+    scanners: [trivy]
+    execution: affected-manifests
+  kubernetes_runtime_cis:
+    scanners: [kube-bench]
+    execution: qualified-rke2-cluster-only
+    status: active-runtime-profile-blocked-until-compatible
+  rocky_os_compliance:
+    scanners: [openscap]
+    execution: qualified-rocky-rke2-node-only
+  policy_as_code:
+    scanners: [conftest, opa]
+    execution: repository-policy-fixtures-and-contracted-inputs
+  controlled_http_dast:
+    scanners: [nuclei]
+    execution: loopback-or-explicit-project-contract-only
+  network_policy_runtime:
+    scanners: [hubble]
+    execution: qualified-rke2-multinode-only
+
+advisory_identifiers:
+  accepted_namespaces:
+    CVE: '^CVE-[0-9]{4}-[0-9]{4,}$'
+    GO: '^GO-[0-9]{4}-[0-9]{4,}$'
+    GHSA: '^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$'
+    OSV: '^OSV-[0-9]{4}-[0-9A-Z][0-9A-Z._-]*$'
+  alias_normalization: uppercase-sorted-unique
+  cve_alias_resolution:
+    required_for_kev_epss: true
+    accepted_namespace: CVE
+  non_cve_without_alias:
+    kev: NOT_APPLICABLE_NO_CVE_ALIAS
+    epss: NOT_APPLICABLE_NO_CVE_ALIAS
+    automatic_pass: forbidden
+    release_unknown_or_reachable_unfixed: BLOCK
+    exact_unreachable: REPORT
+  scanner_deduplication:
+    identity: transitive-identifier-and-alias-set
+    preserve_observations: true
+    conflict: BLOCK
+
+vulnerability_policy:
+  severity_source: scanner-normalized-with-cvss-floor
+  cvss:
+    critical_minimum: 9.0
+    high_minimum: 7.0
+    medium_minimum: 4.0
+    low_minimum: 0.0
+  epss_blocking_threshold: 0.70
+  critical:
+    default_decision: BLOCK
+    fix_available: BLOCK
+    unfixed: BLOCK
+    cisa_kev: BLOCK-no-exception
+    remediation_deadline_hours: 72
+  high:
+    default_decision: BLOCK
+    release_artifact: BLOCK
+    oci_image: BLOCK
+    reachable: BLOCK
+    fix_available: BLOCK
+    unfixed: BLOCK-unless-valid-temporary-exception
+    cisa_kev: BLOCK
+    high_exploit_probability: BLOCK
+    remediation_deadline_days: 7
+  medium:
+    default_decision: REPORT
+    cisa_kev: BLOCK
+    epss_at_or_above_threshold: BLOCK
+    remediation_deadline_days: 30
+  low:
+    default_decision: REPORT
+    remediation_deadline_days: 90
+  unknown:
+    default_decision: REPORT-CLASSIFICATION-REQUIRED
+    release_decision: BLOCK
+    healthy_interpretation: forbidden
+  reachability:
+    scanner: govulncheck
+    reachable_high: BLOCK
+    exact_proof_modes: [source, binary]
+    exact_proof_level: symbol
+    exact_unreachable_release: REPORT
+    unknown_reachability_release: risk-not-reduced
+
+risk_datasets:
+  qualification_network_access: forbidden
+  findings_require_verified_datasets: CVE-or-advisory-with-CVE-alias
+  no_findings_dataset_state: NOT_REQUIRED_NO_FINDINGS
+  non_cve_without_alias_dataset_state: NOT_APPLICABLE_NO_CVE_ALIAS
+  update_command: python3 scripts/repoctl.py security-datasets-sync
+  manifest: .context/security-datasets/manifest.json
+  kev:
+    source: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    file: .context/security-datasets/cisa-kev.json
+    identity_fields: [catalogVersion, dateReleased]
+    checksum: sha256
+    maximum_age_hours: 336
+  epss:
+    source: https://epss.empiricalsecurity.com/epss_scores-current.csv.gz
+    file: .context/security-datasets/epss.csv.gz
+    identity_fields: [model_version, score_date]
+    checksum: sha256
+    maximum_age_hours: 72
+  missing_corrupt_or_stale: BLOCK-when-findings-require-risk-decision
+
+exceptions:
+  format: machine-readable-json
+  authority: architecture.lock.yaml#repository_governance.owner_authorization
+  approval_authentication: trusted-out-of-band-owner-record-required
+  untrusted_local_record: BLOCK
+  root: .context/security-exceptions
+  required_fields:
+    - finding_id
+    - owner
+    - reason
+    - scope
+    - affected_artifact
+    - created_at
+    - expires_at
+    - approval
+  optional_bound_fields:
+    - exact_sha
+    - environment
+    - mitigation
+    - remediation_issue
+  wildcard_scope: forbidden
+  ignore_true_without_governance_metadata: forbidden
+  expiration: required
+  expired: BLOCK
+  finding_match: exact
+  artifact_match: exact
+  head_sha_match_when_present: exact
+
+evidence:
+  schema_version: 1
+  root: .context/evidence/security
+  required_fields:
+    - schema_version
+    - base_sha
+    - head_sha
+    - head_tree_sha
+    - scanner_identities
+    - scanner_versions
+    - tool_checksums
+    - kev_dataset_identity
+    - epss_dataset_identity
+    - artifact_digest
+    - sbom_digest
+    - observations
+    - findings
+    - policy_decisions
+    - exceptions_used
+    - final_result
+    - reasons
+    - generated_at
+  final_results: [PASS, BLOCK]
+  prior_sha_reuse: forbidden
+  artifact_policy_dataset_identity_match: required
+  scanner_failure: BLOCK
+  malformed_scanner_output: BLOCK
+  sbom_artifact_mismatch: BLOCK
+  exact_sha_mismatch: BLOCK
 
 configuration:
   use_default_rules: true
@@ -62,3 +263,7 @@ rules:
   secret_scan_failure: blocking
   config_generation_failure: blocking
   local_policy_override: forbidden
+  vulnerability_scan_failure: blocking
+  missing_required_scanner: blocking
+  unfixed_automatic_pass: forbidden
+  unknown_automatic_pass: forbidden

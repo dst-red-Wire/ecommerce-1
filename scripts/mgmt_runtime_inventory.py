@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the non-secret MGMT Ansible transport overlay from Terraform output."""
+"""Build the non-secret MGMT Ansible transport overlay from OpenTofu output."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def validate_transport(
     canonical_nodes: list[str], gateway_name: str, canonical_private: dict[str, str], value: Any
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError("Terraform runtime_transport output must be a mapping")
+        raise ValueError("OpenTofu runtime_transport output must be a mapping")
     phase = value.get("phase")
     if phase not in {"bootstrap", "steady-state"}:
         raise ValueError("runtime transport phase must be bootstrap or steady-state")
@@ -103,20 +103,20 @@ def validate_transport(
     return {"phase": phase, "gateway": gateway_name, "hosts": hosts}
 
 
-def terraform_transport(terraform_dir: Path) -> dict[str, Any]:
+def opentofu_transport(opentofu_dir: Path) -> dict[str, Any]:
     proc = subprocess.run(
-        ["terraform", f"-chdir={terraform_dir}", "output", "-json", "runtime_transport"],
+        ["tofu", f"-chdir={opentofu_dir}", "output", "-json", "runtime_transport"],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
     if proc.returncode:
-        raise RuntimeError("terraform output runtime_transport failed: " + " ".join(proc.stderr.split()))
+        raise RuntimeError("tofu output runtime_transport failed: " + " ".join(proc.stderr.split()))
     return json.loads(proc.stdout)
 
 
-def write_overlay(output: Path, transport: dict[str, Any], source: str = "terraform-output:runtime_transport") -> None:
-    if source not in {"terraform-output:runtime_transport", "transport-json"}:
+def write_overlay(output: Path, transport: dict[str, Any], source: str = "opentofu-output:runtime_transport") -> None:
+    if source not in {"opentofu-output:runtime_transport", "transport-json"}:
         raise ValueError("unsupported MGMT transport provenance")
     payload = {"version": 2, "source": source, "contains_secrets": False, **transport}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -129,7 +129,7 @@ def write_overlay(output: Path, transport: dict[str, Any], source: str = "terraf
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=".context/runtime/mgmt-ansible-transport.json")
-    parser.add_argument("--terraform-dir", default="platform/terraform/environments/mgmt")
+    parser.add_argument("--opentofu-dir", default="platform/terraform/environments/mgmt")
     parser.add_argument("--transport-json")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -138,14 +138,14 @@ def main() -> int:
         raw = (
             json.loads(Path(args.transport_json).read_text())
             if args.transport_json
-            else terraform_transport(root / args.terraform_dir)
+            else opentofu_transport(root / args.opentofu_dir)
         )
         transport = validate_transport(nodes, gateway, private_addresses, raw)
         output = Path(args.output)
         write_overlay(
             output if output.is_absolute() else root / output,
             transport,
-            "transport-json" if args.transport_json else "terraform-output:runtime_transport",
+            "transport-json" if args.transport_json else "opentofu-output:runtime_transport",
         )
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, json.JSONDecodeError) as exc:
         print(f"FAIL mgmt-runtime-inventory: {exc}", file=sys.stderr)

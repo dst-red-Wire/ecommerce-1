@@ -35,7 +35,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
             MAKEFILE,
         )
         self.assertIn(
-            "ci-full: ci-global lint test terraform ansible ## Run exhaustive portable repository CI checks",
+            "ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks",
             MAKEFILE,
         )
         expected_ci_global = (

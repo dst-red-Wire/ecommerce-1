@@ -1,0 +1,1 @@
+{"template-id":"ecommerce-local-health-smoke","info":{"name":"Ecommerce controlled local health smoke","severity":"info"},"matched-at":"http://127.0.0.1:8080/healthz"}

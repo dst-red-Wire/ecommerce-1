@@ -25,7 +25,8 @@ qualification_squid_allowed_domains:
   # Official Node archive and npm packages used by frontend bootstrap.
   - nodejs.org
   - registry.npmjs.org
-  # Repository-managed Helm, Terraform, and kubectl archives.
+  # Repository-managed Helm and kubectl archives. OpenTofu is fetched from the
+  # already-authorized GitHub release endpoints above; HashiCorp serves Packer only.
   - get.helm.sh
   - releases.hashicorp.com
   - dl.k8s.io

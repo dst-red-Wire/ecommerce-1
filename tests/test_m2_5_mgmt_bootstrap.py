@@ -102,6 +102,18 @@ class M25BootstrapContractTests(unittest.TestCase):
         mutated["platform_bootstrap"]["services"]["woodpecker"] = {}
         self.assertTrue(self.validate(bootstrap=mutated))
 
+    def test_bootstrap_order_keeps_tekton_before_kratix(self):
+        order = self.bootstrap["platform_bootstrap"]["order"]
+        self.assertLess(order.index("tekton"), order.index("kratix"))
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated_order = mutated["platform_bootstrap"]["order"]
+        mutated_order.remove("tekton")
+        mutated_order.append("tekton")
+        self.assertIn(
+            "platform bootstrap order must place Tekton wave 40 before Kratix wave 45",
+            self.validate(bootstrap=mutated),
+        )
+
     def test_external_secrets_removal_fails_closed(self):
         mutated = copy.deepcopy(self.bootstrap)
         mutated["platform_bootstrap"]["services"].pop("external-secrets")
@@ -111,6 +123,19 @@ class M25BootstrapContractTests(unittest.TestCase):
         mutated = copy.deepcopy(self.bootstrap)
         mutated["platform_bootstrap"]["services"]["external-secrets"].pop("dependency")
         self.assertIn("External Secrets must retain its explicit OpenBao dependency", self.validate(bootstrap=mutated))
+
+    def test_kratix_fleet_gitea_boundary_mutation_fails(self):
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated["platform_bootstrap"]["services"]["kratix"]["deployment_owner"] = "direct-kubectl"
+        self.assertIn(
+            "Kratix must remain Fleet-deployed, Kustomize-composed, Helm-packaged and Gitea-backed",
+            self.validate(bootstrap=mutated),
+        )
+
+    def test_kratix_activation_dependency_removal_fails(self):
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated["platform_bootstrap"]["services"]["kratix"]["activation_dependencies"].remove("cert-manager")
+        self.assertIn("Kratix activation dependencies are incomplete", self.validate(bootstrap=mutated))
 
     def test_wireguard_transition_mutations_fail_closed(self):
         mutations = {

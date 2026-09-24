@@ -23,6 +23,7 @@ def profile_roots(contract: dict) -> dict[str, list[str]]:
     profiles = image["profiles"]
     roots = {
         "base": profiles["base"]["rpm_packages"],
+        "rke2": profiles["rke2"]["rpm_packages"],
         "qemu-kvm": image["hypervisors"]["qemu_kvm"]["rpm_packages"],
         "admin-qualification": profiles["admin-qualification"]["rpm_packages"],
     }
@@ -186,7 +187,7 @@ def generate(contract_path: Path, destination: Path) -> dict:
             )
 
     base_files = {entry["file"] for entry in resolved["base"]}
-    for profile in ("qemu-kvm", "admin-qualification"):
+    for profile in ("rke2", "qemu-kvm", "admin-qualification"):
         resolved[profile] = [
             entry for entry in resolved[profile] if entry["file"] not in base_files
         ]

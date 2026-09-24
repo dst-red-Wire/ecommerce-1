@@ -11,8 +11,9 @@ not a second authority.
 - `rocky-10.2-base` is a logical shared component: minimal administration,
   RKE2/Kubernetes host prerequisites, SELinux, nftables, system/network diagnostics
   and generic CLI tools.
-- `rocky-10.2-rke2` builds the shared component without GitHub, CI or advanced
-  qualification tools.
+- `rocky-10.2-rke2` adds the signed Rocky OpenSCAP/SCAP Security Guide packages
+  and the checksum-pinned `kube-bench` binary required for node-side security
+  evidence. It does not contain controller-side developer or CI tooling.
 - `rocky-10.2-admin-qualification` adds `git`, `gh`, `strace`, `sysstat`, `mtr`,
   `shellcheck` and `shfmt`.
 
@@ -28,7 +29,9 @@ repositories. The central contract therefore records the real Rocky package
 Packer owns the immutable OS, stable host prerequisites and baseline diagnostics.
 Ansible owns machine identity, addresses, RKE2 roles, Cilium and host-specific
 network/security policy. The RKE2 bundle owns Kubernetes binaries, images and
-`rke2-selinux`. The admin image alone owns GitHub and advanced qualification tools.
+`rke2-selinux`. The RKE2 image owns only the three node-side security inputs
+listed above. The admin image owns GitHub diagnostics; controller-side
+qualification tools remain outside every Packer image in the governed user cache.
 
 ## Reproducible offline flow
 
