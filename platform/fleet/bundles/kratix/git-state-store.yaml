@@ -1,0 +1,102 @@
+apiVersion: platform.kratix.io/v1alpha1
+kind: GitStateStore
+metadata:
+  name: gitea
+  labels:
+    app.kubernetes.io/part-of: kratix
+    platform.ecommerce.io/owner: cloud-platform
+spec:
+  authMethod: ssh
+  branch: main
+  path: destinations
+  gitAuthor:
+    name: kratix
+    email: kratix@ecommerce.internal
+  secretRef:
+    name: kratix-gitea-writer
+    namespace: kratix-platform-system
+  url: git@gitea-ssh.gitea.svc.cluster.local:platform/kratix-state.git
+---
+apiVersion: platform.kratix.io/v1alpha1
+kind: Destination
+metadata:
+  name: lab
+  labels:
+    environment: lab
+    platform.ecommerce.io/owner: cloud-platform
+spec:
+  path: lab
+  cleanup: none
+  initWorkloads: {enabled: true}
+  stateStoreRef: {kind: GitStateStore, name: gitea}
+---
+apiVersion: platform.kratix.io/v1alpha1
+kind: Destination
+metadata:
+  name: preprod
+  labels:
+    environment: preprod
+    platform.ecommerce.io/owner: cloud-platform
+spec:
+  path: preprod
+  cleanup: none
+  initWorkloads: {enabled: true}
+  stateStoreRef: {kind: GitStateStore, name: gitea}
+---
+apiVersion: platform.kratix.io/v1alpha1
+kind: Destination
+metadata:
+  name: prod
+  labels:
+    environment: prod
+    platform.ecommerce.io/owner: cloud-platform
+spec:
+  path: prod
+  cleanup: none
+  initWorkloads: {enabled: true}
+  stateStoreRef: {kind: GitStateStore, name: gitea}
+---
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: kratix-state-lab
+  namespace: fleet-default
+  labels: {platform.ecommerce.io/component: kratix-state, platform.ecommerce.io/owner: cloud-platform}
+spec:
+  repo: git@gitea-ssh.gitea.svc.cluster.local:platform/kratix-state.git
+  branch: main
+  clientSecretName: kratix-gitea-reader
+  paths: [destinations/lab/dependencies, destinations/lab/resources]
+  targets:
+    - clusterSelector:
+        matchLabels: {environment: lab}
+---
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: kratix-state-preprod
+  namespace: fleet-default
+  labels: {platform.ecommerce.io/component: kratix-state, platform.ecommerce.io/owner: cloud-platform}
+spec:
+  repo: git@gitea-ssh.gitea.svc.cluster.local:platform/kratix-state.git
+  branch: main
+  clientSecretName: kratix-gitea-reader
+  paths: [destinations/preprod/dependencies, destinations/preprod/resources]
+  targets:
+    - clusterSelector:
+        matchLabels: {environment: preprod}
+---
+apiVersion: fleet.cattle.io/v1alpha1
+kind: GitRepo
+metadata:
+  name: kratix-state-prod
+  namespace: fleet-default
+  labels: {platform.ecommerce.io/component: kratix-state, platform.ecommerce.io/owner: cloud-platform}
+spec:
+  repo: git@gitea-ssh.gitea.svc.cluster.local:platform/kratix-state.git
+  branch: main
+  clientSecretName: kratix-gitea-reader
+  paths: [destinations/prod/dependencies, destinations/prod/resources]
+  targets:
+    - clusterSelector:
+        matchLabels: {environment: prod}

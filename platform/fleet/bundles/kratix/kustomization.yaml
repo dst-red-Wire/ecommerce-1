@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - https://github.com/syntasso/kratix//config/default?ref=d50cebceb33defc1f6b9882a009bb1436f0aa3f4
+  - git-state-store.yaml
+images:
+  - name: docker.io/syntasso/kratix-platform
+    newName: syntasso-community.docker.reo.dev/syntasso/kratix-platform
+    digest: sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7
+patches:
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: kratix-platform-pipeline-adapter-config
+    patch: |-
+      - op: replace
+        path: /data/PIPELINE_ADAPTER_IMG
+        value: syntasso-community.docker.reo.dev/syntasso/kratix-platform@sha256:0810b20ca820c627ce176c58798c41c9858b85917daeb474f904348cc41ce0e7

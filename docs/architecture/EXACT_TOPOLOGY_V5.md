@@ -135,6 +135,18 @@ The complete derived delivery/platform flow below mirrors role assignments from 
 - `progressive_delivery`: `argo-rollouts`
 - `object_storage`: `seaweedfs-s3`
 
+The developer-platform orchestration path is `Kratix OSS -> Gitea GitStateStore -> Rancher Fleet`. Kustomize composes the pinned installation overlay and Helm is the governed package format. Kratix is a request and Promise orchestrator, not a deployment authority. Its upstream source and controller image are immutable pins in `config/infrastructure/kratix-platform.yaml`; the bundled Flux and bundled object-store quick-start paths are forbidden.
+
+```text
+Developer Portal (catalog / Golden Paths / QCE / evidence)
+  -> Kratix (Promises / Platform API)
+  -> Gitea (generated desired state)
+  -> Rancher Fleet (multi-cluster reconciliation)
+     -> RKE2 LAB (VirtualBox is the local example)
+     -> RKE2 PREPROD
+     -> RKE2 PROD (PROD-A and PROD-B remain distinct certified sites)
+```
+
 `DEPLOYMENT_DAG.md` and `config/infrastructure/deployment-waves.yaml` define dependency waves, gates and destruction order.
 
 ## AIOps

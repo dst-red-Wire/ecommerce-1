@@ -48,6 +48,8 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
         "tekton",
         "rancher",
         "rancher-fleet",
+        "cert-manager",
+        "kratix",
         "openbao-bootstrap",
         "external-secrets",
         "tetragon",
@@ -56,6 +58,22 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
         errors.append("platform bootstrap service set incomplete")
     if not services.get("rancher-fleet", {}).get("gitops_authority"):
         errors.append("Fleet must remain canonical GitOps")
+    kratix = services.get("kratix", {})
+    if (
+        kratix.get("deployment_owner") != "rancher-fleet"
+        or kratix.get("composition") != "kustomize"
+        or kratix.get("packages") != "helm"
+        or kratix.get("state_store") != "gitea-gitstatestore"
+    ):
+        errors.append("Kratix must remain Fleet-deployed, Kustomize-composed, Helm-packaged and Gitea-backed")
+    if set(kratix.get("activation_dependencies", [])) != {
+        "gitea",
+        "rancher-fleet",
+        "cert-manager",
+        "openbao-bootstrap",
+        "external-secrets",
+    }:
+        errors.append("Kratix activation dependencies are incomplete")
     if services.get("external-secrets", {}).get("dependency") != "openbao-initialized-and-scoped-auth-created":
         errors.append("External Secrets must retain its explicit OpenBao dependency")
     authority = bootstrap.get("wireguard_authority", {})

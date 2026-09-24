@@ -19,6 +19,143 @@ rendering:
   blocked_prefix: "BLOCKED by"
   terminal_statuses: [DONE, PROVEN]
 
+qce_traceability:
+  architecture_authority: architecture.lock.yaml#developer_platform.quality_cloud_engineering.sectors
+  sectors_must_be_derived: true
+  label_prefix: "qce:"
+  labels_are_relations_not_evidence: true
+  unknown_label: reject
+  manual_proven: forbidden
+  github_metadata_snapshot: .context/qce/github-metadata.json
+  evidence_output: .context/evidence/qce-status.json
+  evidence_max_age_seconds: 86400
+  runtime_evidence_contract:
+    schema_version: 1
+    required_fields:
+      - schema_version
+      - status
+      - exact_commit_evidence
+      - runtime_execution
+      - head_sha
+      - head_tree_sha
+      - created_at_epoch
+      - capabilities
+    accepted_status: PASS
+    exact_commit_evidence_required: true
+    runtime_execution_required: true
+    claimed_capability_membership_required: true
+  statuses:
+    NOT_STARTED: no-contracted-capability
+    CONTRACTED: valid-contract-without-complete-implementation
+    PARTIAL: some-required-capability-or-evidence-present
+    IMPLEMENTED: all-required-capabilities-exist-without-current-proof
+    PROVEN: all-required-gates-pass-in-fresh-exact-sha-evidence
+    BLOCKED: explicit-blocker-prevents-target-state
+  capabilities:
+    continuous_testing:
+      - id: affected-tests
+        milestone: M1
+        gates: [system]
+        implementation_paths: [scripts/ci-affected.rb, scripts/repoctl.py]
+        proof: {kind: qualification-gates}
+      - id: exact-sha-qualification
+        milestone: M1
+        gates: [governance, contracts, security]
+        implementation_paths: [config/contracts/ci-evidence.yaml, scripts/repoctl.py]
+        proof: {kind: qualification-gates}
+    test_first:
+      - id: regression-test-contract
+        milestone: M2
+        gates: [system]
+        implementation_paths: [tests/test_m2_product_golden.py]
+        proof: {kind: qualification-gates}
+    test_strategy:
+      - id: impact-to-test-routing
+        milestone: M1
+        gates: [governance, system]
+        implementation_paths: [scripts/ci-affected.rb, config/contracts/qualification-execution-policy.yaml]
+        proof: {kind: qualification-gates}
+    automation:
+      - id: ansible-first-automation
+        milestone: M1
+        gates: [automation]
+        implementation_paths: [platform/ansible/developer.yml, scripts/repoctl.py]
+        proof: {kind: qualification-gates}
+      - id: multi-cluster-platform-orchestration
+        milestone: M4
+        gates: [governance, system]
+        implementation_paths:
+          - config/infrastructure/kratix-platform.yaml
+          - platform/fleet/bundles/kratix/kustomization.yaml
+          - platform/fleet/bundles/kratix/git-state-store.yaml
+          - tests/test_kratix_platform.py
+        proof:
+          kind: runtime-execution
+          evidence_path: .context/evidence/kratix-platform-self-service.json
+        activation_guard:
+          contract: config/infrastructure/kratix-platform.yaml
+          field: [security_qualification, final_result]
+          allowed_values: [PASS]
+    monitoring_observability:
+      - id: telemetry-contract
+        milestone: M4
+        gates: [governance]
+        implementation_paths: [config/contracts/observability-topology.yaml]
+        proof: {kind: qualification-gates}
+      - id: runtime-slo-signals
+        milestone: M5
+        gates: []
+        implementation_paths: []
+        proof: {kind: runtime-execution, evidence_path: .context/evidence/runtime-slo-signals.json}
+    release_governance_automation:
+      - id: immutable-supply-chain
+        milestone: M4
+        gates: [security]
+        implementation_paths: [platform/tekton/tasks/product-supply-chain.yaml]
+        proof: {kind: qualification-gates}
+      - id: governed-promotion-proof
+        milestone: M5
+        gates: []
+        implementation_paths: []
+        proof: {kind: runtime-execution, evidence_path: .context/evidence/governed-promotion-proof.json}
+    golden_path:
+      - id: service-generator
+        milestone: M2
+        gates: [system]
+        implementation_paths: [scripts/servicegen.py]
+        proof: {kind: qualification-gates}
+      - id: platform-self-service
+        milestone: M4
+        gates: [governance, system]
+        implementation_paths:
+          - config/infrastructure/kratix-platform.yaml
+          - platform/fleet/bundles/kratix/kustomization.yaml
+          - tests/test_kratix_platform.py
+        proof:
+          kind: runtime-execution
+          evidence_path: .context/evidence/kratix-platform-self-service.json
+        activation_guard:
+          contract: config/infrastructure/kratix-platform.yaml
+          field: [security_qualification, final_result]
+          allowed_values: [PASS]
+    developer_hub:
+      - id: backstage-self-service
+        milestone: M4
+        gates: []
+        implementation_paths: []
+        proof: {kind: runtime-execution, evidence_path: .context/evidence/backstage-self-service.json}
+    measuring_engineering:
+      - id: engineering-metrics
+        milestone: M1
+        gates: [governance]
+        implementation_paths: [config/contracts/engineering-metrics-policy.yaml, scripts/modern_engineering.py]
+        proof: {kind: qualification-gates}
+      - id: outcome-feedback
+        milestone: M5
+        gates: []
+        implementation_paths: []
+        proof: {kind: runtime-execution, evidence_path: .context/evidence/outcome-feedback.json}
+
 milestones:
   - id: M0
     name: Architecture Sync

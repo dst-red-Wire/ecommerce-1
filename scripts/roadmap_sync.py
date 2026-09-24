@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 from typing import Any
+from datetime import datetime, timezone
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 
@@ -121,6 +122,70 @@ def tracker_states(gh: str, roadmap_policy: dict[str, Any]) -> dict[int, dict[st
             "title": str(issue.get("title") or ""),
         }
     return states
+
+
+def qce_metadata_snapshot(gh: str, roadmap_policy: dict[str, Any]) -> Path:
+    """Materialize non-authoritative GitHub relations for offline QCE projection."""
+    lock = load_yaml("architecture.lock.yaml")
+    sectors = lock.get("developer_platform", {}).get("quality_cloud_engineering", {}).get("sectors", {})
+    if not isinstance(sectors, dict) or len(sectors) != 9:
+        raise RuntimeError("QCE GitHub snapshot requires exactly nine architecture sectors")
+    valid_labels = {"qce:" + str(sector).replace("_", "-") for sector in sectors}
+    repository = github_name_with_owner(gh)
+
+    def entities(kind: str, fields: str) -> list[dict[str, Any]]:
+        response = run([gh, kind, "list", "--state", "all", "--limit", "1000", "--json", fields], check=False)
+        if response.returncode:
+            detail = (response.stderr or response.stdout or "").strip()
+            raise RuntimeError(f"unable to read GitHub {kind} relations: {detail or 'GitHub CLI error'}")
+        try:
+            values = json.loads(response.stdout or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid GitHub {kind} relation JSON") from exc
+        if not isinstance(values, list):
+            raise RuntimeError(f"GitHub {kind} relation JSON must be a list")
+        normalized = []
+        for value in values:
+            if not isinstance(value, dict) or type(value.get("number")) is not int:
+                raise RuntimeError(f"GitHub {kind} relation entry is invalid")
+            labels = sorted(
+                str(item.get("name"))
+                for item in value.get("labels", [])
+                if isinstance(item, dict) and str(item.get("name", "")).startswith("qce:")
+            )
+            unknown = sorted(set(labels) - valid_labels)
+            if unknown:
+                raise RuntimeError("unknown QCE label: " + ", ".join(unknown))
+            if not labels:
+                continue
+            entry = {
+                "number": int(value["number"]),
+                "labels": labels,
+                "milestone": (value.get("milestone") or {}).get("title")
+                if isinstance(value.get("milestone"), dict)
+                else None,
+            }
+            if kind == "pr":
+                entry["head_sha"] = value.get("headRefOid")
+            normalized.append(entry)
+        return sorted(normalized, key=lambda item: item["number"])
+
+    trace = roadmap_policy.get("qce_traceability", {})
+    relative = trace.get("github_metadata_snapshot")
+    if not isinstance(relative, str) or not relative.startswith(".context/"):
+        raise RuntimeError("QCE GitHub metadata snapshot must remain under .context")
+    destination = ROOT / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "repository": repository,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "issues": entities("issue", "number,labels,milestone"),
+        "pull_requests": entities("pr", "number,labels,milestone,headRefOid"),
+        "blockers": [],
+    }
+    destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return destination
 
 
 def compute_statuses(
@@ -288,12 +353,14 @@ def sync(gh: str) -> int:
     if status:
         raise RuntimeError("roadmap-sync requires a clean worktree")
     path, expected, statuses = expected_document(gh)
+    snapshot = qce_metadata_snapshot(gh, policy())
     current = path.read_text(encoding="utf-8")
     if current == expected:
-        print("PASS roadmap-sync already synchronized")
+        print(f"PASS roadmap-sync already synchronized; QCE relations {snapshot.relative_to(ROOT)}")
         return 0
     path.write_text(expected, encoding="utf-8")
     print(f"PASS roadmap-sync updated {path.relative_to(ROOT)}")
+    print(f"PASS roadmap-sync updated QCE relations {snapshot.relative_to(ROOT)}")
     for milestone_id, state in statuses.items():
         print(f"{milestone_id:4} {state}")
     return 0
