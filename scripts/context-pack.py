@@ -23,6 +23,16 @@ OWNERSHIP = ROOT / "config/contracts/service-ownership.yaml"
 DEPS = ROOT / "config/contracts/dependency-map.yaml"
 PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
 
+PEM_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?"
+    r"-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+PEM_PRIVATE_KEY_BEGIN = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+
 
 class MissingManagedYq(RuntimeError):
     pass
@@ -128,8 +138,19 @@ def service_contract(name: str) -> str:
     )
 
 
+def context_input(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RuntimeError(f"context input must be repository-relative: {path}")
+    repository = ROOT.resolve()
+    target = (repository / candidate).resolve()
+    if target != repository and repository not in target.parents:
+        raise RuntimeError(f"context input escapes repository: {path}")
+    return target
+
+
 def excerpt(path: str, max_lines: int) -> str:
-    target = ROOT / path
+    target = context_input(path)
     if not target.is_file():
         return ""
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -144,7 +165,7 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
     AST extraction is best-effort context reduction only; it must never make a
     deterministic gate fail merely because a language pattern evolves.
     """
-    target = ROOT / path
+    target = context_input(path)
     if not target.is_file():
         return ""
     suffix = target.suffix.lower()
@@ -238,14 +259,23 @@ def guard_context_paths(paths: list[str], cfg: dict) -> None:
     patterns = cfg["agent_data_access"].get("forbidden_path_patterns", [])
     for path in paths:
         normalized = path.replace("\\", "/")
+        context_input(path)
         if any(re.search(str(pattern), normalized) for pattern in patterns):
             raise RuntimeError(f"context input is forbidden by least-privilege policy: {path}")
 
 
 def redact_sensitive(text: str, cfg: dict) -> str:
-    redacted = text
+    redacted = PEM_PRIVATE_KEY_BLOCK.sub("[REDACTED PRIVATE KEY BY CONTEXT POLICY]", text)
+    incomplete = PEM_PRIVATE_KEY_BEGIN.search(redacted)
+    if incomplete:
+        redacted = redacted[: incomplete.start()] + "[REDACTED INCOMPLETE PRIVATE KEY BY CONTEXT POLICY]"
     for pattern in cfg["agent_data_access"].get("redaction_patterns", []):
-        redacted = re.sub(str(pattern), "[REDACTED BY CONTEXT POLICY]", redacted)
+        redacted = re.sub(
+            str(pattern),
+            "[REDACTED BY CONTEXT POLICY]",
+            redacted,
+            flags=re.MULTILINE,
+        )
     return redacted
 
 

@@ -244,7 +244,34 @@ class SecurityPolicyTest(unittest.TestCase):
                     any(expected in reason for reason in evidence["reasons"])
                 )
 
+    def test_required_scanners_are_derived_from_scope(self):
+        for scope, required in (
+            ("oci_images", "trivy"),
+            ("repository_filesystem", "trivy"),
+            ("reachable_go_vulnerabilities", "govulncheck"),
+        ):
+            with self.subTest(scope=scope):
+                evidence = self.evaluate(
+                    [], scope=scope, scanner_runs=[], required_scanners=[]
+                )
+                self.assertEqual("BLOCK", evidence["final_result"])
+                self.assertIn(required, evidence["required_scanners"])
+                self.assertTrue(
+                    any(
+                        f"required scanner missing: {required}" in reason
+                        for reason in evidence["reasons"]
+                    )
+                )
+
     def test_malformed_trivy_output_is_rejected(self):
+        self.assertEqual(
+            [],
+            SECURITY.trivy_findings(
+                {"SchemaVersion": 2, "ArtifactType": "filesystem"},
+                artifact="repository",
+                scope="repository_filesystem",
+            ),
+        )
         with self.assertRaisesRegex(ValueError, "missing Results"):
             SECURITY.trivy_findings(
                 {}, artifact="repository", scope="repository_filesystem"
@@ -271,6 +298,18 @@ class SecurityPolicyTest(unittest.TestCase):
         self.assertEqual("BLOCK", conflict["final_result"])
         self.assertTrue(
             any("conflicting duplicate" in reason for reason in conflict["reasons"])
+        )
+
+    def test_same_advisory_in_distinct_packages_remains_distinct(self):
+        first = self.finding("LOW", package="first", installed_version="1.0.0")
+        second = self.finding("LOW", package="second", installed_version="2.0.0")
+        self.datasets(scores={first["finding_id"]: 0.1})
+        evidence = self.evaluate([first, second])
+        self.assertEqual("PASS", evidence["final_result"])
+        self.assertEqual(2, len(evidence["findings"]))
+        self.assertEqual(
+            ["first", "second"],
+            sorted(item["package"] for item in evidence["findings"]),
         )
 
     def test_supported_advisory_namespaces_and_malformed_identifier(self):
@@ -521,6 +560,47 @@ class SecurityPolicyTest(unittest.TestCase):
         self.assertEqual("BLOCK", evidence["final_result"])
         self.assertIn("SBOM/artifact mismatch", evidence["reasons"])
         self.assertIn("exact-SHA mismatch", evidence["reasons"])
+
+    def test_spdx_sbom_binds_only_the_described_root_artifact(self):
+        artifact_digest = "sha256:" + "d" * 64
+        other_digest = "sha256:" + "e" * 64
+        base = {
+            "spdxVersion": "SPDX-2.3",
+            "SPDXID": "SPDXRef-DOCUMENT",
+            "name": "product-image",
+            "documentNamespace": "https://example.test/spdx/product",
+            "documentDescribes": ["SPDXRef-RootPackage"],
+            "packages": [
+                {
+                    "SPDXID": "SPDXRef-RootPackage",
+                    "name": "product",
+                    "externalRefs": [
+                        {
+                            "referenceCategory": "PACKAGE-MANAGER",
+                            "referenceType": "purl",
+                            "referenceLocator": f"pkg:oci/product@{artifact_digest}",
+                        }
+                    ],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sbom.spdx.json"
+            path.write_text(json.dumps(base), encoding="utf-8")
+            _, described = SECURITY.sbom_identity(path, artifact_digest)
+            self.assertEqual(artifact_digest, described)
+
+            wrong = json.loads(json.dumps(base))
+            wrong["packages"][0]["externalRefs"][0]["referenceLocator"] = (
+                f"pkg:oci/product@{other_digest}?note={artifact_digest}"
+            )
+            path.write_text(json.dumps(wrong), encoding="utf-8")
+            _, described = SECURITY.sbom_identity(path, artifact_digest)
+            self.assertIsNone(described)
+
+            path.write_text("not-json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed"):
+                SECURITY.sbom_identity(path, artifact_digest)
 
     def test_cvss_floor_and_deadlines_are_canonical(self):
         finding = self.finding(

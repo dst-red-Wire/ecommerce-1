@@ -144,6 +144,47 @@ class RoutingTests(unittest.TestCase):
             MOD.guard_context_paths(["secrets/prod.key"], cfg)
         self.assertNotIn("super-secret", MOD.redact_sensitive("token=super-secret", cfg))
 
+    def test_context_inputs_cannot_escape_repository(self):
+        cfg = {"agent_data_access": {"forbidden_path_patterns": []}}
+        for unsafe in ("/etc/passwd", "../../secret"):
+            with self.subTest(path=unsafe), self.assertRaisesRegex(
+                RuntimeError, "repository-relative|escapes repository"
+            ):
+                MOD.guard_context_paths([unsafe], cfg)
+
+        with tempfile.TemporaryDirectory() as directory:
+            outside = pathlib.Path(directory) / "outside.yaml"
+            outside.write_text("secret: outside\n", encoding="utf-8")
+            link = ROOT / ".context" / "outside-link.yaml"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                link.symlink_to(outside)
+                with self.assertRaisesRegex(RuntimeError, "escapes repository"):
+                    MOD.guard_context_paths([str(link.relative_to(ROOT))], cfg)
+            finally:
+                link.unlink(missing_ok=True)
+
+    def test_complete_private_key_blocks_are_redacted(self):
+        cfg = {"agent_data_access": {"redaction_patterns": []}}
+        for key_type in ("RSA ", "EC ", "OPENSSH ", "", "ENCRYPTED "):
+            body = f"-----BEGIN {key_type}PRIVATE KEY-----\nSENSITIVEBASE64BODY\n-----END {key_type}PRIVATE KEY-----"
+            with self.subTest(key_type=key_type or "PKCS8"):
+                redacted = MOD.redact_sensitive(f"before\n{body}\nafter", cfg)
+                self.assertNotIn("SENSITIVEBASE64BODY", redacted)
+                self.assertNotIn("BEGIN", redacted)
+                self.assertIn("before", redacted)
+                self.assertIn("after", redacted)
+
+    def test_incomplete_private_key_fails_closed(self):
+        cfg = {"agent_data_access": {"redaction_patterns": []}}
+        redacted = MOD.redact_sensitive(
+            "safe\n-----BEGIN PRIVATE KEY-----\nSENSITIVEBASE64BODY\nmore content",
+            cfg,
+        )
+        self.assertEqual(
+            "safe\n[REDACTED INCOMPLETE PRIVATE KEY BY CONTEXT POLICY]", redacted
+        )
+
     def test_unknown_context_authority_reference_is_rejected(self):
         cfg = {
             "levels": {"L0": {"max_bytes": 100}},

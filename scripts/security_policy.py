@@ -381,11 +381,7 @@ def _ecosystem(result: dict[str, Any], finding_id: str) -> str:
     return str(result.get("Type") or result.get("Class") or "unknown")
 
 
-def load_json_stream(path: Path, label: str) -> list[dict[str, Any]]:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ValueError(f"{label} is missing or malformed") from exc
+def parse_json_stream(raw: str, label: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     offset = 0
     values: list[dict[str, Any]] = []
@@ -406,11 +402,25 @@ def load_json_stream(path: Path, label: str) -> list[dict[str, Any]]:
     return values
 
 
+def load_json_stream(path: Path, label: str) -> list[dict[str, Any]]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{label} is missing or malformed") from exc
+    return parse_json_stream(raw, label)
+
+
 def trivy_findings(
     payload: dict[str, Any], *, artifact: str, scope: str
 ) -> list[dict[str, Any]]:
     results = payload.get("Results")
     if results is None:
+        if payload.get("SchemaVersion") == 2 and payload.get("ArtifactType") in {
+            "filesystem",
+            "container_image",
+            "repository",
+        }:
+            return []
         raise ValueError("Trivy output is missing Results")
     if not isinstance(results, list):
         raise TypeError("Trivy Results must be a list")
@@ -654,7 +664,7 @@ def _normalized_findings(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     reasons: list[str] = []
     observations: list[dict[str, Any]] = []
-    exact_seen: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    exact_seen: dict[tuple[str, str, str, str, str, str, str], dict[str, Any]] = {}
     for raw in raw_findings:
         if not isinstance(raw, dict):
             reasons.append("scanner finding is malformed")
@@ -670,6 +680,8 @@ def _normalized_findings(
             observation["scope"],
             observation["scanner"],
             observation["target"],
+            observation["package"],
+            observation["installed_version"],
         )
         if key in exact_seen:
             if exact_seen[key] != observation:
@@ -698,6 +710,12 @@ def _normalized_findings(
             for group in groups
             if group["artifact"] == observation["artifact"]
             and group["scope"] == observation["scope"]
+            and group["component"]
+            == (
+                observation["ecosystem"],
+                observation["package"],
+                observation["installed_version"],
+            )
             and identifiers.intersection(group["identifiers"])
         ]
         if not matches:
@@ -705,6 +723,11 @@ def _normalized_findings(
                 {
                     "artifact": observation["artifact"],
                     "scope": observation["scope"],
+                    "component": (
+                        observation["ecosystem"],
+                        observation["package"],
+                        observation["installed_version"],
+                    ),
                     "identifiers": set(identifiers),
                     "observations": [observation],
                 }
@@ -920,6 +943,21 @@ def evaluate(
     if sbom_artifact_digest is not None and sbom_artifact_digest != artifact_digest:
         reasons.append("SBOM/artifact mismatch")
 
+    scope = str(payload.get("scope", ""))
+    scope_contract = policy.get("scan_scopes", {}).get(scope)
+    if not isinstance(scope_contract, dict):
+        reasons.append(f"unknown security scan scope: {scope or '<empty>'}")
+        canonical_required_scanners: list[str] = []
+    else:
+        scanners = scope_contract.get("scanners")
+        if not isinstance(scanners, list) or not all(
+            isinstance(scanner, str) and scanner for scanner in scanners
+        ):
+            reasons.append(f"security scan scope has invalid scanner contract: {scope}")
+            canonical_required_scanners = []
+        else:
+            canonical_required_scanners = list(dict.fromkeys(scanners))
+
     scanner_runs = payload.get("scanner_runs", [])
     if not isinstance(scanner_runs, list):
         scanner_runs = []
@@ -929,10 +967,18 @@ def evaluate(
         for item in scanner_runs
         if isinstance(item, dict) and item.get("name")
     }
-    required_scanners = payload.get("required_scanners", [])
-    if not isinstance(required_scanners, list):
-        reasons.append("required scanner inventory is malformed")
-        required_scanners = []
+    claimed_scanners = payload.get("required_scanners", [])
+    if not isinstance(claimed_scanners, list) or not all(
+        isinstance(scanner, str) and scanner for scanner in claimed_scanners
+    ):
+        reasons.append("claimed scanner inventory is malformed")
+        claimed_scanners = []
+    missing_claims = sorted(set(canonical_required_scanners) - set(claimed_scanners))
+    for scanner in missing_claims:
+        reasons.append(f"claimed scanner inventory omits contract requirement: {scanner}")
+    required_scanners = sorted(
+        set(canonical_required_scanners) | set(claimed_scanners)
+    )
     for scanner in required_scanners:
         run = scanner_index.get(str(scanner))
         if run is None:
@@ -1162,6 +1208,8 @@ def evaluate(
         "head_sha": head_sha,
         "head_tree_sha": tree_sha,
         "scanner_identities": sorted(scanner_index),
+        "required_scanners": canonical_required_scanners,
+        "claimed_scanners": sorted(set(claimed_scanners)),
         "scanner_versions": versions,
         "tool_checksums": checksums,
         "kev_dataset_identity": dataset_state["identities"].get("kev", {}),
@@ -1199,9 +1247,63 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
 def sbom_identity(path: Path, artifact_digest: str | None) -> tuple[str, str | None]:
     raw = path.read_bytes()
     digest = "sha256:" + _sha256_bytes(raw)
-    described = (
-        artifact_digest
-        if artifact_digest and artifact_digest in raw.decode("utf-8", errors="ignore")
-        else None
-    )
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("SPDX SBOM is malformed") from exc
+    if not isinstance(document, dict):
+        raise ValueError("SPDX SBOM must be a JSON object")
+    if (
+        not str(document.get("spdxVersion", "")).startswith("SPDX-")
+        or document.get("SPDXID") != "SPDXRef-DOCUMENT"
+        or not isinstance(document.get("name"), str)
+        or not document.get("name")
+        or not isinstance(document.get("documentNamespace"), str)
+        or not document.get("documentNamespace")
+    ):
+        raise ValueError("SPDX document identity is invalid")
+    describes = document.get("documentDescribes")
+    packages = document.get("packages")
+    if (
+        not isinstance(describes, list)
+        or not describes
+        or not all(isinstance(item, str) and item for item in describes)
+        or not isinstance(packages, list)
+    ):
+        raise ValueError("SPDX root artifact description is missing")
+    package_index = {
+        package.get("SPDXID"): package
+        for package in packages
+        if isinstance(package, dict) and isinstance(package.get("SPDXID"), str)
+    }
+    if any(subject not in package_index for subject in describes):
+        raise ValueError("SPDX documentDescribes references an unknown package")
+
+    described_digests: set[str] = set()
+    for subject in describes:
+        package = package_index[subject]
+        for checksum in package.get("checksums") or []:
+            if (
+                isinstance(checksum, dict)
+                and str(checksum.get("algorithm", "")).upper() == "SHA256"
+                and re.fullmatch(r"[0-9a-fA-F]{64}", str(checksum.get("checksumValue", "")))
+            ):
+                described_digests.add(
+                    "sha256:" + str(checksum["checksumValue"]).lower()
+                )
+        for reference in package.get("externalRefs") or []:
+            if not isinstance(reference, dict):
+                continue
+            reference_type = str(reference.get("referenceType", "")).lower()
+            locator = str(reference.get("referenceLocator", ""))
+            if reference_type not in {"purl", "other"}:
+                continue
+            match = re.search(
+                r"(?:@|digest=|oci-digest:)(sha256:[0-9a-fA-F]{64})(?:$|[?&#])",
+                locator,
+            )
+            if match:
+                described_digests.add(match.group(1).lower())
+    normalized_artifact = artifact_digest.lower() if isinstance(artifact_digest, str) else None
+    described = normalized_artifact if normalized_artifact in described_digests else None
     return digest, described

@@ -102,6 +102,18 @@ class M25BootstrapContractTests(unittest.TestCase):
         mutated["platform_bootstrap"]["services"]["woodpecker"] = {}
         self.assertTrue(self.validate(bootstrap=mutated))
 
+    def test_bootstrap_order_keeps_tekton_before_kratix(self):
+        order = self.bootstrap["platform_bootstrap"]["order"]
+        self.assertLess(order.index("tekton"), order.index("kratix"))
+        mutated = copy.deepcopy(self.bootstrap)
+        mutated_order = mutated["platform_bootstrap"]["order"]
+        mutated_order.remove("tekton")
+        mutated_order.append("tekton")
+        self.assertIn(
+            "platform bootstrap order must place Tekton wave 40 before Kratix wave 45",
+            self.validate(bootstrap=mutated),
+        )
+
     def test_external_secrets_removal_fails_closed(self):
         mutated = copy.deepcopy(self.bootstrap)
         mutated["platform_bootstrap"]["services"].pop("external-secrets")

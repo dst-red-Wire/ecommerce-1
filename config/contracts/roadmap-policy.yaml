@@ -15,9 +15,38 @@ rendering:
   next_section_heading: "## 4. Critical path"
   begin_marker: "<!-- BEGIN GENERATED ROADMAP MILESTONES -->"
   end_marker: "<!-- END GENERATED ROADMAP MILESTONES -->"
-  ready_status: "READY FOR CODEX"
-  blocked_prefix: "BLOCKED by"
-  terminal_statuses: [DONE, PROVEN]
+  derived_status_label: "DERIVED — run make roadmap-check"
+
+status_derivation:
+  manual_status_override: forbidden
+  projection_output: .context/evidence/roadmap-status.json
+  qualification_base_ref: origin/main
+  evidence_max_age_seconds: 86400
+  dependency_terminal_statuses: [DONE, PROVEN]
+  statuses:
+    NOT_STARTED: no-valid-contract-or-implementation
+    CONTRACTED: architecture-and-acceptance-defined
+    PARTIAL: some-required-implementation-or-evidence-present
+    IMPLEMENTED: required-implementation-exists-without-complete-proof
+    PROVEN: all-required-exact-and-runtime-evidence-valid
+    BLOCKED: explicit-condition-or-required-dependency-blocked
+  runtime_evidence_contract:
+    schema_version: 1
+    required_fields:
+      - schema_version
+      - status
+      - exact_commit_evidence
+      - runtime_execution
+      - head_sha
+      - head_tree_sha
+      - created_at_epoch
+      - milestone
+      - environment
+      - runtime_identity
+      - outcome
+    accepted_status: PASS
+    accepted_outcome: PASS
+    runtime_identity_required_fields: [kind, id]
 
 qce_traceability:
   architecture_authority: architecture.lock.yaml#developer_platform.quality_cloud_engineering.sectors
@@ -40,7 +69,13 @@ qce_traceability:
       - head_tree_sha
       - created_at_epoch
       - capabilities
+      - environment
+      - runtime_identity
+      - outcome
     accepted_status: PASS
+    accepted_outcome: PASS
+    allowed_environments: [management, lab, preprod, prod-a, prod-b]
+    runtime_identity_required_fields: [kind, id]
     exact_commit_evidence_required: true
     runtime_execution_required: true
     claimed_capability_membership_required: true
@@ -174,7 +209,11 @@ milestones:
     entry_gate: M0 merged
     exit_gate: exactly 19 services + 2 frontends represented, repo checks green
     requires: [M0]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [architecture.lock.yaml, scripts/repoctl.py]
+      qualification_gates: [governance, contracts, security, system]
+      qce_capabilities: [affected-tests, exact-sha-qualification, impact-to-test-routing, ansible-first-automation]
+      runtime_evidence: []
 
   - id: M2
     name: Golden Service Product
@@ -185,7 +224,11 @@ milestones:
     entry_gate: M1 PROVEN
     exit_gate: Product REST/gRPC/PostgreSQL/Outbox/Kafka/tests/container/Fleet/Tekton pattern PROVEN
     requires: [M1]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [services/product/go.mod, tests/test_m2_product_golden.py]
+      qualification_gates: [security, system]
+      qce_capabilities: [regression-test-contract, service-generator]
+      runtime_evidence: []
 
   - id: M2.5
     name: Persistent MGMT Bootstrap
@@ -196,7 +239,11 @@ milestones:
     entry_gate: M1 PROVEN
     exit_gate: persistent MGMT bootstrap PROVEN under the canonical architecture contracts
     requires: [M1]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [config/infrastructure/mgmt-bootstrap.yaml, platform/terraform/environments/mgmt, platform/ansible]
+      qualification_gates: [governance, contracts, system]
+      qce_capabilities: []
+      runtime_evidence: []
 
   - id: M3
     name: PREPROD Infrastructure
@@ -207,7 +254,13 @@ milestones:
     entry_gate: M2.5 PROVEN; exact infrastructure contracts already merged
     exit_gate: Terraform/Ansible/Proxmox/Rocky/RKE2 baseline reproducible, destroyable, zero-resource verified
     requires: [M2.5]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [config/infrastructure/preprod-inventory.yaml, platform/terraform/environments/qualification]
+      qualification_gates: [governance, contracts, system]
+      qce_capabilities: []
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M3-preprod-infrastructure.json
+          environments: [preprod]
 
   - id: M4
     name: Platform Baseline
@@ -218,7 +271,13 @@ milestones:
     entry_gate: M3 PROVEN
     exit_gate: platform services healthy, declarative, observable, secured, restore prerequisites present
     requires: [M3]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [config/infrastructure/deployment-waves.yaml, platform/fleet, platform/tekton]
+      qualification_gates: [governance, contracts, security, system]
+      qce_capabilities: [multi-cluster-platform-orchestration, telemetry-contract, immutable-supply-chain, platform-self-service, backstage-self-service]
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M4-platform-baseline.json
+          environments: [management]
 
   - id: M5
     name: Commerce Vertical Slice
@@ -229,7 +288,13 @@ milestones:
     entry_gate: M2 + M4 PROVEN
     exit_gate: Storefront through domain/data/event paths passes contracts, BDD, E2E and baseline performance
     requires: [M2, M4]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [services/product, frontend/apps/storefront]
+      qualification_gates: [contracts, security, system]
+      qce_capabilities: [runtime-slo-signals, governed-promotion-proof, outcome-feedback]
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M5-commerce-vertical-slice.json
+          environments: [preprod]
 
   - id: M6
     name: Full Application
@@ -240,7 +305,13 @@ milestones:
     entry_gate: M5 PROVEN
     exit_gate: all scoped business capabilities implemented with contracts/tests/ownership
     requires: [M5]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [services, frontend/apps/storefront, frontend/apps/admin]
+      qualification_gates: [contracts, security, system]
+      qce_capabilities: []
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M6-full-application.json
+          environments: [preprod]
 
   - id: M7
     name: Qualification
@@ -251,7 +322,13 @@ milestones:
     entry_gate: M6 feature complete and platform stable
     exit_gate: qualification evidence complete; no unresolved release blocker
     requires: [M6]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [config/contracts/qualification-execution-policy.yaml, scripts/repoctl.py]
+      qualification_gates: [automation, contracts, governance, security, system]
+      qce_capabilities: [exact-sha-qualification]
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M7-qualification.json
+          environments: [preprod]
 
   - id: M8
     name: PREPROD Certification
@@ -262,7 +339,17 @@ milestones:
     entry_gate: M7 PROVEN
     exit_gate: standard + endurance + PROD-equivalent PASS; evidence archived; test state destroyed; READY_FOR_PROD
     requires: [M7]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [docs/project/MASTER_EXECUTION_PLAN.md]
+      qualification_gates: [governance, security, system]
+      qce_capabilities: []
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M8-standard-campaign.json
+          environments: [preprod]
+        - path: .context/evidence/roadmap/M8-endurance-campaign.json
+          environments: [preprod]
+        - path: .context/evidence/roadmap/M8-prod-equivalent-campaign.json
+          environments: [preprod]
 
   - id: M9
     name: PROD A/B Rollout
@@ -273,4 +360,12 @@ milestones:
     entry_gate: M8 READY_FOR_PROD
     exit_gate: controlled rollout, rollback proven, monitoring/business operations ready, release evidence complete
     requires: [M8]
-    completion_status: PROVEN
+    requirements:
+      implementation_paths: [config/infrastructure/prod-inventory.yaml]
+      qualification_gates: [governance, security, system]
+      qce_capabilities: []
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M9-prod-a.json
+          environments: [prod-a]
+        - path: .context/evidence/roadmap/M9-prod-b.json
+          environments: [prod-b]

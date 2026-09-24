@@ -58,7 +58,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            stdout = json.dumps({"Results": []}) if argv[:2] == ["trivy", "fs"] else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(
@@ -210,7 +211,8 @@ class DeveloperStateFastPathTest(unittest.TestCase):
 
         def fake_run(argv, **kwargs):
             calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            stdout = json.dumps({"Results": []}) if argv[:2] == ["trivy", "fs"] else ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(MOD, "require", return_value="/managed/tool"),
@@ -229,12 +231,95 @@ class DeveloperStateFastPathTest(unittest.TestCase):
         self.assertNotIn("--scanners", trivy_calls[0])
         self.assertEqual("platform/tekton/tasks", trivy_calls[0][-1])
 
+    def test_security_propagates_trivy_findings_and_fails_closed_on_malformed_output(self):
+        cases = (
+            ("HIGH", False, 1),
+            ("LOW", False, 0),
+            (None, True, 1),
+        )
+        for severity, malformed, expected_rc in cases:
+            captured = {}
+
+            def fake_run(argv, **kwargs):
+                if argv[:2] == ["trivy", "fs"]:
+                    if malformed:
+                        stdout = "not-json"
+                    else:
+                        stdout = json.dumps(
+                            {
+                                "Results": [
+                                    {
+                                        "Type": "alpine",
+                                        "Vulnerabilities": [
+                                            {
+                                                "VulnerabilityID": "CVE-2026-1000",
+                                                "Severity": severity,
+                                                "PkgName": "libexample",
+                                                "InstalledVersion": "1.0.0",
+                                                "FixedVersion": "1.0.1",
+                                            }
+                                        ],
+                                    }
+                                ]
+                            }
+                        )
+                    return subprocess.CompletedProcess(argv, 0, stdout, "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            def fake_evaluate(payload, *_args, **_kwargs):
+                captured.update(payload)
+                scanner_failed = any(
+                    item.get("name") == "trivy" and item.get("status") == "FAIL"
+                    for item in payload["scanner_runs"]
+                )
+                blocking = scanner_failed or any(
+                    item.get("severity") == "HIGH" for item in payload["findings"]
+                )
+                return {
+                    "final_result": "BLOCK" if blocking else "PASS",
+                    "reasons": ["scanner failure"] if scanner_failed else [],
+                }
+
+            with (
+                self.subTest(severity=severity, malformed=malformed),
+                mock.patch.object(MOD, "require", return_value="/managed/tool"),
+                mock.patch.object(MOD, "changed_paths", return_value=[]),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+                mock.patch.object(MOD._cve_policy_api(), "evaluate", side_effect=fake_evaluate),
+                mock.patch.object(MOD._cve_policy_api(), "write_evidence"),
+                mock.patch.dict(os.environ, {"BASE": "origin/main", "HEAD": "HEAD"}, clear=False),
+            ):
+                self.assertEqual(expected_rc, MOD.security())
+            self.assertEqual(["trivy"], captured["required_scanners"])
+            if malformed:
+                self.assertEqual([], captured["findings"])
+                self.assertEqual("FAIL", captured["scanner_runs"][-1]["status"])
+            else:
+                self.assertEqual(severity, captured["findings"][0]["severity"])
+
     def test_security_scans_every_go_module_when_workspace_changes(self):
         calls = []
 
         def fake_run(argv, **kwargs):
             calls.append((argv, kwargs.get("cwd")))
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["trivy", "fs"]:
+                stdout = json.dumps({"Results": []})
+            elif argv[:1] == ["govulncheck"]:
+                stdout = json.dumps(
+                    {
+                        "config": {
+                            "scanner_name": "govulncheck",
+                            "scanner_version": "v1.8.0",
+                            "scan_mode": "source",
+                            "scan_level": "symbol",
+                            "db": "https://vuln.go.dev",
+                            "db_last_modified": "2026-09-16T18:00:43Z",
+                        }
+                    }
+                )
+            else:
+                stdout = ""
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
 
         with (
             mock.patch.object(MOD, "require", return_value="/managed/tool"),

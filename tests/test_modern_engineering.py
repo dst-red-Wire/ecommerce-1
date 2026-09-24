@@ -1,10 +1,12 @@
 import copy
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -138,27 +140,42 @@ class ModernEngineeringTest(unittest.TestCase):
             }
             path.write_text(json.dumps(evidence), encoding="utf-8")
             gates, error = MOD._qualification_evidence(
-                path, "a" * 40, "b" * 40, 86400, NOW
+                path,
+                "a" * 40,
+                "b" * 40,
+                86400,
+                NOW,
+                canonical_validator=lambda candidate: candidate == path,
             )
             self.assertIsNone(error)
             self.assertEqual("PASS", gates["governance"])
-            for mutation, expected in (
-                ({"exact_commit_evidence": False}, "not exact-SHA PASS"),
-                ({"head_sha": "c" * 40}, "wrong SHA"),
-                ({"created_at_epoch": (NOW - timedelta(days=2)).timestamp()}, "stale"),
-                ({"gates": []}, None),
-            ):
-                changed = {**evidence, **mutation}
-                path.write_text(json.dumps(changed), encoding="utf-8")
-                values, problem = MOD._qualification_evidence(
-                    path, "a" * 40, "b" * 40, 86400, NOW
-                )
-                if expected:
-                    self.assertIn(expected, problem)
-                    self.assertEqual({}, values)
-                else:
-                    self.assertEqual({}, values)
-                    self.assertIsNone(problem)
+            values, problem = MOD._qualification_evidence(
+                path, "a" * 40, "b" * 40, 86400, NOW
+            )
+            self.assertEqual({}, values)
+            self.assertIn("canonical exact-SHA validation", problem)
+
+    def test_minimal_hand_authored_qualification_cannot_prove_qce(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "minimal.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "exact_commit_evidence": True,
+                        "head_sha": "a" * 40,
+                        "head_tree_sha": "b" * 40,
+                        "created_at_epoch": NOW.timestamp(),
+                        "gates": [{"gate": "governance", "status": "PASS"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            gates, problem = MOD._qualification_evidence(
+                path, "a" * 40, "b" * 40, 86400, NOW
+            )
+            self.assertEqual({}, gates)
+            self.assertIn("canonical exact-SHA validation", problem)
 
     def test_runtime_proof_requires_execution_exact_sha_freshness_and_capability(self):
         contract = self.roadmap["qce_traceability"]["runtime_evidence_contract"]
@@ -173,6 +190,9 @@ class ModernEngineeringTest(unittest.TestCase):
                 "head_tree_sha": "b" * 40,
                 "created_at_epoch": NOW.timestamp(),
                 "capabilities": ["platform-self-service"],
+                "environment": "preprod",
+                "runtime_identity": {"kind": "rke2-cluster", "id": "preprod-01"},
+                "outcome": "PASS",
             }
             path.write_text(json.dumps(evidence), encoding="utf-8")
             proven, problem = MOD._runtime_capability_evidence(
@@ -194,6 +214,9 @@ class ModernEngineeringTest(unittest.TestCase):
                     "stale or future-dated",
                 ),
                 ({"capabilities": ["another-capability"]}, "does not claim"),
+                ({"environment": "development"}, "invalid environment"),
+                ({"runtime_identity": {"kind": "rke2-cluster"}}, "identity is invalid"),
+                ({"outcome": "CLAIMED"}, "not an exact execution PASS"),
             ):
                 with self.subTest(expected=expected):
                     path.write_text(
@@ -210,6 +233,15 @@ class ModernEngineeringTest(unittest.TestCase):
                     )
                     self.assertFalse(proven)
                     self.assertIn(expected, problem)
+
+    def test_runtime_only_capability_can_become_proven(self):
+        with mock.patch.object(
+            MOD, "_runtime_capability_evidence", return_value=(True, None)
+        ):
+            payload = MOD.qce_status(ROOT, sector="developer_hub", now=NOW)
+        capability = payload["sectors"][0]["capabilities"][0]
+        self.assertEqual("PROVEN", capability["status"])
+        self.assertEqual("PROVEN", payload["sectors"][0]["status"])
 
     def test_qce_projection_maps_milestones_issues_gates_and_is_deterministic(self):
         first = MOD.qce_status(ROOT, now=NOW)
@@ -328,13 +360,59 @@ class ModernEngineeringTest(unittest.TestCase):
             ):
                 MOD.calculate_dora(events, self.policy)
 
+    def test_dora_excludes_events_outside_declared_window(self):
+        metrics = MOD.calculate_dora(
+            [
+                self.event(
+                    "old-success",
+                    "deployment_succeeded",
+                    "2026-07-01T00:00:00Z",
+                    deployment_id="old",
+                ),
+                self.event(
+                    "new-success",
+                    "deployment_succeeded",
+                    "2026-09-24T00:00:00Z",
+                    deployment_id="new",
+                ),
+                self.event(
+                    "old-failure",
+                    "deployment_failed",
+                    "2026-07-02T00:00:00Z",
+                    deployment_id="old-failed",
+                ),
+            ],
+            self.policy,
+            window_end="2026-09-24T00:00:00Z",
+        )
+        self.assertEqual("2026-08-25T00:00:00Z", metrics["window_start"])
+        self.assertEqual("2026-09-24T00:00:00Z", metrics["window_end"])
+        self.assertEqual(1, metrics["event_count"])
+        self.assertEqual(1, metrics["deployment_frequency"]["successful_deployments"])
+        self.assertEqual(0, metrics["change_fail_rate"]["failed"])
+
     def test_slo_error_budget_and_burn_boundaries(self):
+        slo_policy = MOD.yaml_file(ROOT / "config/contracts/service-slo.yaml")
         MOD.validate_service_slo_policy(
-            MOD.yaml_file(ROOT / "config/contracts/service-slo.yaml"),
+            slo_policy,
             self.lock["business"]["services"],
         )
         healthy = MOD.calculate_slo(999, 1000, 99.0)
         self.assertEqual("HEALTHY", healthy["budget_state"])
+        high_burn = MOD.calculate_slo(
+            999,
+            1000,
+            99.0,
+            slo_policy=slo_policy,
+            window_measurements={
+                "fast": {
+                    "short": {"good_events": 85, "total_events": 100},
+                    "long": {"good_events": 850, "total_events": 1000},
+                }
+            },
+        )
+        self.assertEqual("HIGH_BURN", high_burn["budget_state"])
+        self.assertEqual(["fast"], high_burn["high_burn_windows"])
         exhausted = MOD.calculate_slo(989, 1000, 99.0)
         self.assertEqual("EXHAUSTED", exhausted["budget_state"])
         self.assertEqual(

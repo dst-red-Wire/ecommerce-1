@@ -125,7 +125,7 @@ agent_data_access:
     - "(^|/)(kubeconfig|credentials)(\\.|$)"
     - "(^|/)terraform\\.tfstate(\\.|$)"
   redaction_patterns:
-    - "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    - "(?is)-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
     - "(?i)(password|secret|token|api[_-]?key)\\s*[:=]\\s*[^\\s]+"
   contract_references:
     - architecture.lock.yaml#machine_contracts.context_router

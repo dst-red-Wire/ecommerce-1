@@ -59,7 +59,7 @@ state:
 
 platform_bootstrap:
   activation_owner: M4-platform-baseline
-  order: [rke2, cilium, tetragon, openbao-bootstrap, external-secrets, gitea, harbor, rancher, rancher-fleet, cert-manager, kratix, tekton]
+  order: [rke2, cilium, tetragon, openbao-bootstrap, external-secrets, gitea, harbor, rancher, rancher-fleet, cert-manager, tekton, kratix]
   services:
     gitea:
       version: 1.24.6

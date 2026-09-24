@@ -3282,6 +3282,8 @@ def security() -> int:
     _cve_policy_api().validate_policy(policy)
     scanner_runs: list[dict] = []
     required_vulnerability_scanners: list[str] = []
+    vulnerability_findings: list[dict] = []
+    scanner_errors: list[str] = []
     toolchain_versions = _raw_toolchain_lock()["versions"]
     scanner = policy.get("scanner", {})
     command = str(scanner.get("name", "gitleaks"))
@@ -3326,42 +3328,6 @@ def security() -> int:
     head = os.environ.get("HEAD", "WORKTREE").strip() or "WORKTREE"
     security_paths = changed_paths(base, head)
 
-    trivy_targets: set[str] = set()
-    for path in security_paths:
-        candidate = Path(path)
-        parts = candidate.parts
-        if candidate.name in {"Containerfile", "Dockerfile"} or candidate.suffix in {".tf", ".hcl"}:
-            trivy_targets.add(str(candidate.parent))
-        elif candidate.suffix in {".yaml", ".yml"} and parts and parts[0] == "platform":
-            if len(parts) > 1 and parts[1] in {"fleet", "helm", "kubernetes", "tekton"}:
-                trivy_targets.add(str(candidate.parent))
-    if trivy_targets:
-        require("trivy")
-        required_vulnerability_scanners.append("trivy")
-        for relative in sorted(trivy_targets):
-            run(
-                [
-                    "trivy",
-                    "config",
-                    "--exit-code",
-                    "1",
-                    "--severity",
-                    "HIGH,CRITICAL",
-                    relative,
-                ]
-            )
-        print("PASS trivy affected configuration scan completed")
-        scanner_runs.append(
-            {
-                "name": "trivy",
-                "status": "PASS",
-                "version": toolchain_versions.get("TRIVY_VERSION"),
-                "checksum": toolchain_versions.get("TRIVY_SHA256_LINUX_AMD64"),
-            }
-        )
-    else:
-        print("SKIP trivy: no affected container or configuration input")
-
     module_roots = [ROOT / "frontend", *sorted((ROOT / "services").glob("*"))]
     scan_all_go_modules = "go.work" in security_paths
     affected_modules = [
@@ -3377,17 +3343,140 @@ def security() -> int:
             )
         )
     ]
+
+    require("trivy")
+    required_vulnerability_scanners.append("trivy")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-trivy-affected-") as temp_dir:
+        scan_root = Path(temp_dir)
+        materialized: set[Path] = set()
+        for relative in security_paths:
+            source = (ROOT / relative).resolve()
+            if source.is_file() and source.is_relative_to(ROOT.resolve()):
+                materialized.add(source)
+        for module in affected_modules:
+            for name in ("go.mod", "go.sum"):
+                source = module / name
+                if source.is_file():
+                    materialized.add(source.resolve())
+        for source in sorted(materialized):
+            destination = scan_root / source.relative_to(ROOT.resolve())
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        trivy_vulnerability = run(
+            [
+                "trivy",
+                "fs",
+                "--exit-code",
+                "0",
+                "--format",
+                "json",
+                "--scanners",
+                "vuln",
+                str(scan_root),
+            ],
+            check=False,
+            capture=True,
+        )
+    trivy_status = "PASS"
+    if trivy_vulnerability.returncode != 0:
+        trivy_status = "FAIL"
+        scanner_errors.append(
+            (trivy_vulnerability.stderr or "Trivy filesystem scan failed").strip()
+        )
+    else:
+        try:
+            trivy_payload = json.loads(trivy_vulnerability.stdout)
+            if not isinstance(trivy_payload, dict):
+                raise TypeError("Trivy output must be a JSON object")
+            vulnerability_findings.extend(
+                _cve_policy_api().trivy_findings(
+                    trivy_payload,
+                    artifact="repository",
+                    scope="repository_filesystem",
+                )
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            trivy_status = "FAIL"
+            scanner_errors.append(f"Trivy scanner output is malformed: {exc}")
+    scanner_runs.append(
+        {
+            "name": "trivy",
+            "status": trivy_status,
+            "version": toolchain_versions.get("TRIVY_VERSION"),
+            "checksum": toolchain_versions.get("TRIVY_SHA256_LINUX_AMD64"),
+        }
+    )
+    if trivy_status == "PASS":
+        print(
+            "PASS Trivy repository vulnerability scan completed "
+            f"({len(vulnerability_findings)} finding(s))"
+        )
+
+    trivy_targets: set[str] = set()
+    for path in security_paths:
+        candidate = Path(path)
+        parts = candidate.parts
+        if candidate.name in {"Containerfile", "Dockerfile"} or candidate.suffix in {".tf", ".hcl"}:
+            trivy_targets.add(str(candidate.parent))
+        elif candidate.suffix in {".yaml", ".yml"} and parts and parts[0] == "platform":
+            if len(parts) > 1 and parts[1] in {"fleet", "helm", "kubernetes", "tekton"}:
+                trivy_targets.add(str(candidate.parent))
+    if trivy_targets:
+        for relative in sorted(trivy_targets):
+            run(
+                [
+                    "trivy",
+                    "config",
+                    "--exit-code",
+                    "1",
+                    "--severity",
+                    "HIGH,CRITICAL",
+                    relative,
+                ]
+            )
+        print("PASS trivy affected configuration scan completed")
+    else:
+        print("SKIP trivy: no affected container or configuration input")
+
     if affected_modules:
         require("gosec")
         require("govulncheck")
         required_vulnerability_scanners.append("govulncheck")
         env = os.environ.copy()
+        govulncheck_failed = False
         env.pop("GOROOT", None)
         env.pop("GOTOOLDIR", None)
         for module in affected_modules:
             run(["gosec", "./..."], cwd=module, env=env)
-            run(["govulncheck", "./..."], cwd=module, env=env)
-        print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
+            completed = run(
+                ["govulncheck", "-json", "-mode=source", "-scan=symbol", "./..."],
+                cwd=module,
+                env=env,
+                check=False,
+                capture=True,
+            )
+            if completed.returncode not in {0, 3}:
+                govulncheck_failed = True
+                scanner_errors.append(
+                    (completed.stderr or "govulncheck execution failed").strip()
+                )
+                continue
+            try:
+                events = _cve_policy_api().parse_json_stream(
+                    completed.stdout, f"govulncheck output for {module.name}"
+                )
+                findings, _ = _cve_policy_api().govulncheck_findings(
+                    events,
+                    artifact="repository",
+                    scope="reachable_go_vulnerabilities",
+                    target=str(module.relative_to(ROOT)),
+                )
+                vulnerability_findings.extend(findings)
+            except (TypeError, ValueError) as exc:
+                govulncheck_failed = True
+                scanner_errors.append(str(exc))
+        if not govulncheck_failed:
+            print(f"PASS Go security scans completed for {len(affected_modules)} affected module(s)")
         scanner_runs.extend(
             [
                 {
@@ -3398,7 +3487,7 @@ def security() -> int:
                 },
                 {
                     "name": "govulncheck",
-                    "status": "PASS",
+                    "status": "FAIL" if govulncheck_failed else "PASS",
                     "version": toolchain_versions.get("GOVULNCHECK_VERSION"),
                     "checksum": "go-checksum-database",
                 },
@@ -3428,12 +3517,15 @@ def security() -> int:
             "release": False,
             "scanner_runs": scanner_runs,
             "required_scanners": sorted(set(required_vulnerability_scanners)),
-            "findings": [],
+            "findings": vulnerability_findings,
             "exceptions": _security_exceptions(),
         },
         policy,
         ROOT,
     )
+    if scanner_errors:
+        evidence["reasons"] = sorted(set([*evidence["reasons"], *scanner_errors]))
+        evidence["final_result"] = "BLOCK"
     destination = CONTEXT / "evidence" / "security" / ("worktree.json" if head == "WORKTREE" else f"{head_sha}.json")
     _cve_policy_api().write_evidence(destination, evidence)
     print(f"PASS deterministic vulnerability policy evidence {destination.relative_to(ROOT)}")
@@ -5786,7 +5878,11 @@ def engineering_metrics_command(input_path: str, output_path: str) -> int:
         raise RuntimeError("engineering metrics input is missing or malformed") from exc
     events = payload.get("events") if isinstance(payload, dict) else None
     policy = _modern_engineering_api().load_metrics_policy(ROOT)
-    metrics = _modern_engineering_api().calculate_dora(events, policy)
+    metrics = _modern_engineering_api().calculate_dora(
+        events,
+        policy,
+        window_end=payload.get("window_end") if isinstance(payload, dict) else None,
+    )
     requested_metrics = payload.get("requested_metrics", []) if isinstance(payload, dict) else []
     if requested_metrics:
         _modern_engineering_api().reject_forbidden_metrics(requested_metrics, policy)
@@ -5800,7 +5896,11 @@ def engineering_metrics_command(input_path: str, output_path: str) -> int:
             (ROOT / "config/contracts/engineering-metrics-policy.yaml").read_bytes()
         ).hexdigest(),
         "input_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-        "window": {"days": metrics["window_days"]},
+        "window": {
+            "days": metrics["window_days"],
+            "start": metrics["window_start"],
+            "end": metrics["window_end"],
+        },
         "metrics": metrics,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
@@ -6014,9 +6114,10 @@ def vulnerability_evaluate_command(
             scanner_runs.append({"name": "syft", "status": "PASS", "version": "image-pinned", "checksum": None})
             if "syft" not in required_scanners:
                 required_scanners.append("syft")
-        except OSError:
+        except (OSError, TypeError, ValueError) as exc:
             scanner_runs.append({"name": "syft", "status": "FAIL", "version": "image-pinned", "checksum": None})
             required_scanners.append("syft")
+            payload["scanner_error"] = str(exc)
     payload.update(
         {
             "base_sha": base_sha,

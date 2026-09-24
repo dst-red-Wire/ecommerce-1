@@ -42,6 +42,7 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
     if architecture.get("platform", {}).get("node_os") != "rocky-linux-10.2":
         errors.append("MGMT node OS must be Rocky Linux 10.2")
     services = bootstrap.get("platform_bootstrap", {}).get("services", {})
+    bootstrap_order = bootstrap.get("platform_bootstrap", {}).get("order", [])
     required = {
         "gitea",
         "harbor",
@@ -56,6 +57,15 @@ def validate_contracts(inventory, network, access, bootstrap, architecture, wire
     }
     if not required.issubset(services):
         errors.append("platform bootstrap service set incomplete")
+    if (
+        not isinstance(bootstrap_order, list)
+        or "tekton" not in bootstrap_order
+        or "kratix" not in bootstrap_order
+        or bootstrap_order.index("tekton") >= bootstrap_order.index("kratix")
+    ):
+        errors.append(
+            "platform bootstrap order must place Tekton wave 40 before Kratix wave 45"
+        )
     if not services.get("rancher-fleet", {}).get("gitops_authority"):
         errors.append("Fleet must remain canonical GitOps")
     kratix = services.get("kratix", {})

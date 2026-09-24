@@ -10,9 +10,10 @@ import re
 import statistics
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -178,7 +179,10 @@ def _percentile(values: list[float], quantile: float) -> float | None:
 
 
 def calculate_dora(
-    events: list[dict[str, Any]], policy: dict[str, Any]
+    events: list[dict[str, Any]],
+    policy: dict[str, Any],
+    *,
+    window_end: datetime | str | None = None,
 ) -> dict[str, Any]:
     validate_metrics_policy(policy)
     if not isinstance(events, list):
@@ -204,8 +208,28 @@ def calculate_dora(
         value = dict(item)
         value["_timestamp"] = parsed
         normalized.append(value)
-    normalized.sort(key=lambda item: (item["_timestamp"], item["event_id"]))
     window_days = int(policy["calculation"]["default_window_days"])
+    if isinstance(window_end, str):
+        effective_window_end = _parse_time(window_end, "DORA window_end")
+    elif isinstance(window_end, datetime):
+        if window_end.tzinfo is None:
+            raise ValueError("DORA window_end timestamp must include a timezone")
+        effective_window_end = window_end.astimezone(UTC)
+    elif window_end is None:
+        effective_window_end = (
+            max(item["_timestamp"] for item in normalized)
+            if normalized
+            else datetime.now(UTC)
+        )
+    else:
+        raise TypeError("DORA window_end must be a timestamp")
+    effective_window_start = effective_window_end - timedelta(days=window_days)
+    normalized = [
+        item
+        for item in normalized
+        if effective_window_start <= item["_timestamp"] <= effective_window_end
+    ]
+    normalized.sort(key=lambda item: (item["_timestamp"], item["event_id"]))
     committed: dict[str, datetime] = {}
     deployed_changes: dict[str, datetime] = {}
     lead_times: list[float] = []
@@ -277,6 +301,8 @@ def calculate_dora(
     return {
         "event_count": len(normalized),
         "window_days": window_days,
+        "window_start": _iso(effective_window_start),
+        "window_end": _iso(effective_window_end),
         "change_lead_time": duration_metric(lead_times),
         "deployment_frequency": {
             "status": "MEASURED" if successful else "MISSING",
@@ -302,7 +328,12 @@ def calculate_dora(
 
 
 def calculate_slo(
-    good_events: int | None, total_events: int | None, objective_percent: float
+    good_events: int | None,
+    total_events: int | None,
+    objective_percent: float,
+    *,
+    window_measurements: dict[str, dict[str, dict[str, int]]] | None = None,
+    slo_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if good_events is None or total_events is None:
         return {"status": "MISSING", "release_decision": "NOT_PROVEN"}
@@ -324,10 +355,49 @@ def calculate_slo(
     allowed_bad = total_events * (1 - objective_ratio)
     remaining = allowed_bad - bad
     burn_rate = (bad / total_events) / (1 - objective_ratio)
+    evaluated_windows: dict[str, dict[str, float]] = {}
+    high_burn_windows: list[str] = []
+    if window_measurements is not None:
+        if not isinstance(slo_policy, dict):
+            raise ValueError("multi-window burn evaluation requires the service SLO policy")
+        contracted_windows = slo_policy.get("burn_rate_windows", {})
+        if set(window_measurements) - set(contracted_windows):
+            raise ValueError("unknown SLO burn-rate window")
+
+        def sample_burn(sample: object, label: str) -> float:
+            if not isinstance(sample, dict):
+                raise TypeError(f"{label} burn sample must be an object")
+            sample_good = sample.get("good_events")
+            sample_total = sample.get("total_events")
+            if (
+                type(sample_good) is not int
+                or type(sample_total) is not int
+                or sample_total <= 0
+                or sample_good < 0
+                or sample_good > sample_total
+            ):
+                raise ValueError(f"{label} burn sample is invalid")
+            return ((sample_total - sample_good) / sample_total) / (
+                1 - objective_ratio
+            )
+
+        for name, samples in window_measurements.items():
+            if not isinstance(samples, dict) or set(samples) != {"short", "long"}:
+                raise ValueError(f"{name} burn window requires short and long samples")
+            short_burn = sample_burn(samples["short"], f"{name} short")
+            long_burn = sample_burn(samples["long"], f"{name} long")
+            threshold = float(contracted_windows[name]["threshold"])
+            evaluated_windows[name] = {
+                "short_burn_rate": short_burn,
+                "long_burn_rate": long_burn,
+                "threshold": threshold,
+            }
+            if short_burn >= threshold and long_burn >= threshold:
+                high_burn_windows.append(name)
     if remaining <= 0:
         budget_state = "EXHAUSTED"
         decision = "RELIABILITY_WORK_AND_RELEASE_RESTRICTION"
-    elif burn_rate > 1:
+    elif high_burn_windows:
         budget_state = "HIGH_BURN"
         decision = "ELEVATED_RISK"
     else:
@@ -340,6 +410,8 @@ def calculate_slo(
         "observed_bad_events": bad,
         "error_budget_remaining": remaining,
         "burn_rate": burn_rate,
+        "burn_rate_windows": evaluated_windows,
+        "high_burn_windows": sorted(high_burn_windows),
         "budget_state": budget_state,
         "release_decision": decision,
     }
@@ -503,6 +575,9 @@ def validate_qce_traceability(
         "head_tree_sha",
         "created_at_epoch",
         "capabilities",
+        "environment",
+        "runtime_identity",
+        "outcome",
     }
     if (
         not isinstance(runtime_evidence, dict)
@@ -512,6 +587,10 @@ def validate_qce_traceability(
         or runtime_evidence.get("exact_commit_evidence_required") is not True
         or runtime_evidence.get("runtime_execution_required") is not True
         or runtime_evidence.get("claimed_capability_membership_required") is not True
+        or runtime_evidence.get("accepted_outcome") != "PASS"
+        or not isinstance(runtime_evidence.get("allowed_environments"), list)
+        or not runtime_evidence.get("allowed_environments")
+        or runtime_evidence.get("runtime_identity_required_fields") != ["kind", "id"]
     ):
         raise ValueError("QCE runtime evidence contract is invalid")
     capabilities = trace.get("capabilities")
@@ -660,27 +739,22 @@ def _github_metadata(path: Path, sectors: list[str]) -> dict[str, Any]:
 
 
 def _qualification_evidence(
-    path: Path, head: str, tree: str, maximum_age: int, now: datetime
+    path: Path,
+    head: str,
+    tree: str,
+    maximum_age: int,
+    now: datetime,
+    *,
+    canonical_validator: Callable[[Path], bool] | None = None,
 ) -> tuple[dict[str, str], str | None]:
     if not path.is_file():
         return {}, "qualification evidence missing"
+    if canonical_validator is None or not canonical_validator(path):
+        return {}, "qualification evidence failed canonical exact-SHA validation"
     try:
         evidence = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}, "qualification evidence malformed"
-    if (
-        evidence.get("status") != "PASS"
-        or evidence.get("exact_commit_evidence") is not True
-    ):
-        return {}, "qualification evidence is not exact-SHA PASS"
-    if evidence.get("head_sha") != head or evidence.get("head_tree_sha") != tree:
-        return {}, "qualification evidence has wrong SHA or tree"
-    created = evidence.get("created_at_epoch")
-    if (
-        not isinstance(created, (int, float))
-        or now.timestamp() - float(created) > maximum_age
-    ):
-        return {}, "qualification evidence is stale"
     records = evidence.get("gates")
     if not isinstance(records, list):
         return {}, "qualification gate evidence missing"
@@ -716,6 +790,7 @@ def _runtime_capability_evidence(
         or evidence.get("status") != contract["accepted_status"]
         or evidence.get("exact_commit_evidence") is not True
         or evidence.get("runtime_execution") is not True
+        or evidence.get("outcome") != contract["accepted_outcome"]
     ):
         return False, f"runtime evidence is not an exact execution PASS: {relative}"
     if evidence.get("head_sha") != head or evidence.get("head_tree_sha") != tree:
@@ -729,7 +804,33 @@ def _runtime_capability_evidence(
     capabilities = evidence.get("capabilities")
     if not isinstance(capabilities, list) or capability_id not in capabilities:
         return False, f"runtime evidence does not claim {capability_id}: {relative}"
+    if evidence.get("environment") not in contract["allowed_environments"]:
+        return False, f"runtime evidence has invalid environment: {relative}"
+    runtime_identity = evidence.get("runtime_identity")
+    if not isinstance(runtime_identity, dict) or any(
+        not isinstance(runtime_identity.get(field), str)
+        or not runtime_identity.get(field)
+        for field in contract["runtime_identity_required_fields"]
+    ):
+        return False, f"runtime evidence identity is invalid: {relative}"
     return True, None
+
+
+def _canonical_qualification_validator(root: Path, head: str) -> Callable[[Path], bool]:
+    """Delegate QCE proof acceptance to repoctl's canonical exact-evidence validator."""
+    try:
+        import repoctl
+
+        if Path(repoctl.ROOT).resolve() != root.resolve():
+            canonical = None
+        else:
+            canonical = repoctl._valid_exact_evidence("origin/main", head)
+    except (ImportError, RuntimeError, ValueError):
+        canonical = None
+    canonical_resolved = canonical.resolve() if canonical is not None else None
+    return lambda candidate: (
+        canonical_resolved is not None and candidate.resolve() == canonical_resolved
+    )
 
 
 def _activation_guard_blocker(
@@ -779,6 +880,7 @@ def qce_status(
         tree,
         int(trace["evidence_max_age_seconds"]),
         freshness_time,
+        canonical_validator=_canonical_qualification_validator(root, head),
     )
     milestones = {str(item["id"]): item for item in roadmap["milestones"]}
     result_sectors: list[dict[str, Any]] = []
@@ -835,7 +937,8 @@ def qce_status(
                     freshness_time,
                     trace["runtime_evidence_contract"],
                 )
-                proven = implemented and runtime_proven
+                implemented = implemented or runtime_proven
+                proven = runtime_proven
                 proof_evidence_path = runtime_evidence_path
             blocker = _activation_guard_blocker(
                 root, str(capability["id"]), capability.get("activation_guard")
