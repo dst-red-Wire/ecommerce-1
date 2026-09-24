@@ -49,6 +49,15 @@ variable "offline_bundle_dir" {
   type = string
 }
 
+variable "artifact_dir" {
+  type = string
+
+  validation {
+    condition     = length(trimspace(var.artifact_dir)) > 3
+    error_message = "Artifact_dir must reference a host-local build staging directory."
+  }
+}
+
 variable "image_profile" {
   type    = string
   default = "rke2"
@@ -61,6 +70,7 @@ variable "image_profile" {
 
 locals {
   image_name = "rocky-10.2-${var.image_profile}"
+  vm_name    = "ecommerce-rocky-10-2-build-${var.image_profile}"
   boot_command = [
     "<up><wait><tab><wait>",
     " inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks",
@@ -69,7 +79,7 @@ locals {
 }
 
 source "virtualbox-iso" "base" {
-  vm_name       = "ecommerce-${local.image_name}"
+  vm_name       = local.vm_name
   guest_os_type = "RedHat_64"
   iso_url       = var.iso_url
   iso_checksum  = "sha256:${var.iso_checksum}"
@@ -90,11 +100,11 @@ source "virtualbox-iso" "base" {
   memory               = 4096
   hard_drive_interface = "sata"
   format               = "ova"
-  output_directory     = "${path.root}/../../../.context/packer/${local.image_name}-virtualbox"
+  output_directory     = "${var.artifact_dir}/${local.image_name}-virtualbox"
 }
 
 source "qemu" "base" {
-  vm_name      = "ecommerce-${local.image_name}"
+  vm_name      = local.vm_name
   iso_url      = var.iso_url
   iso_checksum = "sha256:${var.iso_checksum}"
   http_content = {
@@ -115,7 +125,7 @@ source "qemu" "base" {
   cpus                 = 2
   memory               = 4096
   net_device           = "virtio-net"
-  output_directory     = "${path.root}/../../../.context/packer/${local.image_name}-kvm"
+  output_directory     = "${var.artifact_dir}/${local.image_name}-kvm"
 }
 
 build {
@@ -195,15 +205,16 @@ build {
       "truncate -s 0 /etc/machine-id",
       "rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
       "rm -rf /tmp/packer-offline",
-      "usermod --lock --shell /sbin/nologin packer",
-      "rm -f /etc/sudoers.d/packer && rm -rf /home/packer/.ssh",
+      "passwd --status packer | grep -Eq '^packer[[:space:]]+L'",
+      "test -s /home/packer/.ssh/authorized_keys",
+      "chmod 0700 /home/packer/.ssh && chmod 0600 /home/packer/.ssh/authorized_keys",
       "systemd-run --unit=packer-final-shutdown --on-active=10s /usr/sbin/shutdown -P now",
     ]
   }
 
   post-processor "vagrant" {
     only              = ["virtualbox-iso.base"]
-    output            = "${path.root}/../../../.context/packer/${local.image_name}-virtualbox.box"
+    output            = "${var.artifact_dir}/${local.image_name}-virtualbox.box"
     provider_override = "virtualbox"
   }
 }

@@ -596,19 +596,6 @@
       "requirement": "required-static"
     },
     {
-      "name": "packer",
-      "requires": [],
-      "command": "packer",
-      "version_args": ["version"],
-      "version_key": "PACKER_VERSION",
-      "provision_requires": ["ansible-playbook"],
-      "provision": {"type": "ansible", "tags": "packer"},
-      "platforms": ["linux/amd64"],
-      "classification": "managed",
-      "checksum_key": "PACKER_SHA256_LINUX_AMD64",
-      "requirement": "required-static"
-    },
-    {
       "name": "trivy",
       "requires": [],
       "command": "trivy",
@@ -836,7 +823,6 @@
     "helm": "ansible",
     "cosign": "ansible",
     "skopeo": "ansible",
-    "packer": "ansible",
     "trivy": "ansible",
     "gosec": "ansible",
     "govulncheck": "ansible",
@@ -904,6 +890,10 @@
     {
       "command": "gpg",
       "justification": "OpenPGP verification primitive supplied by the supported platform for offline release authentication."
+    },
+    {
+      "command": "wslpath",
+      "justification": "WSL platform primitive used only by the Windows image profile to convert governed repository paths."
     }
   ],
   "gate_requirements": {
@@ -934,6 +924,10 @@
     "automation": [
       "python3",
       "git"
+    ],
+    "image-windows": [
+      "python3",
+      "wslpath"
     ],
     "lint": [
       "python3",

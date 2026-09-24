@@ -33,7 +33,51 @@ network/security policy. The RKE2 bundle owns Kubernetes binaries, images and
 listed above. The admin image owns GitHub diagnostics; controller-side
 qualification tools remain outside every Packer image in the governed user cache.
 
-## Reproducible offline flow
+## Reproducible host profiles
+
+The Windows path is WSL2 Make -> native Windows PowerShell -> native Windows
+Packer/VirtualBox/Vagrant. Packer is intentionally absent from WSL. Run:
+
+```text
+make image-rocky-windows-preflight
+make image-rocky-windows-build
+make image-rocky-windows-qualify
+make image-rocky-windows-release
+```
+
+The historical targets without `-windows-` are aliases for this profile. The
+explicit targets delegate their stateless WSL/Windows path conversion to
+`scripts/repoctl.py`. PowerShell stages the build under Windows LocalAppData so
+Packer, VirtualBox and Vagrant never use a UNC working directory. Generated boxes
+are copied to `.artifacts/packer/rocky-10.2/windows`; generated evidence stays
+under `.context/evidence/rocky-image/rocky-10.2/windows` as required by the
+repository evidence policy.
+
+The second path is a native Ubuntu 24.04 x86_64 host -> Packer Linux -> QEMU/KVM.
+It rejects WSL and requires `/dev/kvm`:
+
+```text
+make image-rocky-linux-preflight
+make image-rocky-linux-build
+make image-rocky-linux-qualify
+make image-rocky-linux-release
+```
+
+It produces a qcow2 under `.artifacts/packer/rocky-10.2/linux`, records evidence
+under `.context/evidence/rocky-image/rocky-10.2/linux`, and qualifies it through a
+disposable overlay, a bounded QEMU process and loopback-only SSH.
+
+Use `OFFLINE=1` only after the exact ISO, RPMs, tools and Packer plugins have been
+cached and verified:
+
+```text
+make image-rocky-windows-build OFFLINE=1
+make image-rocky-linux-build OFFLINE=1
+```
+
+Offline materialization fails if any cache entry is absent. Packer variables use
+host-local paths and a local `file:///` ISO. `packer init`, `packer fmt -check`
+and `packer validate` are mandatory before either profile-specific build.
 
 Regenerate the RPM projection only when the central package roots change:
 
@@ -42,45 +86,14 @@ python3 scripts/generate_packer_rpm_lock.py \
   --output config/artifacts/rocky-10.2-base-packages.lock.json
 ```
 
-Materialize every approved artifact before entering the isolated Packer build:
-
-```text
-python3 scripts/materialize_packer_rpm_repo.py \
-  --contract config/contracts/machine-image-lock.yaml \
-  --package-lock config/artifacts/rocky-10.2-base-packages.lock.json \
-  --toolchain-lock config/contracts/toolchain-lock.json \
-  --cache .context/cache/packer \
-  --output .context/packer/rocky-10.2-offline
-
-ssh-keygen -q -t ed25519 -N '' -f .context/packer/build-key
-
-python3 scripts/render_packer_vars.py \
-  --contract config/contracts/machine-image-lock.yaml \
-  --bundle .context/packer/rocky-10.2-offline \
-  --build-public-key-file .context/packer/build-key.pub \
-  --build-private-key-file .context/packer/build-key \
-  --output .context/packer/rocky-10.2.auto.pkrvars.hcl
-```
-
-`--offline` makes materialization fail if any cache entry is absent. The resulting
-Packer variables reference a local `file://` ISO. Initialize the exact Packer
-plugins before removing network access, then build with network access denied:
-
-```text
-packer init platform/packer/rocky-10.2/rocky-10.2.pkr.hcl
-packer build \
-  -var-file=.context/packer/rocky-10.2.auto.pkrvars.hcl \
-  -var=image_profile=rke2 \
-  platform/packer/rocky-10.2/rocky-10.2.pkr.hcl
-```
-
-Use `image_profile=admin-qualification` for the admin image. Generate the temporary
-SSH key only below ignored `.context`; its private half is never copied into the
-guest. Kickstart injects only the public half, and final cleanup removes the
-authorized key, sudo grant and interactive build-user login before export.
+The temporary communicator key is generated on Windows. Its private half remains
+outside the repository under LocalAppData with an owner-only ACL, is used only for
+the exact Vagrant smoke candidate, and is destroyed during qualification cleanup.
+Release refuses any candidate whose key remains.
 
 Every staged file is SHA-256 checked before use. RPM repositories are disabled
 during image provisioning, and external tools are installed only from the staged
 bundle. Qualification checks versions and capabilities locally; `gh api --help`
 does not require a token or a GitHub API call. Clone hygiene removes machine ID,
-SSH host keys, leases/caches and temporary build credentials before export.
+SSH host keys and leases/caches before export. The full operator procedure and
+authority boundary are documented in `docs/engineering/LOCAL_VM_IMAGE_PIPELINE.md`.

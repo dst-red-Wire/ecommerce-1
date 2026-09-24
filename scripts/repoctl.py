@@ -626,7 +626,11 @@ def toolchain_closure_violations(
         installer_tags = frozenset()
         violations.append(f"developer toolchain installer tags cannot be audited: {exc}")
 
-    approved_non_graph_provisioners = {"packer-bundle"}
+    approved_non_graph_provisioners = {
+        "native-linux-host",
+        "packer-bundle",
+        "windows-host",
+    }
     for name, entry in active.items():
         capability_name = entry.get("capability")
         capability = capabilities.get(capability_name)
@@ -7005,6 +7009,61 @@ def _canonical_rke2_vagrant_ready() -> bool:
     return (result.stdout or "").strip() == expected
 
 
+def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
+    scripts = {
+        "preflight": "packer-preflight.ps1",
+        "build": "build-rocky-image.ps1",
+        "qualify": "qualify-rocky-image.ps1",
+        "release": "release-rocky-image.ps1",
+    }
+    script_name = scripts.get(action)
+    if script_name is None:
+        return fail(f"unsupported Windows image pipeline action: {action}")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("Windows image pipeline requires WSL2 and WSL_DISTRO_NAME")
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    windows_working_directory = Path("/mnt/c/Windows")
+    if not powershell.is_file() or not windows_working_directory.is_dir():
+        return fail("native Windows PowerShell is unavailable through WSL interop")
+    try:
+        windows_root = output(["wslpath", "-w", str(ROOT)]).strip()
+        windows_script = output(
+            ["wslpath", "-w", str(ROOT / "scripts/windows" / script_name)]
+        ).strip()
+    except RuntimeError as exc:
+        return fail(f"cannot convert WSL paths for Windows image pipeline: {exc}")
+    if not windows_root.startswith("\\\\") or not windows_script.startswith("\\\\"):
+        return fail("repository must resolve through the governed WSL UNC bridge")
+    command = [
+        str(powershell),
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        windows_script,
+        "-RepoRoot",
+        windows_root,
+        "-WslDistribution",
+        distribution,
+        "-WslRepoRoot",
+        str(ROOT),
+    ]
+    if action == "build" and offline:
+        command.append("-Offline")
+    return run(command, cwd=windows_working_directory, check=False).returncode
+
+
+def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
+    if action not in {"preflight", "build", "qualify", "release"}:
+        return fail(f"unsupported Linux image pipeline action: {action}")
+    command = [sys.executable, str(ROOT / "scripts/linux_image_pipeline.py"), action]
+    if action == "build" and offline:
+        command.append("--offline")
+    return run(command, cwd=ROOT, check=False).returncode
+
+
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
     vbox = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
     result = run([vbox, "list", "vms"], check=False, capture=True)
@@ -7643,6 +7702,21 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    sub.add_parser("image-rocky-preflight")
+    image_build = sub.add_parser("image-rocky-build")
+    image_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-qualify")
+    sub.add_parser("image-rocky-release")
+    sub.add_parser("image-rocky-windows-preflight")
+    image_windows_build = sub.add_parser("image-rocky-windows-build")
+    image_windows_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-windows-qualify")
+    sub.add_parser("image-rocky-windows-release")
+    sub.add_parser("image-rocky-linux-preflight")
+    image_linux_build = sub.add_parser("image-rocky-linux-build")
+    image_linux_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-linux-qualify")
+    sub.add_parser("image-rocky-linux-release")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -7823,6 +7897,30 @@ def main() -> int:
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
+        if args.cmd == "image-rocky-preflight":
+            return windows_image_pipeline("preflight")
+        if args.cmd == "image-rocky-build":
+            return windows_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-qualify":
+            return windows_image_pipeline("qualify")
+        if args.cmd == "image-rocky-release":
+            return windows_image_pipeline("release")
+        if args.cmd == "image-rocky-windows-preflight":
+            return windows_image_pipeline("preflight")
+        if args.cmd == "image-rocky-windows-build":
+            return windows_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-windows-qualify":
+            return windows_image_pipeline("qualify")
+        if args.cmd == "image-rocky-windows-release":
+            return windows_image_pipeline("release")
+        if args.cmd == "image-rocky-linux-preflight":
+            return linux_image_pipeline("preflight")
+        if args.cmd == "image-rocky-linux-build":
+            return linux_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-linux-qualify":
+            return linux_image_pipeline("qualify")
+        if args.cmd == "image-rocky-linux-release":
+            return linux_image_pipeline("release")
         if args.cmd == "rke2-local-virtualbox-qualification":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 input_path = Path(args.inputs)

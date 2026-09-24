@@ -148,6 +148,7 @@ V5_SECTION_KEYS = {
             "gate_executable_inventory",
             "container",
             "machine_images",
+            "local_vm_image_pipeline",
             "iac",
             "security",
             "secrets",

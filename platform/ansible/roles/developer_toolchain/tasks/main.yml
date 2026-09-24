@@ -15,6 +15,15 @@
   ansible.builtin.import_tasks: opentofu_cleanup.yml
   tags: [toolchain, opentofu]
 
+- name: Remove superseded WSL Packer installation
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ local_bin }}/packer"
+    - "{{ local_share }}/tools/packer-{{ toolchain_lock.versions.PACKER_VERSION }}"
+  tags: [toolchain, workstation, image_pipeline]
+
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
     name:
