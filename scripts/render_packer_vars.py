@@ -54,6 +54,7 @@ def render(
     *,
     target_platform: str = "linux",
     artifact_dir: Path | None = None,
+    runtime_contract_output: Path | None = None,
 ) -> None:
     contract = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
     image = contract["packer_image"]
@@ -106,6 +107,19 @@ def render(
     vm_ssh_timeout_seconds = _bounded_contract_integer(
         timeouts, "ssh_seconds", minimum=1800, maximum=7200
     )
+    virtualbox = image["build"]["virtualbox"]
+    acceleration = virtualbox.get("acceleration")
+    if acceleration != {
+        "required": "native-vtx",
+        "forbidden": ["nem"],
+        "hyper_v_present": False,
+    }:
+        raise ValueError("VirtualBox native VT-x acceleration contract is invalid")
+    virtualbox_network_adapter = image["hypervisors"]["virtualbox"].get(
+        "network_adapter"
+    )
+    if virtualbox_network_adapter != "virtio":
+        raise ValueError("VirtualBox network adapter must be virtio")
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError("output must be a new path below an existing directory")
     iso = bundle / "iso" / source["iso"]
@@ -165,6 +179,8 @@ def render(
         f"vm_root_min_mib = {vm_root_min_mib}\n"
         f"vm_root_filesystem = {json.dumps(storage['root_filesystem'])}\n"
         f"vm_ssh_timeout_seconds = {vm_ssh_timeout_seconds}\n"
+        f"vm_virtualbox_nic_type = {json.dumps(virtualbox_network_adapter)}\n"
+        f"virtualbox_serial_log_file = {json.dumps(str(Path(artifact_path) / 'virtualbox-serial.log'))}\n"
         f"build_ssh_public_key = {json.dumps(public_key)}\n"
         f"build_ssh_private_key_file = {json.dumps(private_key_path)}\n"
     )
@@ -178,6 +194,47 @@ def render(
         temporary.write(body)
         temporary_path = Path(temporary.name)
     os.replace(temporary_path, output)
+    if runtime_contract_output is not None:
+        if (
+            runtime_contract_output.exists()
+            or runtime_contract_output.is_symlink()
+            or not runtime_contract_output.parent.is_dir()
+        ):
+            raise ValueError(
+                "runtime contract output must be a new path below an existing directory"
+            )
+        runtime_contract = {
+            "schema": 1,
+            "authority": "config/contracts/machine-image-lock.yaml",
+            "resources": {
+                "vcpus": vm_cpus,
+                "memory_mib": vm_memory_mib,
+                "disk_mib": vm_disk_mib,
+                "headless": vm_headless,
+            },
+            "storage": {
+                "firmware": storage["firmware"],
+                "partition_table": storage["partition_table"],
+                "root_filesystem": storage["root_filesystem"],
+                "lvm": storage["lvm"],
+                "swap": storage["swap"],
+            },
+            "timeouts": {"ssh_seconds": vm_ssh_timeout_seconds},
+            "virtualbox": {"network_adapter": virtualbox_network_adapter},
+            "rpm_profile_roots": image["profiles"]["base"]["rpm_packages"]
+            + image["profiles"]["rke2"]["rpm_packages"],
+        }
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=runtime_contract_output.parent,
+            prefix=runtime_contract_output.name + ".",
+            delete=False,
+        ) as runtime_temporary:
+            json.dump(runtime_contract, runtime_temporary, indent=2, sort_keys=True)
+            runtime_temporary.write("\n")
+            runtime_temporary_path = Path(runtime_temporary.name)
+        os.replace(runtime_temporary_path, runtime_contract_output)
 
 
 def main() -> int:
@@ -191,6 +248,7 @@ def main() -> int:
         "--target-platform", choices=("linux", "windows"), default="linux"
     )
     parser.add_argument("--artifact-dir", type=Path)
+    parser.add_argument("--runtime-contract-output", type=Path)
     args = parser.parse_args()
     render(
         args.contract.resolve(),
@@ -200,6 +258,11 @@ def main() -> int:
         args.output.resolve(),
         target_platform=args.target_platform,
         artifact_dir=args.artifact_dir.resolve() if args.artifact_dir else None,
+        runtime_contract_output=(
+            args.runtime_contract_output.resolve()
+            if args.runtime_contract_output
+            else None
+        ),
     )
     print(args.output)
     return 0

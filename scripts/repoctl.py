@@ -7074,6 +7074,22 @@ def _canonical_rke2_vagrant_ready() -> bool:
     return (result.stdout or "").strip() == expected
 
 
+def _windows_powershell_environment() -> dict[str, str]:
+    """Keep Windows PowerShell 5.1 from loading incompatible PowerShell 7 modules."""
+    environment = dict(os.environ)
+    environment["PSModulePath"] = (
+        r"C:\Windows\system32\WindowsPowerShell\v1.0\Modules;"
+        r"C:\Program Files\WindowsPowerShell\Modules"
+    )
+    inherited_wslenv = [
+        entry
+        for entry in environment.get("WSLENV", "").split(":")
+        if entry and entry.split("/", 1)[0].lower() != "psmodulepath"
+    ]
+    environment["WSLENV"] = ":".join(["PSModulePath", *inherited_wslenv])
+    return environment
+
+
 def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
     scripts = {
         "preflight": "packer-preflight.ps1",
@@ -7117,7 +7133,76 @@ def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
     ]
     if action == "build" and offline:
         command.append("-Offline")
-    return run(command, cwd=windows_working_directory, check=False).returncode
+    return run(
+        command,
+        cwd=windows_working_directory,
+        env=_windows_powershell_environment(),
+        check=False,
+    ).returncode
+
+
+def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
+    if action not in {"prepare", "reboot", "import", "recover", "selftest"}:
+        return fail(f"unsupported Windows native VT-x cycle action: {action}")
+    cycle = (
+        ruby_yaml("config/contracts/machine-image-lock.yaml")
+        .get("packer_image", {})
+        .get("local_pipeline", {})
+        .get("windows_native_vtx_cycle", {})
+    )
+    lab_root = cycle.get("lab_root")
+    if not isinstance(lab_root, str) or re.fullmatch(r"[A-Z]:/[A-Za-z0-9._/-]+", lab_root) is None:
+        return fail("Windows native VT-x lab_root contract is invalid")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("Windows native VT-x cycle requires WSL2 and WSL_DISTRO_NAME")
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    windows_working_directory = Path("/mnt/c/Windows")
+    if not powershell.is_file() or not windows_working_directory.is_dir():
+        return fail("native Windows PowerShell is unavailable through WSL interop")
+    try:
+        windows_root = output(["wslpath", "-w", str(ROOT)]).strip()
+        windows_script = output(
+            ["wslpath", "-w", str(ROOT / "scripts/windows/native-vtx-cycle.ps1")]
+        ).strip()
+    except RuntimeError as exc:
+        return fail(f"cannot convert WSL paths for native VT-x cycle: {exc}")
+    if not windows_root.startswith("\\\\") or not windows_script.startswith("\\\\"):
+        return fail("native VT-x preparation must start through the governed WSL UNC bridge")
+    powershell_action = {
+        "prepare": "Prepare",
+        "reboot": "Reboot",
+        "import": "Import",
+        "recover": "Recover",
+        "selftest": "SelfTest",
+    }[action]
+    command = [
+        str(powershell),
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        windows_script,
+        "-Action",
+        powershell_action,
+        "-RepoRoot",
+        windows_root,
+        "-WslDistribution",
+        distribution,
+        "-WslRepoRoot",
+        str(ROOT),
+        "-LabRoot",
+        lab_root.replace("/", "\\"),
+    ]
+    if action == "prepare" and offline:
+        command.append("-Offline")
+    return run(
+        command,
+        cwd=windows_working_directory,
+        env=_windows_powershell_environment(),
+        check=False,
+    ).returncode
 
 
 def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
@@ -8170,6 +8255,12 @@ def main() -> int:
     image_windows_build.add_argument("--offline", action="store_true")
     sub.add_parser("image-rocky-windows-qualify")
     sub.add_parser("image-rocky-windows-release")
+    image_native_prepare = sub.add_parser("image-rocky-windows-native-prepare")
+    image_native_prepare.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-windows-native-reboot")
+    sub.add_parser("image-rocky-windows-native-import")
+    sub.add_parser("image-rocky-windows-native-recover")
+    sub.add_parser("image-rocky-windows-native-self-test")
     sub.add_parser("image-rocky-linux-preflight")
     image_linux_build = sub.add_parser("image-rocky-linux-build")
     image_linux_build.add_argument("--offline", action="store_true")
@@ -8385,6 +8476,16 @@ def main() -> int:
             return windows_image_pipeline("qualify")
         if args.cmd == "image-rocky-windows-release":
             return windows_image_pipeline("release")
+        if args.cmd == "image-rocky-windows-native-prepare":
+            return windows_native_vtx_cycle("prepare", offline=args.offline)
+        if args.cmd == "image-rocky-windows-native-reboot":
+            return windows_native_vtx_cycle("reboot")
+        if args.cmd == "image-rocky-windows-native-import":
+            return windows_native_vtx_cycle("import")
+        if args.cmd == "image-rocky-windows-native-recover":
+            return windows_native_vtx_cycle("recover")
+        if args.cmd == "image-rocky-windows-native-self-test":
+            return windows_native_vtx_cycle("selftest")
         if args.cmd == "image-rocky-linux-preflight":
             return linux_image_pipeline("preflight")
         if args.cmd == "image-rocky-linux-build":

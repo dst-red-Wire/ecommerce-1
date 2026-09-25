@@ -23,6 +23,8 @@ $cleanupStatus = 'NOT_EXECUTED'
 $artifactSource = $null
 $artifactSha256 = $null
 $gitState = $null
+$serialLog = $null
+$packerLog = $null
 $evidence = [ordered]@{
     schema = 1
     image = 'rocky-10.2'
@@ -45,6 +47,30 @@ $evidence = [ordered]@{
     checksum = 'NOT_EXECUTED'
     cleanup = 'NOT_EXECUTED'
     qualification_key = 'NOT_CREATED'
+    resources = $null
+    storage = $null
+    milestones = [ordered]@{
+        T0_PACKER_START = $null
+        T1_VM_CREATED = $null
+        T2_ISO_BOOT = $null
+        T3_KICKSTART_START = $null
+        T4_NETWORK_READY = $null
+        T5_RPM_INSTALLATION_START = $null
+        T6_RPM_INSTALLATION_END = $null
+        T7_FIRST_REBOOT = $null
+        T8_INSTALLED_OS_BOOT = $null
+        T9_SSHD_READY = $null
+        T10_PACKER_SSH_CONNECTION = $null
+        T11_PROVISIONING_COMPLETE = $null
+        T12_SHUTDOWN = $null
+        T13_ARTIFACT_EXPORT_COMPLETE = $null
+    }
+    telemetry = [ordered]@{
+        serial_log = 'NOT_CAPTURED'
+        serial_log_sha256 = $null
+        packer_log = 'NOT_CAPTURED'
+        packer_log_sha256 = $null
+    }
     started_at = [DateTime]::UtcNow.ToString('o')
     completed_at = $null
     error = $null
@@ -137,6 +163,7 @@ try {
     $evidence.qualification_key = 'CREATED_WINDOWS_LOCAL_ONLY'
 
     $varFileWsl = "$stageWsl/rocky-10.2.auto.pkrvars.hcl"
+    $runtimeContractWsl = "$stageWsl/runtime-contract.json"
     $render = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @(
         'scripts/render_packer_vars.py',
         '--contract', 'config/contracts/machine-image-lock.yaml',
@@ -145,16 +172,64 @@ try {
         '--build-private-key-file', "$stageWsl/qualification-key",
         '--artifact-dir', "$stageWsl/artifacts",
         '--target-platform', 'windows',
+        '--runtime-contract-output', $runtimeContractWsl,
         '--output', $varFileWsl
     ) -TimeoutSeconds 300
     Assert-ProcessSuccess -Result $render -Operation 'Packer Windows variable rendering'
     $varFile = Join-Path $stageRoot 'rocky-10.2.auto.pkrvars.hcl'
+    $runtimeContract = Read-JsonFile (Join-Path $stageRoot 'runtime-contract.json')
+    $evidence.resources = $runtimeContract.resources
+    $evidence.storage = $runtimeContract.storage
 
     $validate = Invoke-BoundedProcess -FilePath $packer -Arguments @('validate', "-var-file=$varFile", $sourceRoot) -TimeoutSeconds 120 -WorkingDirectory $stageRoot
     Assert-ProcessSuccess -Result $validate -Operation 'packer validate'
     $evidence.packer_validate = 'PASS'
 
-    $build = Invoke-BoundedProcess -FilePath $packer -Arguments @('build', '-only=rocky-10.2-base.virtualbox-iso.base', "-var-file=$varFile", '-var=image_profile=rke2', $sourceRoot) -TimeoutSeconds 7200 -WorkingDirectory $stageRoot
+    $serialLog = Join-Path $buildArtifacts 'virtualbox-serial.log'
+    $packerLog = Join-Path $stageRoot 'packer-build.log'
+    $milestoneTokens = [ordered]@{
+        T3_KICKSTART_START = 'ECOMMERCE_MILESTONE T3_KICKSTART_START'
+        T4_NETWORK_READY = 'ECOMMERCE_MILESTONE T4_NETWORK_READY'
+        T5_RPM_INSTALLATION_START = 'ECOMMERCE_MILESTONE T5_RPM_INSTALLATION_START'
+        T6_RPM_INSTALLATION_END = 'ECOMMERCE_MILESTONE T6_RPM_INSTALLATION_END'
+        T7_FIRST_REBOOT = 'ECOMMERCE_MILESTONE T7_FIRST_REBOOT'
+        T8_INSTALLED_OS_BOOT = 'ECOMMERCE_MILESTONE T8_INSTALLED_OS_BOOT'
+        T9_SSHD_READY = 'ECOMMERCE_MILESTONE T9_SSHD_READY'
+        T10_PACKER_SSH_CONNECTION = 'ECOMMERCE_MILESTONE T10_PACKER_SSH_CONNECTION'
+        T11_PROVISIONING_COMPLETE = 'ECOMMERCE_MILESTONE T11_PROVISIONING_COMPLETE'
+        T12_SHUTDOWN = 'ECOMMERCE_MILESTONE T12_SHUTDOWN'
+    }
+    $evidence.milestones.T0_PACKER_START = [DateTime]::UtcNow.ToString('o')
+    $observeProgress = {
+        $observedAt = [DateTime]::UtcNow.ToString('o')
+        if ($null -eq $evidence.milestones.T1_VM_CREATED) {
+            try {
+                $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $stageRoot
+                if ($machines.ContainsKey($ownedBuildVm)) {
+                    $evidence.milestones.T1_VM_CREATED = $observedAt
+                }
+            }
+            catch {
+                # Telemetry probes must not replace the bounded Packer result.
+            }
+        }
+        if (Test-Path -LiteralPath $serialLog -PathType Leaf) {
+            $serialInfo = Get-Item -LiteralPath $serialLog
+            if ($serialInfo.Length -gt 0 -and $null -eq $evidence.milestones.T2_ISO_BOOT) {
+                $evidence.milestones.T2_ISO_BOOT = $observedAt
+            }
+            $serial = [System.IO.File]::ReadAllText($serialLog, [System.Text.Encoding]::UTF8)
+            foreach ($name in $milestoneTokens.Keys) {
+                if ($null -eq $evidence.milestones[$name] -and $serial.Contains($milestoneTokens[$name])) {
+                    $evidence.milestones[$name] = $observedAt
+                }
+            }
+        }
+    }.GetNewClosure()
+    $build = Invoke-BoundedProcess -FilePath $packer -Arguments @('build', '-only=rocky-10.2-base.virtualbox-iso.base', "-var-file=$varFile", '-var=image_profile=rke2', $sourceRoot) -TimeoutSeconds 7200 -WorkingDirectory $stageRoot -Environment @{
+        PACKER_LOG = '1'
+        PACKER_LOG_PATH = $packerLog
+    } -OnPoll $observeProgress -PollIntervalSeconds 5
     Assert-ProcessSuccess -Result $build -Operation 'packer build'
     $evidence.packer_build = 'PASS'
     $artifactSource = Join-Path $buildArtifacts 'rocky-10.2-rke2-virtualbox.box'
@@ -167,6 +242,11 @@ try {
     }
     $evidence.sha256 = $artifactSha256
     $evidence.checksum = 'PASS'
+    $evidence.milestones.T13_ARTIFACT_EXPORT_COMPLETE = [DateTime]::UtcNow.ToString('o')
+    $missingMilestones = @($evidence.milestones.Keys | Where-Object { $null -eq $evidence.milestones[$_] })
+    if ($missingMilestones.Count -gt 0) {
+        throw "Packer telemetry is incomplete: $($missingMilestones -join ', ')"
+    }
     $buildCompleted = $true
 }
 catch {
@@ -185,6 +265,20 @@ if ($null -ne $vbox -and $null -ne $stageRoot -and (Test-Path -LiteralPath $stag
     }
 }
 $evidence.cleanup = $cleanupStatus
+
+if ($null -ne $evidenceRoot) {
+    foreach ($telemetrySource in @(
+        [pscustomobject]@{ Source = $serialLog; Name = 'build-serial.log'; Status = 'serial_log'; Digest = 'serial_log_sha256' },
+        [pscustomobject]@{ Source = $packerLog; Name = 'build-packer.log'; Status = 'packer_log'; Digest = 'packer_log_sha256' }
+    )) {
+        if ($null -ne $telemetrySource.Source -and (Test-Path -LiteralPath $telemetrySource.Source -PathType Leaf)) {
+            $telemetryTarget = Join-Path $evidenceRoot $telemetrySource.Name
+            Copy-Item -LiteralPath $telemetrySource.Source -Destination $telemetryTarget -Force
+            $evidence.telemetry[$telemetrySource.Status] = $telemetrySource.Name
+            $evidence.telemetry[$telemetrySource.Digest] = Get-FileSha256 -Path $telemetryTarget
+        }
+    }
+}
 
 if ($buildCompleted -and $cleanupStatus -ne 'FAIL') {
     try {

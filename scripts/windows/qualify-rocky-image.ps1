@@ -129,8 +129,9 @@ try {
         private_key = $privateKey
         boot_timeout_seconds = 900
         ssh_timeout_seconds = 30
-        cpus = 2
-        memory_mib = 4096
+        cpus = [int]$buildEvidence.resources.vcpus
+        memory_mib = [int]$buildEvidence.resources.memory_mib
+        nic_type = 'virtio'
     }
     Write-Utf8Json -InputObject $runtime -Path (Join-Path $stageRoot 'runtime.json')
     $environment = @{

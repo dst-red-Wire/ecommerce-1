@@ -17,7 +17,7 @@ SPEC.loader.exec_module(REPOCTL)
 class BranchCleanupTests(unittest.TestCase):
     def git(self, root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", *args],
+            ["git", "-c", "commit.gpgsign=false", *args],
             cwd=root,
             check=check,
             text=True,

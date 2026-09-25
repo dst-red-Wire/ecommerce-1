@@ -95,7 +95,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
@@ -119,6 +119,21 @@ image-rocky-windows-qualify: ## Boot and smoke-test the exact Rocky box through 
 
 image-rocky-windows-release: ## Verify exact Windows build and qualification evidence without remote publication
 	@$(PYTHON) scripts/repoctl.py image-rocky-windows-release
+
+image-rocky-windows-native-prepare: ## Prepare exact-SHA Windows staging, guarded BCD entry and one-shot task; does not reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-prepare $(if $(OFFLINE),--offline,)
+
+image-rocky-windows-native-reboot: ## Explicitly authorize the one-shot native VT-x boot and automatic return
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-reboot
+
+image-rocky-windows-native-import: ## Import exact-SHA native VT-x build and smoke evidence after WSL2 returns
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-import
+
+image-rocky-windows-native-recover: ## Arm the normal Windows boot and remove the temporary task while preserving the native entry
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-recover
+
+image-rocky-windows-native-self-test: ## Test BCD parsing, backend classification, integrity and stale-evidence rejection without reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-self-test
 
 image-rocky-linux-preflight: ## Verify exact Packer/QEMU versions and KVM access on a native Linux host
 	@$(PYTHON) scripts/repoctl.py image-rocky-linux-preflight

@@ -25,6 +25,7 @@ Vagrant.configure("2") do |config|
     vm.check_guest_additions = false
     vm.customize ["modifyvm", :id, "--ioapic", "on"]
     vm.customize ["modifyvm", :id, "--nic1", "nat"]
+    vm.customize ["modifyvm", :id, "--nictype1", runtime.fetch("nic_type")]
     (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
     vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]
   end

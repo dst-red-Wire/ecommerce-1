@@ -415,7 +415,11 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             legacy = repo / "legacy.sh"
             legacy.write_text("#!/bin/sh\n", encoding="utf-8")
             subprocess.run(["git", "add", "legacy.sh"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "baseline"],
+                cwd=repo,
+                check=True,
+            )
             self.assertEqual(["legacy.sh"], MOD.repository_shell_paths(repo))
 
             # Migration deletes tracked Shell files before staging/commit. The gate

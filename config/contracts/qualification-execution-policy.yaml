@@ -818,8 +818,14 @@ workflows:
       build: make image-rocky-windows-build
       qualification: make image-rocky-windows-qualify
       release: make image-rocky-windows-release
+      native_prepare: make image-rocky-windows-native-prepare
+      native_reboot: make image-rocky-windows-native-reboot
+      native_import: make image-rocky-windows-native-import
+      native_recover: make image-rocky-windows-native-recover
     exit_criteria:
       - exact-windows-tool-versions-pass
+      - virtualbox-native-vtx-runtime-backend-pass-and-nem-absent
+      - exact-sha-windows-staging-and-one-shot-normal-return-pass
       - packer-init-fmt-validate-pass
       - checksum-locked-offline-inputs-pass
       - packer-build-pass

@@ -126,6 +126,7 @@ packer_image:
     virtualbox:
       base_agent: none
       guest_additions: disabled
+      network_adapter: virtio
     qemu_kvm:
       rpm_packages: [qemu-guest-agent]
 
@@ -199,6 +200,10 @@ packer_image:
       build_user_final_state: password-locked-key-only
     virtualbox:
       version: 7.2.18
+      acceleration:
+        required: native-vtx
+        forbidden: [nem]
+        hyper_v_present: false
       plugin:
         source: github.com/hashicorp/virtualbox
         version: 1.1.5
@@ -312,6 +317,37 @@ packer_image:
     windows_scripts_root: scripts/windows
     linux_orchestrator: scripts/linux_image_pipeline.py
     windows_stage_root: LOCALAPPDATA/ecommerce-1/packer/rocky-10.2
+    windows_native_vtx_cycle:
+      lab_root: C:/ecommerce-lab
+      boot_entry_name: Windows - VirtualBox VT-x native
+      scheduled_task_name: Ecommerce-VirtualBox-Native-Qualification
+      max_native_boot_attempts: 1
+      normal_boot:
+        hyper_v: enabled
+        wsl2: enabled
+        mutation: forbidden
+      native_boot:
+        hypervisorlaunchtype: "off"
+        vsmlaunchtype: off-or-unsupported
+        required_backend: native-vtx
+        forbidden_backend: nem
+      bcd:
+        backup_before_mutation: required
+        next_boot_authority: bootsequence-one-shot
+        default_entry_mutation: forbidden
+      staging:
+        layout: staging/{source_git_sha}
+        exact_git_sha: required
+        exact_tree_sha: required
+        sha256_manifest: required
+        wsl_dependency_during_native_boot: forbidden
+      evidence:
+        layout: evidence/{source_git_sha}/result.json
+        import_binding: [source-git-sha, source-tree-sha, staging-manifest-sha256, artifact-sha256]
+      recovery:
+        return_to_normal_boot: required
+        remove_scheduled_task: required
+        preserve_native_boot_entry: true
     linux_stage_root: .context/packer-linux/rocky-10.2
     profiles:
       windows:
@@ -323,6 +359,10 @@ packer_image:
           build: image-rocky-windows-build
           qualification: image-rocky-windows-qualify
           release: image-rocky-windows-release
+          native_prepare: image-rocky-windows-native-prepare
+          native_reboot: image-rocky-windows-native-reboot
+          native_import: image-rocky-windows-native-import
+          native_recover: image-rocky-windows-native-recover
       linux:
         host_os: ubuntu-24.04-x86_64
         builder: qemu

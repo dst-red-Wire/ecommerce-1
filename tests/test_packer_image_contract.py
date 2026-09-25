@@ -188,6 +188,20 @@ class PackerImageContractTest(unittest.TestCase):
                             "authority": "shared-all-hypervisors",
                             "ssh_seconds": 5400,
                         },
+                        "virtualbox": {
+                            "acceleration": {
+                                "required": "native-vtx",
+                                "forbidden": ["nem"],
+                                "hyper_v_present": False,
+                            }
+                        },
+                    },
+                    "hypervisors": {
+                        "virtualbox": {"network_adapter": "virtio"}
+                    },
+                    "profiles": {
+                        "base": {"rpm_packages": ["kernel", "openssh-server"]},
+                        "rke2": {"rpm_packages": ["openscap-scanner"]},
                     },
                 }
             }
@@ -198,6 +212,7 @@ class PackerImageContractTest(unittest.TestCase):
             public_key.write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
             private_key.write_text("test\n", encoding="utf-8")
             output = root / "generated.pkrvars.hcl"
+            runtime_output = root / "runtime-contract.json"
             RENDERER.render(
                 contract_path,
                 bundle,
@@ -205,6 +220,7 @@ class PackerImageContractTest(unittest.TestCase):
                 private_key,
                 output,
                 target_platform="linux",
+                runtime_contract_output=runtime_output,
             )
             rendered = output.read_text(encoding="utf-8")
             self.assertIn("vm_cpus = 4\n", rendered)
@@ -218,6 +234,26 @@ class PackerImageContractTest(unittest.TestCase):
             self.assertIn("vm_root_min_mib = 20480\n", rendered)
             self.assertIn('vm_root_filesystem = "xfs"\n', rendered)
             self.assertIn("vm_ssh_timeout_seconds = 5400\n", rendered)
+            self.assertIn('vm_virtualbox_nic_type = "virtio"\n', rendered)
+            self.assertIn(
+                'virtualbox_serial_log_file = "',
+                rendered,
+            )
+            runtime = json.loads(runtime_output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    "vcpus": 4,
+                    "memory_mib": 8192,
+                    "disk_mib": 65536,
+                    "headless": False,
+                },
+                runtime["resources"],
+            )
+            self.assertEqual("virtio", runtime["virtualbox"]["network_adapter"])
+            self.assertEqual(
+                ["kernel", "openssh-server", "openscap-scanner"],
+                runtime["rpm_profile_roots"],
+            )
 
     def test_renderer_rejects_invalid_vm_resources(self):
         with self.assertRaisesRegex(TypeError, "vcpus must be an integer"):
@@ -547,6 +583,27 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn('"boot<enter>"', self.packer)
         self.assertNotIn("<tab>", self.packer)
         self.assertIn('boot_keygroup_interval = "500ms"', self.packer)
+
+    def test_virtualbox_requires_native_vtx_and_is_observable(self):
+        acceleration = self.image["build"]["virtualbox"]["acceleration"]
+        self.assertEqual(
+            {
+                "required": "native-vtx",
+                "forbidden": ["nem"],
+                "hyper_v_present": False,
+            },
+            acceleration,
+        )
+        self.assertNotIn("virtualbox_kernel_arguments", self.packer)
+        self.assertEqual(
+            "virtio", self.image["hypervisors"]["virtualbox"]["network_adapter"]
+        )
+        self.assertIn("nic_type               = var.vm_virtualbox_nic_type", self.packer)
+        self.assertIn('bootloader_kernel_arguments = "quiet console=tty0"', self.packer)
+        self.assertIn("--uartmode1", self.packer)
+        self.assertIn("virtualbox_serial_log_file", self.packer)
+        for index in range(3, 13):
+            self.assertIn(f"ECOMMERCE_MILESTONE T{index}_", self.packer + self.kickstart)
 
     def test_packer_build_is_offline_and_profile_separated(self):
         self.assertIn("install -d -m 0700 /tmp/packer-offline", self.packer)

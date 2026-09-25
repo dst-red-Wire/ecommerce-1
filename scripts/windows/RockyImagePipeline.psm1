@@ -46,7 +46,9 @@ function Invoke-BoundedProcess {
         [string[]]$Arguments = @(),
         [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [scriptblock]$OnPoll = $null,
+        [ValidateRange(1, 60)][int]$PollIntervalSeconds = 5
     )
 
     if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
@@ -73,7 +75,24 @@ function Invoke-BoundedProcess {
     }
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+    $timedOut = $false
+    if ($null -eq $OnPoll) {
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+    }
+    else {
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit($PollIntervalSeconds * 1000)) {
+            & $OnPoll
+            if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                $timedOut = $true
+                break
+            }
+        }
+        if (-not $timedOut) {
+            & $OnPoll
+        }
+    }
+    if ($timedOut) {
         & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F *> $null
         $process.WaitForExit()
         throw "Timed out after ${TimeoutSeconds}s: $FilePath"
@@ -282,7 +301,7 @@ function Remove-OwnedVirtualMachine {
         [Parameter(Mandatory = $true)][string]$VBoxManage,
         [Parameter(Mandatory = $true)][string]$WorkingDirectory
     )
-    if ($Name -notmatch '^ecommerce-rocky-10-2-(?:build|smoke)-[a-z0-9-]+$') {
+    if ($Name -notmatch '^ecommerce-rocky-10-2-(?:build|smoke|native-probe)-[a-z0-9-]+$') {
         throw "Refusing cleanup of unowned VM name: $Name"
     }
     $current = Get-VBoxMachines -VBoxManage $VBoxManage -WorkingDirectory $WorkingDirectory
@@ -292,9 +311,15 @@ function Remove-OwnedVirtualMachine {
     if ($InitialMachines.ContainsKey($Name)) {
         throw "Refusing cleanup of VM that existed before this run: $Name"
     }
+    $running = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('list', 'runningvms') -TimeoutSeconds 15 -WorkingDirectory $WorkingDirectory
+    Assert-ProcessSuccess -Result $running -Operation 'VirtualBox running machine inventory'
+    if ($running.StdOut -match [regex]::Escape("{$($current[$Name])}")) {
+        $poweroff = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('controlvm', $current[$Name], 'poweroff') -TimeoutSeconds 60 -WorkingDirectory $WorkingDirectory
+        Assert-ProcessSuccess -Result $poweroff -Operation "VirtualBox poweroff for $Name"
+    }
     $result = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('unregistervm', $current[$Name], '--delete') -TimeoutSeconds 300 -WorkingDirectory $WorkingDirectory
     Assert-ProcessSuccess -Result $result -Operation "VirtualBox cleanup for $Name"
     return 'PASS'
 }
 
-Export-ModuleMember -Function Set-PipelineUtf8, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine
+Export-ModuleMember -Function Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine

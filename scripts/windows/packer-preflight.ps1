@@ -3,7 +3,8 @@ param(
     [string]$RepoRoot = '',
     [string]$WslDistribution = '',
     [string]$WslRepoRoot = '',
-    [string]$EvidencePath = ''
+    [string]$EvidencePath = '',
+    [switch]$PreparationOnly
 )
 
 Set-StrictMode -Version Latest
@@ -19,6 +20,12 @@ $evidence = [ordered]@{
     started_at = $startedAt
     completed_at = $null
     tools = [ordered]@{}
+    virtualbox_acceleration = [ordered]@{
+        required = 'native-vtx'
+        hyper_v_present = $null
+        firmware_virtualization_enabled = $null
+        status = 'NOT_CHECKED'
+    }
     wsl2_duplicate_packer = 'NOT_CHECKED'
     error = $null
 }
@@ -84,6 +91,26 @@ try {
             actual_version = $actual
             executable = $path
         }
+    }
+
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    $processors = @(Get-CimInstance -ClassName Win32_Processor)
+    $firmwareVirtualizationEnabled = $processors.Count -gt 0 -and @(
+        $processors | Where-Object { $_.VirtualizationFirmwareEnabled -eq $true }
+    ).Count -eq $processors.Count
+    $evidence.virtualbox_acceleration.hyper_v_present = [bool]$computer.HypervisorPresent
+    $evidence.virtualbox_acceleration.firmware_virtualization_enabled = $firmwareVirtualizationEnabled
+    if ($computer.HypervisorPresent -and -not $PreparationOnly.IsPresent) {
+        throw 'Native VT-x is unavailable because the Microsoft hypervisor is active; NEM is forbidden by contract'
+    }
+    if (-not $firmwareVirtualizationEnabled) {
+        throw 'Native VT-x is unavailable because firmware virtualization is disabled'
+    }
+    if ($PreparationOnly.IsPresent) {
+        $evidence.virtualbox_acceleration.status = 'DEFERRED_TO_NATIVE_BOOT_RUNTIME_PROBE'
+    }
+    else {
+        $evidence.virtualbox_acceleration.status = 'PASS'
     }
 
     if (-not [string]::IsNullOrWhiteSpace($WslDistribution) -or -not [string]::IsNullOrWhiteSpace($WslRepoRoot)) {

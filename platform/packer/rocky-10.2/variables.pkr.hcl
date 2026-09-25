@@ -134,6 +134,24 @@ variable "vm_ssh_timeout_seconds" {
   }
 }
 
+variable "virtualbox_serial_log_file" {
+  type = string
+
+  validation {
+    condition     = length(trimspace(var.virtualbox_serial_log_file)) > 3
+    error_message = "Virtualbox_serial_log_file must reference a host-local telemetry file."
+  }
+}
+
+variable "vm_virtualbox_nic_type" {
+  type = string
+
+  validation {
+    condition     = var.vm_virtualbox_nic_type == "virtio"
+    error_message = "Vm_virtualbox_nic_type must match the central VirtualBox network contract."
+  }
+}
+
 variable "image_profile" {
   type    = string
   default = "rke2"

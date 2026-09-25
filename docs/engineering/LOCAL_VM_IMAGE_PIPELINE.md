@@ -12,23 +12,31 @@ The same Packer template exposes two host-native profiles. WSL2 is part of the
 Windows profile; it is not treated as a native Linux virtualization host.
 
 ```text
-Windows profile: VS Code / WSL2
+Windows normal boot: VS Code / WSL2 / Hyper-V
      |
-     | make image-rocky-build
+     | make image-rocky-windows-native-prepare
      v
-scripts/repoctl.py (stateless path bridge)
+exact-SHA C:\ecommerce-lab staging + BCD backup + one-shot task
      |
+     | make image-rocky-windows-native-reboot (explicit authorization)
      v
-PowerShell Windows
-     |
-     v
-Packer Windows
+Windows native boot: Hyper-V/WSL2 unavailable
      |
      v
-VirtualBox Windows
+PowerShell -> VirtualBox backend probe -> NATIVE_VTX required
      |
      v
-Rocky Linux 10.2 .box + SHA-256 + build evidence
+Packer -> Vagrant smoke -> cleanup -> result.json
+     |
+     v
+bootsequence normal -> automatic reboot
+     |
+     v
+Windows normal boot / WSL2
+     |
+     | make image-rocky-windows-native-import
+     v
+exact-SHA local artifact and build/qualification/release evidence
 ```
 
 ```text
@@ -96,6 +104,7 @@ platform/vagrant/rocky-image-smoke/
 
 scripts/windows/
   RockyImagePipeline.psm1
+  native-vtx-cycle.ps1
   packer-preflight.ps1
   build-rocky-image.ps1
   qualify-rocky-image.ps1
@@ -124,9 +133,12 @@ repository never installs or upgrades them automatically. Then run:
 make image-rocky-windows-preflight
 ```
 
-The preflight starts no VM. It requires exact Packer, VirtualBox and Vagrant
-versions, emits UTF-8 JSON, returns non-zero on any mismatch, and rejects a
-competing Packer executable in WSL2. A workstation previously bootstrapped by an
+The reference build requires VirtualBox to own VT-x directly. The normal Windows
+boot deliberately retains Hyper-V and WSL2, so a full reference preflight fails
+there instead of silently accepting VirtualBox NEM. Preparation checks exact
+Packer, VirtualBox and Vagrant versions, emits UTF-8 JSON, and rejects a competing
+Packer executable in WSL2, but records acceleration as deferred until the native
+boot runtime probe. A workstation previously bootstrapped by an
 older repository revision can remove only the superseded WSL Packer installation
 through the Ansible-owned reconciliation:
 
@@ -136,6 +148,62 @@ python3 scripts/repoctl.py reconcile --tags image_pipeline
 
 ## Windows build, qualification and release
 
+The reference workflow uses a guarded two-boot cycle:
+
+```console
+make image-rocky-windows-native-self-test
+make image-rocky-windows-native-prepare
+make image-rocky-windows-native-reboot
+```
+
+`native-prepare` may request Windows UAC because BCD backup, the dedicated loader
+entry and the highest-privilege one-shot scheduled task require administrator
+rights. It never reboots. It requires a clean Git worktree, creates or reuses
+exactly one entry named `Windows - VirtualBox VT-x native`, modifies only that
+entry with `hypervisorlaunchtype off`, and stages the exact Git SHA and tree below
+the contract-owned `C:\ecommerce-lab\staging\<sha>`. The staging manifest covers
+every immutable input needed while WSL2 is unavailable. `vsmlaunchtype off` is
+recorded as `PASS` or `UNSUPPORTED`; it is never treated as runtime proof.
+
+`native-reboot` is the explicit reboot authorization boundary. It verifies the
+staging and task, arms only `bcdedit /bootsequence` for the native entry, and
+reboots. It never changes the permanent default loader. After interactive Windows
+logon, the temporary task:
+
+1. rejects a second attempt for the same SHA;
+2. verifies the staging manifest and exact tool versions;
+3. proves `HypervisorPresent=false` and starts a disposable VirtualBox probe;
+4. requires `VBox.log` to identify `NATIVE_VTX` and rejects NEM before Packer;
+5. records T0 through T13 while building the box;
+6. boots and smoke-tests the box with centrally derived CPU, memory, disk,
+   `virtio` NIC, XFS/no-LVM/no-swap and RPM profile;
+7. destroys owned VMs and the isolated Vagrant box and removes the ephemeral key;
+8. arms the exact normal loader in a `finally`, removes the task, writes evidence,
+   and reboots even when qualification fails.
+
+After the normal boot and WSL2 return:
+
+```console
+make image-rocky-windows-native-import
+```
+
+Import rejects stale SHA/tree/manifest bindings, any non-PASS runtime field,
+NEM, checksum drift, leftover keys or incomplete cleanup. Only then does it place
+the `.box`, `SHA256SUMS`, and compatible build/qualification/release evidence in
+the repository's ignored artifact/evidence roots.
+
+Recovery does not restore the whole BCD or delete the reusable native entry:
+
+```console
+make image-rocky-windows-native-recover
+```
+
+It arms the normal Windows loader for the next boot and removes the temporary
+task. Full BCD restoration remains a manual last resort using the verified backup
+under `C:\ecommerce-lab\bcd`.
+
+The legacy stage-specific commands remain available for bounded diagnostics:
+
 ```console
 make image-rocky-windows-build
 make image-rocky-windows-qualify
@@ -143,7 +211,8 @@ make image-rocky-windows-release
 ```
 
 The shorter `image-rocky-{preflight,build,qualify,release}` targets remain stable
-aliases for the Windows profile. `image-rocky-windows-build` performs preflight,
+aliases for the Windows profile. They do not bypass the native-VT-x preflight.
+`image-rocky-windows-build` performs preflight,
 `packer init`, `packer fmt -check`,
 `packer validate`, the VirtualBox-only Packer build, SHA-256 calculation and
 structured build evidence. The ISO, RPMs, signing keys and guest tools are

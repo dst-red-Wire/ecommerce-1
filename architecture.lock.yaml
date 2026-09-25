@@ -466,6 +466,10 @@ tooling:
     profiles:
       windows:
         developer_environment: wsl2
+        boot_modes:
+          normal: hyper-v-wsl2
+          reference_image_build: virtualbox-native-vtx-one-shot
+          reference_image_return: normal-boot-required
         image_builder:
           authority: packer
           execution_environment: windows-host
@@ -477,6 +481,7 @@ tooling:
           execution_environment: windows-host
         host_orchestration:
           authority: powershell
+          native_boot_cycle: guarded-bcd-bootsequence-and-scheduled-task
       linux:
         developer_environment: ubuntu-24.04-native
         image_builder:

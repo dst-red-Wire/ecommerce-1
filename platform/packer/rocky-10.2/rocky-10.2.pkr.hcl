@@ -19,7 +19,7 @@ packer {
 locals {
   image_name = "rocky-10.2-${var.image_profile}"
   vm_name    = "ecommerce-rocky-10-2-build-${var.image_profile}"
-  boot_command = [
+  qemu_boot_command = [
     "c<wait5>",
     "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks<enter><wait>",
     "initrd /images/pxeboot/initrd.img<enter><wait>",
@@ -34,15 +34,21 @@ source "virtualbox-iso" "base" {
   iso_checksum  = "sha256:${var.iso_checksum}"
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
-      build_ssh_public_key = trimspace(var.build_ssh_public_key)
-      partition_table      = var.vm_partition_table
-      bios_boot_mib        = var.vm_bios_boot_mib
-      boot_mib             = var.vm_boot_mib
-      root_min_mib         = var.vm_root_min_mib
-      root_filesystem      = var.vm_root_filesystem
+      build_ssh_public_key        = trimspace(var.build_ssh_public_key)
+      partition_table             = var.vm_partition_table
+      bios_boot_mib               = var.vm_bios_boot_mib
+      boot_mib                    = var.vm_boot_mib
+      root_min_mib                = var.vm_root_min_mib
+      root_filesystem             = var.vm_root_filesystem
+      bootloader_kernel_arguments = "quiet console=tty0 console=ttyS0,115200n8"
     })
   }
-  boot_command           = local.boot_command
+  boot_command = [
+    "c<wait5>",
+    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks console=tty0 console=ttyS0,115200n8<enter><wait>",
+    "initrd /images/pxeboot/initrd.img<enter><wait>",
+    "boot<enter>",
+  ]
   boot_keygroup_interval = "500ms"
   boot_wait              = "10s"
   ssh_username           = "packer"
@@ -56,8 +62,13 @@ source "virtualbox-iso" "base" {
   cpus                   = var.vm_cpus
   memory                 = var.vm_memory_mib
   hard_drive_interface   = "sata"
+  nic_type               = var.vm_virtualbox_nic_type
   format                 = "ova"
   output_directory       = "${var.artifact_dir}/${local.image_name}-virtualbox"
+  vboxmanage = [
+    ["modifyvm", "{{.Name}}", "--uart1", "0x3F8", "4"],
+    ["modifyvm", "{{.Name}}", "--uartmode1", "file", var.virtualbox_serial_log_file],
+  ]
 }
 
 source "qemu" "base" {
@@ -66,15 +77,16 @@ source "qemu" "base" {
   iso_checksum = "sha256:${var.iso_checksum}"
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
-      build_ssh_public_key = trimspace(var.build_ssh_public_key)
-      partition_table      = var.vm_partition_table
-      bios_boot_mib        = var.vm_bios_boot_mib
-      boot_mib             = var.vm_boot_mib
-      root_min_mib         = var.vm_root_min_mib
-      root_filesystem      = var.vm_root_filesystem
+      build_ssh_public_key        = trimspace(var.build_ssh_public_key)
+      partition_table             = var.vm_partition_table
+      bios_boot_mib               = var.vm_bios_boot_mib
+      boot_mib                    = var.vm_boot_mib
+      root_min_mib                = var.vm_root_min_mib
+      root_filesystem             = var.vm_root_filesystem
+      bootloader_kernel_arguments = "quiet console=tty0"
     })
   }
-  boot_command         = local.boot_command
+  boot_command         = local.qemu_boot_command
   boot_key_interval    = "100ms"
   boot_wait            = "10s"
   ssh_username         = "packer"
@@ -101,7 +113,10 @@ build {
   ]
 
   provisioner "shell" {
-    inline = ["install -d -m 0700 /tmp/packer-offline"]
+    inline = [
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T10_PACKER_SSH_CONNECTION\\n' | sudo -n tee /dev/ttyS0 >/dev/null; fi",
+      "install -d -m 0700 /tmp/packer-offline",
+    ]
   }
 
   provisioner "file" {
@@ -174,6 +189,11 @@ build {
       "passwd --status packer | grep -Eq '^packer[[:space:]]+L'",
       "test -s /home/packer/.ssh/authorized_keys",
       "chmod 0700 /home/packer/.ssh && chmod 0600 /home/packer/.ssh/authorized_keys",
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T11_PROVISIONING_COMPLETE\\n' > /dev/ttyS0; fi",
+      "systemctl disable packer-milestone-t8.service packer-milestone-t9.service",
+      "rm -f /etc/systemd/system/packer-milestone-t8.service /etc/systemd/system/packer-milestone-t9.service",
+      "systemctl daemon-reload",
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T12_SHUTDOWN\\n' > /dev/ttyS0; fi",
       "systemd-run --unit=packer-final-shutdown --on-active=10s /usr/sbin/shutdown -P now",
     ]
   }

@@ -31,6 +31,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         cls.build = (WINDOWS / "build-rocky-image.ps1").read_text(encoding="utf-8")
         cls.qualify = (WINDOWS / "qualify-rocky-image.ps1").read_text(encoding="utf-8")
         cls.release = (WINDOWS / "release-rocky-image.ps1").read_text(encoding="utf-8")
+        cls.native = (WINDOWS / "native-vtx-cycle.ps1").read_text(encoding="utf-8")
         cls.module = (WINDOWS / "RockyImagePipeline.psm1").read_text(encoding="utf-8")
 
     def test_one_responsibility_has_one_canonical_authority(self):
@@ -131,12 +132,61 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn('["wslpath", "-w", str(ROOT)]', repoctl)
         self.assertIn("windows_image_pipeline", repoctl)
         self.assertIn("WindowsPowerShell/v1.0/powershell.exe", repoctl)
+        self.assertIn("_windows_powershell_environment()", repoctl)
+        self.assertIn(r"C:\Windows\system32\WindowsPowerShell\v1.0\Modules", repoctl)
+        self.assertNotIn(r"C:\Program Files\PowerShell\7\Modules", repoctl)
+        self.assertIn('environment["WSLENV"]', repoctl)
         primitives = {
             entry["command"] for entry in self.capabilities["platform_primitives"]
         }
         self.assertIn("wslpath", primitives)
         self.assertIn(
             "wslpath", self.capabilities["gate_requirements"]["image-windows"]
+        )
+        for target in (
+            "image-rocky-windows-native-prepare",
+            "image-rocky-windows-native-reboot",
+            "image-rocky-windows-native-import",
+            "image-rocky-windows-native-recover",
+            "image-rocky-windows-native-self-test",
+        ):
+            self.assertIn(f"{target}:", makefile)
+            self.assertIn(f'sub.add_parser("{target}")', repoctl)
+
+    def test_native_vtx_cycle_is_one_shot_fail_closed_and_recoverable(self):
+        cycle = self.machine["packer_image"]["local_pipeline"][
+            "windows_native_vtx_cycle"
+        ]
+        self.assertEqual("C:/ecommerce-lab", cycle["lab_root"])
+        self.assertEqual(1, cycle["max_native_boot_attempts"])
+        self.assertEqual("native-vtx", cycle["native_boot"]["required_backend"])
+        self.assertEqual("nem", cycle["native_boot"]["forbidden_backend"])
+        for marker in (
+            "bcdedit.exe",
+            "'/export'",
+            "'/copy'",
+            "'/bootsequence'",
+            "hypervisorlaunchtype",
+            "vsmlaunchtype",
+            "MAX_NATIVE_BOOT_ATTEMPTS=1",
+            "FAIL_ALREADY_ATTEMPTED",
+            "NATIVE_VTX",
+            "Remove-NativeTask",
+            "Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id)",
+            "Assert-ResultBinding",
+            "Test-StagingManifest",
+            "Invoke-EmergencyNativeReturn",
+            "ExpectedManifestSha256",
+            "transcript_sha256",
+            "qualification_private_key_sha256",
+        ):
+            self.assertIn(marker, self.native)
+        self.assertNotIn("/default", self.native.lower())
+        self.assertNotIn("/delete", self.native.lower())
+        self.assertIn("Restart-Computer -Force", self.native)
+        self.assertLess(
+            self.native.index("Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id)"),
+            self.native.rindex("Restart-Computer -Force"),
         )
 
     def test_preflight_is_read_only_and_fails_closed(self):
@@ -148,6 +198,10 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertNotIn("vagrant up", self.preflight)
         self.assertNotIn("startvm", self.preflight.lower())
         self.assertIn("competing Packer executable exists in WSL2", self.preflight)
+        self.assertIn("Win32_ComputerSystem", self.preflight)
+        self.assertIn("Win32_Processor", self.preflight)
+        self.assertIn("Native VT-x is unavailable", self.preflight)
+        self.assertIn("NEM is forbidden by contract", self.preflight)
 
     def test_all_external_processes_and_retries_are_bounded(self):
         self.assertIn("TimeoutSeconds", self.module)
@@ -170,6 +224,16 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         )
         self.assertIn("bounded process output omitted", self.module)
 
+    def test_build_records_complete_runtime_milestone_telemetry(self):
+        for index in range(14):
+            self.assertRegex(self.build, rf"T{index}_[A-Z_]+")
+        self.assertIn("virtualbox-serial.log", self.build)
+        self.assertIn("PACKER_LOG_PATH", self.build)
+        self.assertIn("Packer telemetry is incomplete", self.build)
+        self.assertIn("-OnPoll $observeProgress", self.build)
+        self.assertIn("'controlvm'", self.module)
+        self.assertIn("'poweroff'", self.module)
+
     def test_build_wsl_process_calls_only_use_supported_parameters(self):
         calls = re.findall(
             r"Invoke-WslProcess\b.*?(?=\n\s*Assert-ProcessSuccess)",
@@ -184,11 +248,15 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("config.vm.box", self.vagrant)
         self.assertIn('config.ssh.username = "packer"', self.vagrant)
         self.assertIn('vm.customize ["modifyvm"', self.vagrant)
+        self.assertIn('runtime.fetch("nic_type")', self.vagrant)
         self.assertNotIn("config.vm.provision", self.vagrant)
         self.assertNotIn("ansible", self.vagrant.lower())
         self.assertIn("vagrant", self.qualify.lower())
         self.assertIn("destroy", self.qualify.lower())
         self.assertIn("box', 'remove'", self.qualify)
+        self.assertIn("$buildEvidence.resources.vcpus", self.qualify)
+        self.assertIn("$buildEvidence.resources.memory_mib", self.qualify)
+        self.assertNotIn("cpus = 2", self.qualify)
 
     def test_cleanup_is_owned_and_ephemeral_key_is_destroyed(self):
         self.assertIn("Remove-OwnedVirtualMachine", self.build)
