@@ -602,6 +602,7 @@ machine_contracts:
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
   kratix_platform: config/infrastructure/kratix-platform.yaml
+  local_services_qualification: config/contracts/local-services-qualification.yaml
   machine_image_lock: config/contracts/machine-image-lock.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml

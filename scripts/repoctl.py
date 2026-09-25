@@ -7206,10 +7206,19 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
 
 
 def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
-    if action not in {"preflight", "build", "qualify", "release"}:
+    if action not in {"static-validate", "preflight", "build", "qualify", "release"}:
         return fail(f"unsupported Linux image pipeline action: {action}")
     command = [sys.executable, str(ROOT / "scripts/linux_image_pipeline.py"), action]
     if action == "build" and offline:
+        command.append("--offline")
+    return run(command, cwd=ROOT, check=False).returncode
+
+
+def local_services_qualification(action: str, *, offline: bool = False) -> int:
+    if action not in {"assets", "qualify", "recover"}:
+        return fail(f"unsupported local services qualification action: {action}")
+    command = [sys.executable, str(ROOT / "scripts/local_services_qualification.py"), action]
+    if action in {"assets", "qualify"} and offline:
         command.append("--offline")
     return run(command, cwd=ROOT, check=False).returncode
 
@@ -7325,6 +7334,31 @@ def _oras_cache_root(distribution: dict) -> Path:
         raise RuntimeError("ORAS_CACHE must not be a symbolic link")
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     return cache
+
+
+def _oras_runtime_arguments(distribution: dict) -> list[str]:
+    policy = distribution.get("runtime_tls", {})
+    if policy.get("insecure_skip_verify") != "forbidden":
+        raise RuntimeError("ORAS runtime TLS must forbid insecure verification")
+    arguments: list[str] = []
+    for contract_key, option, secret in (
+        ("ca_file_environment", "--ca-file", False),
+        ("registry_config_environment", "--registry-config", True),
+    ):
+        environment = policy.get(contract_key)
+        if not isinstance(environment, str) or not environment:
+            raise RuntimeError(f"ORAS runtime TLS is missing {contract_key}")
+        configured = os.environ.get(environment, "").strip()
+        if not configured:
+            continue
+        candidate = Path(configured).expanduser()
+        if candidate.is_symlink() or not candidate.is_file():
+            raise RuntimeError(f"{environment} must reference a regular non-symlink file")
+        path = candidate.resolve()
+        if secret and path.stat().st_mode & 0o077:
+            raise RuntimeError(f"{environment} must not be group/world accessible")
+        arguments.extend((option, str(path)))
+    return arguments
 
 
 def _run_bounded_transport(
@@ -7471,6 +7505,7 @@ def image_oras_push(profile: str, repository: str) -> int:
             [
                 oras,
                 "push",
+                *_oras_runtime_arguments(distribution),
                 target,
                 "--artifact-type",
                 distribution["artifact_type"],
@@ -7548,6 +7583,7 @@ def image_oras_pull(profile: str, reference: str) -> int:
                 [
                     oras,
                     "pull",
+                    *_oras_runtime_arguments(distribution),
                     reference,
                     "--output",
                     str(pulled),
@@ -8262,6 +8298,7 @@ def main() -> int:
     sub.add_parser("image-rocky-windows-native-recover")
     sub.add_parser("image-rocky-windows-native-self-test")
     sub.add_parser("image-rocky-linux-preflight")
+    sub.add_parser("image-rocky-linux-static-validate")
     image_linux_build = sub.add_parser("image-rocky-linux-build")
     image_linux_build.add_argument("--offline", action="store_true")
     sub.add_parser("image-rocky-linux-qualify")
@@ -8280,6 +8317,11 @@ def main() -> int:
     image_oras_pull_parser.add_argument(
         "--reference", default=os.environ.get("ORAS_REF", "")
     )
+    local_services_assets = sub.add_parser("local-services-assets")
+    local_services_assets.add_argument("--offline", action="store_true")
+    local_services_qualify = sub.add_parser("local-services-qualify")
+    local_services_qualify.add_argument("--offline", action="store_true")
+    sub.add_parser("local-services-recover")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -8488,6 +8530,8 @@ def main() -> int:
             return windows_native_vtx_cycle("selftest")
         if args.cmd == "image-rocky-linux-preflight":
             return linux_image_pipeline("preflight")
+        if args.cmd == "image-rocky-linux-static-validate":
+            return linux_image_pipeline("static-validate")
         if args.cmd == "image-rocky-linux-build":
             return linux_image_pipeline("build", offline=args.offline)
         if args.cmd == "image-rocky-linux-qualify":
@@ -8498,6 +8542,12 @@ def main() -> int:
             return image_oras_push(args.profile, args.repository)
         if args.cmd == "image-rocky-oras-pull":
             return image_oras_pull(args.profile, args.reference)
+        if args.cmd == "local-services-assets":
+            return local_services_qualification("assets", offline=args.offline)
+        if args.cmd == "local-services-qualify":
+            return local_services_qualification("qualify", offline=args.offline)
+        if args.cmd == "local-services-recover":
+            return local_services_qualification("recover")
         if args.cmd == "rke2-local-virtualbox-qualification":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 input_path = Path(args.inputs)

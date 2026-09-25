@@ -95,7 +95,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-qualify local-services-recover
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
@@ -138,6 +138,9 @@ image-rocky-windows-native-self-test: ## Test BCD parsing, backend classificatio
 image-rocky-linux-preflight: ## Verify exact Packer/QEMU versions and KVM access on a native Linux host
 	@$(PYTHON) scripts/repoctl.py image-rocky-linux-preflight
 
+image-rocky-linux-static-validate: ## Validate QEMU Packer source/plugins through Windows without claiming KVM runtime
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-static-validate
+
 image-rocky-linux-build: ## Build the checksum-locked Rocky Linux 10.2 qcow2 with native Linux Packer/QEMU
 	@$(PYTHON) scripts/repoctl.py image-rocky-linux-build $(if $(OFFLINE),--offline,)
 
@@ -152,6 +155,15 @@ image-rocky-oras-push: ## Push PROFILE=windows|linux release to ORAS_REPOSITORY 
 
 image-rocky-oras-pull: ## Pull PROFILE=windows|linux from immutable ORAS_REF=repository@sha256:digest
 	@$(PYTHON) scripts/repoctl.py image-rocky-oras-pull --profile "$${PROFILE:-windows}" --reference "$${ORAS_REF:-}"
+
+local-services-assets: ## Materialize exact Gitea, Harbor and Docker offline inputs
+	@$(PYTHON) scripts/repoctl.py local-services-assets $(if $(OFFLINE),--offline,)
+
+local-services-qualify: ## Qualify Gitea, Harbor and ORAS on the exact released Rocky box
+	@$(PYTHON) scripts/repoctl.py local-services-qualify $(if $(OFFLINE),--offline,)
+
+local-services-recover: ## Stop only owned local service VMs while preserving their disks
+	@$(PYTHON) scripts/repoctl.py local-services-recover
 
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 

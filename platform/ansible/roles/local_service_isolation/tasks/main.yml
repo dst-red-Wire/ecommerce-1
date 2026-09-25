@@ -1,0 +1,40 @@
+---
+- name: Install local service nftables isolation policy
+  ansible.builtin.template:
+    src: ecommerce-local-service.nft.j2
+    dest: /etc/nftables/ecommerce-local-service.nft
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Apply default-deny local service isolation
+  ansible.builtin.command:
+    argv: [nft, -f, /etc/nftables/ecommerce-local-service.nft]
+  changed_when: true
+
+- name: Install persistent local service isolation unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ecommerce-local-service-isolation.service
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Ecommerce local service default-deny nftables policy
+      Before=network-online.target docker.service gitea.service
+      Wants=network-pre.target
+      After=network-pre.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/nft -f /etc/nftables/ecommerce-local-service.nft
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Enable persistent local service isolation
+  ansible.builtin.systemd_service:
+    name: ecommerce-local-service-isolation
+    enabled: true
+    daemon_reload: true

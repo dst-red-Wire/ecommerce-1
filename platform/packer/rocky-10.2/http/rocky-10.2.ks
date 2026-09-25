@@ -44,6 +44,7 @@ kernel-modules-extra
 NetworkManager
 openssh-server
 python3
+cloud-init
 sudo
 %end
 

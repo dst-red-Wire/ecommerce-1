@@ -1,0 +1,93 @@
+version: 1
+status: exact-local-runtime-qualification
+architecture_authority: architecture.lock.yaml
+scope: qualified-rocky-10.2-virtualbox-local-services
+production_authority: forbidden
+runtime:
+  owner: ansible
+  orchestrator: scripts/local_services_qualification.py
+  fixture: platform/ansible/tests/local_services_vm
+  state_root: .context/runtime/local-services-vm
+  evidence: .context/evidence/local-services-vm/qualification.json
+  credentials: runtime-generated-untracked-masked
+  network_exposure: ssh-tunnel-only
+  guest_egress_after_staging: default-deny
+  persistent_disks: preserve-stopped-after-qualification
+machine_image:
+  contract: config/contracts/machine-image-lock.yaml
+  profile: windows
+  artifact: .artifacts/packer/rocky-10.2/windows/rocky-10.2-rke2-virtualbox.box
+  checksum_file: .artifacts/packer/rocky-10.2/windows/SHA256SUMS
+  release_evidence: .context/evidence/rocky-image/rocky-10.2/windows/release.json
+  access:
+    datasource: NoCloud-Net
+    seed_endpoint: virtualbox-nat-host-loopback-10.0.2.2
+    account: qualifier
+    ssh_key: runtime-generated-ephemeral
+    password_authentication: forbidden
+    shared_private_key: forbidden
+  sizing:
+    authority: local-service-qualification-only
+    gitea: {vcpus: 2, memory_mib: 3072}
+    harbor: {vcpus: 4, memory_mib: 6144}
+    simultaneous_active_service_vms: 1
+gitea:
+  version: 1.24.6
+  source: https://dl.gitea.com/gitea/1.24.6/gitea-1.24.6-linux-amd64
+  filename: gitea-1.24.6-linux-amd64
+  sha256: bb09d565d7e22ed07a9525d22e6f7c468ec00b58484a9691d61ff70940452676
+  config: /etc/gitea/app.ini
+  storage: /var/lib/gitea
+  listen: 127.0.0.1:3000
+  ssh_listen: 127.0.0.1:2222
+  database: sqlite3-local-qualification-only
+  rpm_lock: config/artifacts/local-services-rocky-10.2-packages.lock.json
+  rpm_roots: [git]
+harbor:
+  version: 2.13.2
+  source: https://github.com/goharbor/harbor/releases/download/v2.13.2/harbor-offline-installer-v2.13.2.tgz
+  filename: harbor-offline-installer-v2.13.2.tgz
+  sha256: 198bcefa594007186a265cf2513a4ec5f9419c6995e3a02bc81cac8fa17dede3
+  nested_image_archive_sha256: eb9a33e4c9ac05257394a08d1b6fe6ab125c83edeea9f1e3d47adc34f3e5f654
+  config: /opt/harbor/2.13.2/harbor.yml
+  storage: /data
+  listen: 127.0.0.1:443
+  tls: runtime-generated-private-ca
+  project: machine-images
+  images:
+    - {name: prepare, manifest_digest: sha256:fa0ac5ded123ed5c25d9ac72ea9a6cb7a81c32a0ac37400d6975c5bfe5064589, offline_config_digest: sha256:53905b30703f3c06f9123e431a89fae4c1cc4adb0371eac66c87839e8cc7d749}
+    - {name: harbor-core, manifest_digest: sha256:89114e3fb5c95aefa3285d5d627f89c46c3eaa2f4da138cedee887e58d297f2a, offline_config_digest: sha256:a754b7d40a2abf91bce852af52b2f69f614b11e51b1fddfd250a4754125e1501}
+    - {name: harbor-db, manifest_digest: sha256:fcf1f3dbc8f10183abe336712560a94fb2804ba8d3ce3ca634342e5a8df7da2c, offline_config_digest: sha256:d454060ee4b6c76babd47b7f3b1921d38bf788d438f02a890d96502b3a437a2f}
+    - {name: harbor-jobservice, manifest_digest: sha256:12fe1d4271dfa60fdcd90396efcf39afe05f2316e5b3de50413bde06560cc550, offline_config_digest: sha256:7678c8e2cc6edcff244bf4a47491864a2fba39cf6f00d2d905db93b7823185d9}
+    - {name: harbor-exporter, manifest_digest: sha256:17db16a26911348d743476877de703683d8313e87adcbe37cfea86e064337eec, offline_config_digest: sha256:25f5a194d29877bc41b8e48bf0907936bf155b17ff5295e20eda68adb65d881f}
+    - {name: harbor-portal, manifest_digest: sha256:ac9c2444e1045ac6fc23ae3adbfb43443cdb31dc937be354410b6328a9768bb8, offline_config_digest: sha256:2cdbbbaec69504894bb94cd4bebe6520a6df6bacd6c93e936eb7ec690b07d46c}
+    - {name: harbor-log, manifest_digest: sha256:72329386bf264848e1c043c4b77e2dc4d9513a0079f3766b5b52d22c223a4ec0, offline_config_digest: sha256:9835b2c97248b259abaf3e55553ef25035b869f6811ec31d7c2659253f916572}
+    - {name: harbor-registryctl, manifest_digest: sha256:3d82ef5215c55953540aa08b460785f9d0457a10276365ab9f7750027609295b, offline_config_digest: sha256:af207ccbe6db8d976fb060488607275c55e8e8893449152d917bfc8f2e7e4e9e}
+    - {name: redis-photon, manifest_digest: sha256:7b3e7ea34477cb1df592594fb0d0ea9168945fa9f72aab9586ec357cbe935ae0, offline_config_digest: sha256:4153f964b209dd94eb324b890144c1106e1daf912866da0bf2129c9b45c5ace8}
+    - {name: nginx-photon, manifest_digest: sha256:41aa68bd94aed9b780e7f7b8afe419fd3b0a340c8ac39a2aed25fce1993b8fea, offline_config_digest: sha256:aa191f956a23c6e3e8ffb31720c9c41460bc5e91ebca70db2a12a643d3e42cd8}
+    - {name: registry-photon, manifest_digest: sha256:1fc840dda17e4bb99cb58edc2a4c2435b9413f770b9146ac716a4593061bc136, offline_config_digest: sha256:a0a146d033c4302bc590507e4035386a71d2d57089d94d6b54b87947b10f0873}
+    - {name: trivy-adapter-photon, manifest_digest: sha256:7a6d2284992ee5739ef0a76a9bed722bd87ec9e9ad286c6d72aa7919a606e106, offline_config_digest: sha256:60672d3800121d431cbbc88aa7b87b67438f68f88721f52093f9dbd376928e10}
+  container_runtime:
+    docker_version: 29.8.1
+    containerd_version: 2.3.5
+    compose_version: 2.40.3
+    signing_key:
+      url: https://download.docker.com/linux/centos/gpg
+      filename: docker-centos.asc
+      fingerprint: 060A61C51B558A7F742B77AAC52FEB6B621E9F35
+      sha256: e6c650e0700b1bf4868b693b30761b926844befc8a0acb7ac0dd9b1faf1b7423
+    rpms:
+      - {filename: docker-ce-29.8.1-1.el10.x86_64.rpm, url: https://download.docker.com/linux/centos/10/x86_64/stable/Packages/docker-ce-29.8.1-1.el10.x86_64.rpm, sha256: 462fd66b3eecc94128786426c37ce9cf07de16607dcab0e98a6451f8000c2205}
+      - {filename: docker-ce-cli-29.8.1-1.el10.x86_64.rpm, url: https://download.docker.com/linux/centos/10/x86_64/stable/Packages/docker-ce-cli-29.8.1-1.el10.x86_64.rpm, sha256: e474e8dcd236702ab6e39d22fe14f71747150282038e81d94dfb60302f1cac1c}
+      - {filename: containerd.io-2.3.5-1.el10.x86_64.rpm, url: https://download.docker.com/linux/centos/10/x86_64/stable/Packages/containerd.io-2.3.5-1.el10.x86_64.rpm, sha256: d63bae0ea50de1d5897a0456ef64bbd128dd2f9acc74f4dbed228a9320a2f9b6}
+      - {filename: docker-compose-plugin-2.40.3-1.el10.x86_64.rpm, url: https://download.docker.com/linux/centos/10/x86_64/stable/Packages/docker-compose-plugin-2.40.3-1.el10.x86_64.rpm, sha256: e947c62f9ab7ea88eb92382051c4ab83723a4b42a71cfd5c23115df1560e9439}
+oras:
+  version: 1.3.3
+  authority: config/contracts/toolchain-lock.json#versions.ORAS_VERSION
+  repository: machine-images/rocky
+  reference: digest-only
+  mutable_pull: forbidden
+  ca_file_environment: ORAS_CA_FILE
+  registry_config_environment: ORAS_REGISTRY_CONFIG
+  credential_store: runtime-isolated-docker-config
+  negative_test: wrong-digest-rejected

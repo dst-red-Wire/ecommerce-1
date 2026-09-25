@@ -1,0 +1,16 @@
+[Unit]
+Description=Harbor {{ local_harbor_version }} local qualification service
+Requires=docker.service ecommerce-local-service-isolation.service
+After=docker.service ecommerce-local-service-isolation.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/opt/harbor/{{ local_harbor_version }}
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=600
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

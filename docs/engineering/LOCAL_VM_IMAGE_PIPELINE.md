@@ -273,6 +273,63 @@ process is bounded. The overlay, process and ephemeral key are removed before
 qualification can pass. `OFFLINE=1` has the same fail-closed cache semantics as
 the Windows profile.
 
+On a WSL workstation, QEMU runtime remains ineligible even when a `/dev/kvm`
+device node is visible. The bounded static entrypoint still validates the QEMU
+source, derived variables, ISO checksum, Packer initialization and exact plugin
+through native Windows Packer without claiming a VM build:
+
+```console
+make image-rocky-linux-static-validate
+```
+
+Its evidence records `host_capability: NOT_AVAILABLE` and
+`runtime_build: NOT_EXECUTED`. Only the native Ubuntu entrypoints above may turn
+those runtime fields into a real result.
+
+## Local Gitea, Harbor and ORAS qualification
+
+`config/contracts/local-services-qualification.yaml` is a local qualification
+contract subordinate to the architecture and machine-image locks; it is not a
+second production MGMT authority. It pins Gitea 1.24.6, Harbor 2.13.2, Docker
+29.8.1, containerd 2.3.5, Compose 2.40.3, every Harbor image identity and all
+download checksums. Materialize its offline inputs before the native build:
+
+```console
+make local-services-assets
+make local-services-assets OFFLINE=1
+```
+
+The base image contains cloud-init but no shared Vagrant private key. Each owned
+service VM reads a runtime-only public key from a bounded loopback-only
+NoCloud-Net endpoint through the VirtualBox NAT host address, regenerates SSH
+host keys, and disables password login.
+The endpoint and Vagrant state live below Windows LocalAppData, which avoids UNC
+working-directory failures. Private keys, service credentials, TLS material and
+Ansible extra-vars stay below ignored `.context/runtime` paths with owner-only
+permissions.
+
+After importing and publishing exact-SHA image release evidence, run:
+
+```console
+make local-services-qualify
+```
+
+The controller uses Ansible to install and probe Gitea first, proves repository
+creation plus push/clone/fetch SHA integrity, and stops that VM while preserving
+its disk. It then installs Harbor from the verified offline archive on a separate
+sized VM, verifies all loaded image IDs, uses a runtime private CA, creates the
+project, and performs ORAS login, push, immutable-digest pull, SHA-256 comparison
+and wrong-digest rejection. Guest output and forwarding use a persistent
+default-deny nftables policy after bootstrap. Both service VMs are stopped after
+the proof so the limited host never retains Packer, Gitea and Harbor workloads
+running together.
+
+Recovery is bounded to owned service VMs and preserves their disks:
+
+```console
+make local-services-recover
+```
+
 ## Shared VM resource and storage authority
 
 `config/contracts/machine-image-lock.yaml#packer_image.build.resources` is the
@@ -321,6 +378,9 @@ keeps materialized artifacts below
 operations without deletion, and verifies SHA-256 before and after every cache
 or artifact synchronization. Registry authentication remains external to this
 workflow; passwords and tokens are never accepted as command arguments.
+For a runtime private CA and isolated credential file, the controller consumes
+`ORAS_CA_FILE` and `ORAS_REGISTRY_CONFIG`; it validates both paths and rejects a
+group/world-readable registry configuration. TLS verification cannot be disabled.
 
 Generated outputs are ignored by Git:
 

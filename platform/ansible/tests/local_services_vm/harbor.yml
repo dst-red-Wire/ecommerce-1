@@ -1,0 +1,8 @@
+---
+- name: Qualify local Harbor on the exact Rocky image
+  hosts: local_service
+  gather_facts: true
+  become: true
+  roles:
+    - role: local_service_isolation
+    - role: local_harbor

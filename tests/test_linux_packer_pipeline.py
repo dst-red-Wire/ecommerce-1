@@ -111,6 +111,17 @@ class LinuxPackerPipelineTest(unittest.TestCase):
             self.assertIn(f"scripts/repoctl.py {target}", makefile)
             self.assertIn(f'args.cmd == "{target}"', repoctl)
         self.assertIn("linux_image_pipeline", repoctl)
+        self.assertIn("image-rocky-linux-static-validate:", makefile)
+        self.assertIn('linux_image_pipeline("static-validate")', repoctl)
+
+    def test_qemu_static_validation_is_honest_about_wsl_runtime(self):
+        self.assertIn('"packer_init": "NOT_EXECUTED"', self.pipeline)
+        self.assertIn('"packer_validate": "NOT_EXECUTED"', self.pipeline)
+        self.assertIn('"qemu_plugin_version": "NOT_EXECUTED"', self.pipeline)
+        self.assertIn('"host_capability": "NOT_AVAILABLE"', self.pipeline)
+        self.assertIn('"runtime_build": "NOT_EXECUTED"', self.pipeline)
+        self.assertIn('image["build"]["qemu_kvm"]["plugin"]["version"]', self.pipeline)
+        self.assertIn("rocky-image-qemu-static host_capability=NOT_AVAILABLE", self.pipeline)
 
     def test_pipeline_is_utf8_and_adds_no_shell_automation(self):
         raw = LINUX_PIPELINE.read_bytes()

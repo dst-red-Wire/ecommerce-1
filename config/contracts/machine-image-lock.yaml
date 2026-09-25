@@ -61,6 +61,7 @@ packer_image:
         - openssh-server
         - sudo
         - python3
+        - cloud-init
         - ca-certificates
         - bash-completion
         - which
@@ -154,7 +155,7 @@ packer_image:
     static_ip: forbidden
 
   services:
-    enabled: [NetworkManager, chronyd, sshd]
+    enabled: [NetworkManager, chronyd, sshd, cloud-init-local, cloud-init, cloud-config, cloud-final]
     disabled: [firewalld]
 
   kubernetes_prerequisites:
@@ -239,6 +240,10 @@ packer_image:
   distribution:
     authority: oras
     registry: harbor
+    runtime_tls:
+      ca_file_environment: ORAS_CA_FILE
+      registry_config_environment: ORAS_REGISTRY_CONFIG
+      insecure_skip_verify: forbidden
     artifact_type: application/vnd.ecommerce.rocky-machine-image.v1
     repository_entrypoints:
       push: image-rocky-oras-push
@@ -286,6 +291,14 @@ packer_image:
     build_private_key: destroyed-after-qualification-before-release
     build_user: password-locked-key-only
     secrets: forbidden
+    first_boot_access:
+      authority: cloud-init-nocloud-net
+      transport: virtualbox-nat-host-loopback-http
+      ssh_public_key: runtime-generated-ephemeral
+      ssh_private_key: host-runtime-only
+      image_embedded_private_key: forbidden
+      image_embedded_shared_private_key: forbidden
+      datasource_fallback: none
     rke2_token: forbidden
 
   evidence:

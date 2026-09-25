@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -281,6 +282,7 @@ class PackerImageContractTest(unittest.TestCase):
             "NetworkManager",
             "openssh-server",
             "python3",
+            "cloud-init",
             "chrony",
             "nftables",
             "iptables-nft",
@@ -303,6 +305,10 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertEqual(rke2, {"openscap-scanner", "scap-security-guide"})
         self.assertEqual(qemu, {"qemu-guest-agent"})
         self.assertNotIn("qemu-guest-agent", base)
+        self.assertTrue(
+            {"cloud-init-local", "cloud-init", "cloud-config", "cloud-final"}
+            <= set(self.image["services"]["enabled"])
+        )
 
     def test_profile_package_lock_is_a_valid_projection(self):
         self.assertEqual(
@@ -466,6 +472,14 @@ class PackerImageContractTest(unittest.TestCase):
         distribution = self.image["distribution"]
         self.assertEqual("oras", distribution["authority"])
         self.assertEqual("harbor", distribution["registry"])
+        self.assertEqual(
+            {
+                "ca_file_environment": "ORAS_CA_FILE",
+                "registry_config_environment": "ORAS_REGISTRY_CONFIG",
+                "insecure_skip_verify": "forbidden",
+            },
+            distribution["runtime_tls"],
+        )
         self.assertEqual("ORAS_CACHE", distribution["cache"]["environment"])
         self.assertEqual("rsync", distribution["cache"]["synchronization"])
         self.assertEqual(
@@ -552,6 +566,34 @@ class PackerImageContractTest(unittest.TestCase):
             checksums.write_bytes(b"x" * 4097)
             with self.assertRaisesRegex(RuntimeError, "4096-byte safety limit"):
                 REPOCTL._verified_artifact_sha256(artifact, checksums)
+
+    def test_oras_runtime_tls_arguments_are_explicit_and_secret_config_is_private(self):
+        distribution = self.image["distribution"]
+        with tempfile.TemporaryDirectory() as directory:
+            ca = Path(directory) / "ca.pem"
+            config = Path(directory) / "config.json"
+            ca.write_text("runtime CA", encoding="utf-8")
+            config.write_text("{}", encoding="utf-8")
+            config.chmod(0o600)
+            with mock.patch.dict(
+                os.environ,
+                {"ORAS_CA_FILE": str(ca), "ORAS_REGISTRY_CONFIG": str(config)},
+                clear=False,
+            ):
+                self.assertEqual(
+                    ["--ca-file", str(ca), "--registry-config", str(config)],
+                    REPOCTL._oras_runtime_arguments(distribution),
+                )
+            config.chmod(0o644)
+            with mock.patch.dict(os.environ, {"ORAS_REGISTRY_CONFIG": str(config)}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "group/world accessible"):
+                    REPOCTL._oras_runtime_arguments(distribution)
+            config.chmod(0o600)
+            link = Path(directory) / "config-link.json"
+            link.symlink_to(config)
+            with mock.patch.dict(os.environ, {"ORAS_REGISTRY_CONFIG": str(link)}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "non-symlink"):
+                    REPOCTL._oras_runtime_arguments(distribution)
 
     def test_oras_make_entrypoints_are_explicit(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

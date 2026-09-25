@@ -1,0 +1,24 @@
+table inet ecommerce_local_service {
+  chain input {
+    type filter hook input priority 10; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    tcp dport 22 accept
+    ip protocol icmp accept
+  }
+
+  chain output {
+    type filter hook output priority 10; policy drop;
+    oifname "lo" accept
+    ct state established,related accept
+    oifname "docker0" accept
+    oifname "br-*" accept
+  }
+
+  chain forward {
+    type filter hook forward priority 10; policy drop;
+    ct state established,related accept
+    iifname "docker0" oifname "docker0" accept
+    iifname "br-*" oifname "br-*" accept
+  }
+}
