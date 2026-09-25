@@ -97,6 +97,12 @@ def render(
     )
     if vm_bios_boot_mib + vm_boot_mib + vm_root_min_mib >= vm_disk_mib:
         raise ValueError("Packer partitions must leave growable space on the disk")
+    timeouts = image["build"]["timeouts"]
+    if timeouts.get("authority") != "shared-all-hypervisors":
+        raise ValueError("Packer timeouts must have one shared hypervisor authority")
+    vm_ssh_timeout_seconds = _bounded_contract_integer(
+        timeouts, "ssh_seconds", minimum=1800, maximum=7200
+    )
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError("output must be a new path below an existing directory")
     iso = bundle / "iso" / source["iso"]
@@ -154,6 +160,7 @@ def render(
         f"vm_boot_mib = {vm_boot_mib}\n"
         f"vm_root_min_mib = {vm_root_min_mib}\n"
         f"vm_root_filesystem = {json.dumps(storage['root_filesystem'])}\n"
+        f"vm_ssh_timeout_seconds = {vm_ssh_timeout_seconds}\n"
         f"build_ssh_public_key = {json.dumps(public_key)}\n"
         f"build_ssh_private_key_file = {json.dumps(private_key_path)}\n"
     )

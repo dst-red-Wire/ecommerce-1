@@ -16,6 +16,10 @@ VirtualBox and QEMU builders and renders the Kickstart storage instructions.
 The explicit layout contains `biosboot`, `/boot` and a growable `/` partition;
 LVM and swap are forbidden for this Kubernetes-ready base image.
 
+The central contract also owns the bounded SSH communicator timeout shared by
+both hypervisors. Slow Windows hosts therefore use the same reviewed value as
+native Linux instead of requiring an untracked Packer override.
+
 The shared boot command opens the GRUB console and executes the exact `linux`,
 `initrd` and `boot` commands projected from the locked Rocky ISO. It does not
 depend on menu selection or cursor positioning. VirtualBox uses a bounded 500 ms

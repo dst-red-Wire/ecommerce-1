@@ -95,6 +95,10 @@ class PackerImageContractTest(unittest.TestCase):
             self.image["build"]["storage"],
         )
         self.assertEqual(
+            {"authority": "shared-all-hypervisors", "ssh_seconds": 3600},
+            self.image["build"]["timeouts"],
+        )
+        self.assertEqual(
             2,
             len(re.findall(r"^\s*cpus\s*=\s*var\.vm_cpus$", self.packer, re.MULTILINE)),
         )
@@ -114,6 +118,16 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn('disk_size            = "${var.vm_disk_mib}M"', self.packer)
         self.assertIn("firmware               = var.vm_firmware", self.packer)
         self.assertIn('efi_boot             = var.vm_firmware == "efi"', self.packer)
+        self.assertEqual(
+            2,
+            len(
+                re.findall(
+                    r'^\s*ssh_timeout\s*=\s*"\$\{var\.vm_ssh_timeout_seconds\}s"$',
+                    self.packer,
+                    re.MULTILINE,
+                )
+            ),
+        )
 
     def test_renderer_projects_shared_vm_resources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +167,10 @@ class PackerImageContractTest(unittest.TestCase):
                             "lvm": "forbidden",
                             "swap": "forbidden",
                         },
+                        "timeouts": {
+                            "authority": "shared-all-hypervisors",
+                            "ssh_seconds": 5400,
+                        },
                     },
                 }
             }
@@ -181,6 +199,7 @@ class PackerImageContractTest(unittest.TestCase):
             self.assertIn("vm_boot_mib = 4096\n", rendered)
             self.assertIn("vm_root_min_mib = 20480\n", rendered)
             self.assertIn('vm_root_filesystem = "xfs"\n', rendered)
+            self.assertIn("vm_ssh_timeout_seconds = 5400\n", rendered)
 
     def test_renderer_rejects_invalid_vm_resources(self):
         with self.assertRaisesRegex(TypeError, "vcpus must be an integer"):

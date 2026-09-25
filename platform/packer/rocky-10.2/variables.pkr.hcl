@@ -121,6 +121,15 @@ variable "vm_root_filesystem" {
   }
 }
 
+variable "vm_ssh_timeout_seconds" {
+  type = number
+
+  validation {
+    condition     = var.vm_ssh_timeout_seconds >= 1800 && var.vm_ssh_timeout_seconds <= 7200
+    error_message = "Vm_ssh_timeout_seconds must be between 1800 and 7200."
+  }
+}
+
 variable "image_profile" {
   type    = string
   default = "rke2"

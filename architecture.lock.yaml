@@ -501,6 +501,10 @@ tooling:
       authority: config/contracts/machine-image-lock.yaml#packer_image.build.storage
       projection: generated-packer-variables-and-kickstart-template
       overrides: forbidden
+    build_timeouts:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.timeouts
+      projection: generated-packer-variables
+      overrides: forbidden
     repository_entrypoint:
       authority: make
       execution_environment: developer-environment

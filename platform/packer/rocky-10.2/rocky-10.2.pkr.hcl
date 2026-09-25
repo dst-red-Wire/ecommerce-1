@@ -47,7 +47,7 @@ source "virtualbox-iso" "base" {
   boot_wait              = "10s"
   ssh_username           = "packer"
   ssh_private_key_file   = var.build_ssh_private_key_file
-  ssh_timeout            = "30m"
+  ssh_timeout            = "${var.vm_ssh_timeout_seconds}s"
   shutdown_command       = "true"
   guest_additions_mode   = "disable"
   firmware               = var.vm_firmware
@@ -78,7 +78,7 @@ source "qemu" "base" {
   boot_wait            = "10s"
   ssh_username         = "packer"
   ssh_private_key_file = var.build_ssh_private_key_file
-  ssh_timeout          = "30m"
+  ssh_timeout          = "${var.vm_ssh_timeout_seconds}s"
   shutdown_command     = "true"
   accelerator          = "kvm"
   efi_boot             = var.vm_firmware == "efi"

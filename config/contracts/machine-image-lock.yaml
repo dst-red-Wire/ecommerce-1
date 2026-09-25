@@ -170,6 +170,9 @@ packer_image:
       root_filesystem: xfs
       lvm: forbidden
       swap: forbidden
+    timeouts:
+      authority: shared-all-hypervisors
+      ssh_seconds: 3600
     host_tool_versions:
       virtualbox: config/contracts/toolchain-lock.json#versions.VIRTUALBOX_VERSION
       vagrant: config/contracts/toolchain-lock.json#versions.VAGRANT_VERSION

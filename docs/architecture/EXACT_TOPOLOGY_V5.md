@@ -217,7 +217,9 @@ VM CPU, memory and disk sizing has one authority in
 layout have one authority in the adjacent `packer_image.build.storage` section.
 The renderer projects those values into generated Packer variables shared by
 VirtualBox and QEMU and into the Kickstart template; per-hypervisor resource or
-storage overrides are forbidden.
+storage overrides are forbidden. Bounded communicator timeouts are likewise
+owned by the adjacent `packer_image.build.timeouts` section and projected to
+both builders.
 
 M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
 
