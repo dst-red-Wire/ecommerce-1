@@ -92,12 +92,21 @@ def install(entry: dict, artifact: Path) -> None:
 
 
 def qualify(entry: dict) -> None:
+    # Packer invokes this installer through sudo; its secure_path can omit
+    # /usr/local/bin even though that is where the verified tools are installed.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+    }
+    environment["PATH"] = f"/usr/local/bin:{environment.get('PATH', '/usr/bin:/bin')}"
     result = subprocess.run(
         entry["version_command"],
         check=True,
         text=True,
         capture_output=True,
         timeout=30,
+        env=environment,
     )
     version_output = result.stdout + result.stderr
     if entry["version"] not in version_output:
@@ -116,11 +125,7 @@ def qualify(entry: dict) -> None:
             text=True,
             capture_output=True,
             timeout=30,
-            env={
-                key: value
-                for key, value in os.environ.items()
-                if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
-            },
+            env=environment,
         )
         output = result.stdout + result.stderr
         missing = [

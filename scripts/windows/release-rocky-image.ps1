@@ -30,6 +30,9 @@ $evidence = [ordered]@{
         qualification_evidence = 'NOT_EXECUTED'
         cleanup = 'NOT_EXECUTED'
         ephemeral_key_absent = 'NOT_EXECUTED'
+        sbom = 'NOT_EXECUTED'
+        package_manifest = 'NOT_EXECUTED'
+        profile_inventory = 'NOT_EXECUTED'
     }
     completed_at = $null
     error = $null
@@ -96,6 +99,12 @@ try {
         }
     }
     $evidence.checks.qualification_evidence = 'PASS'
+    $packageLock = Read-JsonFile (Join-Path $root 'config\artifacts\rocky-10.2-base-packages.lock.json')
+    $requiredPackages = @($packageLock.profiles.base.roots) + @($packageLock.profiles.rke2.roots)
+    Assert-ImageSupplyChainEvidence -Evidence $qualification.supply_chain -ArtifactSha256 $sha256 -RequiredPackages $requiredPackages
+    $evidence.checks.sbom = 'PASS'
+    $evidence.checks.package_manifest = 'PASS'
+    $evidence.checks.profile_inventory = 'PASS'
     if ($qualification.qualification.cleanup -ne 'PASS' -or $qualification.qualification.key_cleanup -ne 'PASS') {
         throw 'Qualification cleanup evidence is not PASS'
     }

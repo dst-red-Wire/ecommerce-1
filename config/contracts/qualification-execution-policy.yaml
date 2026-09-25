@@ -70,6 +70,21 @@ runtime_orchestration:
     recapture_current_state: required
     restore_from_prior_session: forbidden
   capabilities:
+    local-virtualization-serialization:
+      handler: dependency
+      requires: []
+      mutation_class: local-virtualization
+      timeout_seconds: 1
+      privilege: none
+      global_lock: true
+      operations:
+        detector: dependency-closure
+        preflight: dependency-closure
+        prepare: none
+        verify: dependency-closure
+        restore: no-host-resource-created
+        verify_restore: no-host-resource-created
+      evidence_fields: [satisfied]
     docker-runtime:
       handler: docker-rootless
       requires: [ansible-runtime]

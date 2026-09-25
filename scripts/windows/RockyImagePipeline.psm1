@@ -335,4 +335,70 @@ function Remove-OwnedVirtualMachine {
     }
 }
 
-Export-ModuleMember -Function Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine
+function New-ImageSupplyChainEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactSha256,
+        [Parameter(Mandatory = $true)][string]$RpmInventory,
+        [Parameter(Mandatory = $true)][string[]]$RequiredPackages
+    )
+    if ($ArtifactSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid supply-chain artifact digest' }
+    $packages = @($RpmInventory -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($packages.Count -lt 50 -or @($packages | Sort-Object -Unique).Count -ne $packages.Count) {
+        throw 'RPM package manifest is empty, incomplete or duplicated'
+    }
+    $components = @()
+    foreach ($line in $packages) {
+        if ($line -cnotmatch '^([A-Za-z0-9+_.-]+)\|([^\s|]+)$') { throw 'Invalid RPM package manifest entry' }
+        $components += [ordered]@{ type = 'library'; name = $Matches[1]; version = $Matches[2] }
+    }
+    $required = @($RequiredPackages | Sort-Object -Unique)
+    if ($required.Count -eq 0 -or @($required | Where-Object { $_ -cnotmatch '^[A-Za-z0-9+_.-]+$' }).Count -gt 0) {
+        throw 'Required image profile package list is invalid'
+    }
+    $installed = @($components | ForEach-Object { $_.name })
+    foreach ($name in $required) {
+        if ($installed -cnotcontains $name) { throw "Required image profile package is absent: $name" }
+    }
+    return [ordered]@{
+        artifact_sha256 = $ArtifactSha256
+        package_manifest = [ordered]@{ format = 'rpm-nevra-v1'; packages = $packages }
+        profile_inventory = [ordered]@{ profile = 'rke2'; required_packages = $required }
+        sbom = [ordered]@{
+            bomFormat = 'CycloneDX'; specVersion = '1.5'; version = 1
+            metadata = [ordered]@{ component = [ordered]@{ type = 'file'; name = 'rocky-10.2-rke2-virtualbox.box'; hashes = @([ordered]@{ alg = 'SHA-256'; content = $ArtifactSha256 }) } }
+            components = $components
+        }
+    }
+}
+
+function Assert-ImageSupplyChainEvidence {
+    param(
+        [Parameter(Mandatory = $true)]$Evidence,
+        [Parameter(Mandatory = $true)][string]$ArtifactSha256,
+        [Parameter(Mandatory = $true)][string[]]$RequiredPackages
+    )
+    if ($null -eq $Evidence -or [string]$Evidence.artifact_sha256 -cne $ArtifactSha256 -or
+        [string]$Evidence.sbom.bomFormat -cne 'CycloneDX' -or
+        [string]$Evidence.sbom.specVersion -cne '1.5' -or
+        [string]$Evidence.sbom.metadata.component.hashes[0].content -cne $ArtifactSha256 -or
+        [string]$Evidence.sbom.metadata.component.hashes[0].alg -cne 'SHA-256' -or
+        [string]$Evidence.package_manifest.format -cne 'rpm-nevra-v1' -or
+        [string]$Evidence.profile_inventory.profile -cne 'rke2') {
+        throw 'Supply-chain evidence is absent or not bound to the exact artifact'
+    }
+    if ((@($Evidence.profile_inventory.required_packages) -join "`n") -cne ((@($RequiredPackages | Sort-Object -Unique)) -join "`n")) {
+        throw 'Supply-chain profile inventory differs from the contracted package roots'
+    }
+    $expected = New-ImageSupplyChainEvidence -ArtifactSha256 $ArtifactSha256 -RpmInventory (($Evidence.package_manifest.packages) -join "`n") -RequiredPackages @($Evidence.profile_inventory.required_packages)
+    if (@($Evidence.sbom.components).Count -ne @($expected.sbom.components).Count) {
+        throw 'SBOM components differ from the package manifest'
+    }
+    for ($index = 0; $index -lt $expected.sbom.components.Count; $index++) {
+        if ([string]$Evidence.sbom.components[$index].name -cne [string]$expected.sbom.components[$index].name -or
+            [string]$Evidence.sbom.components[$index].version -cne [string]$expected.sbom.components[$index].version) {
+            throw 'SBOM components differ from the package manifest'
+        }
+    }
+}
+
+Export-ModuleMember -Function Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine, New-ImageSupplyChainEvidence, Assert-ImageSupplyChainEvidence

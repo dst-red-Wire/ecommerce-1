@@ -301,6 +301,28 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("key_cleanup = 'NOT_EXECUTED'", self.qualify)
         self.assertIn("ephemeral_key_absent", self.release)
 
+    def test_reviewed_security_and_release_evidence_are_fail_closed(self):
+        for source in (self.qualify, self.native):
+            self.assertIn('sudo -n test ! -e /root/.config/gh/hosts.yml', source)
+            self.assertIn('sudo -n test ! -e /etc/rancher/rke2/config.yaml', source)
+            self.assertIn('New-ImageSupplyChainEvidence', source)
+        self.assertIn('Assert-ImageSupplyChainEvidence', self.release)
+        self.assertIn('Assert-ImageSupplyChainEvidence', self.native)
+        self.assertIn('package_manifest', self.release)
+        self.assertIn('profile_inventory', self.release)
+        self.assertIn('sbom', self.release)
+        self.assertIn('$promotionStarted', self.build)
+        self.assertIn('qualification key rollback failed', self.build)
+
+    def test_image_entrypoints_share_governed_host_user_lock(self):
+        policy = yaml.safe_load((ROOT / 'config/contracts/qualification-execution-policy.yaml').read_text(encoding='utf-8'))
+        capability = policy['runtime_orchestration']['capabilities']['local-virtualization-serialization']
+        self.assertTrue(capability['global_lock'])
+        self.assertEqual('local-virtualization', capability['mutation_class'])
+        controller = (ROOT / 'scripts/repoctl.py').read_text(encoding='utf-8')
+        self.assertIn('workflow_capabilities=["local-virtualization-serialization"]', controller)
+        self.assertIn('return image_phase_with_runtime(args.cmd', controller)
+
     def test_json_and_powershell_sources_are_utf8_safe(self):
         for path in sorted(WINDOWS.glob("*.ps*")):
             raw = path.read_bytes()

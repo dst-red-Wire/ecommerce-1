@@ -281,6 +281,9 @@ if ($null -ne $evidenceRoot) {
 }
 
 if ($buildCompleted -and $cleanupStatus -ne 'FAIL') {
+    $promotionStarted = $false
+    $storedPrivateKey = $null
+    $storedPublicKey = $null
     try {
         $targetArtifact = Join-Path $artifactRoot 'rocky-10.2-rke2-virtualbox.box'
         $temporaryArtifact = Join-Path $artifactRoot ("rocky-10.2-rke2-virtualbox.box.{0}.tmp" -f [Guid]::NewGuid().ToString('N'))
@@ -301,6 +304,10 @@ if ($buildCompleted -and $cleanupStatus -ne 'FAIL') {
         [void](New-Item -ItemType Directory -Path $keyRoot -Force)
         $storedPrivateKey = Assert-SafeChildPath -BasePath $pipelineRoot -CandidatePath (Join-Path $keyRoot "$artifactSha256.key")
         $storedPublicKey = Assert-SafeChildPath -BasePath $pipelineRoot -CandidatePath (Join-Path $keyRoot "$artifactSha256.key.pub")
+        if ((Test-Path -LiteralPath $storedPrivateKey) -or (Test-Path -LiteralPath $storedPublicKey)) {
+            throw 'Qualification key destination already exists; refusing to overwrite it'
+        }
+        $promotionStarted = $true
         Move-Item -LiteralPath (Join-Path $stageRoot 'qualification-key') -Destination $storedPrivateKey -Force
         Move-Item -LiteralPath (Join-Path $stageRoot 'qualification-key.pub') -Destination $storedPublicKey -Force
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -316,6 +323,18 @@ if ($buildCompleted -and $cleanupStatus -ne 'FAIL') {
     catch {
         $evidence.status = 'FAIL'
         $evidence.error = $_.Exception.Message
+        if ($promotionStarted) {
+            foreach ($storedKey in @($storedPrivateKey, $storedPublicKey)) {
+                try {
+                    if (Test-Path -LiteralPath $storedKey) {
+                        Remove-Item -LiteralPath $storedKey -Force
+                    }
+                }
+                catch {
+                    $evidence.error += "; qualification key rollback failed: $($_.Exception.Message)"
+                }
+            }
+        }
     }
 }
 

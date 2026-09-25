@@ -50,6 +50,7 @@ $evidence = [ordered]@{
         key_cleanup = 'NOT_EXECUTED'
     }
     observations = [ordered]@{}
+    supply_chain = $null
     started_at = [DateTime]::UtcNow.ToString('o')
     completed_at = $null
     error = $null
@@ -185,8 +186,13 @@ try {
     $evidence.observations.fundamental_tools = $tools
     $rke2 = Invoke-SmokeCommand -Name 'rke2_prerequisites' -Command "test -z \"`$(swapon --noheadings --show)\"; test \"`$(stat -fc %T /sys/fs/cgroup)\" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe \"`$module\"; done; test \"`$(sysctl -n net.ipv4.ip_forward)\" = 1; test \"`$(sysctl -n net.bridge.bridge-nf-call-iptables)\" = 1; test -d /sys/fs/bpf; printf 'rke2-prerequisites-present'"
     $evidence.observations.rke2_prerequisites = $rke2
-    $security = Invoke-SmokeCommand -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; test ! -e /root/.config/gh/hosts.yml; test ! -e /etc/rancher/rke2/config.yaml; printf 'security-baseline-present'"
+    $security = Invoke-SmokeCommand -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf 'security-baseline-present'"
     $evidence.observations.security = $security
+    $packageLock = Read-JsonFile (Join-Path $root 'config\artifacts\rocky-10.2-base-packages.lock.json')
+    $requiredPackages = @($packageLock.profiles.base.roots) + @($packageLock.profiles.rke2.roots)
+    $rpmInventory = Invoke-SmokeCommand -Name 'package_manifest' -Command "rpm -qa --qf '%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort"
+    $evidence.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $actualSha256 -RpmInventory $rpmInventory -RequiredPackages $requiredPackages
+    Assert-ImageSupplyChainEvidence -Evidence $evidence.supply_chain -ArtifactSha256 $actualSha256 -RequiredPackages $requiredPackages
     $qualificationPassed = $true
 }
 catch {

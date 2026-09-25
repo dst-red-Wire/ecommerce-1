@@ -434,6 +434,7 @@ function Invoke-NativeRun {
             security = 'NOT_EXECUTED'
         }
         observations = [ordered]@{}
+        supply_chain = $null
         cleanup = 'NOT_EXECUTED'
         qualification_key_cleanup = 'NOT_EXECUTED'
         bootsequence_return_normal = 'NOT_EXECUTED'
@@ -673,8 +674,11 @@ function Invoke-NativeRun {
         $result.vagrant_smoke.fundamental_tools = 'PASS'
         $result.observations.rke2_prerequisites = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rke2-prerequisites' -Command "test \"`$(stat -fc %T /sys/fs/cgroup)\" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe \"`$module\"; done; test \"`$(sysctl -n net.ipv4.ip_forward)\" = 1; test \"`$(sysctl -n net.bridge.bridge-nf-call-iptables)\" = 1; test -d /sys/fs/bpf; printf 'rke2-prerequisites-present'"
         $result.vagrant_smoke.rke2_prerequisites = 'PASS'
-        $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'"
+        $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml"
         $result.vagrant_smoke.security = 'PASS'
+        $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command "rpm -qa --qf '%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort"
+        $result.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $artifactSha256 -RpmInventory $rpmInventory -RequiredPackages $packages
+        Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages $packages
         $result.status = 'PASS'
     }
     catch {
@@ -783,6 +787,8 @@ function Invoke-Import {
     if (-not (Test-Path -LiteralPath $artifactSource -PathType Leaf)) { throw 'Native artifact is missing' }
     $artifactSha256 = Get-FileSha256 -Path $artifactSource
     if ($artifactSha256 -ne [string]$result.artifact_sha256) { throw 'Native artifact SHA-256 differs from runtime evidence' }
+    $runtimeContract = Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')
+    Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages @($runtimeContract.rpm_profile_roots)
     if ((Get-Item -LiteralPath $artifactSource).Length -ne [int64]$result.artifact_size_bytes) {
         throw 'Native artifact size differs from runtime evidence'
     }
@@ -841,7 +847,7 @@ function Invoke-Import {
             expected_memory = 'PASS'; root_filesystem_xfs = 'PASS'; lvm_absent = 'PASS'
             swap_absent = 'PASS'; rpm_profile = 'PASS'
         }
-        observations = $result.observations; started_at = $result.started_at; completed_at = $result.completed_at; error = $null
+        observations = $result.observations; supply_chain = $result.supply_chain; started_at = $result.started_at; completed_at = $result.completed_at; error = $null
     }
     $releaseEvidence = [ordered]@{
         schema = 1; image = 'rocky-10.2'; artifact = 'rocky-10.2-rke2-virtualbox.box'
@@ -850,7 +856,7 @@ function Invoke-Import {
         checks = [ordered]@{
             preflight = 'PASS'; exact_source_sha = 'PASS'; clean_source = 'PASS'
             build_evidence = 'PASS'; checksum = 'PASS'; qualification_evidence = 'PASS'
-            cleanup = 'PASS'; ephemeral_key_absent = 'PASS'
+            cleanup = 'PASS'; ephemeral_key_absent = 'PASS'; sbom = 'PASS'; package_manifest = 'PASS'; profile_inventory = 'PASS'
         }
         completed_at = Get-UtcTimestamp; error = $null
     }

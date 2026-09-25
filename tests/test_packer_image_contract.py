@@ -785,6 +785,16 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertIn('"--disablerepo=*"', installer)
         self.assertNotIn("urllib", installer)
 
+    def test_offline_tool_qualification_uses_installed_binary_path_under_sudo(self):
+        entry = {"name": "ripgrep", "version": "15.2.0", "version_command": ["rg", "--version"]}
+        completed = mock.Mock(stdout="ripgrep 15.2.0", stderr="")
+        with mock.patch.object(PACKER_INSTALLER.subprocess, "run", return_value=completed) as process:
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin", "GH_TOKEN": "redacted"}):
+                PACKER_INSTALLER.qualify(entry)
+        environment = process.call_args.kwargs["env"]
+        self.assertTrue(environment["PATH"].startswith("/usr/local/bin:"))
+        self.assertNotIn("GH_TOKEN", environment)
+
 
 if __name__ == "__main__":
     unittest.main()

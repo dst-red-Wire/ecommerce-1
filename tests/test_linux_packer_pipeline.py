@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import unittest
 from pathlib import Path
@@ -10,6 +11,9 @@ MACHINE_LOCK = ROOT / "config/contracts/machine-image-lock.yaml"
 TOOLCHAIN_LOCK = ROOT / "config/contracts/toolchain-lock.json"
 PACKER = ROOT / "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl"
 LINUX_PIPELINE = ROOT / "scripts/linux_image_pipeline.py"
+SPEC = importlib.util.spec_from_file_location("linux_image_pipeline", LINUX_PIPELINE)
+PIPELINE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(PIPELINE)
 
 
 class LinuxPackerPipelineTest(unittest.TestCase):
@@ -67,6 +71,10 @@ class LinuxPackerPipelineTest(unittest.TestCase):
         self.assertEqual(
             ["linux/amd64"], self.toolchain["tools"]["packer-linux"]["platforms"]
         )
+        self.assertIn('QEMU_PACKAGE_VERSION', self.pipeline)
+        self.assertIn('"qemu-utils"', self.pipeline)
+        self.assertIn('"dpkg-query", "-S"', self.pipeline)
+        self.assertIn('"dpkg-query", "-W"', self.pipeline)
 
     def test_linux_profile_is_native_and_explicitly_rejects_wsl(self):
         self.assertIn('"/proc/sys/kernel/osrelease"', self.pipeline)
@@ -101,6 +109,22 @@ class LinuxPackerPipelineTest(unittest.TestCase):
         self.assertIn("RELEASE_EVIDENCE", self.pipeline)
         self.assertIn('"remote_publication": "NOT_PERFORMED"', self.pipeline)
         self.assertIn('"source_clean": False', self.pipeline)
+        self.assertIn('assert_image_supply_chain(qualification.get("supply_chain"), digest)', self.pipeline)
+        self.assertIn('sudo -n test ! -e /root/.config/gh/hosts.yml', self.pipeline)
+
+    def test_supply_chain_must_match_guest_packages_and_artifact_digest(self):
+        package_lock = json.loads((ROOT / "config/artifacts/rocky-10.2-base-packages.lock.json").read_text())
+        required = package_lock["profiles"]["base"]["roots"] + package_lock["profiles"]["rke2"]["roots"]
+        names = sorted(set(required) | {f"extra-{number}" for number in range(10)})
+        raw = "\n".join(f"{name}|0:1.0-1.x86_64" for name in names)
+        digest = "a" * 64
+        evidence = PIPELINE.image_supply_chain(digest, raw, required)
+        PIPELINE.assert_image_supply_chain(evidence, digest)
+        with self.assertRaises(PIPELINE.PipelineError):
+            PIPELINE.assert_image_supply_chain(evidence, "b" * 64)
+        evidence["sbom"]["components"].pop()
+        with self.assertRaises(PIPELINE.PipelineError):
+            PIPELINE.assert_image_supply_chain(evidence, digest)
 
     def test_make_and_repoctl_expose_all_linux_stages(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

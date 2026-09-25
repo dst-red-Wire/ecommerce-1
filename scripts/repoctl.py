@@ -7214,6 +7214,28 @@ def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
     return run(command, cwd=ROOT, check=False).returncode
 
 
+def image_phase_with_runtime(command: str, *, offline: bool = False) -> int:
+    """Serialize image phase entrypoints with the governed host/user lock."""
+    if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
+        raise RuntimeError("image phase wrapper cannot be entered recursively")
+    child_args = [command, *(["--offline"] if offline else [])]
+    records: list[dict] = []
+
+    def execute(runtime_env: dict[str, str]) -> int:
+        result = run(_controller_command(*child_args), check=False, env=runtime_env)
+        records.append(
+            {"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL", "exit_code": result.returncode}
+        )
+        return result.returncode
+
+    return _execute_with_runtime(
+        [], execute, workflow=f"image:{command}", head="WORKTREE",
+        environment=os.environ.copy(),
+        workflow_capabilities=["local-virtualization-serialization"],
+        records=records,
+    )
+
+
 def local_services_qualification(action: str, *, offline: bool = False) -> int:
     if action not in {"assets", "qualify", "recover"}:
         return fail(f"unsupported local services qualification action: {action}")
@@ -8502,6 +8524,16 @@ def main() -> int:
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
+        if args.cmd in {
+            "image-rocky-preflight", "image-rocky-build", "image-rocky-qualify", "image-rocky-release",
+            "image-rocky-windows-preflight", "image-rocky-windows-build",
+            "image-rocky-windows-qualify", "image-rocky-windows-release",
+            "image-rocky-windows-native-prepare", "image-rocky-windows-native-reboot",
+            "image-rocky-windows-native-import", "image-rocky-windows-native-recover",
+            "image-rocky-linux-preflight", "image-rocky-linux-build",
+            "image-rocky-linux-qualify", "image-rocky-linux-release",
+        } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+            return image_phase_with_runtime(args.cmd, offline=getattr(args, "offline", False))
         if args.cmd == "image-rocky-preflight":
             return windows_image_pipeline("preflight")
         if args.cmd == "image-rocky-build":

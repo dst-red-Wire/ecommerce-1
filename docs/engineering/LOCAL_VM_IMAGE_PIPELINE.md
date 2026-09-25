@@ -176,7 +176,8 @@ logon, the temporary task:
 4. requires `VBox.log` to identify `NATIVE_VTX` and rejects NEM before Packer;
 5. records T0 through T13 while building the box;
 6. boots and smoke-tests the box with centrally derived CPU, memory, disk,
-   `virtio` NIC, XFS/no-LVM/no-swap and RPM profile;
+   `virtio` NIC, XFS/no-LVM/no-swap and RPM profile; captures the guest RPM
+   manifest, contracted profile roots and CycloneDX SBOM bound to the box digest;
 7. destroys owned VMs and the isolated Vagrant box and removes the ephemeral key;
 8. arms the exact normal loader in a `finally`, removes the task, writes evidence,
    and reboots even when qualification fails.
@@ -188,7 +189,8 @@ make image-rocky-windows-native-import
 ```
 
 Import rejects stale SHA/tree/manifest bindings, any non-PASS runtime field,
-NEM, checksum drift, leftover keys or incomplete cleanup. Only then does it place
+NEM, checksum drift, missing or inconsistent supply-chain evidence, leftover
+keys or incomplete cleanup. Only then does it place
 the `.box`, `SHA256SUMS`, and compatible build/qualification/release evidence in
 the repository's ignored artifact/evidence roots.
 
@@ -248,13 +250,16 @@ exists.
 
 `image-rocky-windows-release` publishes nothing. It only writes local release evidence
 after matching a clean exact source SHA, build evidence, artifact checksum,
-qualification evidence and cleanup evidence.
+qualification evidence, cleanup evidence, and artifact-bound SBOM, package
+manifest and profile inventory. Root-owned credential/config paths are tested
+through noninteractive `sudo`; host-user-global image phases are serialized by
+the governed runtime lock.
 
 ## Native Linux build, qualification and release
 
 The Linux profile requires a native Ubuntu 24.04 x86_64 host with
 readable/writable `/dev/kvm`, Packer 1.16.1 and the exact contracted QEMU 8.2.2
-package. It intentionally rejects WSL so Packer cannot become a second authority
+package revision for both `qemu-system-x86` and `qemu-utils`. It intentionally rejects WSL so Packer cannot become a second authority
 next to Packer Windows. Host packages are verified by preflight and are never
 installed or upgraded automatically by this pipeline.
 

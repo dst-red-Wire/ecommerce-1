@@ -76,6 +76,61 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def image_supply_chain(artifact_sha256: str, rpm_inventory: str, required: list[str]) -> dict:
+    """Derive an artifact-bound SBOM and profile inventory from the booted guest."""
+    if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+        raise PipelineError("invalid supply-chain artifact digest")
+    packages = sorted(line.strip() for line in rpm_inventory.splitlines() if line.strip())
+    if len(packages) < 50 or len(set(packages)) != len(packages):
+        raise PipelineError("RPM package manifest is incomplete or duplicated")
+    components = []
+    for line in packages:
+        if re.fullmatch(r"[A-Za-z0-9+_.-]+\|[^\s|]+", line) is None:
+            raise PipelineError("invalid RPM package manifest entry")
+        name, version = line.split("|", 1)
+        components.append({"type": "library", "name": name, "version": version})
+    required = sorted(set(required))
+    if not required or any(re.fullmatch(r"[A-Za-z0-9+_.-]+", item) is None for item in required):
+        raise PipelineError("invalid image profile package list")
+    installed = {component["name"] for component in components}
+    if missing := set(required) - installed:
+        raise PipelineError(f"image profile packages are absent: {sorted(missing)}")
+    return {
+        "artifact_sha256": artifact_sha256,
+        "package_manifest": {"format": "rpm-nevra-v1", "packages": packages},
+        "profile_inventory": {"profile": "rke2", "required_packages": required},
+        "sbom": {
+            "bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1,
+            "metadata": {"component": {"type": "file", "name": ARTIFACT_NAME,
+                "hashes": [{"alg": "SHA-256", "content": artifact_sha256}]}},
+            "components": components,
+        },
+    }
+
+
+def assert_image_supply_chain(evidence: object, artifact_sha256: str) -> None:
+    if not isinstance(evidence, dict) or evidence.get("artifact_sha256") != artifact_sha256:
+        raise PipelineError("supply-chain evidence is absent or not bound to artifact")
+    manifest = evidence.get("package_manifest")
+    inventory = evidence.get("profile_inventory")
+    sbom = evidence.get("sbom")
+    if not isinstance(manifest, dict) or not isinstance(inventory, dict) or not isinstance(sbom, dict):
+        raise PipelineError("supply-chain evidence is incomplete")
+    if manifest.get("format") != "rpm-nevra-v1" or inventory.get("profile") != "rke2":
+        raise PipelineError("supply-chain evidence format or profile is invalid")
+    packages = manifest.get("packages")
+    required = inventory.get("required_packages")
+    if not isinstance(packages, list) or not isinstance(required, list):
+        raise PipelineError("supply-chain package lists are invalid")
+    package_lock = read_json(ROOT / "config/artifacts/rocky-10.2-base-packages.lock.json")
+    contracted = sorted(set(package_lock["profiles"]["base"]["roots"] + package_lock["profiles"]["rke2"]["roots"]))
+    if required != contracted:
+        raise PipelineError("profile inventory differs from contracted package roots")
+    expected = image_supply_chain(artifact_sha256, "\n".join(packages), required)
+    if sbom != expected["sbom"] or manifest != expected["package_manifest"] or inventory != expected["profile_inventory"]:
+        raise PipelineError("SBOM, package manifest and profile inventory are inconsistent")
+
+
 def run(
     arguments: list[str],
     *,
@@ -163,6 +218,7 @@ def inspect_tools() -> dict:
     lock = toolchain()
     expected_packer = str(lock["versions"]["PACKER_VERSION"])
     expected_qemu = str(lock["versions"]["QEMU_VERSION"])
+    expected_qemu_package = str(lock["versions"]["QEMU_PACKAGE_VERSION"])
     paths = {
         name: executable(name)
         for name in (
@@ -187,6 +243,23 @@ def inspect_tools() -> dict:
         raise PipelineError(
             f"QEMU version mismatch: expected {expected_qemu}, actual {actual_qemu}"
         )
+    qemu_packages = {
+        "qemu-system-x86_64": "qemu-system-x86",
+        "qemu-img": "qemu-utils",
+    }
+    package_versions = {}
+    for binary, package in qemu_packages.items():
+        owners = run(["dpkg-query", "-S", str(Path(paths[binary]).resolve())], timeout=15).stdout
+        if not any(line.startswith(f"{package}: ") for line in owners.splitlines()):
+            raise PipelineError(f"{binary} is not owned by the contracted {package} package")
+        actual_package = run(
+            ["dpkg-query", "-W", "-f=${Version}", package], timeout=15
+        ).stdout.strip()
+        if actual_package != expected_qemu_package:
+            raise PipelineError(
+                f"{package} revision mismatch: expected {expected_qemu_package}, actual {actual_package}"
+            )
+        package_versions[package] = actual_package
     return {
         "packer": {
             "executable": paths["packer"],
@@ -198,6 +271,8 @@ def inspect_tools() -> dict:
             "qemu_img": paths["qemu-img"],
             "expected_version": expected_qemu,
             "actual_version": actual_qemu,
+            "expected_package_version": expected_qemu_package,
+            "package_versions": package_versions,
         },
         "ssh": paths["ssh"],
         "ssh_keygen": paths["ssh-keygen"],
@@ -654,6 +729,7 @@ def qualify() -> int:
         "status": "FAIL",
         "qualification": {field: "NOT_EXECUTED" for field in fields},
         "observations": {},
+        "supply_chain": None,
         "started_at": now(),
         "completed_at": None,
         "error": None,
@@ -761,7 +837,7 @@ def qualify() -> int:
             "network": "ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q '^default '; ip -4 -o addr show scope global; ip -4 route show default",
             "fundamental_tools": 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf required-tools-present',
             "rke2_prerequisites": 'test -z "$(swapon --noheadings --show)"; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf rke2-prerequisites-present',
-            "security": "test \"$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; test ! -e /root/.config/gh/hosts.yml; test ! -e /etc/rancher/rke2/config.yaml; printf security-baseline-present",
+            "security": "test \"$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf security-baseline-present",
         }
         for name, command in checks.items():
             result = run(
@@ -771,6 +847,15 @@ def qualify() -> int:
             )
             evidence["qualification"][name] = "PASS"
             evidence["observations"][name] = result.stdout.strip()
+        rpm_inventory = run(
+            ssh_command(tools["ssh"], private_key, port,
+                        "rpm -qa --qf '%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\n' | LC_ALL=C sort"),
+            cwd=stage, timeout=120,
+        ).stdout
+        package_lock = read_json(ROOT / "config/artifacts/rocky-10.2-base-packages.lock.json")
+        required = package_lock["profiles"]["base"]["roots"] + package_lock["profiles"]["rke2"]["roots"]
+        evidence["supply_chain"] = image_supply_chain(digest, rpm_inventory, required)
+        assert_image_supply_chain(evidence["supply_chain"], digest)
         passed = True
     except (OSError, PipelineError) as exc:
         evidence["error"] = str(exc)
@@ -831,6 +916,9 @@ def release() -> int:
             "qualification_evidence",
             "cleanup",
             "ephemeral_key_absent",
+            "sbom",
+            "package_manifest",
+            "profile_inventory",
         )
     }
     evidence = {
@@ -891,6 +979,10 @@ def release() -> int:
         ):
             raise PipelineError("qualification evidence is not PASS for exact artifact")
         checks["qualification_evidence"] = "PASS"
+        assert_image_supply_chain(qualification.get("supply_chain"), digest)
+        checks["sbom"] = "PASS"
+        checks["package_manifest"] = "PASS"
+        checks["profile_inventory"] = "PASS"
         checks["cleanup"] = "PASS"
         key_root = PIPELINE_ROOT / "keys"
         if (key_root / f"{digest}.key").exists() or (
