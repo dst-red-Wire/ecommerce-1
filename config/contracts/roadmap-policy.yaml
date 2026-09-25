@@ -275,6 +275,15 @@ milestones:
       implementation_paths: [config/infrastructure/deployment-waves.yaml, platform/fleet, platform/tekton]
       qualification_gates: [governance, contracts, security, system]
       qce_capabilities: [multi-cluster-platform-orchestration, telemetry-contract, immutable-supply-chain, platform-self-service, backstage-self-service]
+      resolved_capabilities:
+        - tool: fleet
+          capability: convergence
+          scope: kubernetes
+          status: proven
+        - tool: cosign
+          capability: provenance
+          scope: artifact
+          status: proven
       runtime_evidence:
         - path: .context/evidence/roadmap/M4-platform-baseline.json
           environments: [management]

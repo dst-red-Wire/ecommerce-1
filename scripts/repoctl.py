@@ -1153,6 +1153,22 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError("qualification execution policy must declare runtime_orchestration")
         _runtime_api().validate_runtime_policy(runtime_policy)
         capability_names = set(runtime_policy["capabilities"])
+        context = policy.get("execution_context")
+        profiles = policy.get("qualification_profiles")
+        if not isinstance(context, dict) or not isinstance(context.get("environments"), dict):
+            raise RuntimeError("qualification execution policy must declare execution environments")
+        if not isinstance(profiles, dict) or set(profiles) != {"static", "developer-wsl2", "runtime", "full"}:
+            raise RuntimeError("qualification execution policy must declare the canonical qualification profiles")
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile, dict) or not isinstance(profile.get("allowed_environments"), list):
+                raise RuntimeError(f"qualification profile {profile_name} is invalid")
+            if set(profile["allowed_environments"]) - set(context["environments"]):
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown environment")
+            dispositions = profile.get("runtime_capabilities", {})
+            if not isinstance(dispositions, dict) or set(dispositions) - capability_names:
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown capability")
+            if set(dispositions.values()) - {"out_of_scope", "required_when_affected"}:
+                raise RuntimeError(f"qualification profile {profile_name} has an unknown capability disposition")
         for gate_name, gate in gates.items():
             if not isinstance(gate, dict):
                 continue
@@ -2047,7 +2063,280 @@ def repository_authority_check() -> int:
         ROOT,
     )
 
+    execution_policy, execution_registry = execution_properties_contracts()
+    execution_violations = execution_properties_violations(execution_policy, execution_registry)
+    if execution_violations:
+        raise RuntimeError("execution properties policy invalid: " + "; ".join(execution_violations))
+
     print("PASS repository maximal authority model")
+    return 0
+
+
+EXECUTION_PROPERTY_NAMES = {
+    "reproducibility",
+    "determinism",
+    "idempotency",
+    "convergence",
+    "immutability",
+    "hermeticity",
+    "integrity",
+    "provenance",
+    "verification",
+    "drift",
+    "recovery",
+    "execution",
+    "failure",
+}
+EXECUTION_RELATIONSHIPS = {
+    "implements",
+    "enforces",
+    "verifies",
+    "observes",
+    "produces_evidence",
+    "transports_evidence",
+}
+
+
+def execution_properties_contracts(root: Path = ROOT) -> tuple[dict, dict]:
+    """Load the semantic authority and its non-authoritative implementation registry."""
+    paths = (
+        root / "config/contracts/execution-properties-policy.yaml",
+        root / "config/contracts/execution-properties-implementations.yaml",
+    )
+    missing = [str(path.relative_to(root)) for path in paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"execution properties contract missing: {', '.join(missing)}")
+    return ruby_yaml(str(paths[0].relative_to(root))), ruby_yaml(str(paths[1].relative_to(root)))
+
+
+def _contains_forbidden_execution_claim(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key).lower() in {"proven", "completion_status"} and str(item).upper() == "PROVEN"
+            or _contains_forbidden_execution_claim(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_execution_claim(item) for item in value)
+    return False
+
+
+def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
+    """Validate authority separation and fail-closed implementation/evidence declarations."""
+    violations: list[str] = []
+    if policy.get("version") != 1 or policy.get("kind") != "ExecutionPropertiesPolicy":
+        violations.append("canonical execution properties policy identity is invalid")
+    if policy.get("status") != "enforced":
+        violations.append("canonical execution properties policy status must be enforced")
+    properties = policy.get("properties")
+    if not isinstance(properties, dict):
+        return violations + ["canonical execution properties must be a mapping"]
+    missing = EXECUTION_PROPERTY_NAMES - set(properties)
+    if missing:
+        violations.append(f"canonical execution properties disappeared without migration: {sorted(missing)}")
+    expected = {
+        ("reproducibility", "mutable_versions"): "forbidden",
+        ("convergence", "second_apply_changes"): 0,
+        ("verification", "runtime_evidence"): "required",
+        ("verification", "declaration_only_proof"): "forbidden",
+        ("drift", "detection"): "required",
+        ("recovery", "capture_before_mutation"): "required",
+        ("recovery", "restore_on_failure"): "required",
+        ("recovery", "restore_verification"): "required",
+        ("execution", "bounded"): "required",
+        ("execution", "concurrency_locking"): "required",
+        ("failure", "unknown_state"): "fail_closed",
+        ("failure", "missing_evidence"): "fail_closed",
+    }
+    for (name, field), value in expected.items():
+        if not isinstance(properties.get(name), dict) or properties[name].get(field) != value:
+            violations.append(f"canonical property {name}.{field} must be {value!r}")
+    evidence_contract = policy.get("evidence_contract", {})
+    if evidence_contract.get("static_status_forbidden") is not True:
+        violations.append("static execution proof status must be forbidden")
+    if evidence_contract.get("unknown_or_missing") != "FAIL":
+        violations.append("unknown or missing execution evidence must fail closed")
+
+    if registry.get("version") != 1 or registry.get("kind") != "ExecutionPropertiesImplementations":
+        violations.append("execution implementation registry identity is invalid")
+    if registry.get("status") != "enforced":
+        violations.append("execution implementation registry status must be enforced")
+    if registry.get("policy_ref") != "config/contracts/execution-properties-policy.yaml":
+        violations.append("implementation registry must reference the canonical execution policy")
+    if registry.get("semantics") != "references-only":
+        violations.append("implementation registry must not redefine property semantics")
+    if set(registry.get("relationship_values", [])) != EXECUTION_RELATIONSHIPS:
+        violations.append("execution relationship vocabulary drifted")
+    if _contains_forbidden_execution_claim(registry):
+        violations.append("implementation registry contains a static PROVEN claim")
+    implementations = registry.get("implementations")
+    if not isinstance(implementations, dict):
+        return violations + ["execution implementations must be a mapping"]
+    for required in registry.get("required_implementations", []):
+        if required not in implementations:
+            violations.append(f"required active implementation has no mapping: {required}")
+    for tool, entry in implementations.items():
+        if not isinstance(entry, dict):
+            violations.append(f"implementation {tool} must be a mapping")
+            continue
+        if not isinstance(entry.get("authority_ref"), str) or not entry["authority_ref"]:
+            violations.append(f"implementation {tool} is unknown to the canonical toolchain or architecture")
+        relationships = entry.get("relationships")
+        if not isinstance(relationships, dict) or not relationships:
+            violations.append(f"implementation {tool} has no property relationships")
+            continue
+        for property_name, roles in relationships.items():
+            if property_name not in properties:
+                violations.append(f"implementation {tool} references unknown property: {property_name}")
+            if not isinstance(roles, list) or not roles or set(roles) - EXECUTION_RELATIONSHIPS:
+                violations.append(f"implementation {tool} has invalid relationship for {property_name}")
+        mechanisms = entry.get("mechanisms")
+        if not isinstance(mechanisms, list) or not mechanisms or not all(isinstance(x, str) and x for x in mechanisms):
+            violations.append(f"implementation {tool} has no implementation mechanism")
+        if not isinstance(entry.get("gate"), str) or not entry["gate"]:
+            violations.append(f"implementation {tool} has no verifying gate")
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("runtime_required") is not True:
+            violations.append(f"implementation {tool} lacks required runtime evidence")
+            continue
+        required_fields = set(evidence.get("required_fields", []))
+        baseline = {"source_sha", "toolchain_digest", "artifact_digest"}
+        if not baseline.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks complete provenance evidence fields")
+        if not evidence.get("producer") or not evidence.get("artifact"):
+            violations.append(f"implementation {tool} has ambiguous evidence producer or artifact")
+        if "convergence" in relationships and "second_apply_changes" not in required_fields and tool in {"ansible", "opentofu"}:
+            violations.append(f"implementation {tool} lacks second-apply convergence evidence")
+        if "drift" in relationships and "drift_detected" not in required_fields:
+            violations.append(f"implementation {tool} lacks drift detection evidence")
+        if "recovery" in relationships and not {"capture_digest", "restore_verification"}.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks capture/verified-restore evidence")
+        if "execution" in relationships and "timeout_seconds" not in required_fields:
+            violations.append(f"implementation {tool} lacks bounded execution timeout evidence")
+        if tool in {"opentofu", "tekton"} and "locking" not in required_fields:
+            violations.append(f"implementation {tool} lacks concurrency locking evidence")
+    return violations
+
+
+def execution_evidence_violations(policy: dict, registry: dict, evidence: dict) -> list[str]:
+    """Validate one runtime proof record; absence and ambiguity are failures, never passes."""
+    violations: list[str] = []
+    if not isinstance(evidence, dict):
+        return ["runtime execution evidence must be a mapping"]
+    tool = evidence.get("implementation")
+    implementations = registry.get("implementations", {})
+    if tool not in implementations:
+        return [f"runtime evidence references unknown implementation: {tool}"]
+    entry = implementations[tool]
+    required = set(policy["evidence_contract"]["required_identity_fields"])
+    required.update(policy["evidence_contract"]["required_runtime_fields"])
+    required.update(entry["evidence"]["required_fields"])
+    for field in sorted(required):
+        if field not in evidence or evidence[field] in (None, "", "unknown"):
+            violations.append(f"runtime evidence missing or unknown: {field}")
+    if evidence.get("status") not in policy["evidence_contract"]["status_values"]:
+        violations.append("runtime evidence status is unknown")
+    digest_pattern = policy["evidence_contract"]["digest_pattern"]
+    for field in ("toolchain_digest", "artifact_digest", "evidence_digest"):
+        value = evidence.get(field, "")
+        if not isinstance(value, str) or re.fullmatch(digest_pattern, value) is None:
+            violations.append(f"runtime evidence {field} is not an exact sha256 digest")
+    if not isinstance(evidence.get("source_sha"), str) or re.fullmatch(r"[0-9a-f]{40}", evidence.get("source_sha", "")) is None:
+        violations.append("runtime evidence source_sha is not an exact full SHA")
+    if any(str(value).lower() == "latest" for value in evidence.values()):
+        violations.append("runtime evidence contains a mutable latest version")
+    relationships = entry["relationships"]
+    if tool in {"ansible", "opentofu"} and evidence.get("second_apply_changes") != 0:
+        violations.append("required second apply did not converge with zero changes")
+    if tool == "ansible" and evidence.get("changed") != 0:
+        violations.append("Ansible idempotence evidence changed is not zero")
+    if "drift" in relationships and "drift_detected" not in evidence:
+        violations.append("required drift observation is missing")
+    if "recovery" in relationships:
+        if not evidence.get("capture_digest"):
+            violations.append("recovery evidence lacks pre-mutation capture")
+        if evidence.get("restore_verification") is not True:
+            violations.append("recovery restore was not verified")
+    if "execution" in relationships:
+        timeout = evidence.get("timeout_seconds")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            violations.append("bounded execution has no positive timeout")
+        retry_limit = evidence.get("retry_limit")
+        if not isinstance(retry_limit, int) or isinstance(retry_limit, bool) or retry_limit < 0:
+            violations.append("bounded execution retry limit must be a nonnegative integer")
+        if tool in {"opentofu", "tekton"} and evidence.get("locking") is not True:
+            violations.append("state-mutating concurrent execution lacks locking")
+    if _contains_forbidden_execution_claim(evidence):
+        violations.append("runtime evidence contains an unverified PROVEN claim")
+    return violations
+
+
+def execution_properties_matrix(registry: dict) -> str:
+    """Render the human view directly from the machine-readable implementation registry."""
+    rows = ["| Component | Implements | Enforces | Verifies | Observes / evidence |", "|---|---|---|---|---|"]
+    for tool, entry in registry["implementations"].items():
+        by_role = {role: [] for role in EXECUTION_RELATIONSHIPS}
+        for prop, roles in entry["relationships"].items():
+            for role in roles:
+                by_role[role].append(prop)
+        observed = sorted(set(by_role["observes"] + by_role["produces_evidence"] + by_role["transports_evidence"]))
+        values = [tool, ", ".join(sorted(by_role["implements"])) or "—", ", ".join(sorted(by_role["enforces"])) or "—", ", ".join(sorted(by_role["verifies"])) or "—", ", ".join(observed) or "—"]
+        rows.append("| " + " | ".join(values) + " |")
+    return "\n".join(rows) + "\n"
+
+
+def execution_properties_check(*, matrix: bool = False, evidence_path: str = "") -> int:
+    policy, registry = execution_properties_contracts()
+    violations = execution_properties_violations(policy, registry)
+    if evidence_path:
+        evidence = ruby_yaml(evidence_path)
+        violations.extend(execution_evidence_violations(policy, registry, evidence))
+    if violations:
+        for violation in violations:
+            print(f"FAIL execution-properties: {violation}", file=sys.stderr)
+        return 1
+    if matrix:
+        print(execution_properties_matrix(registry), end="")
+    else:
+        print(json.dumps({"gate": "execution-properties", "status": "PASS", "policy": registry["policy_ref"], "implementations": len(registry["implementations"])}))
+    return 0
+
+
+def capabilities_command(
+    *, evidence: str = "", output: str = ".context/evidence/effective-capabilities.yaml",
+    tool: str = "", property_name: str = "", status: str = "", scope: str = "",
+    output_format: str = "summary",
+) -> int:
+    """Resolve potential tool relationships into exact-SHA effective capabilities."""
+    import capability_resolver
+
+    evidence_path = Path(evidence) if evidence else None
+    payload = capability_resolver.resolve(ROOT, evidence_path=evidence_path)
+    requested_destination = Path(output)
+    destination = requested_destination if requested_destination.is_absolute() else ROOT / requested_destination
+    capability_resolver.write(payload, destination)
+    view = capability_resolver.filtered(
+        payload, tool=tool, property_name=property_name, status=status, scope=scope
+    )
+    if output_format in {"json", "yaml"}:
+        # JSON is valid YAML 1.2 and prevents serializer-specific ordering drift.
+        print(json.dumps(view, indent=2, sort_keys=True))
+    else:
+        count = sum(len(item["capabilities"]) for item in view["tools"].values())
+        print(
+            f"PASS capabilities resolved={count} source_sha={payload['source_sha']} "
+            f"output={destination if destination.is_absolute() and not destination.is_relative_to(ROOT) else destination.relative_to(ROOT)} "
+            f"gaps={len(payload['gaps'])}"
+        )
+    if payload["unknown_states"] or payload["stale_evidence"]:
+        for problem in payload["unknown_states"]:
+            print(f"FAIL capabilities: {problem}", file=sys.stderr)
+        for problem in payload["stale_evidence"]:
+            print(
+                f"FAIL capabilities: {problem['tool']}.{problem['capability']}:"
+                f"{','.join(problem['reasons'])}", file=sys.stderr
+            )
+        return 1
     return 0
 
 
@@ -3115,6 +3404,15 @@ def reconcile(tags: str, target_repo_root: str = "") -> int:
     selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
     if not selected:
         return fail("reconcile requires at least one Ansible tag")
+    if "docker" in selected.split(","):
+        detected = _runtime_api().detect_execution_environment()
+        if detected.name != "wsl2_developer":
+            return fail(
+                "BLOCKED_RUNTIME: docker reconciliation requires "
+                "execution_environment=wsl2_developer "
+                f"detected={detected.name} no mutation performed",
+                2,
+            )
     require("ansible-playbook")
     repo_root = Path(target_repo_root).expanduser().resolve() if target_repo_root else ROOT
     run(
@@ -4774,6 +5072,8 @@ def _execute_with_runtime(
     capability_context: dict[str, object] | None = None,
     authoritative: bool = False,
     records: list[dict] | None = None,
+    execution_profile: str = "full",
+    scope_decisions: list[dict] | None = None,
 ) -> int:
     if environment.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
         return callback(environment)
@@ -4784,10 +5084,52 @@ def _execute_with_runtime(
         context=capability_context,
     )
     source_kind, source_sha = _runtime_source(head)
+    policy = qualification_execution_policy()
+    profile = policy["qualification_profiles"][execution_profile]
+    detected = runtime.detect_execution_environment(environ=environment)
+    dispositions = profile.get("runtime_capabilities", {})
+    excluded = sorted({request.name for request in requests if dispositions.get(request.name) == "out_of_scope"})
+    if excluded:
+        decisions = scope_decisions if scope_decisions is not None else []
+        for capability in excluded:
+            decisions.append(
+                {
+                    "capability": capability,
+                    "status": "OUT_OF_SCOPE",
+                    "executed": False,
+                    "execution_profile": execution_profile,
+                    "execution_environment": detected.name,
+                    "policy_reason": "capability explicitly excluded by qualification profile",
+                    "source_sha": source_sha,
+                }
+            )
+        requests = [request for request in requests if request.name not in excluded]
+    runtime_env = dict(environment)
+    runtime_env.update(
+        {
+            "ECOMMERCE_EXECUTION_PROFILE": execution_profile,
+            "ECOMMERCE_EXECUTION_ENVIRONMENT": detected.name,
+        }
+    )
+    if not requests and excluded:
+        runtime_env["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
+        return callback(runtime_env)
+    if detected.name not in profile["allowed_environments"]:
+        if records is not None:
+            records.append({
+                "gate": "runtime-orchestration",
+                "status": "FAIL",
+                "runtime_status": "BLOCKED_RUNTIME",
+                "exit_code": 2,
+                "duration_seconds": 0.0,
+                "execution": "fresh",
+                "reason": f"profile {execution_profile} requires runtime capabilities unavailable in {detected.name}; no mutation performed",
+            })
+        return 2
     executor = runtime.RuntimeExecutor(
         ROOT,
         qualification_execution_policy()["runtime_orchestration"],
-        driver=runtime.BuiltinCapabilityDriver(environment),
+        driver=runtime.BuiltinCapabilityDriver(runtime_env),
     )
     result = executor.execute(
         requests,
@@ -4796,7 +5138,7 @@ def _execute_with_runtime(
         source_kind=source_kind,
         source_sha=source_sha,
         selected_gates=[str(entry["gate"]) for entry in plan],
-        base_environment=environment,
+        base_environment=runtime_env,
         authoritative=authoritative,
         gate_results=(lambda: copy.deepcopy(records or [])),
     )
@@ -5396,7 +5738,7 @@ def write_evidence(
     return destination
 
 
-def verify_change(base: str, head: str) -> int:
+def verify_change(base: str, head: str, profile: str = "full") -> int:
     if toolchain_closure():
         return 1
     source_head_sha: str | None = None
@@ -5433,10 +5775,11 @@ def verify_change(base: str, head: str) -> int:
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
-    verification: dict = {"mode": "full"}
+    verification: dict = {"mode": "full", "execution_profile": profile}
     if head == "WORKTREE":
         verification = {
             "mode": "worktree",
+            "execution_profile": profile,
             "source_head_sha": source_head_sha,
             "source_tree_sha": source_tree_sha,
         }
@@ -5445,6 +5788,7 @@ def verify_change(base: str, head: str) -> int:
         delta_components = set(affected(parent_sha, head, strict_unknown=True))
         verification = {
             "mode": "incremental",
+            "execution_profile": profile,
             "parent_sha": parent_sha,
             "delta_paths": delta_paths,
             "delta_components": sorted(delta_components),
@@ -5509,6 +5853,7 @@ def verify_change(base: str, head: str) -> int:
                 return fail("worktree changed during verification; evidence is not promotable", 1)
         return 0
 
+    scope_decisions: list[dict] = []
     runtime_rc = _execute_with_runtime(
         plan,
         execute_selected,
@@ -5517,7 +5862,10 @@ def verify_change(base: str, head: str) -> int:
         environment=env,
         authoritative=head != "WORKTREE",
         records=records,
+        execution_profile=profile,
+        scope_decisions=scope_decisions,
     )
+    verification["runtime_scope"] = scope_decisions
     if runtime_rc:
         write_evidence(base, head, paths, components, records, verification)
         return runtime_rc
@@ -7590,6 +7938,19 @@ def main() -> int:
     qtrace = sub.add_parser("qce-trace")
     qtrace.add_argument("--sector", default="")
     sub.add_parser("qce-check")
+    execution_properties = sub.add_parser("execution-properties")
+    execution_properties.add_argument("--matrix", action="store_true")
+    execution_properties.add_argument("--evidence", default="")
+    capabilities = sub.add_parser("capabilities")
+    capabilities.add_argument("--evidence", default="")
+    capabilities.add_argument("--output", default=".context/evidence/effective-capabilities.yaml")
+    capabilities.add_argument("--tool", default="")
+    capabilities.add_argument("--property", dest="property_name", default="")
+    capabilities.add_argument(
+        "--status", choices=["unsupported", "available", "configured", "verified", "proven", "not-proven"], default=""
+    )
+    capabilities.add_argument("--scope", default="")
+    capabilities.add_argument("--format", choices=["summary", "json", "yaml"], default="summary")
     metrics = sub.add_parser("engineering-metrics")
     metrics.add_argument("--input", required=True)
     metrics.add_argument("--output", default="")
@@ -7633,6 +7994,7 @@ def main() -> int:
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    v.add_argument("--profile", choices=("static", "developer-wsl2", "runtime", "full"), default="full")
     gl = sub.add_parser("global-check")
     gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -7818,7 +8180,7 @@ def main() -> int:
             print(json.dumps(comps) if args.json else "\n".join(comps))
             return 0
         if args.cmd == "verify-change":
-            return verify_change(args.base, args.head)
+            return verify_change(args.base, args.head, args.profile)
         if args.cmd == "global-check":
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
@@ -7908,6 +8270,14 @@ def main() -> int:
             return qce_status_command(json_output=True, sector=args.sector, trace=True)
         if args.cmd == "qce-check":
             return qce_check_command()
+        if args.cmd == "execution-properties":
+            return execution_properties_check(matrix=args.matrix, evidence_path=args.evidence)
+        if args.cmd == "capabilities":
+            return capabilities_command(
+                evidence=args.evidence, output=args.output, tool=args.tool,
+                property_name=args.property_name, status=args.status, scope=args.scope,
+                output_format=args.format,
+            )
         if args.cmd == "engineering-metrics":
             return engineering_metrics_command(args.input, args.output)
         if args.cmd == "security-datasets-sync":

@@ -1,0 +1,38 @@
+---
+capabilities:
+  reproducible_machine_image:
+    required: false
+    requires:
+      all:
+      - capability: reproducibility
+        status: proven
+        tool: packer
+      - capability: hermeticity
+        status: proven
+        tool: packer
+      - capability: idempotency
+        status: proven
+        tool: ansible
+      - capability: convergence
+        status: proven
+        tool: ansible
+    scopes:
+    - machine_image
+  supply_chain_integrity:
+    required: false
+    requires:
+      all:
+      - capability: immutability
+        status: proven
+        tool: buildkit
+      - capability: artifact_addressing
+        status: proven
+        tool: harbor
+      - capability: integrity
+        status: proven
+        tool: cosign
+    scopes:
+    - artifact
+kind: ComposedCapabilities
+registry_ref: config/contracts/tool-capabilities.yaml
+version: 1

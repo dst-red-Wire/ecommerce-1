@@ -20,11 +20,38 @@ from scripts.runtime_orchestration import (
     RuntimePlanner,
     RuntimePolicyError,
     RuntimeVerificationError,
+    detect_execution_environment,
     resolve_runtime_lock_path,
     validate_runtime_policy,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class ExecutionEnvironmentDetectionTests(unittest.TestCase):
+    def test_wsl2_requires_kernel_and_environment_signals(self):
+        detected = detect_execution_environment(
+            environ={"WSL_INTEROP": "/run/WSL/1_interop", "WSL_DISTRO_NAME": "Ubuntu"},
+            platform_name="linux",
+            proc_version="Linux version 6.6.87.2-microsoft-standard-WSL2",
+            cgroup="0::/",
+            mountinfo="",
+            docker_env=False,
+            container_env=False,
+        )
+        self.assertEqual("wsl2_developer", detected.name)
+
+    def test_container_signal_takes_precedence_over_native_linux(self):
+        detected = detect_execution_environment(
+            environ={}, platform_name="linux", proc_version="Linux", cgroup="0::/",
+            mountinfo="", docker_env=True, container_env=False,
+        )
+        self.assertEqual("linux_container", detected.name)
+
+    def test_native_linux_and_unknown_are_distinct(self):
+        common = dict(environ={}, proc_version="", cgroup="", mountinfo="", docker_env=False, container_env=False)
+        self.assertEqual("native_linux", detect_execution_environment(platform_name="linux", **common).name)
+        self.assertEqual("unknown", detect_execution_environment(platform_name="darwin", **common).name)
 
 
 def capability(
