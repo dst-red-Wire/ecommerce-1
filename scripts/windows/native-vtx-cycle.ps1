@@ -224,6 +224,31 @@ function Get-VirtualBoxBackendFromLog {
     return 'UNKNOWN'
 }
 
+function Read-SharedUtf8Text {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutSeconds = 20
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try {
+                $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+                try { return $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            }
+            finally { $stream.Dispose() }
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Cannot read shared VirtualBox log within $TimeoutSeconds seconds: $Path"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+}
+
 function Assert-ResultBinding {
     param(
         [Parameter(Mandatory = $true)]$Result,
@@ -320,12 +345,15 @@ function Invoke-NativeBackendProbe {
         Assert-ProcessSuccess -Result $modify -Operation 'VirtualBox native backend probe configuration'
         $start = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('startvm', $name, '--type', 'headless') -TimeoutSeconds 60 -WorkingDirectory $PreparedStage
         Assert-ProcessSuccess -Result $start -Operation 'VirtualBox native backend probe start'
-        Start-Sleep -Seconds 5
         $log = Join-Path $probeRoot "$name\Logs\VBox.log"
-        if (-not (Test-Path -LiteralPath $log -PathType Leaf)) {
-            throw 'VirtualBox native backend probe produced no VBox.log'
+        $backend = 'UNKNOWN'
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+                $backend = Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $log)
+                if ($backend -ne 'UNKNOWN') { break }
+            }
+            Start-Sleep -Seconds 1
         }
-        $backend = Get-VirtualBoxBackendFromLog -Text ([IO.File]::ReadAllText($log, [Text.Encoding]::UTF8))
         if ($backend -ne 'NATIVE_VTX') {
             throw "VirtualBox backend is $backend; native VT-x is required and NEM is forbidden"
         }
@@ -1086,6 +1114,17 @@ description             $NativeEntryName
         if (-not (Test-StagingManifest -Root $temporary)) { throw 'staging manifest acceptance self-test failed' }
         [IO.File]::AppendAllText((Join-Path $temporary '1.txt'), 'tampered', [Text.Encoding]::UTF8)
         if (Test-StagingManifest -Root $temporary) { throw 'staging tamper rejection self-test failed' }
+        $heldLog = Join-Path $temporary 'held-vbox.log'
+        $writer = [IO.File]::Open($heldLog, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes('HM: HMR3Init: VT-x w/ nested paging')
+            $writer.Write($bytes, 0, $bytes.Length)
+            $writer.Flush()
+            if ((Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $heldLog)) -ne 'NATIVE_VTX') {
+                throw 'shared VirtualBox log read self-test failed'
+            }
+        }
+        finally { $writer.Dispose() }
         $result = [pscustomobject]@{ source_git_sha = 'a' * 40; source_tree_sha = 'b' * 40; staging_manifest_sha256 = 'c' * 64 }
         Assert-ResultBinding -Result $result -SourceSha ('a' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64)
         try { Assert-ResultBinding -Result $result -SourceSha ('d' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64); throw 'stale evidence rejection self-test failed' } catch { }

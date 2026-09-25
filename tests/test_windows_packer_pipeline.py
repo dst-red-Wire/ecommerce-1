@@ -108,6 +108,12 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             self.native,
         )
 
+    def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):
+        self.assertIn("[IO.FileShare]::ReadWrite", self.native)
+        self.assertIn("Read-SharedUtf8Text -Path $log", self.native)
+        self.assertIn("$attempt -le 20", self.native)
+        self.assertIn("shared VirtualBox log read self-test failed", self.native)
+
     def test_packer_source_and_plugins_are_exact(self):
         source = self.machine["packer_image"]["source"]
         self.assertEqual("10.2", self.machine["packer_image"]["os"]["version"])
