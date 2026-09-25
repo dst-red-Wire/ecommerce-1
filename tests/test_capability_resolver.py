@@ -55,13 +55,17 @@ class CapabilityResolverTests(unittest.TestCase):
         (self.root / relative).write_text(json.dumps(value, sort_keys=True) + "\n")
 
     def evidence(self, tool, capability, requirements, **observations):
-        return {
+        record = {
             "id": f"{tool}-{capability}", "tool": tool, "capability": capability,
             "source_sha": SHA, "toolchain_digest": RESOLVER.toolchain_digest(self.root),
-            "artifact_digest": ARTIFACT, "gate": "PASS",
+            "artifact_digest": ARTIFACT, "gate": "PASS", "gate_id": f"{tool}-{capability}",
             "requirements": {name: "PASS" for name in requirements},
             "observations": observations,
         }
+        record["evidence_digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return record
 
     def resolve_records(self, records):
         path = self.root / "evidence.json"

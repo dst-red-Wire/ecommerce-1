@@ -102,6 +102,7 @@ tools:
           - pinned_inputs
         scopes:
         - security
+        gate: age-declarative_reproducibility
       verification:
         relationships:
         - verifies
@@ -110,6 +111,7 @@ tools:
           - decryption_verified
         scopes:
         - security
+        gate: age-verification
     discovery:
     - marker: age
       path: config/contracts/secret-delivery-policy.yaml
@@ -127,6 +129,7 @@ tools:
           - bounded_timeout
         scopes:
         - configuration
+        gate: ansible-bounded_execution
       convergence:
         relationships:
         - implements
@@ -137,6 +140,7 @@ tools:
           - convergence_test
         scopes:
         - machine_configuration
+        gate: ansible-convergence
       determinism:
         relationships:
         - implements
@@ -146,6 +150,7 @@ tools:
           - immutable_source_versions
         scopes:
         - configuration
+        gate: ansible-determinism
       idempotency:
         relationships:
         - implements
@@ -156,6 +161,7 @@ tools:
           - second_apply_changes_zero
         scopes:
         - machine_configuration
+        gate: ansible-idempotency
       recovery:
         relationships:
         - implements
@@ -166,6 +172,7 @@ tools:
           - restore_verification
         scopes:
         - bootstrap
+        gate: ansible-recovery
       reproducibility:
         relationships:
         - implements
@@ -175,6 +182,7 @@ tools:
           - immutable_source_versions
         scopes:
         - configuration
+        gate: ansible-reproducibility
       verification:
         relationships:
         - verifies
@@ -183,6 +191,7 @@ tools:
           - runtime_evidence
         scopes:
         - configuration
+        gate: ansible-verification
     discovery:
     - path: platform/ansible/mgmt.yml
     - path: platform/ansible/requirements.yml
@@ -201,6 +210,7 @@ tools:
           - immutable_source_versions
         scopes:
         - artifact
+        gate: buildkit-determinism
       hermeticity:
         relationships:
         - enforces
@@ -210,6 +220,7 @@ tools:
           - network_access_controlled
         scopes:
         - artifact
+        gate: buildkit-hermeticity
       immutability:
         relationships:
         - produces_evidence
@@ -220,6 +231,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: buildkit-immutability
       provenance:
         relationships:
         - produces_evidence
@@ -230,6 +242,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: buildkit-provenance
       reproducibility:
         relationships:
         - implements
@@ -239,6 +252,7 @@ tools:
           - immutable_source_versions
         scopes:
         - artifact
+        gate: buildkit-reproducibility
       verification:
         relationships:
         - verifies
@@ -247,6 +261,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: buildkit-verification
     discovery:
     - marker: build
       path: platform/tekton/tasks/product-supply-chain.yaml
@@ -265,6 +280,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: cilium-convergence
       drift:
         relationships:
         - observes
@@ -274,6 +290,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: cilium-drift
       verification:
         relationships:
         - verifies
@@ -282,6 +299,7 @@ tools:
           - runtime_evidence
         scopes:
         - kubernetes
+        gate: cilium-verification
     discovery:
     - marker: 'cni: cilium'
       path: architecture.lock.yaml
@@ -301,6 +319,7 @@ tools:
           - fail_closed_result
         scopes:
         - security
+        gate: conftest-fail_closed
       verification:
         relationships:
         - verifies
@@ -309,6 +328,7 @@ tools:
           - policy_pass
         scopes:
         - security
+        gate: conftest-verification
     discovery:
     - path: config/policies/qualification/repository.rego
     not_guaranteed:
@@ -327,6 +347,7 @@ tools:
           - valid_signature
         scopes:
         - artifact
+        gate: cosign-integrity
       provenance:
         relationships:
         - verifies
@@ -337,6 +358,7 @@ tools:
           - valid_signature
         scopes:
         - artifact
+        gate: cosign-provenance
       verification:
         relationships:
         - verifies
@@ -345,6 +367,7 @@ tools:
           - policy_pass
         scopes:
         - artifact
+        gate: cosign-verification
     discovery:
     - marker: verify-blob
       path: scripts/repository_delivery.py
@@ -366,6 +389,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: fleet-convergence
       drift:
         relationships:
         - observes
@@ -376,6 +400,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: fleet-drift
       reproducibility:
         relationships:
         - implements
@@ -384,6 +409,7 @@ tools:
           - pinned_inputs
         scopes:
         - kubernetes
+        gate: fleet-reproducibility
       verification:
         relationships:
         - verifies
@@ -392,6 +418,7 @@ tools:
           - runtime_evidence
         scopes:
         - kubernetes
+        gate: fleet-verification
     discovery:
     - path: platform/fleet
     not_guaranteed:
@@ -410,6 +437,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: gitleaks-verification
     discovery:
     - marker: gitleaks
       path: config/contracts/qualification-tools.yaml
@@ -430,6 +458,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: gosec-verification
     discovery:
     - marker: gosec
       path: config/contracts/qualification-tools.yaml
@@ -450,6 +479,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: govulncheck-verification
     discovery:
     - marker: govulncheck
       path: config/contracts/qualification-tools.yaml
@@ -468,6 +498,7 @@ tools:
           - digest_addressing
         scopes:
         - artifact
+        gate: harbor-artifact_addressing
       immutability:
         relationships:
         - enforces
@@ -476,6 +507,7 @@ tools:
           - digest_addressing
         scopes:
         - artifact
+        gate: harbor-immutability
       integrity:
         relationships:
         - verifies
@@ -484,6 +516,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: harbor-integrity
       provenance_retention:
         relationships:
         - transports_evidence
@@ -492,6 +525,7 @@ tools:
           - retention_configured
         scopes:
         - artifact
+        gate: harbor-provenance_retention
       verification:
         relationships:
         - verifies
@@ -500,6 +534,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: harbor-verification
     discovery:
     - marker: 'registry: harbor'
       path: architecture.lock.yaml
@@ -518,6 +553,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: hubble-runtime_evidence
       verification:
         relationships:
         - verifies
@@ -526,6 +562,7 @@ tools:
           - runtime_evidence
         scopes:
         - kubernetes
+        gate: hubble-verification
     discovery:
     - marker: hubble
       path: config/contracts/mesh-observability-policy.yaml
@@ -543,6 +580,7 @@ tools:
           - execution_bounds
         scopes:
         - application
+        gate: k6-bounded_execution
       runtime_evidence:
         relationships:
         - verifies
@@ -552,6 +590,7 @@ tools:
           - runtime_evidence
         scopes:
         - application
+        gate: k6-runtime_evidence
       verification:
         relationships:
         - verifies
@@ -561,6 +600,7 @@ tools:
           - runtime_evidence
         scopes:
         - application
+        gate: k6-verification
     discovery:
     - marker: k6
       path: config/contracts/qualification-tools.yaml
@@ -580,6 +620,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: kube-bench-verification
     discovery:
     - marker: kube-bench
       path: config/contracts/qualification-tools.yaml
@@ -600,6 +641,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: nuclei-verification
     discovery:
     - marker: nuclei
       path: config/contracts/qualification-tools.yaml
@@ -620,6 +662,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: oapi-codegen-determinism
       provenance:
         relationships:
         - produces_evidence
@@ -630,6 +673,7 @@ tools:
           - artifact_digest
         scopes:
         - application
+        gate: oapi-codegen-provenance
       reproducibility:
         relationships:
         - implements
@@ -640,6 +684,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: oapi-codegen-reproducibility
     discovery:
     - path: scripts/repoctl.py
     not_guaranteed:
@@ -658,6 +703,7 @@ tools:
           - fail_closed_result
         scopes:
         - security
+        gate: opa-fail_closed
       verification:
         relationships:
         - verifies
@@ -666,6 +712,7 @@ tools:
           - policy_pass
         scopes:
         - security
+        gate: opa-verification
     discovery:
     - path: config/policies/qualification/repository.rego
     not_guaranteed:
@@ -684,6 +731,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: openscap-verification
     discovery:
     - marker: openscap
       path: config/contracts/qualification-tools.yaml
@@ -703,6 +751,7 @@ tools:
           - state_locking
         scopes:
         - infrastructure
+        gate: opentofu-bounded_execution
       concurrency_locking:
         relationships:
         - enforces
@@ -712,6 +761,7 @@ tools:
           - state_locking
         scopes:
         - infrastructure
+        gate: opentofu-concurrency_locking
       convergence:
         relationships:
         - implements
@@ -723,6 +773,7 @@ tools:
           - convergence_test
         scopes:
         - infrastructure
+        gate: opentofu-convergence
       determinism:
         relationships:
         - implements
@@ -732,6 +783,7 @@ tools:
           - immutable_source_versions
         scopes:
         - infrastructure
+        gate: opentofu-determinism
       drift:
         relationships:
         - observes
@@ -742,6 +794,7 @@ tools:
           - observed_state
         scopes:
         - infrastructure
+        gate: opentofu-drift
       recovery:
         relationships:
         - implements
@@ -752,6 +805,7 @@ tools:
           - restore_verification
         scopes:
         - infrastructure
+        gate: opentofu-recovery
       reproducibility:
         relationships:
         - implements
@@ -761,6 +815,7 @@ tools:
           - immutable_source_versions
         scopes:
         - infrastructure
+        gate: opentofu-reproducibility
     discovery:
     - path: platform/terraform/environments/mgmt/main.tf
     - path: platform/terraform/environments/mgmt/.terraform.lock.hcl
@@ -778,6 +833,7 @@ tools:
           - digest_addressing
         scopes:
         - artifact
+        gate: oras-artifact_addressing
       immutability:
         relationships:
         - implements
@@ -787,6 +843,7 @@ tools:
           - digest_addressing
         scopes:
         - artifact
+        gate: oras-immutability
       provenance_transport:
         relationships:
         - transports_evidence
@@ -795,6 +852,7 @@ tools:
           - provenance_attestation
         scopes:
         - artifact
+        gate: oras-provenance_transport
       verification:
         relationships:
         - verifies
@@ -803,6 +861,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: oras-verification
     discovery:
     - marker: oras
       path: scripts/repository_delivery.py
@@ -823,6 +882,7 @@ tools:
           - deterministic_build_definition
         scopes:
         - machine_image
+        gate: packer-determinism
       hermeticity:
         relationships:
         - implements
@@ -833,6 +893,7 @@ tools:
           - network_access_controlled
         scopes:
         - machine_image
+        gate: packer-hermeticity
       immutability:
         relationships:
         - produces_evidence
@@ -843,6 +904,7 @@ tools:
           - artifact_digest
         scopes:
         - machine_image
+        gate: packer-immutability
       provenance:
         relationships:
         - produces_evidence
@@ -853,6 +915,7 @@ tools:
           - artifact_digest
         scopes:
         - machine_image
+        gate: packer-provenance
       reproducibility:
         relationships:
         - implements
@@ -864,6 +927,7 @@ tools:
           - deterministic_build_definition
         scopes:
         - machine_image
+        gate: packer-reproducibility
       verification:
         relationships:
         - produces_evidence
@@ -874,6 +938,7 @@ tools:
           - artifact_digest
         scopes:
         - machine_image
+        gate: packer-verification
     discovery:
     - marker: packer {
       path: platform/packer/rocky-10.2/rocky-10.2.pkr.hcl
@@ -893,6 +958,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: pint-verification
     discovery:
     - marker: pint
       path: config/contracts/qualification-tools.yaml
@@ -911,6 +977,7 @@ tools:
           - referenced_runtime_evidence
         scopes:
         - pipeline
+        gate: qce-evidence_aggregation
       verification:
         relationships:
         - aggregates_evidence
@@ -919,6 +986,7 @@ tools:
           - referenced_runtime_evidence
         scopes:
         - pipeline
+        gate: qce-verification
     discovery:
     - marker: qce_status
       path: scripts/modern_engineering.py
@@ -939,6 +1007,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: rke2-convergence
       drift:
         relationships:
         - observes
@@ -948,6 +1017,7 @@ tools:
           - observed_state
         scopes:
         - kubernetes
+        gate: rke2-drift
       recovery:
         relationships:
         - implements
@@ -958,6 +1028,7 @@ tools:
           - restore_verification
         scopes:
         - kubernetes
+        gate: rke2-recovery
       reproducibility:
         relationships:
         - implements
@@ -966,6 +1037,7 @@ tools:
           - runtime_version_pinned
         scopes:
         - kubernetes
+        gate: rke2-reproducibility
       verification:
         relationships:
         - verifies
@@ -974,6 +1046,7 @@ tools:
           - runtime_evidence
         scopes:
         - kubernetes
+        gate: rke2-verification
     discovery:
     - marker: 'kubernetes: rke2'
       path: architecture.lock.yaml
@@ -990,6 +1063,7 @@ tools:
           - transfer_digest_preserved
         scopes:
         - artifact
+        gate: skopeo-artifact_transfer
       digest_preservation:
         relationships:
         - verifies
@@ -999,6 +1073,7 @@ tools:
           - transfer_digest_preserved
         scopes:
         - artifact
+        gate: skopeo-digest_preservation
       immutability:
         relationships:
         - verifies
@@ -1008,6 +1083,7 @@ tools:
           - transfer_digest_preserved
         scopes:
         - artifact
+        gate: skopeo-immutability
       verification:
         relationships:
         - verifies
@@ -1016,6 +1092,7 @@ tools:
           - artifact_digest
         scopes:
         - artifact
+        gate: skopeo-verification
     discovery:
     - marker: 'command: [skopeo]'
       path: platform/tekton/tasks/product-supply-chain.yaml
@@ -1034,6 +1111,7 @@ tools:
           - pinned_inputs
         scopes:
         - security
+        gate: sops-declarative_reproducibility
       verification:
         relationships:
         - verifies
@@ -1042,6 +1120,7 @@ tools:
           - decryption_verified
         scopes:
         - security
+        gate: sops-verification
     discovery:
     - marker: sops
       path: config/contracts/secret-delivery-policy.yaml
@@ -1061,6 +1140,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: sqlc-determinism
       provenance:
         relationships:
         - produces_evidence
@@ -1071,6 +1151,7 @@ tools:
           - artifact_digest
         scopes:
         - application
+        gate: sqlc-provenance
       reproducibility:
         relationships:
         - implements
@@ -1081,6 +1162,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: sqlc-reproducibility
     discovery:
     - path: sqlc.yaml
     not_guaranteed:
@@ -1098,6 +1180,7 @@ tools:
           - state_locking
         scopes:
         - pipeline
+        gate: tekton-bounded_execution
       concurrency_locking:
         relationships:
         - enforces
@@ -1107,6 +1190,7 @@ tools:
           - state_locking
         scopes:
         - pipeline
+        gate: tekton-concurrency_locking
       determinism:
         relationships:
         - implements
@@ -1116,6 +1200,7 @@ tools:
           - immutable_source_versions
         scopes:
         - pipeline
+        gate: tekton-determinism
       provenance:
         relationships:
         - produces_evidence
@@ -1126,6 +1211,7 @@ tools:
           - artifact_digest
         scopes:
         - pipeline
+        gate: tekton-provenance
       reproducibility:
         relationships:
         - implements
@@ -1135,6 +1221,7 @@ tools:
           - immutable_source_versions
         scopes:
         - pipeline
+        gate: tekton-reproducibility
       verification:
         relationships:
         - verifies
@@ -1143,6 +1230,7 @@ tools:
           - runtime_evidence
         scopes:
         - pipeline
+        gate: tekton-verification
     discovery:
     - path: platform/tekton
     not_guaranteed:
@@ -1160,6 +1248,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: templ-determinism
       provenance:
         relationships:
         - produces_evidence
@@ -1170,6 +1259,7 @@ tools:
           - artifact_digest
         scopes:
         - application
+        gate: templ-provenance
       reproducibility:
         relationships:
         - implements
@@ -1180,6 +1270,7 @@ tools:
           - output_digest
         scopes:
         - application
+        gate: templ-reproducibility
     discovery:
     - path: frontend
     not_guaranteed:
@@ -1198,6 +1289,7 @@ tools:
           - runtime_evidence
         scopes:
         - security
+        gate: trivy-verification
     discovery:
     - marker: trivy
       path: config/contracts/qualification-tools.yaml

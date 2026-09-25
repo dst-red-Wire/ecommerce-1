@@ -103,6 +103,8 @@ def validate_registry(registry: dict[str, Any], composed: dict[str, Any]) -> Non
         if not isinstance(entry.get("not_guaranteed"), list):
             raise ResolutionError(f"{tool}: not_guaranteed must be explicit")
         for capability, declaration in entry["capabilities"].items():
+            if not isinstance(declaration.get("gate"), str) or not declaration["gate"]:
+                raise ResolutionError(f"{tool}.{capability}: mandatory gate is absent")
             relationships = set(declaration.get("relationships", []))
             if not relationships or relationships - RELATIONSHIPS:
                 raise ResolutionError(f"{tool}.{capability}: unknown relationship")
@@ -264,8 +266,15 @@ def resolve(
                     identity_errors.append("toolchain_digest_mismatch")
                 if not DIGEST.fullmatch(str(record.get("artifact_digest", ""))):
                     identity_errors.append("artifact_digest_missing_or_invalid")
-                if record.get("gate") != "PASS":
+                if record.get("gate_id") != declaration["gate"] or record.get("gate") != "PASS":
                     identity_errors.append("required_gate_missing_or_failed")
+                supplied_evidence_digest = str(record.get("evidence_digest", ""))
+                digest_input = {key: value for key, value in record.items() if key != "evidence_digest"}
+                expected_evidence_digest = "sha256:" + hashlib.sha256(
+                    json.dumps(digest_input, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                if supplied_evidence_digest != expected_evidence_digest:
+                    identity_errors.append("evidence_digest_missing_or_invalid")
                 unknown_values = sorted(set(values) - set(names))
                 if unknown_values:
                     identity_errors.append("unknown_requirements:" + ",".join(unknown_values))
@@ -295,7 +304,7 @@ def resolve(
                 "relationships": declaration["relationships"],
                 "scopes": declaration["scopes"],
                 "requirements": {name: values.get(name, "MISSING") for name in names},
-                "gates": [record.get("gate")] if isinstance(record, dict) else [],
+                "gates": [declaration["gate"]] if isinstance(record, dict) else [],
                 "evidence": evidence_ids,
                 "missing": missing,
             }
