@@ -116,6 +116,14 @@ class ExecutionPropertiesTests(unittest.TestCase):
     def test_changed_nonzero_fails_idempotence(self):
         self.assertEvidenceRejected(lambda x: x.update(changed=1), "changed is not zero")
 
+    def test_retry_limit_must_be_a_nonnegative_integer(self):
+        for value in ("forever", -2, True):
+            with self.subTest(value=value):
+                self.assertEvidenceRejected(
+                    lambda evidence, value=value: evidence.update(retry_limit=value),
+                    "nonnegative integer",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -894,12 +894,19 @@ def qce_status(
     # never interpreted here as proof of an execution capability.
     import capability_resolver
 
-    effective_capabilities = capability_resolver.resolve(
-        root,
-        source_sha=head,
-        evidence_path=root / ".context" / "evidence" / "capabilities",
-    )
-    qce_verification = effective_capabilities["tools"]["qce"]["capabilities"]["verification"]
+    try:
+        effective_capabilities = capability_resolver.resolve(
+            root,
+            source_sha=head,
+            evidence_path=root / ".context" / "evidence" / "capabilities",
+        )
+        qce_verification = effective_capabilities["tools"]["qce"]["capabilities"]["verification"]
+    except capability_resolver.ResolutionError:
+        effective_capabilities = {
+            "source_sha": head,
+            "toolchain_digest": "unverified",
+        }
+        qce_verification = {"status": "unsupported"}
     resolver_proven = qce_verification["status"] == "proven"
     milestones = {str(item["id"]): item for item in roadmap["milestones"]}
     result_sectors: list[dict[str, Any]] = []

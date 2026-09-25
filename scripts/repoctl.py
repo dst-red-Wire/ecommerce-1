@@ -2245,8 +2245,9 @@ def execution_evidence_violations(policy: dict, registry: dict, evidence: dict) 
         timeout = evidence.get("timeout_seconds")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
             violations.append("bounded execution has no positive timeout")
-        if evidence.get("retry_limit") in (-1, "unlimited", "infinite"):
-            violations.append("bounded execution declares unlimited retries")
+        retry_limit = evidence.get("retry_limit")
+        if not isinstance(retry_limit, int) or isinstance(retry_limit, bool) or retry_limit < 0:
+            violations.append("bounded execution retry limit must be a nonnegative integer")
         if tool in {"opentofu", "tekton"} and evidence.get("locking") is not True:
             violations.append("state-mutating concurrent execution lacks locking")
     if _contains_forbidden_execution_claim(evidence):
@@ -2295,7 +2296,8 @@ def capabilities_command(
 
     evidence_path = Path(evidence) if evidence else None
     payload = capability_resolver.resolve(ROOT, evidence_path=evidence_path)
-    destination = ROOT / output
+    requested_destination = Path(output)
+    destination = requested_destination if requested_destination.is_absolute() else ROOT / requested_destination
     capability_resolver.write(payload, destination)
     view = capability_resolver.filtered(
         payload, tool=tool, property_name=property_name, status=status, scope=scope
@@ -2307,7 +2309,8 @@ def capabilities_command(
         count = sum(len(item["capabilities"]) for item in view["tools"].values())
         print(
             f"PASS capabilities resolved={count} source_sha={payload['source_sha']} "
-            f"output={destination.relative_to(ROOT)} gaps={len(payload['gaps'])}"
+            f"output={destination if destination.is_absolute() and not destination.is_relative_to(ROOT) else destination.relative_to(ROOT)} "
+            f"gaps={len(payload['gaps'])}"
         )
     if payload["unknown_states"] or payload["stale_evidence"]:
         for problem in payload["unknown_states"]:

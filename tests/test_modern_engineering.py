@@ -242,7 +242,7 @@ class ModernEngineeringTest(unittest.TestCase):
         capability = payload["sectors"][0]["capabilities"][0]
         self.assertEqual("IMPLEMENTED", capability["status"])
         self.assertEqual("IMPLEMENTED", payload["sectors"][0]["status"])
-        self.assertEqual("configured", payload["effective_capabilities"]["qce_verification"])
+        self.assertNotEqual("proven", payload["effective_capabilities"]["qce_verification"])
 
     def test_runtime_capability_becomes_proven_with_resolved_qce_proof(self):
         resolved = {

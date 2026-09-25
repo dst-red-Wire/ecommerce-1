@@ -12,7 +12,6 @@ RESOLVER = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(RESOLVER)
 SHA = "b" * 40
-ARTIFACT = "sha256:" + "c" * 64
 
 
 class CapabilityResolverTests(unittest.TestCase):
@@ -55,10 +54,16 @@ class CapabilityResolverTests(unittest.TestCase):
         (self.root / relative).write_text(json.dumps(value, sort_keys=True) + "\n")
 
     def evidence(self, tool, capability, requirements, **observations):
+        artifact = self.root / ".context/evidence/artifacts" / f"{tool}-{capability}.artifact"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(f"{tool}:{capability}\n".encode())
+        artifact_digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
         record = {
             "id": f"{tool}-{capability}", "tool": tool, "capability": capability,
             "source_sha": SHA, "toolchain_digest": RESOLVER.toolchain_digest(self.root),
-            "artifact_digest": ARTIFACT, "gate": "PASS", "gate_id": f"{tool}-{capability}",
+            "artifact_digest": artifact_digest,
+            "artifact_path": f".context/evidence/artifacts/{tool}-{capability}.artifact",
+            "gate": "PASS", "gate_id": f"{tool}-{capability}",
             "requirements": {name: "PASS" for name in requirements},
             "observations": observations,
         }
@@ -125,6 +130,19 @@ class CapabilityResolverTests(unittest.TestCase):
         record["source_sha"] = "a" * 40
         result = self.resolve_records([record])
         self.assertIn("stale_or_foreign_evidence", result["stale_evidence"][0]["reasons"])
+
+    def test_tampered_producer_artifact_fails_closed(self):
+        record = self.evidence("cosign", "integrity", self.requirements("cosign", "integrity"), signature_verified=True)
+        (self.root / record["artifact_path"]).write_text("tampered\n")
+        result = self.resolve_records([record])
+        self.assertEqual("configured", result["tools"]["cosign"]["capabilities"]["integrity"]["status"])
+        self.assertIn("producer_artifact_digest_mismatch", result["stale_evidence"][0]["reasons"])
+
+    def test_duplicate_evidence_cannot_remain_proven(self):
+        record = self.evidence("cosign", "integrity", self.requirements("cosign", "integrity"), signature_verified=True)
+        result = self.resolve_records([record, record])
+        self.assertEqual("configured", result["tools"]["cosign"]["capabilities"]["integrity"]["status"])
+        self.assertIn("ambiguous_evidence:cosign.integrity", result["unknown_states"])
 
     def test_unknown_capability_and_tool_fail_closed(self):
         unknown_cap = self.evidence("cosign", "magic_reproducibility", [])

@@ -105,6 +105,10 @@ def policy() -> dict[str, Any]:
         for capability in capabilities
         if isinstance(capability, dict)
     }
+    import capability_resolver
+
+    tool_registry = capability_resolver._load(ROOT / "config/contracts/tool-capabilities.yaml")
+    registered_tools = tool_registry.get("tools", {})
     seen: set[str] = set()
     for item in milestones:
         milestone_id = str(item["id"])
@@ -152,6 +156,16 @@ def policy() -> dict[str, Any]:
                     raise RuntimeError(f"roadmap milestone {milestone_id} has invalid resolved capability")
                 if requirement["status"] != "proven":
                     raise RuntimeError(f"roadmap milestone {milestone_id} capability must require proven")
+                tool = registered_tools.get(requirement["tool"])
+                capability = tool.get("capabilities", {}).get(requirement["capability"]) if isinstance(tool, dict) else None
+                if not isinstance(capability, dict):
+                    raise RuntimeError(
+                        f"roadmap milestone {milestone_id} references unknown resolved capability"
+                    )
+                if requirement["scope"] not in capability.get("scopes", []):
+                    raise RuntimeError(
+                        f"roadmap milestone {milestone_id} references unknown capability scope"
+                    )
             for relative in paths:
                 path = Path(str(relative))
                 if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -382,10 +396,14 @@ def derive_projection(
         if registry_path.is_file():
             import capability_resolver
 
-            effective_capabilities = capability_resolver.resolve(
-                root, source_sha=head,
-                evidence_path=root / ".context" / "evidence" / "capabilities",
-            )
+            try:
+                effective_capabilities = capability_resolver.resolve(
+                    root, source_sha=head,
+                    evidence_path=root / ".context" / "evidence" / "capabilities",
+                )
+            except capability_resolver.ResolutionError:
+                # A dirty or otherwise unbound input set proves nothing.
+                effective_capabilities = {"tools": {}}
         else:
             # Synthetic/test roots without the authority cannot prove a
             # capability; absence is represented as empty, never inferred.

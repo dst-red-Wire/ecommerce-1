@@ -55,6 +55,35 @@ def toolchain_digest(root: Path) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+def _assert_commit_bound(root: Path, source_sha: str, registry: dict[str, Any]) -> None:
+    """Reject live-worktree inputs which differ from the claimed commit."""
+    probe = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=root, text=True,
+        capture_output=True, check=False,
+    )
+    if probe.returncode:
+        return  # Synthetic fixture roots are bound by their explicit test SHA.
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+        capture_output=True, check=False,
+    ).stdout.strip()
+    if head != source_sha:
+        raise ResolutionError("resolver source SHA is not the checked-out exact HEAD")
+    relevant = {
+        "config/contracts/tool-capabilities.yaml",
+        "config/contracts/composed-capabilities.yaml",
+        "config/contracts/toolchain-lock.json",
+    }
+    for entry in registry["tools"].values():
+        relevant.update(str(probe["path"]) for probe in entry.get("discovery", []))
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", *sorted(relevant)],
+        cwd=root, text=True, capture_output=True, check=False,
+    )
+    if dirty.returncode or dirty.stdout.strip():
+        raise ResolutionError("resolver inputs differ from the claimed exact commit")
+
+
 def _requirement_names(expression: object) -> set[str]:
     if isinstance(expression, str):
         return {expression}
@@ -153,6 +182,7 @@ def _evidence_files(path: Path | None) -> list[Path]:
 def _read_evidence(path: Path | None) -> tuple[dict[tuple[str, str], dict[str, Any]], list[str]]:
     records: dict[tuple[str, str], dict[str, Any]] = {}
     errors: list[str] = []
+    duplicates: set[tuple[str, str]] = set()
     for source in _evidence_files(path):
         try:
             payload = _load(source)
@@ -168,8 +198,10 @@ def _read_evidence(path: Path | None) -> tuple[dict[tuple[str, str], dict[str, A
                 errors.append(f"invalid_evidence:{source}:record must be a mapping")
                 continue
             key = (str(record.get("tool", "")), str(record.get("capability", "")))
-            if key in records:
+            if key in records or key in duplicates:
                 errors.append(f"ambiguous_evidence:{key[0]}.{key[1]}")
+                records.pop(key, None)
+                duplicates.add(key)
             else:
                 records[key] = record
     return records, errors
@@ -190,6 +222,7 @@ def resolve(
     exact_sha = source_sha or _head(root)
     if not SHA.fullmatch(exact_sha):
         raise ResolutionError("source SHA must be an exact full SHA")
+    _assert_commit_bound(root, exact_sha, registry)
     digest = toolchain_digest(root)
     active = lock.get("tool_lifecycle", {}).get("active", {})
     versions = lock.get("versions", {})
@@ -266,6 +299,22 @@ def resolve(
                     identity_errors.append("toolchain_digest_mismatch")
                 if not DIGEST.fullmatch(str(record.get("artifact_digest", ""))):
                     identity_errors.append("artifact_digest_missing_or_invalid")
+                artifact_relative = Path(str(record.get("artifact_path", "")))
+                artifact_root = Path(".context/evidence/artifacts")
+                if (
+                    artifact_relative.is_absolute()
+                    or ".." in artifact_relative.parts
+                    or artifact_relative.parts[:3] != artifact_root.parts
+                ):
+                    identity_errors.append("artifact_path_missing_or_unsafe")
+                else:
+                    artifact = root / artifact_relative
+                    if not artifact.is_file() or artifact.is_symlink():
+                        identity_errors.append("producer_artifact_missing")
+                    else:
+                        actual_artifact_digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+                        if actual_artifact_digest != record.get("artifact_digest"):
+                            identity_errors.append("producer_artifact_digest_mismatch")
                 if record.get("gate_id") != declaration["gate"] or record.get("gate") != "PASS":
                     identity_errors.append("required_gate_missing_or_failed")
                 supplied_evidence_digest = str(record.get("evidence_digest", ""))
