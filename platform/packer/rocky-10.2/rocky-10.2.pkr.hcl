@@ -143,6 +143,7 @@ build {
       "! rpm -q firewalld",
       "test \"$(getenforce)\" = Enforcing",
       "find /lib/modules -maxdepth 1 -mindepth 1 -type d -name '6.12.*' | grep -q .",
+      "grubby --default-kernel | grep -Fq '6.12.0-211.58.1.el10_2.x86_64'",
       "systemctl is-enabled sshd chronyd NetworkManager",
       "test -z \"$(swapon --noheadings --show)\"",
       "! grep -Ev '^[[:space:]]*(#|$)' /etc/fstab | grep -qw swap",

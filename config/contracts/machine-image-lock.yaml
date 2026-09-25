@@ -131,6 +131,8 @@ packer_image:
 
   kernel:
     nevra: kernel-0:6.12.0-211.58.1.el10_2.x86_64
+    installonly_retention: exact-plus-one-previous
+    default_boot_nevra: exact
     modules_extra: required
     required_modules: [br_netfilter, nf_conntrack, overlay, vxlan]
 

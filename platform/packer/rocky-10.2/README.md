@@ -101,6 +101,9 @@ The locked RPM closure is installed with repositories disabled, local GPG
 verification enabled and explicit replacement of conflicting older DVD
 packages. `skip-broken` and `nobest` are forbidden; each profile's contract
 roots must match their exact locked NEVRA after the transaction.
+Kernel install-only packages may retain exactly one previous DVD version for
+rollback, but the locked kernel must be installed and selected as the default
+boot entry. Every non-kernel root remains strictly mono-version.
 
 Regenerate the RPM projection only when the central package roots change:
 

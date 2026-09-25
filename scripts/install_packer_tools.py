@@ -17,6 +17,11 @@ class ToolInstallError(RuntimeError):
     """Fail closed without executing network access."""
 
 
+INSTALLONLY_ROOTS = frozenset(
+    {"kernel", "kernel-core", "kernel-modules", "kernel-modules-extra"}
+)
+
+
 def digest(path: Path) -> str:
     checksum = hashlib.sha256()
     with path.open("rb") as stream:
@@ -137,6 +142,20 @@ def install_profile(bundle: Path, profile: str) -> None:
         qualify(entry)
 
 
+def validate_rpm_versions(
+    package: str, expected: str, actual_versions: set[str]
+) -> None:
+    if package in INSTALLONLY_ROOTS:
+        valid = expected in actual_versions and 1 <= len(actual_versions) <= 2
+    else:
+        valid = actual_versions == {expected}
+    if not valid:
+        actual = ",".join(sorted(actual_versions)) or "missing"
+        raise ToolInstallError(
+            f"package={package} expected_version={expected} actual_versions={actual}"
+        )
+
+
 def qualify_rpm_profile(bundle: Path, profile: str) -> None:
     definition = json.loads(
         (bundle / "rpms" / profile / "manifest.json").read_text(encoding="utf-8")
@@ -146,17 +165,20 @@ def qualify_rpm_profile(bundle: Path, profile: str) -> None:
         entry = packages[package]
         expected = f"{entry['epoch']}:{entry['version']}-{entry['release']}.{entry['architecture']}"
         result = subprocess.run(
-            ["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}", package],
+            [
+                "rpm",
+                "-q",
+                "--qf",
+                "%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\n",
+                package,
+            ],
             check=True,
             text=True,
             capture_output=True,
             timeout=30,
         )
-        actual = result.stdout.strip()
-        if actual != expected:
-            raise ToolInstallError(
-                f"package={package} expected_version={expected} actual_version={actual}"
-            )
+        actual_versions = {line for line in result.stdout.splitlines() if line}
+        validate_rpm_versions(package, expected, actual_versions)
 
 
 def main() -> int:

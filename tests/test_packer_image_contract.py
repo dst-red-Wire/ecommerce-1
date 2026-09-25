@@ -31,6 +31,11 @@ RENDERER_SPEC = importlib.util.spec_from_file_location(
 )
 RENDERER = importlib.util.module_from_spec(RENDERER_SPEC)
 RENDERER_SPEC.loader.exec_module(RENDERER)
+INSTALLER_SPEC = importlib.util.spec_from_file_location(
+    "install_packer_tools", INSTALLER
+)
+PACKER_INSTALLER = importlib.util.module_from_spec(INSTALLER_SPEC)
+INSTALLER_SPEC.loader.exec_module(PACKER_INSTALLER)
 REPOCTL_SPEC = importlib.util.spec_from_file_location(
     "repoctl_image_artifact_transport", REPOCTL_PATH
 )
@@ -324,6 +329,29 @@ class PackerImageContractTest(unittest.TestCase):
             f"{kernel['release']}.{kernel['architecture']}"
         )
         self.assertEqual(expected, self.image["kernel"]["nevra"])
+        self.assertEqual(
+            "exact-plus-one-previous",
+            self.image["kernel"]["installonly_retention"],
+        )
+        self.assertEqual("exact", self.image["kernel"]["default_boot_nevra"])
+        self.assertIn("grubby --default-kernel", self.packer)
+
+    def test_rpm_root_version_qualification_handles_installonly_packages(self):
+        expected = "0:6.12.0-211.58.1.el10_2.x86_64"
+        previous = "0:6.12.0-211.16.1.el10_2.0.1.x86_64"
+        PACKER_INSTALLER.validate_rpm_versions(
+            "kernel", expected, {previous, expected}
+        )
+        with self.assertRaisesRegex(PACKER_INSTALLER.ToolInstallError, "kernel"):
+            PACKER_INSTALLER.validate_rpm_versions(
+                "kernel", expected, {"old-a", "old-b", expected}
+            )
+        with self.assertRaisesRegex(PACKER_INSTALLER.ToolInstallError, "curl"):
+            PACKER_INSTALLER.validate_rpm_versions(
+                "curl",
+                "0:8.0-1.x86_64",
+                {"0:7.0-1.x86_64", "0:8.0-1.x86_64"},
+            )
 
     def test_materializer_reports_expected_and_actual_digest(self):
         with tempfile.TemporaryDirectory() as directory:

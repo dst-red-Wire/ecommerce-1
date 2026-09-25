@@ -284,6 +284,9 @@ closure with all network repositories disabled. The contract permits
 `allowerasing` only to replace incompatible ISO-era companion packages;
 `skip-broken` and `nobest` remain forbidden, and exact profile-root NEVRAs are
 qualified immediately after every transaction.
+The four kernel install-only roots may retain at most one previous DVD version;
+the locked NEVRA must be present and selected as the default boot kernel. All
+other contract roots remain strictly mono-version.
 
 ## RKE2 relationship
 
