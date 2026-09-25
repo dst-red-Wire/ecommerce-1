@@ -525,6 +525,8 @@ machine_contracts:
   egress_policy: config/contracts/egress-policy.yaml
   egress_runtime_policy: config/contracts/egress-runtime-policy.yaml
   engineering_metrics_policy: config/contracts/engineering-metrics-policy.yaml
+  execution_properties_policy: config/contracts/execution-properties-policy.yaml
+  execution_properties_implementations: config/contracts/execution-properties-implementations.yaml
   event_contracts: config/contracts/event-contracts.yaml
   identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
   mesh_observability_policy: config/contracts/mesh-observability-policy.yaml
