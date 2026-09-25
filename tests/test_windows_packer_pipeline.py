@@ -162,6 +162,14 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             r"while\s*\(\s*\$true\s*\)|for\s*\(\s*;;",
         )
 
+    def test_process_failure_evidence_preserves_bounded_head_and_tail(self):
+        self.assertIn("if ($detail.Length -gt 8000)", self.module)
+        self.assertIn("$head = $detail.Substring(0, 2000)", self.module)
+        self.assertIn(
+            "$tail = $detail.Substring($detail.Length - 6000)", self.module
+        )
+        self.assertIn("bounded process output omitted", self.module)
+
     def test_build_wsl_process_calls_only_use_supported_parameters(self):
         calls = re.findall(
             r"Invoke-WslProcess\b.*?(?=\n\s*Assert-ProcessSuccess)",

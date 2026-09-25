@@ -94,8 +94,10 @@ function Assert-ProcessSuccess {
     )
     if ($Result.ExitCode -ne 0) {
         $detail = ($Result.StdErr + "`n" + $Result.StdOut).Trim()
-        if ($detail.Length -gt 2000) {
-            $detail = $detail.Substring(0, 2000)
+        if ($detail.Length -gt 8000) {
+            $head = $detail.Substring(0, 2000)
+            $tail = $detail.Substring($detail.Length - 6000)
+            $detail = $head + "`n... bounded process output omitted ...`n" + $tail
         }
         throw "$Operation failed with exit code $($Result.ExitCode): $detail"
     }
