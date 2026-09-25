@@ -79,12 +79,22 @@ class PackerImageContractTest(unittest.TestCase):
             },
             self.image["build"]["resources"],
         )
-        self.assertEqual(2, self.packer.count("cpus                 = var.vm_cpus"))
         self.assertEqual(
-            2, self.packer.count("memory               = var.vm_memory_mib")
+            2,
+            len(re.findall(r"^\s*cpus\s*=\s*var\.vm_cpus$", self.packer, re.MULTILINE)),
         )
-        self.assertNotIn("cpus                 = 2", self.packer)
-        self.assertNotIn("memory               = 4096", self.packer)
+        self.assertEqual(
+            2,
+            len(
+                re.findall(
+                    r"^\s*memory\s*=\s*var\.vm_memory_mib$",
+                    self.packer,
+                    re.MULTILINE,
+                )
+            ),
+        )
+        self.assertNotRegex(self.packer, r"(?m)^\s*cpus\s*=\s*2$")
+        self.assertNotRegex(self.packer, r"(?m)^\s*memory\s*=\s*4096$")
 
     def test_renderer_projects_shared_vm_resources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -415,8 +425,16 @@ class PackerImageContractTest(unittest.TestCase):
         )
         self.assertIn("${local.image_name}-virtualbox.box", self.packer)
         self.assertIn("${local.image_name}-kvm", self.packer)
-        self.assertIn('"<f10>"', self.packer)
-        self.assertNotIn('"<enter>"', self.packer)
+        self.assertIn('"c<wait5>"', self.packer)
+        self.assertIn(
+            "linux /images/pxeboot/vmlinuz "
+            "inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://",
+            self.packer,
+        )
+        self.assertIn("initrd /images/pxeboot/initrd.img<enter>", self.packer)
+        self.assertIn('"boot<enter>"', self.packer)
+        self.assertNotIn("<tab>", self.packer)
+        self.assertIn('boot_keygroup_interval = "500ms"', self.packer)
 
     def test_packer_build_is_offline_and_profile_separated(self):
         self.assertIn("install -d -m 0700 /tmp/packer-offline", self.packer)

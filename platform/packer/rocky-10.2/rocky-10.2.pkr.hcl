@@ -20,9 +20,10 @@ locals {
   image_name = "rocky-10.2-${var.image_profile}"
   vm_name    = "ecommerce-rocky-10-2-build-${var.image_profile}"
   boot_command = [
-    "<up><wait><tab><wait>",
-    " inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks",
-    "<f10>",
+    "c<wait5>",
+    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks<enter><wait>",
+    "initrd /images/pxeboot/initrd.img<enter><wait>",
+    "boot<enter>",
   ]
 }
 
@@ -36,19 +37,20 @@ source "virtualbox-iso" "base" {
       build_ssh_public_key = trimspace(var.build_ssh_public_key)
     })
   }
-  boot_command         = local.boot_command
-  boot_wait            = "10s"
-  ssh_username         = "packer"
-  ssh_private_key_file = var.build_ssh_private_key_file
-  ssh_timeout          = "30m"
-  shutdown_command     = "true"
-  guest_additions_mode = "disable"
-  disk_size            = 32768
-  cpus                 = var.vm_cpus
-  memory               = var.vm_memory_mib
-  hard_drive_interface = "sata"
-  format               = "ova"
-  output_directory     = "${var.artifact_dir}/${local.image_name}-virtualbox"
+  boot_command           = local.boot_command
+  boot_keygroup_interval = "500ms"
+  boot_wait              = "10s"
+  ssh_username           = "packer"
+  ssh_private_key_file   = var.build_ssh_private_key_file
+  ssh_timeout            = "30m"
+  shutdown_command       = "true"
+  guest_additions_mode   = "disable"
+  disk_size              = 32768
+  cpus                   = var.vm_cpus
+  memory                 = var.vm_memory_mib
+  hard_drive_interface   = "sata"
+  format                 = "ova"
+  output_directory       = "${var.artifact_dir}/${local.image_name}-virtualbox"
 }
 
 source "qemu" "base" {
@@ -61,6 +63,7 @@ source "qemu" "base" {
     })
   }
   boot_command         = local.boot_command
+  boot_key_interval    = "100ms"
   boot_wait            = "10s"
   ssh_username         = "packer"
   ssh_private_key_file = var.build_ssh_private_key_file

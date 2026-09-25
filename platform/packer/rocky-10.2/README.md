@@ -10,9 +10,10 @@ not a second authority.
 the central contract into a host-local `rocky-10.2.auto.pkrvars.hcl`; generated
 paths, checksums and temporary key material are never committed.
 
-The shared boot command edits the Rocky GRUB entry and uses `F10` to execute it;
-`Enter` is intentionally forbidden because it only inserts a line in GRUB's
-editor and leaves Packer waiting for SSH.
+The shared boot command opens the GRUB console and executes the exact `linux`,
+`initrd` and `boot` commands projected from the locked Rocky ISO. It does not
+depend on menu selection or cursor positioning. VirtualBox uses a bounded 500 ms
+key-group interval so a loaded Windows host cannot drop the start of a command.
 
 ## Profiles
 
