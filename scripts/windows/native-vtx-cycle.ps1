@@ -33,6 +33,22 @@ function Get-UtcTimestamp {
     return [DateTime]::UtcNow.ToString('o')
 }
 
+function Assert-NativeFreeSpace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$MinimumGiB,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+    $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
+    $drive = [IO.DriveInfo]::new($root)
+    if (-not $drive.IsReady) { throw "BLOCKED_RUNTIME $Operation`: drive $root is unavailable" }
+    $minimum = [long]$MinimumGiB * 1GB
+    if ($drive.AvailableFreeSpace -lt $minimum) {
+        $available = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
+        throw "BLOCKED_RUNTIME $Operation`: $available GiB free on $root; $MinimumGiB GiB required"
+    }
+}
+
 function Resolve-LabRoot {
     param([Parameter(Mandatory = $true)][string]$Path)
     $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -543,6 +559,7 @@ function Invoke-NativeRun {
         $result.nem_detected = $false
         $result.native_vtx = 'PASS'
         $result.precheck = 'PASS'
+        Assert-NativeFreeSpace -Path $preparedStage -MinimumGiB 24 -Operation 'native Packer build'
 
         $sourceRoot = Join-Path $preparedStage 'packer'
         $varFile = Join-Path $preparedStage 'rocky-10.2.auto.pkrvars.hcl'
@@ -639,6 +656,7 @@ function Invoke-NativeRun {
         }
         $smokeInitialMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
         if ($smokeInitialMachines.ContainsKey($smokeVmName)) { throw "Owned smoke VM already exists: $smokeVmName" }
+        Assert-NativeFreeSpace -Path $smokeRoot -MinimumGiB 16 -Operation 'Vagrant smoke import'
         $boxAdd = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'add', '--name', $smokeBoxName, '--provider', 'virtualbox', '--checksum-type', 'sha256', '--checksum', $artifactSha256, $artifact) -TimeoutSeconds 600 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
         Assert-ProcessSuccess -Result $boxAdd -Operation 'native Vagrant box add'
         $result.vagrant_smoke.box_add = 'PASS'
@@ -698,6 +716,7 @@ function Invoke-NativeRun {
     }
     catch {
         $result.error = $_.Exception.Message
+        if ($result.error.StartsWith('BLOCKED_RUNTIME ', [StringComparison]::Ordinal)) { $result.status = 'BLOCKED_RUNTIME' }
     }
     finally {
         try {
@@ -898,6 +917,7 @@ function Invoke-Prepare {
     if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
         throw 'Prepare requires valid WSL distribution and repository paths'
     }
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preparation'
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
     if (-not $gitState.Clean) { throw 'Native VT-x staging requires a clean exact-SHA worktree' }
     $treeResult = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD^{tree}') -TimeoutSeconds 60
@@ -1089,6 +1109,7 @@ function Invoke-Reboot {
     if ($null -eq (Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction SilentlyContinue)) {
         throw 'Native qualification scheduled task is missing'
     }
+    Assert-NativeFreeSpace -Path ([string]$prepared.stage_root) -MinimumGiB 24 -Operation 'native cycle reboot'
     Set-OneShotBootSequence -BootId ([string]$prepared.native_boot_id)
     [Console]::WriteLine("PASS native-vtx-reboot-authorized next=$($prepared.native_boot_id)")
     Restart-Computer -Force
@@ -1154,6 +1175,10 @@ description             $NativeEntryName
         $result = [pscustomobject]@{ source_git_sha = 'a' * 40; source_tree_sha = 'b' * 40; staging_manifest_sha256 = 'c' * 64 }
         Assert-ResultBinding -Result $result -SourceSha ('a' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64)
         try { Assert-ResultBinding -Result $result -SourceSha ('d' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64); throw 'stale evidence rejection self-test failed' } catch { }
+        $spaceBlocked = $false
+        try { Assert-NativeFreeSpace -Path $temporary -MinimumGiB 1024 -Operation 'self-test' }
+        catch { $spaceBlocked = $_.Exception.Message.StartsWith('BLOCKED_RUNTIME self-test', [StringComparison]::Ordinal) }
+        if (-not $spaceBlocked) { throw 'insufficient native disk space rejection self-test failed' }
         [Console]::WriteLine('PASS native-vtx-self-test BCD GUID parsing, protected loader, backend classification, staging integrity, stale evidence rejection')
     }
     finally {

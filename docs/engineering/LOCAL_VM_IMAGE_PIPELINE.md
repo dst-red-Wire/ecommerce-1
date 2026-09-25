@@ -47,6 +47,13 @@ Windows normal boot / WSL2
 exact-SHA local artifact and build/qualification/release evidence
 ```
 
+The native cycle checks free space on its Windows staging drive before
+preparation (40 GiB), reboot (24 GiB), build (24 GiB), and Vagrant smoke import
+(16 GiB). Insufficient space is `BLOCKED_RUNTIME`; it cannot be treated as an
+image or guest `PASS`. A failed native attempt remains recorded under its exact
+SHA, and the one-attempt contract requires a new source SHA for another cycle.
+Keep prior evidence when cleaning obsolete local staging directories.
+
 ```text
 make image-rocky-qualify
      |
