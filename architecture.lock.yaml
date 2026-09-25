@@ -533,6 +533,7 @@ machine_contracts:
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
   kratix_platform: config/infrastructure/kratix-platform.yaml
   machine_image_lock: config/contracts/machine-image-lock.yaml
+  vm_lifecycle_policy: config/contracts/vm-lifecycle-policy.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
