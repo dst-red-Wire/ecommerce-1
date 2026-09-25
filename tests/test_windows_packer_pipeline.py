@@ -88,6 +88,18 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("Remove superseded WSL Packer installation", ansible)
         self.assertIn("local_bin }}/packer", ansible)
 
+    def test_preparation_defers_firmware_probe_until_native_boot(self):
+        self.assertIn(
+            "-not $firmwareVirtualizationEnabled -and -not $PreparationOnly.IsPresent",
+            self.preflight,
+        )
+        self.assertIn(
+            "DEFERRED_TO_NATIVE_BOOT_RUNTIME_PROBE", self.preflight
+        )
+        self.assertIn("Get-VirtualBoxBackendFromLog", self.native)
+        self.assertIn("NATIVE_VTX", self.native)
+        self.assertIn("NEM", self.native)
+
     def test_packer_source_and_plugins_are_exact(self):
         source = self.machine["packer_image"]["source"]
         self.assertEqual("10.2", self.machine["packer_image"]["os"]["version"])

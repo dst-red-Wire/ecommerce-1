@@ -103,7 +103,9 @@ try {
     if ($computer.HypervisorPresent -and -not $PreparationOnly.IsPresent) {
         throw 'Native VT-x is unavailable because the Microsoft hypervisor is active; NEM is forbidden by contract'
     }
-    if (-not $firmwareVirtualizationEnabled) {
+    # With Hyper-V active, WMI may report False even while WSL2 is running.
+    # Preparation records the observation; the native boot proves VT-x directly.
+    if (-not $firmwareVirtualizationEnabled -and -not $PreparationOnly.IsPresent) {
         throw 'Native VT-x is unavailable because firmware virtualization is disabled'
     }
     if ($PreparationOnly.IsPresent) {
