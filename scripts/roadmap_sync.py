@@ -129,16 +129,29 @@ def policy() -> dict[str, Any]:
             if not isinstance(heading, str) or not heading.startswith("### "):
                 raise RuntimeError(f"roadmap milestone {item.get('id')} requires a section_heading")
             requirements = item.get("requirements")
-            if not isinstance(requirements, dict) or set(requirements) != {
+            base_requirement_fields = {
                 "implementation_paths", "qualification_gates", "qce_capabilities", "runtime_evidence"
-            }:
+            }
+            if (
+                not isinstance(requirements, dict)
+                or not base_requirement_fields.issubset(requirements)
+                or set(requirements) - base_requirement_fields != (
+                    {"resolved_capabilities"} if "resolved_capabilities" in requirements else set()
+                )
+            ):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements are invalid")
             paths = requirements["implementation_paths"]
             gates = requirements["qualification_gates"]
             capabilities = requirements["qce_capabilities"]
             runtime = requirements["runtime_evidence"]
-            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime)):
+            resolved = requirements.get("resolved_capabilities", [])
+            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime, resolved)):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements must be lists")
+            for requirement in resolved:
+                if not isinstance(requirement, dict) or set(requirement) != {"tool", "capability", "scope", "status"}:
+                    raise RuntimeError(f"roadmap milestone {milestone_id} has invalid resolved capability")
+                if requirement["status"] != "proven":
+                    raise RuntimeError(f"roadmap milestone {milestone_id} capability must require proven")
             for relative in paths:
                 path = Path(str(relative))
                 if path.is_absolute() or ".." in path.parts or not path.parts:
@@ -350,6 +363,7 @@ def derive_projection(
     qualification_gates: dict[str, str] | None = None,
     qualification_evidence_path: str | None = None,
     qce_payload: dict[str, Any] | None = None,
+    effective_capabilities: dict[str, Any] | None = None,
     head: str | None = None,
     tree: str | None = None,
     now: datetime | None = None,
@@ -363,6 +377,19 @@ def derive_projection(
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     gate_statuses = qualification_gates or {}
     qce_statuses = _qce_capability_statuses(qce_payload)
+    if effective_capabilities is None:
+        registry_path = root / "config/contracts/tool-capabilities.yaml"
+        if registry_path.is_file():
+            import capability_resolver
+
+            effective_capabilities = capability_resolver.resolve(
+                root, source_sha=head,
+                evidence_path=root / ".context" / "evidence" / "capabilities",
+            )
+        else:
+            # Synthetic/test roots without the authority cannot prove a
+            # capability; absence is represented as empty, never inferred.
+            effective_capabilities = {"tools": {}}
     results: list[dict[str, Any]] = []
     status_index: dict[str, str] = {}
 
@@ -438,6 +465,22 @@ def derive_projection(
                 if capability_status == "BLOCKED":
                     blockers.append(f"QCE capability blocked: {capability}")
 
+        resolved_requirements = requirements.get("resolved_capabilities", [])
+        resolved_complete = True
+        for requirement in resolved_requirements:
+            tool_name = str(requirement["tool"])
+            capability_name = str(requirement["capability"])
+            scope = str(requirement["scope"])
+            expected = str(requirement["status"])
+            requirement_names.append(f"capability:{tool_name}.{capability_name}:{scope}:{expected}")
+            item = effective_capabilities.get("tools", {}).get(tool_name, {}).get("capabilities", {}).get(capability_name)
+            valid = isinstance(item, dict) and item.get("status") == expected and scope in item.get("scopes", [])
+            resolved_complete = resolved_complete and valid
+            if valid:
+                evidence.append(f"capability:{tool_name}.{capability_name}:{scope}:{expected}")
+            else:
+                missing.append(f"capability:{tool_name}.{capability_name}:{scope}:{expected}")
+
         runtime_declarations = requirements["runtime_evidence"]
         requirement_names.extend(f"runtime:{item['path']}" for item in runtime_declarations)
         runtime_valid = True
@@ -460,6 +503,7 @@ def derive_projection(
             implementation_complete
             and all(gate_statuses.get(gate) == "PASS" for gate in gates)
             and all(qce_statuses.get(capability) == "PROVEN" for capability in capabilities)
+            and resolved_complete
             and runtime_valid
         )
         if blockers:

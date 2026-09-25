@@ -5,7 +5,7 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix security-datasets-sync engineering-metrics experiment
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix capabilities security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -85,6 +85,9 @@ execution-properties: ## Validate the canonical execution-properties authority a
 
 execution-properties-matrix: ## Render the execution-properties matrix from the implementation registry
 	@$(PYTHON) scripts/repoctl.py execution-properties --matrix
+
+capabilities: ## Resolve scoped effective tool capabilities from exact-SHA evidence
+	@$(PYTHON) scripts/repoctl.py capabilities
 
 security-datasets-sync: ## Explicitly refresh verified KEV/EPSS snapshots outside qualification
 	@$(PYTHON) scripts/repoctl.py security-datasets-sync --output "$${OUTPUT:-.context/security-datasets}"

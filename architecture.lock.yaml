@@ -527,6 +527,8 @@ machine_contracts:
   engineering_metrics_policy: config/contracts/engineering-metrics-policy.yaml
   execution_properties_policy: config/contracts/execution-properties-policy.yaml
   execution_properties_implementations: config/contracts/execution-properties-implementations.yaml
+  tool_capabilities: config/contracts/tool-capabilities.yaml
+  composed_capabilities: config/contracts/composed-capabilities.yaml
   event_contracts: config/contracts/event-contracts.yaml
   identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
   mesh_observability_policy: config/contracts/mesh-observability-policy.yaml

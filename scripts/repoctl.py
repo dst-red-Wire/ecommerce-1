@@ -2285,6 +2285,42 @@ def execution_properties_check(*, matrix: bool = False, evidence_path: str = "")
     return 0
 
 
+def capabilities_command(
+    *, evidence: str = "", output: str = ".context/evidence/effective-capabilities.yaml",
+    tool: str = "", property_name: str = "", status: str = "", scope: str = "",
+    output_format: str = "summary",
+) -> int:
+    """Resolve potential tool relationships into exact-SHA effective capabilities."""
+    import capability_resolver
+
+    evidence_path = Path(evidence) if evidence else None
+    payload = capability_resolver.resolve(ROOT, evidence_path=evidence_path)
+    destination = ROOT / output
+    capability_resolver.write(payload, destination)
+    view = capability_resolver.filtered(
+        payload, tool=tool, property_name=property_name, status=status, scope=scope
+    )
+    if output_format in {"json", "yaml"}:
+        # JSON is valid YAML 1.2 and prevents serializer-specific ordering drift.
+        print(json.dumps(view, indent=2, sort_keys=True))
+    else:
+        count = sum(len(item["capabilities"]) for item in view["tools"].values())
+        print(
+            f"PASS capabilities resolved={count} source_sha={payload['source_sha']} "
+            f"output={destination.relative_to(ROOT)} gaps={len(payload['gaps'])}"
+        )
+    if payload["unknown_states"] or payload["stale_evidence"]:
+        for problem in payload["unknown_states"]:
+            print(f"FAIL capabilities: {problem}", file=sys.stderr)
+        for problem in payload["stale_evidence"]:
+            print(
+                f"FAIL capabilities: {problem['tool']}.{problem['capability']}:"
+                f"{','.join(problem['reasons'])}", file=sys.stderr
+            )
+        return 1
+    return 0
+
+
 def source_quality_adapter(name: str) -> dict:
     adapter = source_quality_policy().get("adapters", {}).get(name)
     if not isinstance(adapter, dict):
@@ -7827,6 +7863,16 @@ def main() -> int:
     execution_properties = sub.add_parser("execution-properties")
     execution_properties.add_argument("--matrix", action="store_true")
     execution_properties.add_argument("--evidence", default="")
+    capabilities = sub.add_parser("capabilities")
+    capabilities.add_argument("--evidence", default="")
+    capabilities.add_argument("--output", default=".context/evidence/effective-capabilities.yaml")
+    capabilities.add_argument("--tool", default="")
+    capabilities.add_argument("--property", dest="property_name", default="")
+    capabilities.add_argument(
+        "--status", choices=["unsupported", "available", "configured", "verified", "proven", "not-proven"], default=""
+    )
+    capabilities.add_argument("--scope", default="")
+    capabilities.add_argument("--format", choices=["summary", "json", "yaml"], default="summary")
     metrics = sub.add_parser("engineering-metrics")
     metrics.add_argument("--input", required=True)
     metrics.add_argument("--output", default="")
@@ -8147,6 +8193,12 @@ def main() -> int:
             return qce_check_command()
         if args.cmd == "execution-properties":
             return execution_properties_check(matrix=args.matrix, evidence_path=args.evidence)
+        if args.cmd == "capabilities":
+            return capabilities_command(
+                evidence=args.evidence, output=args.output, tool=args.tool,
+                property_name=args.property_name, status=args.status, scope=args.scope,
+                output_format=args.format,
+            )
         if args.cmd == "engineering-metrics":
             return engineering_metrics_command(args.input, args.output)
         if args.cmd == "security-datasets-sync":
