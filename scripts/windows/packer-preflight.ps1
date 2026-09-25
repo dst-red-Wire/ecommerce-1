@@ -27,6 +27,7 @@ $evidence = [ordered]@{
         status = 'NOT_CHECKED'
     }
     wsl2_duplicate_packer = 'NOT_CHECKED'
+    guest_smoke_commands = 'NOT_EXECUTED'
     error = $null
 }
 
@@ -115,19 +116,20 @@ try {
         $evidence.virtualbox_acceleration.status = 'PASS'
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($WslDistribution) -or -not [string]::IsNullOrWhiteSpace($WslRepoRoot)) {
-        if ([string]::IsNullOrWhiteSpace($WslDistribution) -or [string]::IsNullOrWhiteSpace($WslRepoRoot)) {
-            throw 'WslDistribution and WslRepoRoot must be provided together'
-        }
-        if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
-            throw 'Invalid WSL distribution or repository path'
-        }
-        $probe = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @('-c', 'import pathlib,shutil,sys; candidates=[shutil.which("packer"), str(pathlib.Path.home()/".local/bin/packer") if (pathlib.Path.home()/".local/bin/packer").exists() else None]; found=next((p for p in candidates if p), ""); print(found); sys.exit(1 if found else 0)') -TimeoutSeconds 60
-        if ($probe.ExitCode -ne 0) {
-            throw "A competing Packer executable exists in WSL2: $($probe.StdOut.Trim())"
-        }
-        $evidence.wsl2_duplicate_packer = 'ABSENT'
+    if ([string]::IsNullOrWhiteSpace($WslDistribution) -or [string]::IsNullOrWhiteSpace($WslRepoRoot)) {
+        throw 'Windows image preflight requires WSL identity for mandatory guest smoke validation'
     }
+    if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
+        throw 'Invalid WSL distribution or repository path'
+    }
+    $guestSmokePreflight = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @('scripts/validate_guest_smoke_commands.py') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $guestSmokePreflight -Operation 'Guest smoke command preflight'
+    $evidence.guest_smoke_commands = 'PASS'
+    $probe = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @('-c', 'import pathlib,shutil,sys; candidates=[shutil.which("packer"), str(pathlib.Path.home()/".local/bin/packer") if (pathlib.Path.home()/".local/bin/packer").exists() else None]; found=next((p for p in candidates if p), ""); print(found); sys.exit(1 if found else 0)') -TimeoutSeconds 60
+    if ($probe.ExitCode -ne 0) {
+        throw "A competing Packer executable exists in WSL2: $($probe.StdOut.Trim())"
+    }
+    $evidence.wsl2_duplicate_packer = 'ABSENT'
 
     $evidence.status = 'PASS'
     $evidence.completed_at = [DateTime]::UtcNow.ToString('o')

@@ -761,6 +761,15 @@ def main() -> int:
     parser.add_argument("action", choices=("assets", "qualify", "recover"))
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
+    if args.action != "recover":
+        from validate_guest_smoke_commands import GuestSmokePreflightError, validate_guest_smoke_commands
+
+        try:
+            count = validate_guest_smoke_commands()
+        except GuestSmokePreflightError as exc:
+            print(f"FAIL guest-smoke-preflight: {exc}", file=sys.stderr)
+            return 1
+        print(f"PASS guest-smoke-preflight commands={count}")
     if args.action == "assets":
         materialize_assets(offline=args.offline)
         return 0

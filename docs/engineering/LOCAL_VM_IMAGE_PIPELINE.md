@@ -11,6 +11,14 @@ asset checksums are owned only by `config/contracts/toolchain-lock.json`.
 The same Packer template exposes two host-native profiles. WSL2 is part of the
 Windows profile; it is not treated as a native Linux virtualization host.
 
+Every preparation/qualification entrypoint runs the offline guest-command
+preflight before downloading inputs, staging a candidate or starting a VM:
+Windows preflight/native prepare, Linux static validation/preflight/build/qualify,
+and local-service asset preparation/qualification. It rejects PowerShell host
+interpolation of guest commands and checks their Bash syntax without executing
+guest commands. A passing syntax preflight is not a substitute for runtime smoke
+evidence; a failed runtime cycle must still not be imported or released.
+
 ```text
 Windows normal boot: VS Code / WSL2 / Hyper-V
      |

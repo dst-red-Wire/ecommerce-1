@@ -648,22 +648,22 @@ function Invoke-NativeRun {
         }
         if (-not $sshReady) { throw 'Native Vagrant SSH readiness failed' }
         $result.vagrant_smoke.ssh = 'PASS'
-        $result.observations.rocky_version = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rocky-version' -Command "grep -Fx 'Rocky Linux release 10.2 (Red Quartz)' /etc/rocky-release"
+        $result.observations.rocky_version = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rocky-version' -Command 'grep -Fx ''Rocky Linux release 10.2 (Red Quartz)'' /etc/rocky-release'
         $result.vagrant_smoke.rocky_version = 'PASS'
-        $result.observations.architecture = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'architecture' -Command "test \"`$(uname -m)\" = x86_64 && uname -m"
+        $result.observations.architecture = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'architecture' -Command 'test "$(uname -m)" = x86_64 && uname -m'
         $result.vagrant_smoke.expected_arch = 'PASS'
-        $result.observations.cpu = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'cpu' -Command "test \"`$(getconf _NPROCESSORS_ONLN)\" -eq 4 && getconf _NPROCESSORS_ONLN"
+        $result.observations.cpu = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'cpu' -Command 'test "$(getconf _NPROCESSORS_ONLN)" -eq 4 && getconf _NPROCESSORS_ONLN'
         $result.vagrant_smoke.expected_cpu = 'PASS'
-        $result.observations.memory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'memory' -Command "awk '`$1 == \"MemTotal:\" { print `$2; exit !(`$2 >= 3500000) }' /proc/meminfo"
+        $result.observations.memory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'memory' -Command 'awk ''$1 == "MemTotal:" { print $2; exit !($2 >= 3500000) }'' /proc/meminfo'
         $result.vagrant_smoke.expected_memory = 'PASS'
         $diskBytes = [int64]$runtimeContract.resources.disk_mib * 1MB
-        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command "size=`$(lsblk -b -dn -o SIZE /dev/sda); test \"`$size\" -ge $diskBytes; printf '%s' \"`$size\""
+        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda); test "$size" -ge {0}; printf ''%s'' "$size"' -f $diskBytes)
         $result.vagrant_smoke.expected_disk = 'PASS'
-        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'xfs' -Command "test \"`$(findmnt -n -o FSTYPE /)\" = xfs")
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'xfs' -Command 'test "$(findmnt -n -o FSTYPE /)" = xfs')
         $result.vagrant_smoke.xfs = 'PASS'
-        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'lvm-absent' -Command "! lsblk -n -o TYPE | grep -qx lvm")
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'lvm-absent' -Command '! lsblk -n -o TYPE | grep -qx lvm')
         $result.vagrant_smoke.lvm_absent = 'PASS'
-        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'swap-absent' -Command "test -z \"`$(swapon --noheadings --show)\"")
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'swap-absent' -Command 'test -z "$(swapon --noheadings --show)"')
         $result.vagrant_smoke.swap_absent = 'PASS'
         $packages = @($runtimeContract.rpm_profile_roots)
         if ($packages.Count -lt 10 -or @($packages | Where-Object { $_ -notmatch '^[A-Za-z0-9+_.-]+$' }).Count -gt 0) { throw 'Runtime RPM profile roots are invalid' }
@@ -671,17 +671,17 @@ function Invoke-NativeRun {
         $result.vagrant_smoke.rpm_profile = 'PASS'
         $result.observations.kernel = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'kernel' -Command 'uname -r'
         $result.vagrant_smoke.kernel = 'PASS'
-        $result.observations.systemd = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'systemd' -Command "state=`$(systemctl is-system-running --wait || true); test \"`$state\" = running; test -z \"`$(systemctl --failed --no-legend --plain)\"; printf '%s' \"`$state\""
+        $result.observations.systemd = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s'' "$state"'
         $result.vagrant_smoke.systemd = 'PASS'
-        $result.observations.network = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'network' -Command "ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q '^default '; ip -4 -o addr show scope global; ip -4 route show default"
+        $result.observations.network = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'network' -Command 'ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q ''^default ''; ip -4 -o addr show scope global; ip -4 route show default'
         $result.vagrant_smoke.network = 'PASS'
-        $result.observations.fundamental_tools = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'fundamental-tools' -Command "for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v \"`$tool\" >/dev/null; done; printf 'required-tools-present'"
+        $result.observations.fundamental_tools = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'fundamental-tools' -Command 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf ''required-tools-present'''
         $result.vagrant_smoke.fundamental_tools = 'PASS'
-        $result.observations.rke2_prerequisites = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rke2-prerequisites' -Command "test \"`$(stat -fc %T /sys/fs/cgroup)\" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe \"`$module\"; done; test \"`$(sysctl -n net.ipv4.ip_forward)\" = 1; test \"`$(sysctl -n net.bridge.bridge-nf-call-iptables)\" = 1; test -d /sys/fs/bpf; printf 'rke2-prerequisites-present'"
+        $result.observations.rke2_prerequisites = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rke2-prerequisites' -Command 'test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf ''rke2-prerequisites-present'''
         $result.vagrant_smoke.rke2_prerequisites = 'PASS'
-        $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml"
+        $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml'
         $result.vagrant_smoke.security = 'PASS'
-        $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command "rpm -qa --qf '%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort"
+        $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
         $result.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $artifactSha256 -RpmInventory $rpmInventory -RequiredPackages $packages
         Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages $packages
         $result.status = 'PASS'
@@ -897,6 +897,10 @@ function Invoke-Prepare {
     if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw 'Prepare could not resolve full Git source identities'
     }
+    $guestSmokePreflight = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @(
+        'scripts/validate_guest_smoke_commands.py'
+    ) -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $guestSmokePreflight -Operation 'Guest smoke command host-interpolation and shell-syntax preflight'
 
     foreach ($directory in @('bcd', 'staging', 'evidence', 'logs', 'artifacts')) {
         [void](New-Item -ItemType Directory -Path (Join-Path $script:LabRootResolved $directory) -Force)
@@ -1054,6 +1058,7 @@ function Invoke-Prepare {
         hypervisorlaunchtype = 'PASS'
         vsmlaunchtype = $vsmStatus
         windows_staging = 'PASS'
+        guest_smoke_commands = 'PASS'
         staging_integrity = 'PASS'
         staging_manifest_sha256 = $manifestSha256
         scheduled_task = 'PASS'

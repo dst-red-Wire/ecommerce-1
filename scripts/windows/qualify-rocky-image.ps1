@@ -175,27 +175,27 @@ try {
     }
     $evidence.qualification.ssh = 'PASS'
 
-    $release = Invoke-SmokeCommand -Name 'rocky_release' -Command "grep -Fx 'Rocky Linux release 10.2 (Red Quartz)' /etc/rocky-release"
+    $release = Invoke-SmokeCommand -Name 'rocky_release' -Command 'grep -Fx ''Rocky Linux release 10.2 (Red Quartz)'' /etc/rocky-release'
     $evidence.observations.rocky_release = $release
     $kernel = Invoke-SmokeCommand -Name 'kernel' -Command 'uname -r'
     $evidence.observations.kernel = $kernel
-    $architecture = Invoke-SmokeCommand -Name 'architecture_cpu' -Command "test \"`$(uname -m)\" = x86_64 && test \"`$(getconf _NPROCESSORS_ONLN)\" -ge 2 && uname -m && getconf _NPROCESSORS_ONLN"
+    $architecture = Invoke-SmokeCommand -Name 'architecture_cpu' -Command 'test "$(uname -m)" = x86_64 && test "$(getconf _NPROCESSORS_ONLN)" -ge 2 && uname -m && getconf _NPROCESSORS_ONLN'
     $evidence.observations.architecture_cpu = $architecture
-    $systemd = Invoke-SmokeCommand -Name 'systemd' -Command "state=`$(systemctl is-system-running --wait || true); test \"`$state\" = running; test -z \"`$(systemctl --failed --no-legend --plain)\"; printf '%s' \"`$state\""
+    $systemd = Invoke-SmokeCommand -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s'' "$state"'
     $evidence.observations.systemd = $systemd
-    $disk = Invoke-SmokeCommand -Name 'disk' -Command "available=`$(df --output=avail -BM / | tail -1 | tr -dc '0-9'); test \"`$available\" -ge 1024; printf '%s MiB' \"`$available\""
+    $disk = Invoke-SmokeCommand -Name 'disk' -Command 'available=$(df --output=avail -BM / | tail -1 | tr -dc ''0-9''); test "$available" -ge 1024; printf ''%s MiB'' "$available"'
     $evidence.observations.disk_available = $disk
-    $network = Invoke-SmokeCommand -Name 'network' -Command "ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q '^default '; ip -4 -o addr show scope global; ip -4 route show default"
+    $network = Invoke-SmokeCommand -Name 'network' -Command 'ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q ''^default ''; ip -4 -o addr show scope global; ip -4 route show default'
     $evidence.observations.network = $network
-    $tools = Invoke-SmokeCommand -Name 'fundamental_tools' -Command "for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v \"`$tool\" >/dev/null; done; printf 'required-tools-present'"
+    $tools = Invoke-SmokeCommand -Name 'fundamental_tools' -Command 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf ''required-tools-present'''
     $evidence.observations.fundamental_tools = $tools
-    $rke2 = Invoke-SmokeCommand -Name 'rke2_prerequisites' -Command "test -z \"`$(swapon --noheadings --show)\"; test \"`$(stat -fc %T /sys/fs/cgroup)\" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe \"`$module\"; done; test \"`$(sysctl -n net.ipv4.ip_forward)\" = 1; test \"`$(sysctl -n net.bridge.bridge-nf-call-iptables)\" = 1; test -d /sys/fs/bpf; printf 'rke2-prerequisites-present'"
+    $rke2 = Invoke-SmokeCommand -Name 'rke2_prerequisites' -Command 'test -z "$(swapon --noheadings --show)"; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf ''rke2-prerequisites-present'''
     $evidence.observations.rke2_prerequisites = $rke2
-    $security = Invoke-SmokeCommand -Name 'security' -Command "test \"`$(getenforce)\" = Enforcing; sudo -n sshd -T | grep -qx 'permitrootlogin no'; sudo -n sshd -T | grep -qx 'passwordauthentication no'; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf 'security-baseline-present'"
+    $security = Invoke-SmokeCommand -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf ''security-baseline-present'''
     $evidence.observations.security = $security
     $packageLock = Read-JsonFile (Join-Path $root 'config\artifacts\rocky-10.2-base-packages.lock.json')
     $requiredPackages = @($packageLock.profiles.base.roots) + @($packageLock.profiles.rke2.roots)
-    $rpmInventory = Invoke-SmokeCommand -Name 'package_manifest' -Command "rpm -qa --qf '%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | LC_ALL=C sort"
+    $rpmInventory = Invoke-SmokeCommand -Name 'package_manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
     $evidence.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $actualSha256 -RpmInventory $rpmInventory -RequiredPackages $requiredPackages
     Assert-ImageSupplyChainEvidence -Evidence $evidence.supply_chain -ArtifactSha256 $actualSha256 -RequiredPackages $requiredPackages
     $qualificationPassed = $true

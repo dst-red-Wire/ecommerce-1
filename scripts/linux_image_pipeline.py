@@ -21,6 +21,12 @@ from pathlib import Path
 
 import yaml
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from validate_guest_smoke_commands import validate_guest_smoke_commands, GuestSmokePreflightError
+
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_ROOT = ROOT / ".artifacts/packer/rocky-10.2/linux"
 EVIDENCE_ROOT = ROOT / ".context/evidence/rocky-image/rocky-10.2/linux"
@@ -1012,6 +1018,13 @@ def main() -> int:
     args = parser.parse_args()
     if args.offline and args.action != "build":
         parser.error("--offline is valid only for build")
+    if args.action != "release":
+        try:
+            count = validate_guest_smoke_commands()
+        except GuestSmokePreflightError as exc:
+            print(f"FAIL guest-smoke-preflight: {exc}", file=sys.stderr)
+            return 1
+        print(f"PASS guest-smoke-preflight commands={count}")
     if args.action == "static-validate":
         return static_validate()
     if args.action == "preflight":

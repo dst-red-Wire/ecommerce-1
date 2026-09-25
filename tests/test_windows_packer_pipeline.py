@@ -1,7 +1,10 @@
 import json
+import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -14,6 +17,10 @@ PACKER = ROOT / "platform/packer/rocky-10.2/rocky-10.2.pkr.hcl"
 PACKER_VARIABLES = ROOT / "platform/packer/rocky-10.2/variables.pkr.hcl"
 VAGRANTFILE = ROOT / "platform/vagrant/rocky-image-smoke/Vagrantfile"
 WINDOWS = ROOT / "scripts/windows"
+VALIDATOR_PATH = ROOT / "scripts/validate_guest_smoke_commands.py"
+VALIDATOR_SPEC = importlib.util.spec_from_file_location("validate_guest_smoke_commands", VALIDATOR_PATH)
+VALIDATOR = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(VALIDATOR)
 
 
 class WindowsPackerPipelineTest(unittest.TestCase):
@@ -252,6 +259,34 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", source)
             self.assertIn('if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }', source)
             self.assertIn('if ($attempt -lt 12)', source)
+
+    def test_guest_smoke_commands_are_literal_and_shell_syntax_valid(self):
+        self.assertGreaterEqual(VALIDATOR.validate_guest_smoke_commands(), 36)
+
+    def test_guest_smoke_preflight_rejects_host_interpolation_and_invalid_bash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "native-vtx-cycle.ps1"
+            with mock.patch.object(VALIDATOR, "WINDOWS_SOURCES", ((candidate, "Invoke-VagrantSmokeCommand", 1),)):
+                candidate.write_text('Invoke-VagrantSmokeCommand -Command "test `$(uname -m)"\n', encoding="utf-8")
+                with self.assertRaisesRegex(VALIDATOR.GuestSmokePreflightError, "PowerShell literal"):
+                    VALIDATOR.validate_guest_smoke_commands()
+                candidate.write_text("Invoke-VagrantSmokeCommand -Command 'if true; then'\n", encoding="utf-8")
+                with self.assertRaisesRegex(VALIDATOR.GuestSmokePreflightError, "invalid guest shell syntax"):
+                    VALIDATOR.validate_guest_smoke_commands()
+
+    def test_native_prepare_runs_guest_command_preflight_before_staging(self):
+        self.assertIn('scripts/validate_guest_smoke_commands.py', self.native)
+        self.assertIn('scripts/validate_guest_smoke_commands.py', self.preflight)
+        self.assertIn("$evidence.guest_smoke_commands = 'PASS'", self.preflight)
+        self.assertIn("guest_smoke_commands = 'PASS'", self.native)
+        self.assertLess(
+            self.native.index("Assert-ProcessSuccess -Result $guestSmokePreflight"),
+            self.native.index("foreach ($directory in @('bcd', 'staging'"),
+        )
+        linux = (ROOT / "scripts/linux_image_pipeline.py").read_text(encoding="utf-8")
+        local_services = (ROOT / "scripts/local_services_qualification.py").read_text(encoding="utf-8")
+        self.assertLess(linux.index("validate_guest_smoke_commands()", linux.index("def main()")), linux.index('if args.action == "preflight"'))
+        self.assertLess(local_services.index("validate_guest_smoke_commands()", local_services.index("def main()")), local_services.index('if args.action == "assets"'))
 
     def test_process_failure_evidence_preserves_bounded_head_and_tail(self):
         self.assertIn("if ($detail.Length -gt 8000)", self.module)
