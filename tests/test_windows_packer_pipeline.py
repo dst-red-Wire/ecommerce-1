@@ -100,6 +100,14 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NATIVE_VTX", self.native)
         self.assertIn("NEM", self.native)
 
+    def test_elevated_launcher_keeps_parameter_names_unquoted(self):
+        self.assertIn("$parts += [string]$parameter", self.native)
+        self.assertIn("'^-[A-Za-z][A-Za-z0-9]*$'", self.native)
+        self.assertNotIn(
+            "$parts += ConvertTo-SingleQuotedPowerShellLiteral ([string]$parameter)\n    }",
+            self.native,
+        )
+
     def test_packer_source_and_plugins_are_exact(self):
         source = self.machine["packer_image"]["source"]
         self.assertEqual("10.2", self.machine["packer_image"]["os"]["version"])

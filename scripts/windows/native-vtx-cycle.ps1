@@ -65,7 +65,12 @@ function Invoke-ElevatedSelf {
     if ($Offline.IsPresent) { $parameters += '-Offline' }
     $parts = @('&', (ConvertTo-SingleQuotedPowerShellLiteral $PSCommandPath))
     foreach ($parameter in $parameters) {
-        $parts += ConvertTo-SingleQuotedPowerShellLiteral ([string]$parameter)
+        if ([string]$parameter -match '^-[A-Za-z][A-Za-z0-9]*$') {
+            $parts += [string]$parameter
+        }
+        else {
+            $parts += ConvertTo-SingleQuotedPowerShellLiteral ([string]$parameter)
+        }
     }
     $encoded = [Convert]::ToBase64String(
         [Text.Encoding]::Unicode.GetBytes(($parts -join ' '))
