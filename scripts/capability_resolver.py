@@ -283,20 +283,14 @@ def resolve(
             declaration = entry["capabilities"][capability]
             record = evidence.get((tool, capability))
             names = sorted(_requirement_names(declaration["requires"]))
-            values = record.get("requirements", {}) if isinstance(record, dict) else {}
-            if not isinstance(values, dict):
-                values = {}
-            missing = [name for name in names if values.get(name) != "PASS"]
+            producer: dict[str, Any] = {}
+            values: dict[str, str] = {}
             state = "unsupported" if not detected else "available"
             if configured:
                 state = "configured"
             evidence_ids: list[str] = []
             identity_errors: list[str] = []
             if record is not None:
-                if record.get("source_sha") != exact_sha:
-                    identity_errors.append("stale_or_foreign_evidence")
-                if record.get("toolchain_digest") != digest:
-                    identity_errors.append("toolchain_digest_mismatch")
                 if not DIGEST.fullmatch(str(record.get("artifact_digest", ""))):
                     identity_errors.append("artifact_digest_missing_or_invalid")
                 artifact_relative = Path(str(record.get("artifact_path", "")))
@@ -309,13 +303,34 @@ def resolve(
                     identity_errors.append("artifact_path_missing_or_unsafe")
                 else:
                     artifact = root / artifact_relative
-                    if not artifact.is_file() or artifact.is_symlink():
+                    artifact_root_path = root / artifact_root
+                    if (
+                        artifact_relative.parent != artifact_root
+                        or artifact_root_path.is_symlink()
+                        or not artifact.is_file()
+                        or artifact.is_symlink()
+                    ):
                         identity_errors.append("producer_artifact_missing")
                     else:
                         actual_artifact_digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
                         if actual_artifact_digest != record.get("artifact_digest"):
                             identity_errors.append("producer_artifact_digest_mismatch")
-                if record.get("gate_id") != declaration["gate"] or record.get("gate") != "PASS":
+                        else:
+                            try:
+                                producer = _load(artifact)
+                            except (OSError, ValueError):
+                                identity_errors.append("producer_artifact_invalid")
+                if (
+                    producer.get("kind") != "CapabilityGateEvidence"
+                    or producer.get("tool") != tool
+                    or producer.get("capability") != capability
+                ):
+                    identity_errors.append("producer_identity_mismatch")
+                if producer.get("source_sha") != exact_sha:
+                    identity_errors.append("stale_or_foreign_evidence")
+                if producer.get("toolchain_digest") != digest:
+                    identity_errors.append("toolchain_digest_mismatch")
+                if producer.get("gate_id") != declaration["gate"] or producer.get("gate") != "PASS":
                     identity_errors.append("required_gate_missing_or_failed")
                 supplied_evidence_digest = str(record.get("evidence_digest", ""))
                 digest_input = {key: value for key, value in record.items() if key != "evidence_digest"}
@@ -324,10 +339,13 @@ def resolve(
                 ).hexdigest()
                 if supplied_evidence_digest != expected_evidence_digest:
                     identity_errors.append("evidence_digest_missing_or_invalid")
+                producer_values = producer.get("requirements", {})
+                if isinstance(producer_values, dict):
+                    values = producer_values
                 unknown_values = sorted(set(values) - set(names))
                 if unknown_values:
                     identity_errors.append("unknown_requirements:" + ",".join(unknown_values))
-                observations = record.get("observations", {})
+                observations = producer.get("observations", {})
                 if not isinstance(observations, dict):
                     observations = {}
                 if (
@@ -348,6 +366,7 @@ def resolve(
                     evidence_ids = [str(record.get("id", f"{tool}-{capability}"))]
                     if _evaluate(declaration["requires"], values):
                         state = "proven"
+            missing = [name for name in names if values.get(name) != "PASS"]
             result = {
                 "status": state,
                 "relationships": declaration["relationships"],

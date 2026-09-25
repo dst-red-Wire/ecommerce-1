@@ -56,16 +56,23 @@ class CapabilityResolverTests(unittest.TestCase):
     def evidence(self, tool, capability, requirements, **observations):
         artifact = self.root / ".context/evidence/artifacts" / f"{tool}-{capability}.artifact"
         artifact.parent.mkdir(parents=True, exist_ok=True)
-        artifact.write_bytes(f"{tool}:{capability}\n".encode())
+        producer = {
+            "kind": "CapabilityGateEvidence",
+            "tool": tool,
+            "capability": capability,
+            "source_sha": SHA,
+            "toolchain_digest": RESOLVER.toolchain_digest(self.root),
+            "gate": "PASS",
+            "gate_id": f"{tool}-{capability}",
+            "requirements": {name: "PASS" for name in requirements},
+            "observations": observations,
+        }
+        artifact.write_text(json.dumps(producer, sort_keys=True) + "\n")
         artifact_digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
         record = {
             "id": f"{tool}-{capability}", "tool": tool, "capability": capability,
-            "source_sha": SHA, "toolchain_digest": RESOLVER.toolchain_digest(self.root),
             "artifact_digest": artifact_digest,
             "artifact_path": f".context/evidence/artifacts/{tool}-{capability}.artifact",
-            "gate": "PASS", "gate_id": f"{tool}-{capability}",
-            "requirements": {name: "PASS" for name in requirements},
-            "observations": observations,
         }
         record["evidence_digest"] = "sha256:" + hashlib.sha256(
             json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
@@ -76,6 +83,17 @@ class CapabilityResolverTests(unittest.TestCase):
         path = self.root / "evidence.json"
         path.write_text(json.dumps({"evidence": records}))
         return RESOLVER.resolve(self.root, evidence_path=path, source_sha=SHA)
+
+    def mutate_producer(self, record, **changes):
+        artifact = self.root / record["artifact_path"]
+        producer = json.loads(artifact.read_text())
+        producer.update(changes)
+        artifact.write_text(json.dumps(producer, sort_keys=True) + "\n")
+        record["artifact_digest"] = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+        record.pop("evidence_digest")
+        record["evidence_digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def requirements(self, tool, capability):
         registry = self.load("config/contracts/tool-capabilities.yaml")
@@ -127,7 +145,7 @@ class CapabilityResolverTests(unittest.TestCase):
 
     def test_foreign_sha_fails_closed(self):
         record = self.evidence("cosign", "integrity", self.requirements("cosign", "integrity"), signature_verified=True)
-        record["source_sha"] = "a" * 40
+        self.mutate_producer(record, source_sha="a" * 40)
         result = self.resolve_records([record])
         self.assertIn("stale_or_foreign_evidence", result["stale_evidence"][0]["reasons"])
 
