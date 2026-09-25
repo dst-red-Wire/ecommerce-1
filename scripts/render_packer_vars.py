@@ -75,6 +75,9 @@ def render(
     vm_disk_mib = _bounded_contract_integer(
         resources, "disk_mib", minimum=16384, maximum=1048576
     )
+    vm_headless = resources.get("headless")
+    if not isinstance(vm_headless, bool):
+        raise TypeError("Packer resource headless must be a boolean")
     storage = image["build"]["storage"]
     if storage.get("authority") != "shared-all-hypervisors":
         raise ValueError("Packer storage must have one shared hypervisor authority")
@@ -154,6 +157,7 @@ def render(
         f"vm_cpus = {vm_cpus}\n"
         f"vm_memory_mib = {vm_memory_mib}\n"
         f"vm_disk_mib = {vm_disk_mib}\n"
+        f"vm_headless = {str(vm_headless).lower()}\n"
         f"vm_firmware = {json.dumps(storage['firmware'])}\n"
         f"vm_partition_table = {json.dumps(storage['partition_table'])}\n"
         f"vm_bios_boot_mib = {vm_bios_boot_mib}\n"

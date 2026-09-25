@@ -164,9 +164,10 @@ packer_image:
     packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
     resources:
       authority: shared-all-hypervisors
-      vcpus: 2
+      vcpus: 4
       memory_mib: 4096
       disk_mib: 32768
+      headless: true
     storage:
       authority: shared-all-hypervisors
       firmware: bios

@@ -11,7 +11,7 @@ the central contract into a host-local `rocky-10.2.auto.pkrvars.hcl`; generated
 paths, checksums and temporary key material are never committed.
 
 The same contract is the single authority for CPU, RAM, disk size, BIOS/GPT
-firmware layout and XFS partition sizes. Packer projects it identically to the
+firmware layout, XFS partition sizes and headless execution. Packer projects it identically to the
 VirtualBox and QEMU builders and renders the Kickstart storage instructions.
 The explicit layout contains `biosboot`, `/boot` and a growable `/` partition;
 LVM and swap are forbidden for this Kubernetes-ready base image.

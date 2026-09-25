@@ -67,6 +67,10 @@ variable "vm_disk_mib" {
   }
 }
 
+variable "vm_headless" {
+  type = bool
+}
+
 variable "vm_firmware" {
   type = string
 

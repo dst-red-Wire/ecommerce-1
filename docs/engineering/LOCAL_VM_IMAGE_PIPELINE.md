@@ -211,7 +211,7 @@ only configurable authority for VM vCPU, memory and disk sizing. Its sibling
 `packer_image.build.storage` owns firmware, partition table, partition sizes and
 root filesystem. The renderer validates both sections and emits their values
 into the generated `.pkrvars.hcl`; both VirtualBox and QEMU consume the same
-projection. Kickstart receives the storage projection through Packer's
+projection, including the shared headless build mode. Kickstart receives the storage projection through Packer's
 `templatefile`, creates an explicit BIOS/GPT/XFS layout, and creates neither LVM
 nor swap. The adjacent `packer_image.build.timeouts` section supplies the same
 bounded SSH timeout to both builders so slow hypervisor hosts do not require an

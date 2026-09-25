@@ -50,6 +50,7 @@ source "virtualbox-iso" "base" {
   ssh_timeout            = "${var.vm_ssh_timeout_seconds}s"
   shutdown_command       = "true"
   guest_additions_mode   = "disable"
+  headless               = var.vm_headless
   firmware               = var.vm_firmware
   disk_size              = var.vm_disk_mib
   cpus                   = var.vm_cpus
@@ -81,6 +82,7 @@ source "qemu" "base" {
   ssh_timeout          = "${var.vm_ssh_timeout_seconds}s"
   shutdown_command     = "true"
   accelerator          = "kvm"
+  headless             = var.vm_headless
   efi_boot             = var.vm_firmware == "efi"
   disk_size            = "${var.vm_disk_mib}M"
   disk_interface       = "virtio"

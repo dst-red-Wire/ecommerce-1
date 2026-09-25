@@ -74,9 +74,10 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertEqual(
             {
                 "authority": "shared-all-hypervisors",
-                "vcpus": 2,
+                "vcpus": 4,
                 "memory_mib": 4096,
                 "disk_mib": 32768,
+                "headless": True,
             },
             self.image["build"]["resources"],
         )
@@ -114,6 +115,16 @@ class PackerImageContractTest(unittest.TestCase):
         )
         self.assertNotRegex(self.packer, r"(?m)^\s*cpus\s*=\s*2$")
         self.assertNotRegex(self.packer, r"(?m)^\s*memory\s*=\s*4096$")
+        self.assertEqual(
+            2,
+            len(
+                re.findall(
+                    r"^\s*headless\s*=\s*var\.vm_headless$",
+                    self.packer,
+                    re.MULTILINE,
+                )
+            ),
+        )
         self.assertRegex(self.packer, r"(?m)^\s*disk_size\s*=\s*var\.vm_disk_mib$")
         self.assertIn('disk_size            = "${var.vm_disk_mib}M"', self.packer)
         self.assertIn("firmware               = var.vm_firmware", self.packer)
@@ -155,6 +166,7 @@ class PackerImageContractTest(unittest.TestCase):
                             "vcpus": 4,
                             "memory_mib": 8192,
                             "disk_mib": 65536,
+                            "headless": False,
                         },
                         "storage": {
                             "authority": "shared-all-hypervisors",
@@ -193,6 +205,7 @@ class PackerImageContractTest(unittest.TestCase):
             self.assertIn("vm_cpus = 4\n", rendered)
             self.assertIn("vm_memory_mib = 8192\n", rendered)
             self.assertIn("vm_disk_mib = 65536\n", rendered)
+            self.assertIn("vm_headless = false\n", rendered)
             self.assertIn('vm_firmware = "bios"\n', rendered)
             self.assertIn('vm_partition_table = "gpt"\n', rendered)
             self.assertIn("vm_bios_boot_mib = 1\n", rendered)
