@@ -1,0 +1,149 @@
+version: 1
+kind: ExecutionPropertiesPolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+scope: entire-repository
+principles:
+  single_semantic_authority: true
+  declaration_is_not_implementation: true
+  implementation_is_not_evidence: true
+  runtime_evidence_is_not_status: true
+  qce_role: evidence-aggregation-only
+  roadmap_status_source: verified-gate-evidence-only
+properties:
+  reproducibility:
+    required: true
+    exact_inputs: required
+    mutable_versions: forbidden
+    proof: same-declared-inputs-and-toolchain-produce-semantically-equivalent-output
+  determinism:
+    required: true
+    uncontrolled_randomness: forbidden
+    uncontrolled_time_dependency: forbidden
+    unstable_ordering: forbidden
+    proof: repeated-execution-has-equivalent-observable-result
+  idempotency:
+    required_for:
+    - ansible
+    - bootstrap
+    - reconciliation
+    proof: second-apply-changed-zero
+  convergence:
+    second_apply_changes: 0
+    proof: observed-state-equals-desired-state
+  immutability:
+    published_artifacts: required
+    digest_addressing: required
+    mutable_tag_as_identity: forbidden
+    proof: published-artifact-resolves-to-exact-digest
+  hermeticity:
+    undeclared_network_access: forbidden
+    undeclared_dependencies: forbidden
+    proof: all-inputs-and-network-access-declared
+  integrity:
+    required_for:
+    - published-artifacts
+    - execution-evidence
+    digest_verification: required
+    proof: content-matches-verified-expected-digest
+  provenance:
+    source_sha: required
+    toolchain_digest: required
+    artifact_digest: required
+    proof: source-toolchain-artifact-linkage
+  verification:
+    runtime_evidence: required
+    declaration_only_proof: forbidden
+    proof: gate-validates-unambiguous-runtime-evidence
+  drift:
+    detection: required
+    state_separation:
+    - configured
+    - desired
+    - observed
+    proof: observed-state-compared-with-desired-state
+  recovery:
+    capture_before_mutation: required
+    restore_on_failure: required
+    restore_verification: required
+    proof: capture-mutate-restore-verify
+  execution:
+    bounded: required
+    concurrency_locking: required
+    timeout: required
+    unlimited_retries: forbidden
+    proof: runtime-record-includes-bounds-and-lock-result
+  failure:
+    unknown_state: fail_closed
+    missing_evidence: fail_closed
+    cannot_verify: fail_closed
+    ambiguous_evidence: fail_closed
+adjacent_property_decisions:
+  confidentiality:
+    classification: security-property
+    authority: config/contracts/secret-delivery-policy.yaml
+    included: false
+  authenticity:
+    classification: covered-by-integrity-and-identity-contracts
+    authority: config/contracts/identity-boundary-policy.yaml
+    included: false
+  traceability:
+    classification: evidence-linkage
+    covered_by:
+    - provenance
+    - verification
+    included: false
+  auditability:
+    classification: evidence-retention-and-aggregation
+    covered_by:
+    - provenance
+    - verification
+    included: false
+  reversibility:
+    classification: recovery-semantics
+    covered_by:
+    - recovery
+    included: false
+  portability:
+    classification: non-universal-execution-property
+    included: false
+  availability:
+    classification: service-resilience-property
+    authority: config/contracts/service-resilience-policy.yaml
+    included: false
+  isolation:
+    classification: security-boundary-property
+    authority: config/contracts/security-trust-zones.yaml
+    included: false
+  consistency:
+    classification: domain-data-property
+    authority: config/contracts/commerce-transaction-policy.yaml
+    included: false
+  atomicity:
+    classification: domain-data-property
+    authority: config/contracts/commerce-transaction-policy.yaml
+    included: false
+  compatibility:
+    classification: contract-evolution-property
+    authority: config/contracts/public-api-contracts.yaml
+    included: false
+  observability:
+    classification: telemetry-property
+    authority: config/contracts/observability-topology.yaml
+    included: false
+evidence_contract:
+  status_values:
+  - PASS
+  - FAIL
+  static_status_forbidden: true
+  required_identity_fields:
+  - source_sha
+  - toolchain_digest
+  - artifact_digest
+  required_runtime_fields:
+  - gate
+  - status
+  - observed_at
+  - evidence_digest
+  digest_pattern: ^sha256:[0-9a-f]{64}$
+  unknown_or_missing: FAIL
