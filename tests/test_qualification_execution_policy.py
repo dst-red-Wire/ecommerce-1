@@ -28,6 +28,62 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def test_static_profile_excludes_runtime_without_constructing_executor(self):
+        requests = [types.SimpleNamespace(name="testcontainers")]
+        api = types.SimpleNamespace(
+            detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(name="linux_container"),
+            RuntimeExecutor=mock.Mock(side_effect=AssertionError("runtime executor must not run")),
+        )
+        contract = {
+            "runtime_orchestration": {},
+            "qualification_profiles": {
+                "static": {
+                    "allowed_environments": ["linux_container"],
+                    "runtime_capabilities": {"testcontainers": "out_of_scope"},
+                }
+            },
+        }
+        decisions = []
+        callback = mock.Mock(return_value=0)
+        with (
+            mock.patch.object(MOD, "_runtime_api", return_value=api),
+            mock.patch.object(MOD, "_runtime_requests", return_value=requests),
+            mock.patch.object(MOD, "_runtime_source", return_value=("worktree", "a" * 40)),
+            mock.patch.object(MOD, "qualification_execution_policy", return_value=contract),
+        ):
+            for _ in range(2):
+                self.assertEqual(0, MOD._execute_with_runtime(
+                    [{"gate": "service:product"}], callback, workflow="verify-change",
+                    head="WORKTREE", environment={}, execution_profile="static",
+                    scope_decisions=decisions,
+                ))
+        self.assertEqual(2, callback.call_count)
+        self.assertTrue(all(item["status"] == "OUT_OF_SCOPE" and item["executed"] is False for item in decisions))
+
+    def test_required_runtime_in_container_is_blocked_without_executor(self):
+        requests = [types.SimpleNamespace(name="docker-runtime")]
+        api = types.SimpleNamespace(
+            detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(name="linux_container"),
+            RuntimeExecutor=mock.Mock(side_effect=AssertionError("mutation must not run")),
+        )
+        contract = {"runtime_orchestration": {}, "qualification_profiles": {"full": {
+            "allowed_environments": ["wsl2_developer"],
+            "runtime_capabilities": {"docker-runtime": "required_when_affected"},
+        }}}
+        records = []
+        with (
+            mock.patch.object(MOD, "_runtime_api", return_value=api),
+            mock.patch.object(MOD, "_runtime_requests", return_value=requests),
+            mock.patch.object(MOD, "_runtime_source", return_value=("worktree", "a" * 40)),
+            mock.patch.object(MOD, "qualification_execution_policy", return_value=contract),
+        ):
+            self.assertEqual(2, MOD._execute_with_runtime(
+                [{"gate": "service:product"}], mock.Mock(), workflow="verify-change",
+                head="WORKTREE", environment={}, records=records, execution_profile="full",
+            ))
+        self.assertEqual("BLOCKED_RUNTIME", records[0]["runtime_status"])
+        self.assertIn("no mutation performed", records[0]["reason"])
+
     def test_runtime_restore_failures_always_add_a_failed_evidence_record(self):
         class FakeExecutor:
             def __init__(self, *_args, **_kwargs):
@@ -46,6 +102,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 api = types.SimpleNamespace(
                     RuntimeExecutor=FakeExecutor,
                     BuiltinCapabilityDriver=lambda _environment: object(),
+                    detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(name="unknown"),
                 )
                 with (
                     mock.patch.object(MOD, "_runtime_api", return_value=api),
@@ -56,7 +113,15 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     mock.patch.object(
                         MOD,
                         "qualification_execution_policy",
-                        return_value={"runtime_orchestration": {}},
+                        return_value={
+                            "runtime_orchestration": {},
+                            "qualification_profiles": {
+                                "full": {
+                                    "allowed_environments": ["unknown"],
+                                    "runtime_capabilities": {},
+                                }
+                            },
+                        },
                     ),
                 ):
                     rc = MOD._execute_with_runtime(

@@ -1153,6 +1153,22 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError("qualification execution policy must declare runtime_orchestration")
         _runtime_api().validate_runtime_policy(runtime_policy)
         capability_names = set(runtime_policy["capabilities"])
+        context = policy.get("execution_context")
+        profiles = policy.get("qualification_profiles")
+        if not isinstance(context, dict) or not isinstance(context.get("environments"), dict):
+            raise RuntimeError("qualification execution policy must declare execution environments")
+        if not isinstance(profiles, dict) or set(profiles) != {"static", "developer-wsl2", "runtime", "full"}:
+            raise RuntimeError("qualification execution policy must declare the canonical qualification profiles")
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile, dict) or not isinstance(profile.get("allowed_environments"), list):
+                raise RuntimeError(f"qualification profile {profile_name} is invalid")
+            if set(profile["allowed_environments"]) - set(context["environments"]):
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown environment")
+            dispositions = profile.get("runtime_capabilities", {})
+            if not isinstance(dispositions, dict) or set(dispositions) - capability_names:
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown capability")
+            if set(dispositions.values()) - {"out_of_scope", "required_when_affected"}:
+                raise RuntimeError(f"qualification profile {profile_name} has an unknown capability disposition")
         for gate_name, gate in gates.items():
             if not isinstance(gate, dict):
                 continue
@@ -3388,6 +3404,15 @@ def reconcile(tags: str, target_repo_root: str = "") -> int:
     selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
     if not selected:
         return fail("reconcile requires at least one Ansible tag")
+    if "docker" in selected.split(","):
+        detected = _runtime_api().detect_execution_environment()
+        if detected.name != "wsl2_developer":
+            return fail(
+                "BLOCKED_RUNTIME: docker reconciliation requires "
+                "execution_environment=wsl2_developer "
+                f"detected={detected.name} no mutation performed",
+                2,
+            )
     require("ansible-playbook")
     repo_root = Path(target_repo_root).expanduser().resolve() if target_repo_root else ROOT
     run(
@@ -5047,6 +5072,8 @@ def _execute_with_runtime(
     capability_context: dict[str, object] | None = None,
     authoritative: bool = False,
     records: list[dict] | None = None,
+    execution_profile: str = "full",
+    scope_decisions: list[dict] | None = None,
 ) -> int:
     if environment.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
         return callback(environment)
@@ -5057,10 +5084,52 @@ def _execute_with_runtime(
         context=capability_context,
     )
     source_kind, source_sha = _runtime_source(head)
+    policy = qualification_execution_policy()
+    profile = policy["qualification_profiles"][execution_profile]
+    detected = runtime.detect_execution_environment(environ=environment)
+    dispositions = profile.get("runtime_capabilities", {})
+    excluded = sorted({request.name for request in requests if dispositions.get(request.name) == "out_of_scope"})
+    if excluded:
+        decisions = scope_decisions if scope_decisions is not None else []
+        for capability in excluded:
+            decisions.append(
+                {
+                    "capability": capability,
+                    "status": "OUT_OF_SCOPE",
+                    "executed": False,
+                    "execution_profile": execution_profile,
+                    "execution_environment": detected.name,
+                    "policy_reason": "capability explicitly excluded by qualification profile",
+                    "source_sha": source_sha,
+                }
+            )
+        requests = [request for request in requests if request.name not in excluded]
+    runtime_env = dict(environment)
+    runtime_env.update(
+        {
+            "ECOMMERCE_EXECUTION_PROFILE": execution_profile,
+            "ECOMMERCE_EXECUTION_ENVIRONMENT": detected.name,
+        }
+    )
+    if not requests and excluded:
+        runtime_env["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
+        return callback(runtime_env)
+    if detected.name not in profile["allowed_environments"]:
+        if records is not None:
+            records.append({
+                "gate": "runtime-orchestration",
+                "status": "FAIL",
+                "runtime_status": "BLOCKED_RUNTIME",
+                "exit_code": 2,
+                "duration_seconds": 0.0,
+                "execution": "fresh",
+                "reason": f"profile {execution_profile} requires runtime capabilities unavailable in {detected.name}; no mutation performed",
+            })
+        return 2
     executor = runtime.RuntimeExecutor(
         ROOT,
         qualification_execution_policy()["runtime_orchestration"],
-        driver=runtime.BuiltinCapabilityDriver(environment),
+        driver=runtime.BuiltinCapabilityDriver(runtime_env),
     )
     result = executor.execute(
         requests,
@@ -5069,7 +5138,7 @@ def _execute_with_runtime(
         source_kind=source_kind,
         source_sha=source_sha,
         selected_gates=[str(entry["gate"]) for entry in plan],
-        base_environment=environment,
+        base_environment=runtime_env,
         authoritative=authoritative,
         gate_results=(lambda: copy.deepcopy(records or [])),
     )
@@ -5669,7 +5738,7 @@ def write_evidence(
     return destination
 
 
-def verify_change(base: str, head: str) -> int:
+def verify_change(base: str, head: str, profile: str = "full") -> int:
     if toolchain_closure():
         return 1
     source_head_sha: str | None = None
@@ -5706,10 +5775,11 @@ def verify_change(base: str, head: str) -> int:
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
-    verification: dict = {"mode": "full"}
+    verification: dict = {"mode": "full", "execution_profile": profile}
     if head == "WORKTREE":
         verification = {
             "mode": "worktree",
+            "execution_profile": profile,
             "source_head_sha": source_head_sha,
             "source_tree_sha": source_tree_sha,
         }
@@ -5718,6 +5788,7 @@ def verify_change(base: str, head: str) -> int:
         delta_components = set(affected(parent_sha, head, strict_unknown=True))
         verification = {
             "mode": "incremental",
+            "execution_profile": profile,
             "parent_sha": parent_sha,
             "delta_paths": delta_paths,
             "delta_components": sorted(delta_components),
@@ -5782,6 +5853,7 @@ def verify_change(base: str, head: str) -> int:
                 return fail("worktree changed during verification; evidence is not promotable", 1)
         return 0
 
+    scope_decisions: list[dict] = []
     runtime_rc = _execute_with_runtime(
         plan,
         execute_selected,
@@ -5790,7 +5862,10 @@ def verify_change(base: str, head: str) -> int:
         environment=env,
         authoritative=head != "WORKTREE",
         records=records,
+        execution_profile=profile,
+        scope_decisions=scope_decisions,
     )
+    verification["runtime_scope"] = scope_decisions
     if runtime_rc:
         write_evidence(base, head, paths, components, records, verification)
         return runtime_rc
@@ -7919,6 +7994,7 @@ def main() -> int:
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    v.add_argument("--profile", choices=("static", "developer-wsl2", "runtime", "full"), default="full")
     gl = sub.add_parser("global-check")
     gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -8104,7 +8180,7 @@ def main() -> int:
             print(json.dumps(comps) if args.json else "\n".join(comps))
             return 0
         if args.cmd == "verify-change":
-            return verify_change(args.base, args.head)
+            return verify_change(args.base, args.head, args.profile)
         if args.cmd == "global-check":
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":

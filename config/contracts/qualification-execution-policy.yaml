@@ -12,6 +12,93 @@ principles:
   exact_sha_evidence_remains_authoritative: true
   dynamic_state_must_be_fresh: true
 
+execution_context:
+  detection:
+    owner: scripts/runtime_orchestration.py
+    side_effects: forbidden
+    precedence: [wsl2_developer, linux_container, native_linux, unknown]
+    signals:
+      wsl2_developer: [WSL_INTEROP, WSL_DISTRO_NAME, /proc/version-microsoft]
+      linux_container: [/.dockerenv, /run/.containerenv, /proc/1/cgroup-container-marker, /proc/1/mountinfo-overlay-root]
+      native_linux: [linux-platform-without-wsl-or-container-signals]
+  environments:
+    linux_container:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: not_applicable
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+    wsl2_developer:
+      host_mutation: governed
+      docker_rootless_reconciliation: allowed
+      ip_forward_mutation: governed
+      virtualbox_mutation: governed-windows-interop
+    native_linux:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: not_applicable
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+    unknown:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: forbidden
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+  statuses:
+    PASS: gate-executed-and-satisfied
+    OUT_OF_SCOPE: capability-explicitly-excluded-by-selected-profile
+    BLOCKED_RUNTIME: capability-required-but-environment-cannot-safely-satisfy-it
+    FAIL: gate-executed-and-not-satisfied
+
+qualification_profiles:
+  static:
+    purpose: portable-non-mutating-global-and-affected-qualification
+    allowed_environments: [linux_container, wsl2_developer, native_linux]
+    mutation_classes: [none]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: out_of_scope
+      ip-forward: out_of_scope
+      testcontainers: out_of_scope
+      wsl-windows-interop: out_of_scope
+      virtualbox-runtime-available: out_of_scope
+      vagrant-runtime: out_of_scope
+      memory-capacity: out_of_scope
+      cpu-capacity: out_of_scope
+      disk-capacity: out_of_scope
+      ansible-runtime: out_of_scope
+      opentofu-runtime: out_of_scope
+      kubernetes-context: out_of_scope
+      container-registry-auth: out_of_scope
+      harbor-readiness: out_of_scope
+      tekton-readiness: out_of_scope
+      production-context: out_of_scope
+  developer-wsl2:
+    purpose: governed-local-developer-runtime-qualification
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+  runtime:
+    purpose: gate-driven-runtime-qualification
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+  full:
+    purpose: merge-authoritative-static-and-runtime-qualification
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization, external-governed]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+
 runtime_orchestration:
   enabled: true
   single_authority: true
