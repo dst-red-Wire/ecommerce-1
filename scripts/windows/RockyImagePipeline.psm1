@@ -317,9 +317,22 @@ function Remove-OwnedVirtualMachine {
         $poweroff = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('controlvm', $current[$Name], 'poweroff') -TimeoutSeconds 60 -WorkingDirectory $WorkingDirectory
         Assert-ProcessSuccess -Result $poweroff -Operation "VirtualBox poweroff for $Name"
     }
-    $result = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('unregistervm', $current[$Name], '--delete') -TimeoutSeconds 300 -WorkingDirectory $WorkingDirectory
-    Assert-ProcessSuccess -Result $result -Operation "VirtualBox cleanup for $Name"
-    return 'PASS'
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+        $result = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('unregistervm', $current[$Name], '--delete') -TimeoutSeconds 30 -WorkingDirectory $WorkingDirectory
+        if ($result.ExitCode -eq 0) { return 'PASS' }
+        if (($result.StdOut + $result.StdErr) -notmatch 'while it is locked|VBOX_E_INVALID_OBJECT_STATE') {
+            Assert-ProcessSuccess -Result $result -Operation "VirtualBox cleanup for $Name"
+        }
+        $remaining = Get-VBoxMachines -VBoxManage $VBoxManage -WorkingDirectory $WorkingDirectory
+        if (-not $remaining.ContainsKey($Name)) { return 'PASS' }
+        if ($remaining[$Name] -ne $current[$Name]) {
+            throw "VirtualBox cleanup target changed identity while waiting: $Name"
+        }
+        if ($attempt -eq 12) {
+            Assert-ProcessSuccess -Result $result -Operation "VirtualBox cleanup for $Name after bounded lock retries"
+        }
+        Start-Sleep -Seconds 5
+    }
 }
 
 Export-ModuleMember -Function Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine

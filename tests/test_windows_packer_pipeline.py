@@ -235,6 +235,10 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("-TimeoutSeconds 60", self.module)
         self.assertIn(") -TimeoutSeconds 300", self.build)
         self.assertIn("taskkill.exe", self.module)
+        self.assertIn("$attempt -le 12", self.module)
+        self.assertIn("while it is locked|VBOX_E_INVALID_OBJECT_STATE", self.module)
+        self.assertIn("$remaining[$Name] -ne $current[$Name]", self.module)
+        self.assertIn("Start-Sleep -Seconds 5", self.module)
         self.assertIn("$attempt -le 12", self.qualify)
         self.assertIn("Start-Sleep -Seconds 5", self.qualify)
         self.assertNotRegex(
