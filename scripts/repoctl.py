@@ -2047,7 +2047,241 @@ def repository_authority_check() -> int:
         ROOT,
     )
 
+    execution_policy, execution_registry = execution_properties_contracts()
+    execution_violations = execution_properties_violations(execution_policy, execution_registry)
+    if execution_violations:
+        raise RuntimeError("execution properties policy invalid: " + "; ".join(execution_violations))
+
     print("PASS repository maximal authority model")
+    return 0
+
+
+EXECUTION_PROPERTY_NAMES = {
+    "reproducibility",
+    "determinism",
+    "idempotency",
+    "convergence",
+    "immutability",
+    "hermeticity",
+    "integrity",
+    "provenance",
+    "verification",
+    "drift",
+    "recovery",
+    "execution",
+    "failure",
+}
+EXECUTION_RELATIONSHIPS = {
+    "implements",
+    "enforces",
+    "verifies",
+    "observes",
+    "produces_evidence",
+    "transports_evidence",
+}
+
+
+def execution_properties_contracts(root: Path = ROOT) -> tuple[dict, dict]:
+    """Load the semantic authority and its non-authoritative implementation registry."""
+    paths = (
+        root / "config/contracts/execution-properties-policy.yaml",
+        root / "config/contracts/execution-properties-implementations.yaml",
+    )
+    missing = [str(path.relative_to(root)) for path in paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"execution properties contract missing: {', '.join(missing)}")
+    return ruby_yaml(str(paths[0].relative_to(root))), ruby_yaml(str(paths[1].relative_to(root)))
+
+
+def _contains_forbidden_execution_claim(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key).lower() in {"proven", "completion_status"} and str(item).upper() == "PROVEN"
+            or _contains_forbidden_execution_claim(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_execution_claim(item) for item in value)
+    return False
+
+
+def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
+    """Validate authority separation and fail-closed implementation/evidence declarations."""
+    violations: list[str] = []
+    if policy.get("version") != 1 or policy.get("kind") != "ExecutionPropertiesPolicy":
+        violations.append("canonical execution properties policy identity is invalid")
+    if policy.get("status") != "enforced":
+        violations.append("canonical execution properties policy status must be enforced")
+    properties = policy.get("properties")
+    if not isinstance(properties, dict):
+        return violations + ["canonical execution properties must be a mapping"]
+    missing = EXECUTION_PROPERTY_NAMES - set(properties)
+    if missing:
+        violations.append(f"canonical execution properties disappeared without migration: {sorted(missing)}")
+    expected = {
+        ("reproducibility", "mutable_versions"): "forbidden",
+        ("convergence", "second_apply_changes"): 0,
+        ("verification", "runtime_evidence"): "required",
+        ("verification", "declaration_only_proof"): "forbidden",
+        ("drift", "detection"): "required",
+        ("recovery", "capture_before_mutation"): "required",
+        ("recovery", "restore_on_failure"): "required",
+        ("recovery", "restore_verification"): "required",
+        ("execution", "bounded"): "required",
+        ("execution", "concurrency_locking"): "required",
+        ("failure", "unknown_state"): "fail_closed",
+        ("failure", "missing_evidence"): "fail_closed",
+    }
+    for (name, field), value in expected.items():
+        if not isinstance(properties.get(name), dict) or properties[name].get(field) != value:
+            violations.append(f"canonical property {name}.{field} must be {value!r}")
+    evidence_contract = policy.get("evidence_contract", {})
+    if evidence_contract.get("static_status_forbidden") is not True:
+        violations.append("static execution proof status must be forbidden")
+    if evidence_contract.get("unknown_or_missing") != "FAIL":
+        violations.append("unknown or missing execution evidence must fail closed")
+
+    if registry.get("version") != 1 or registry.get("kind") != "ExecutionPropertiesImplementations":
+        violations.append("execution implementation registry identity is invalid")
+    if registry.get("status") != "enforced":
+        violations.append("execution implementation registry status must be enforced")
+    if registry.get("policy_ref") != "config/contracts/execution-properties-policy.yaml":
+        violations.append("implementation registry must reference the canonical execution policy")
+    if registry.get("semantics") != "references-only":
+        violations.append("implementation registry must not redefine property semantics")
+    if set(registry.get("relationship_values", [])) != EXECUTION_RELATIONSHIPS:
+        violations.append("execution relationship vocabulary drifted")
+    if _contains_forbidden_execution_claim(registry):
+        violations.append("implementation registry contains a static PROVEN claim")
+    implementations = registry.get("implementations")
+    if not isinstance(implementations, dict):
+        return violations + ["execution implementations must be a mapping"]
+    for required in registry.get("required_implementations", []):
+        if required not in implementations:
+            violations.append(f"required active implementation has no mapping: {required}")
+    for tool, entry in implementations.items():
+        if not isinstance(entry, dict):
+            violations.append(f"implementation {tool} must be a mapping")
+            continue
+        if not isinstance(entry.get("authority_ref"), str) or not entry["authority_ref"]:
+            violations.append(f"implementation {tool} is unknown to the canonical toolchain or architecture")
+        relationships = entry.get("relationships")
+        if not isinstance(relationships, dict) or not relationships:
+            violations.append(f"implementation {tool} has no property relationships")
+            continue
+        for property_name, roles in relationships.items():
+            if property_name not in properties:
+                violations.append(f"implementation {tool} references unknown property: {property_name}")
+            if not isinstance(roles, list) or not roles or set(roles) - EXECUTION_RELATIONSHIPS:
+                violations.append(f"implementation {tool} has invalid relationship for {property_name}")
+        mechanisms = entry.get("mechanisms")
+        if not isinstance(mechanisms, list) or not mechanisms or not all(isinstance(x, str) and x for x in mechanisms):
+            violations.append(f"implementation {tool} has no implementation mechanism")
+        if not isinstance(entry.get("gate"), str) or not entry["gate"]:
+            violations.append(f"implementation {tool} has no verifying gate")
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("runtime_required") is not True:
+            violations.append(f"implementation {tool} lacks required runtime evidence")
+            continue
+        required_fields = set(evidence.get("required_fields", []))
+        baseline = {"source_sha", "toolchain_digest", "artifact_digest"}
+        if not baseline.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks complete provenance evidence fields")
+        if not evidence.get("producer") or not evidence.get("artifact"):
+            violations.append(f"implementation {tool} has ambiguous evidence producer or artifact")
+        if "convergence" in relationships and "second_apply_changes" not in required_fields and tool in {"ansible", "opentofu"}:
+            violations.append(f"implementation {tool} lacks second-apply convergence evidence")
+        if "drift" in relationships and "drift_detected" not in required_fields:
+            violations.append(f"implementation {tool} lacks drift detection evidence")
+        if "recovery" in relationships and not {"capture_digest", "restore_verification"}.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks capture/verified-restore evidence")
+        if "execution" in relationships and "timeout_seconds" not in required_fields:
+            violations.append(f"implementation {tool} lacks bounded execution timeout evidence")
+        if tool in {"opentofu", "tekton"} and "locking" not in required_fields:
+            violations.append(f"implementation {tool} lacks concurrency locking evidence")
+    return violations
+
+
+def execution_evidence_violations(policy: dict, registry: dict, evidence: dict) -> list[str]:
+    """Validate one runtime proof record; absence and ambiguity are failures, never passes."""
+    violations: list[str] = []
+    if not isinstance(evidence, dict):
+        return ["runtime execution evidence must be a mapping"]
+    tool = evidence.get("implementation")
+    implementations = registry.get("implementations", {})
+    if tool not in implementations:
+        return [f"runtime evidence references unknown implementation: {tool}"]
+    entry = implementations[tool]
+    required = set(policy["evidence_contract"]["required_identity_fields"])
+    required.update(policy["evidence_contract"]["required_runtime_fields"])
+    required.update(entry["evidence"]["required_fields"])
+    for field in sorted(required):
+        if field not in evidence or evidence[field] in (None, "", "unknown"):
+            violations.append(f"runtime evidence missing or unknown: {field}")
+    if evidence.get("status") not in policy["evidence_contract"]["status_values"]:
+        violations.append("runtime evidence status is unknown")
+    digest_pattern = policy["evidence_contract"]["digest_pattern"]
+    for field in ("toolchain_digest", "artifact_digest", "evidence_digest"):
+        value = evidence.get(field, "")
+        if not isinstance(value, str) or re.fullmatch(digest_pattern, value) is None:
+            violations.append(f"runtime evidence {field} is not an exact sha256 digest")
+    if not isinstance(evidence.get("source_sha"), str) or re.fullmatch(r"[0-9a-f]{40}", evidence.get("source_sha", "")) is None:
+        violations.append("runtime evidence source_sha is not an exact full SHA")
+    if any(str(value).lower() == "latest" for value in evidence.values()):
+        violations.append("runtime evidence contains a mutable latest version")
+    relationships = entry["relationships"]
+    if tool in {"ansible", "opentofu"} and evidence.get("second_apply_changes") != 0:
+        violations.append("required second apply did not converge with zero changes")
+    if tool == "ansible" and evidence.get("changed") != 0:
+        violations.append("Ansible idempotence evidence changed is not zero")
+    if "drift" in relationships and "drift_detected" not in evidence:
+        violations.append("required drift observation is missing")
+    if "recovery" in relationships:
+        if not evidence.get("capture_digest"):
+            violations.append("recovery evidence lacks pre-mutation capture")
+        if evidence.get("restore_verification") is not True:
+            violations.append("recovery restore was not verified")
+    if "execution" in relationships:
+        timeout = evidence.get("timeout_seconds")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            violations.append("bounded execution has no positive timeout")
+        if evidence.get("retry_limit") in (-1, "unlimited", "infinite"):
+            violations.append("bounded execution declares unlimited retries")
+        if tool in {"opentofu", "tekton"} and evidence.get("locking") is not True:
+            violations.append("state-mutating concurrent execution lacks locking")
+    if _contains_forbidden_execution_claim(evidence):
+        violations.append("runtime evidence contains an unverified PROVEN claim")
+    return violations
+
+
+def execution_properties_matrix(registry: dict) -> str:
+    """Render the human view directly from the machine-readable implementation registry."""
+    rows = ["| Component | Implements | Enforces | Verifies | Observes / evidence |", "|---|---|---|---|---|"]
+    for tool, entry in registry["implementations"].items():
+        by_role = {role: [] for role in EXECUTION_RELATIONSHIPS}
+        for prop, roles in entry["relationships"].items():
+            for role in roles:
+                by_role[role].append(prop)
+        observed = sorted(set(by_role["observes"] + by_role["produces_evidence"] + by_role["transports_evidence"]))
+        values = [tool, ", ".join(sorted(by_role["implements"])) or "—", ", ".join(sorted(by_role["enforces"])) or "—", ", ".join(sorted(by_role["verifies"])) or "—", ", ".join(observed) or "—"]
+        rows.append("| " + " | ".join(values) + " |")
+    return "\n".join(rows) + "\n"
+
+
+def execution_properties_check(*, matrix: bool = False, evidence_path: str = "") -> int:
+    policy, registry = execution_properties_contracts()
+    violations = execution_properties_violations(policy, registry)
+    if evidence_path:
+        evidence = ruby_yaml(evidence_path)
+        violations.extend(execution_evidence_violations(policy, registry, evidence))
+    if violations:
+        for violation in violations:
+            print(f"FAIL execution-properties: {violation}", file=sys.stderr)
+        return 1
+    if matrix:
+        print(execution_properties_matrix(registry), end="")
+    else:
+        print(json.dumps({"gate": "execution-properties", "status": "PASS", "policy": registry["policy_ref"], "implementations": len(registry["implementations"])}))
     return 0
 
 
@@ -7590,6 +7824,9 @@ def main() -> int:
     qtrace = sub.add_parser("qce-trace")
     qtrace.add_argument("--sector", default="")
     sub.add_parser("qce-check")
+    execution_properties = sub.add_parser("execution-properties")
+    execution_properties.add_argument("--matrix", action="store_true")
+    execution_properties.add_argument("--evidence", default="")
     metrics = sub.add_parser("engineering-metrics")
     metrics.add_argument("--input", required=True)
     metrics.add_argument("--output", default="")
@@ -7908,6 +8145,8 @@ def main() -> int:
             return qce_status_command(json_output=True, sector=args.sector, trace=True)
         if args.cmd == "qce-check":
             return qce_check_command()
+        if args.cmd == "execution-properties":
+            return execution_properties_check(matrix=args.matrix, evidence_path=args.evidence)
         if args.cmd == "engineering-metrics":
             return engineering_metrics_command(args.input, args.output)
         if args.cmd == "security-datasets-sync":
