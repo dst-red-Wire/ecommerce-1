@@ -279,6 +279,12 @@ local Windows staging directory below LocalAppData, executes the Windows tools
 there, copies only the final box and evidence into `.artifacts`, then removes the
 owned staging tree.
 
+RPM provisioning reconciles the older DVD package set to the signed locked
+closure with all network repositories disabled. The contract permits
+`allowerasing` only to replace incompatible ISO-era companion packages;
+`skip-broken` and `nobest` remain forbidden, and exact profile-root NEVRAs are
+qualified immediately after every transaction.
+
 ## RKE2 relationship
 
 The image pipeline stays separate from cluster qualification:

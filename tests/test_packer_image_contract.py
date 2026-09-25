@@ -251,6 +251,20 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertNotIn("qemu-guest-agent", base)
 
     def test_profile_package_lock_is_a_valid_projection(self):
+        self.assertEqual(
+            {
+                "repositories": "forbidden",
+                "local_package_gpg_check": "required",
+                "iso_conflict_replacement": "allowerasing",
+                "skip_broken": "forbidden",
+                "nobest": "forbidden",
+                "qualification": "exact-profile-roots",
+            },
+            self.image["packages"]["transaction"],
+        )
+        self.assertEqual(4, self.packer.count("--allowerasing install"))
+        self.assertNotIn("--skip-broken", self.packer)
+        self.assertNotIn("--nobest", self.packer)
         self.assertEqual(self.package_lock["schema_version"], 2)
         self.assertEqual(self.package_lock["image"], "rocky-10.2-base")
         self.assertTrue(manifest_is_valid(self.package_lock))

@@ -97,6 +97,10 @@ make image-rocky-linux-build OFFLINE=1
 Offline materialization fails if any cache entry is absent. Packer variables use
 host-local paths and a local `file:///` ISO. `packer init`, `packer fmt -check`
 and `packer validate` are mandatory before either profile-specific build.
+The locked RPM closure is installed with repositories disabled, local GPG
+verification enabled and explicit replacement of conflicting older DVD
+packages. `skip-broken` and `nobest` are forbidden; each profile's contract
+roots must match their exact locked NEVRA after the transaction.
 
 Regenerate the RPM projection only when the central package roots change:
 

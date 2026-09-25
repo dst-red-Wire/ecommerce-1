@@ -21,6 +21,13 @@ packer_image:
     projection_from: packer_image.profiles.*.rpm_packages
     schema: profile-separated-rpm-closure-v2
     single_definition_for_all_outputs: true
+    transaction:
+      repositories: forbidden
+      local_package_gpg_check: required
+      iso_conflict_replacement: allowerasing
+      skip_broken: forbidden
+      nobest: forbidden
+      qualification: exact-profile-roots
     sources:
       rocky:
         repositories:
