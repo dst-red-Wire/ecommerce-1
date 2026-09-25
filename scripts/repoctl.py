@@ -7237,7 +7237,7 @@ def image_phase_with_runtime(command: str, *, offline: bool = False) -> int:
 
 
 def local_services_qualification(action: str, *, offline: bool = False) -> int:
-    if action not in {"assets", "qualify", "recover"}:
+    if action not in {"assets", "capabilities", "qualify", "recover"}:
         return fail(f"unsupported local services qualification action: {action}")
     command = [sys.executable, str(ROOT / "scripts/local_services_qualification.py"), action]
     if action in {"assets", "qualify"} and offline:
@@ -7450,10 +7450,10 @@ def _write_machine_image_transport_evidence(path: Path, evidence: dict) -> None:
     os.replace(temporary, path)
 
 
-def _released_machine_image(profile: str, artifact: Path, digest: str, image: dict) -> str:
+def _released_machine_image_expected_sha256(profile: str, artifact: Path, image: dict) -> tuple[str, str]:
     status = git("status", "--porcelain", "--untracked-files=all").strip()
     if status:
-        raise RuntimeError("ORAS push requires a clean exact-SHA worktree")
+        raise RuntimeError("ORAS transport requires a clean exact-SHA worktree")
     head = git("rev-parse", "HEAD").strip()
     if re.fullmatch(r"[0-9a-f]{40}", head) is None:
         raise RuntimeError("ORAS push could not resolve the exact source SHA")
@@ -7471,10 +7471,18 @@ def _released_machine_image(profile: str, artifact: Path, digest: str, image: di
         release.get("status") != "PASS"
         or release.get("source_sha") != head
         or release.get("artifact") != artifact.name
-        or release.get("artifact_sha256") != digest
+        or not isinstance(release.get("artifact_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", release["artifact_sha256"]) is None
         or release.get("remote_publication") != "NOT_PERFORMED"
     ):
-        raise RuntimeError("ORAS push requires PASS release evidence for the exact SHA-256 artifact")
+        raise RuntimeError("ORAS transport requires PASS release evidence for the exact SHA-256 artifact")
+    return head, release["artifact_sha256"]
+
+
+def _released_machine_image(profile: str, artifact: Path, digest: str, image: dict) -> str:
+    head, expected_digest = _released_machine_image_expected_sha256(profile, artifact, image)
+    if digest != expected_digest:
+        raise RuntimeError("ORAS push artifact differs from the exact-SHA release")
     return head
 
 
@@ -7591,6 +7599,8 @@ def image_oras_pull(profile: str, reference: str) -> int:
     try:
         _, requested_digest = _validate_oras_digest_reference(reference)
         evidence["requested_reference"] = reference
+        image, _ = _machine_image_transport_contract()
+        _, expected_artifact_digest = _released_machine_image_expected_sha256(profile, artifact, image)
         oras = require("oras")
         require("rsync")
         cache = _oras_cache_root(distribution)
@@ -7627,6 +7637,8 @@ def image_oras_pull(profile: str, reference: str) -> int:
             pulled_artifact = entries[artifact.name]
             pulled_checksums = entries["SHA256SUMS"]
             digest = _verified_artifact_sha256(pulled_artifact, pulled_checksums)
+            if digest != expected_artifact_digest:
+                raise RuntimeError("ORAS pull artifact differs from the exact-SHA release")
             cached_root = cache / "materialized" / "sha256" / digest
             cached_artifact, cached_checksums, synced_digest = _rsync_artifact_pair(
                 pulled_artifact,
@@ -8342,6 +8354,7 @@ def main() -> int:
     local_services_assets = sub.add_parser("local-services-assets")
     local_services_assets.add_argument("--offline", action="store_true")
     local_services_qualify = sub.add_parser("local-services-qualify")
+    sub.add_parser("local-services-capabilities")
     local_services_qualify.add_argument("--offline", action="store_true")
     sub.add_parser("local-services-recover")
     pcamp = sub.add_parser("perf-campaign")
@@ -8576,6 +8589,8 @@ def main() -> int:
             return image_oras_pull(args.profile, args.reference)
         if args.cmd == "local-services-assets":
             return local_services_qualification("assets", offline=args.offline)
+        if args.cmd == "local-services-capabilities":
+            return local_services_qualification("capabilities")
         if args.cmd == "local-services-qualify":
             return local_services_qualification("qualify", offline=args.offline)
         if args.cmd == "local-services-recover":

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -36,6 +37,10 @@ EVIDENCE = ROOT / ".context/evidence/local-services-vm/qualification.json"
 
 class QualificationError(RuntimeError):
     """Raised when runtime qualification cannot prove a required invariant."""
+
+
+class RuntimeBlocked(QualificationError):
+    """The current host cannot run the required VirtualBox backend."""
 
 
 def now() -> str:
@@ -94,6 +99,50 @@ def contract() -> dict:
     if value.get("status") != "exact-local-runtime-qualification":
         raise QualificationError("local service contract is not exact")
     return value
+
+
+def runtime_capabilities() -> dict:
+    """Observe controller and Windows virtualization state without starting a VM."""
+    capabilities = {
+        "controller": "wsl2" if platform.system() == "Linux" and "wsl2" in platform.release().lower() else "unavailable",
+        "ansible": (ROOT / ".venv/qualification/bin/ansible-playbook").is_file(),
+        "ssh": shutil.which("ssh") is not None,
+        "windows_interop": POWERSHELL.is_file(),
+        "hypervisor_present": None,
+        "firmware_virtualization_enabled": None,
+        "virtualbox_backend": "NOT_PROBED",
+        "status": "BLOCKED_RUNTIME",
+        "reason": None,
+    }
+    if capabilities["windows_interop"]:
+        probe = (
+        "$c=Get-CimInstance Win32_ComputerSystem;"
+        "$p=@(Get-CimInstance Win32_Processor);"
+        "[pscustomobject]@{hypervisor_present=[bool]$c.HypervisorPresent;"
+        "firmware_virtualization_enabled=($p.Count -gt 0 -and "
+        "@($p | Where-Object {$_.VirtualizationFirmwareEnabled -ne $true}).Count -eq 0)}"
+        "|ConvertTo-Json -Compress"
+        )
+        try:
+            result = run([str(POWERSHELL), "-NoProfile", "-NonInteractive", "-Command", probe],
+                         cwd=Path("/mnt/c/Windows"), timeout=30)
+            windows = json.loads(result.stdout)
+            capabilities["hypervisor_present"] = windows["hypervisor_present"]
+            capabilities["firmware_virtualization_enabled"] = windows["firmware_virtualization_enabled"]
+        except (OSError, QualificationError, ValueError, KeyError, json.JSONDecodeError):
+            capabilities["windows_interop"] = False
+    if capabilities["controller"] != "wsl2":
+        capabilities["reason"] = "WSL2 Ansible/SSH controller is unavailable"
+    elif capabilities["hypervisor_present"]:
+        capabilities["virtualbox_backend"] = "NATIVE_VTX_UNAVAILABLE"
+        capabilities["reason"] = "Microsoft hypervisor is active; native VT-x is unavailable and NEM is forbidden"
+    elif not capabilities["ansible"] or not capabilities["ssh"] or not capabilities["windows_interop"]:
+        capabilities["reason"] = "WSL2 Ansible, SSH or Windows interop capability is unavailable"
+    elif not capabilities["firmware_virtualization_enabled"]:
+        capabilities["reason"] = "firmware virtualization is unavailable"
+    else:
+        capabilities["status"] = "READY_FOR_BACKEND_PROBE"
+    return capabilities
 
 
 def git(*arguments: str) -> str:
@@ -584,6 +633,9 @@ def bootstrap_vm(state: Path, identity: Path, known_hosts: Path) -> None:
     try:
         vagrant(state, "validate", timeout=120)
         vagrant(state, "up", "--provider", "virtualbox", "--no-provision", timeout=900)
+        backend = run([sys.executable, str(TRANSPORT), "backend", "--state", str(state)], timeout=60).stdout.strip()
+        if backend != "NATIVE_VTX":
+            raise RuntimeBlocked(f"VirtualBox backend is {backend}; native VT-x is required and NEM is forbidden")
         wait_for_ssh(state, identity, known_hosts)
     finally:
         powershell_seed("Stop", seed, int(runtime["seed_port"]))
@@ -597,6 +649,7 @@ def qualify(*, offline: bool) -> int:
         "status": "FAIL",
         "source_sha": head,
         "artifact_sha256": None,
+        "runtime_capabilities": {},
         "gitea": {},
         "harbor": {},
         "oras": {},
@@ -613,6 +666,9 @@ def qualify(*, offline: bool) -> int:
             raise QualificationError("local service qualification requires the exact SHA published upstream")
         artifact, artifact_digest = validate_released_artifact(configuration, head)
         evidence["artifact_sha256"] = artifact_digest
+        evidence["runtime_capabilities"] = runtime_capabilities()
+        if evidence["runtime_capabilities"]["status"] == "BLOCKED_RUNTIME":
+            raise RuntimeBlocked(evidence["runtime_capabilities"]["reason"])
         materialize_assets(offline=offline)
         runtime = RUNTIME / head
         runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -716,6 +772,9 @@ def qualify(*, offline: bool) -> int:
         vagrant(states["harbor"], "halt", timeout=300)
         evidence["cleanup"]["harbor_vm"] = "STOPPED_DISK_PRESERVED"
         evidence["status"] = "PASS"
+    except RuntimeBlocked as exc:
+        evidence["status"] = "BLOCKED_RUNTIME"
+        evidence["error"] = str(exc)[:2000]
     except (KeyError, OSError, QualificationError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         evidence["error"] = str(exc)[:2000]
     finally:
@@ -731,7 +790,7 @@ def qualify(*, offline: bool) -> int:
         evidence["completed_at"] = now()
         write_json(EVIDENCE, evidence)
     if evidence["status"] != "PASS":
-        print(f"FAIL local-services-qualification: {evidence['error']}", file=sys.stderr)
+        print(f"{evidence['status']} local-services-qualification: {evidence['error']}", file=sys.stderr)
         return 1
     print("PASS local-services-qualification")
     return 0
@@ -758,9 +817,12 @@ def recover() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("assets", "qualify", "recover"))
+    parser.add_argument("action", choices=("assets", "capabilities", "qualify", "recover"))
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args()
+    if args.action == "capabilities":
+        print(json.dumps(runtime_capabilities(), indent=2, sort_keys=True))
+        return 0
     if args.action != "recover":
         from validate_guest_smoke_commands import GuestSmokePreflightError, validate_guest_smoke_commands
 

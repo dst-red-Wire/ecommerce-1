@@ -5,6 +5,10 @@ scope: qualified-rocky-10.2-virtualbox-local-services
 production_authority: forbidden
 runtime:
   owner: ansible
+  controller: wsl2
+  required_virtualbox_backend: native-vtx
+  incompatible_backend: nem
+  unavailable_classification: BLOCKED_RUNTIME
   orchestrator: scripts/local_services_qualification.py
   fixture: platform/ansible/tests/local_services_vm
   state_root: .context/runtime/local-services-vm

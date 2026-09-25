@@ -328,8 +328,32 @@ permissions.
 After importing and publishing exact-SHA image release evidence, run:
 
 ```console
+make local-services-capabilities
 make local-services-qualify
 ```
+
+WSL2 remains the Ansible/SSH controller. `local-services-capabilities` observes
+the actual WSL2 tools, Windows interop, `HypervisorPresent`, and firmware
+virtualization before a service VM is created. The qualification records
+`BLOCKED_RUNTIME` when native VT-x is unavailable; after a VM starts, it also
+checks that VM's `VBox.log` and rejects NEM before Ansible runs. A blocked
+result is not a failed Gitea, Harbor, or ORAS proof and cannot be promoted to
+`PASS`.
+
+On this workstation, the normal Windows boot keeps the Microsoft hypervisor
+active for WSL2. VirtualBox then uses NEM, which has produced runtime errors;
+the native VT-x boot disables the hypervisor and WSL2. These two observed boot
+capabilities cannot provide both the WSL2 controller and the required native
+VirtualBox backend at once. Do not start service VMs under the normal boot to
+manufacture a qualification result. Keep the development boot and WSL2 as the
+permanent environment. For image build and smoke only, use the controlled
+`image-rocky-windows-native-prepare` → explicitly authorized
+`image-rocky-windows-native-reboot` → Windows native scheduled cycle → normal
+boot → `image-rocky-windows-native-import` sequence above. The cycle stages
+inputs before WSL2 stops, checks the real backend, and returns automatically.
+Service qualification remains `BLOCKED_RUNTIME` until a runtime with both
+WSL2 and a working, contract-approved VirtualBox backend is demonstrated; the
+native image cycle by itself does not supply an Ansible controller.
 
 The controller uses Ansible to install and probe Gitea first, proves repository
 creation plus push/clone/fetch SHA integrity, and stops that VM while preserving

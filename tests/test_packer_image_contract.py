@@ -3,6 +3,8 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -566,6 +568,48 @@ class PackerImageContractTest(unittest.TestCase):
             checksums.write_bytes(b"x" * 4097)
             with self.assertRaisesRegex(RuntimeError, "4096-byte safety limit"):
                 REPOCTL._verified_artifact_sha256(artifact, checksums)
+
+    def test_oras_pull_cannot_replace_released_box_with_other_valid_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = root / "rocky.box"
+            artifact.write_bytes(b"released image")
+            original = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            checksums = root / "SHA256SUMS"
+            checksums.write_text(f"{original}  rocky.box\n", encoding="utf-8")
+            reference = "harbor.example.com/machine-images/rocky@sha256:" + "a" * 64
+            evidence = root / "pull.json"
+
+            def fake_transport(command, **kwargs):
+                output = Path(command[command.index("--output") + 1])
+                output.joinpath("rocky.box").write_bytes(b"different image")
+                other = hashlib.sha256(b"different image").hexdigest()
+                output.joinpath("SHA256SUMS").write_text(f"{other}  rocky.box\n")
+                return subprocess.CompletedProcess(command, 0, json.dumps({"reference": reference}), "")
+
+            def fake_sync(source, sums, destination, **kwargs):
+                destination.mkdir(parents=True, exist_ok=True)
+                if source.resolve() != (destination / source.name).resolve():
+                    shutil.copy2(source, destination / source.name)
+                if sums.resolve() != (destination / sums.name).resolve():
+                    shutil.copy2(sums, destination / sums.name)
+                return destination / source.name, destination / sums.name, REPOCTL._verified_artifact_sha256(source, sums)
+
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(REPOCTL, "_machine_image_transport_paths", return_value=(
+                    artifact, checksums, evidence, {"timeouts_seconds": {"oras": 30, "rsync": 30}}, {}
+                )),
+                mock.patch.object(REPOCTL, "require", side_effect=lambda name: name),
+                mock.patch.object(REPOCTL, "_oras_cache_root", return_value=root / "cache"),
+                mock.patch.object(REPOCTL, "_oras_runtime_arguments", return_value=[]),
+                mock.patch.object(REPOCTL, "_machine_image_transport_contract", return_value=({}, {})),
+                mock.patch.object(REPOCTL, "_released_machine_image_expected_sha256", return_value=("a" * 40, original)),
+                mock.patch.object(REPOCTL, "_run_bounded_transport", side_effect=fake_transport),
+                mock.patch.object(REPOCTL, "_rsync_artifact_pair", side_effect=fake_sync),
+            ):
+                self.assertEqual(1, REPOCTL.image_oras_pull("windows", reference))
+            self.assertEqual(b"released image", artifact.read_bytes())
 
     def test_oras_runtime_tls_arguments_are_explicit_and_secret_config_is_private(self):
         distribution = self.image["distribution"]

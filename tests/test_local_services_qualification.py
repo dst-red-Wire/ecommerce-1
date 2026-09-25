@@ -1,8 +1,10 @@
 import hashlib
+import importlib.util
 import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -27,8 +29,22 @@ class LocalServicesQualificationTest(unittest.TestCase):
         self.assertEqual("architecture.lock.yaml", self.contract["architecture_authority"])
         self.assertEqual("forbidden", self.contract["production_authority"])
         self.assertEqual("ansible", self.contract["runtime"]["owner"])
+        self.assertEqual("wsl2", self.contract["runtime"]["controller"])
+        self.assertEqual("native-vtx", self.contract["runtime"]["required_virtualbox_backend"])
+        self.assertEqual("BLOCKED_RUNTIME", self.contract["runtime"]["unavailable_classification"])
         self.assertEqual(1, self.contract["machine_image"]["sizing"]["simultaneous_active_service_vms"])
         self.assertEqual("preserve-stopped-after-qualification", self.contract["runtime"]["persistent_disks"])
+
+    def test_active_hypervisor_blocks_service_vms_before_start(self):
+        spec = importlib.util.spec_from_file_location("local_services_qualification", ROOT / "scripts/local_services_qualification.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        observed = json.dumps({"hypervisor_present": True, "firmware_virtualization_enabled": False})
+        with patch.object(module.platform, "system", return_value="Linux"), patch.object(module.platform, "release", return_value="5.15-microsoft-standard-WSL2"), patch.object(module.Path, "is_file", return_value=True), patch.object(module.shutil, "which", return_value="/usr/bin/ssh"), patch.object(module, "run", return_value=type("Result", (), {"stdout": observed})()):
+            result = module.runtime_capabilities()
+        self.assertEqual("BLOCKED_RUNTIME", result["status"])
+        self.assertEqual("NATIVE_VTX_UNAVAILABLE", result["virtualbox_backend"])
+        self.assertTrue(result["hypervisor_present"])
 
     def test_gitea_harbor_and_oras_versions_are_exact(self):
         self.assertEqual("1.24.6", self.contract["gitea"]["version"])
@@ -122,6 +138,8 @@ class LocalServicesQualificationTest(unittest.TestCase):
         self.assertIn('f"ipc-transport-{suffix}.ps1"', transport)
         self.assertIn("request_path.unlink(missing_ok=True)", transport)
         self.assertIn("bridge.unlink(missing_ok=True)", transport)
+        self.assertIn('if ($r.mode -eq "backend")', transport)
+        self.assertIn("Get-Content -Raw -LiteralPath (Join-Path $Matches.path 'VBox.log')", transport)
 
     def test_seed_server_is_hidden_bounded_and_noninteractive(self):
         seed = (ROOT / "scripts/windows/local-services-seed-server.ps1").read_text(encoding="utf-8")

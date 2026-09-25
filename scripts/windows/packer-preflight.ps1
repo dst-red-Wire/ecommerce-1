@@ -102,11 +102,15 @@ try {
     $evidence.virtualbox_acceleration.hyper_v_present = [bool]$computer.HypervisorPresent
     $evidence.virtualbox_acceleration.firmware_virtualization_enabled = $firmwareVirtualizationEnabled
     if ($computer.HypervisorPresent -and -not $PreparationOnly.IsPresent) {
+        $evidence.status = 'BLOCKED_RUNTIME'
+        $evidence.virtualbox_acceleration.status = 'BLOCKED_RUNTIME'
         throw 'Native VT-x is unavailable because the Microsoft hypervisor is active; NEM is forbidden by contract'
     }
     # With Hyper-V active, WMI may report False even while WSL2 is running.
     # Preparation records the observation; the native boot proves VT-x directly.
     if (-not $firmwareVirtualizationEnabled -and -not $PreparationOnly.IsPresent) {
+        $evidence.status = 'BLOCKED_RUNTIME'
+        $evidence.virtualbox_acceleration.status = 'BLOCKED_RUNTIME'
         throw 'Native VT-x is unavailable because firmware virtualization is disabled'
     }
     if ($PreparationOnly.IsPresent) {
@@ -144,6 +148,6 @@ catch {
     if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
         try { Write-Utf8Json -InputObject $evidence -Path $EvidencePath } catch { }
     }
-    [Console]::Error.WriteLine("FAIL windows-packer-preflight: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("$($evidence.status) windows-packer-preflight: $($_.Exception.Message)")
     exit 1
 }
