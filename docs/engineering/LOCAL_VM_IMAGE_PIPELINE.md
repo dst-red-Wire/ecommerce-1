@@ -161,6 +161,10 @@ and `packer init` uses Packer's verified release-install mechanism. It must find
 the exact versions in its existing Windows plugin cache during a fully
 disconnected replay.
 
+Large WSL-to-Windows cache copies use bounded buffers, periodic durable flushes,
+and source page-cache release hints so the declared pipeline remains reproducible
+under the supported low-memory WSL profile.
+
 `image-rocky-windows-qualify` checks the exact build SHA-256, adds it to an isolated
 `VAGRANT_HOME`, boots one temporary VM, waits for SSH with finite attempts and
 checks Rocky 10.2, kernel/CPU architecture, systemd, disk, network, fundamental

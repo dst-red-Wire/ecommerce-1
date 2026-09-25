@@ -266,9 +266,14 @@ class PackerImageContractTest(unittest.TestCase):
                 MATERIALIZER.shutil,
                 "copyfile",
                 side_effect=AssertionError("sendfile-backed copy is forbidden"),
-            ):
+            ), mock.patch.object(
+                MATERIALIZER, "COPY_SYNC_BYTES", 1024 * 1024
+            ), mock.patch.object(
+                MATERIALIZER.os, "fsync", wraps=MATERIALIZER.os.fsync
+            ) as fsync:
                 MATERIALIZER._acquire(entry, destination, root / "cache", offline=True)
             self.assertEqual(content, destination.read_bytes())
+            self.assertGreaterEqual(fsync.call_count, 4)
 
     def test_external_tools_use_the_central_toolchain_authority(self):
         expected = {

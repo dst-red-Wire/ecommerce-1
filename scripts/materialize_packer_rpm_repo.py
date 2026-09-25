@@ -16,6 +16,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+COPY_BUFFER_BYTES = 1024 * 1024
+COPY_SYNC_BYTES = 64 * 1024 * 1024
 
 
 class MaterializationError(ValueError):
@@ -42,7 +44,28 @@ def _verify(path: Path, *, artifact: str, version: str, expected: str) -> None:
 def _copy_file(source: Path, destination: Path) -> None:
     """Copy across filesystems without the platform-dependent sendfile fast path."""
     with source.open("rb") as input_stream, destination.open("wb") as output_stream:
-        shutil.copyfileobj(input_stream, output_stream, length=4 * 1024 * 1024)
+        copied_since_sync = 0
+        copied_total = 0
+        while chunk := input_stream.read(COPY_BUFFER_BYTES):
+            output_stream.write(chunk)
+            copied_since_sync += len(chunk)
+            copied_total += len(chunk)
+            if copied_since_sync >= COPY_SYNC_BYTES:
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+                if hasattr(os, "posix_fadvise") and hasattr(
+                    os, "POSIX_FADV_DONTNEED"
+                ):
+                    try:
+                        os.posix_fadvise(
+                            input_stream.fileno(),
+                            copied_total - copied_since_sync,
+                            copied_since_sync,
+                            os.POSIX_FADV_DONTNEED,
+                        )
+                    except OSError:
+                        pass
+                copied_since_sync = 0
         output_stream.flush()
         os.fsync(output_stream.fileno())
 
