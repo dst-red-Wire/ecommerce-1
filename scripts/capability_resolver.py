@@ -73,6 +73,7 @@ def _assert_commit_bound(root: Path, source_sha: str, registry: dict[str, Any]) 
         "config/contracts/tool-capabilities.yaml",
         "config/contracts/composed-capabilities.yaml",
         "config/contracts/toolchain-lock.json",
+        "scripts/capability_resolver.py",
     }
     for entry in registry["tools"].values():
         relevant.update(str(probe["path"]) for probe in entry.get("discovery", []))
