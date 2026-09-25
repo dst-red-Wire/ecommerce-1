@@ -497,6 +497,10 @@ tooling:
       authority: config/contracts/machine-image-lock.yaml#packer_image.build.resources
       projection: generated-packer-variables
       overrides: forbidden
+    build_storage:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.storage
+      projection: generated-packer-variables-and-kickstart-template
+      overrides: forbidden
     repository_entrypoint:
       authority: make
       execution_environment: developer-environment

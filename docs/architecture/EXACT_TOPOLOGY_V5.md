@@ -212,10 +212,12 @@ source SHA, pulls require an immutable `@sha256:` reference, and the local
 content cache is selected through `ORAS_CACHE`, synchronized with `rsync`, and
 verified with SHA-256 before and after synchronization.
 
-VM CPU and memory sizing has one authority in
-`machine-image-lock.yaml#packer_image.build.resources`. The renderer projects
-those values into generated Packer variables shared by VirtualBox and QEMU;
-per-hypervisor resource overrides are forbidden.
+VM CPU, memory and disk sizing has one authority in
+`machine-image-lock.yaml#packer_image.build.resources`; firmware and partition
+layout have one authority in the adjacent `packer_image.build.storage` section.
+The renderer projects those values into generated Packer variables shared by
+VirtualBox and QEMU and into the Kickstart template; per-hypervisor resource or
+storage overrides are forbidden.
 
 M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
 

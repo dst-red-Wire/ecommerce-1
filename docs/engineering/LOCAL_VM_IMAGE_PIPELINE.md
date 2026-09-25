@@ -204,13 +204,16 @@ process is bounded. The overlay, process and ephemeral key are removed before
 qualification can pass. `OFFLINE=1` has the same fail-closed cache semantics as
 the Windows profile.
 
-## Shared VM resource authority
+## Shared VM resource and storage authority
 
 `config/contracts/machine-image-lock.yaml#packer_image.build.resources` is the
-only configurable authority for VM vCPU and memory sizing. The renderer emits
-`vm_cpus` and `vm_memory_mib` into the generated `.pkrvars.hcl`; both the
-VirtualBox and QEMU builders consume those variables and local overrides are
-forbidden.
+only configurable authority for VM vCPU, memory and disk sizing. Its sibling
+`packer_image.build.storage` owns firmware, partition table, partition sizes and
+root filesystem. The renderer validates both sections and emits their values
+into the generated `.pkrvars.hcl`; both VirtualBox and QEMU consume the same
+projection. Kickstart receives the storage projection through Packer's
+`templatefile`, creates an explicit BIOS/GPT/XFS layout, and creates neither LVM
+nor swap. Local and per-hypervisor overrides are forbidden.
 
 ## ORAS distribution and local cache
 

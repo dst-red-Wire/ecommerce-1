@@ -72,6 +72,31 @@ def render(
     vm_memory_mib = _bounded_contract_integer(
         resources, "memory_mib", minimum=2048, maximum=262144
     )
+    vm_disk_mib = _bounded_contract_integer(
+        resources, "disk_mib", minimum=16384, maximum=1048576
+    )
+    storage = image["build"]["storage"]
+    if storage.get("authority") != "shared-all-hypervisors":
+        raise ValueError("Packer storage must have one shared hypervisor authority")
+    if storage.get("firmware") != "bios":
+        raise ValueError("Packer storage firmware must be bios")
+    if storage.get("partition_table") != "gpt":
+        raise ValueError("Packer storage partition table must be gpt")
+    if storage.get("root_filesystem") != "xfs":
+        raise ValueError("Packer root filesystem must be xfs")
+    if storage.get("lvm") != "forbidden" or storage.get("swap") != "forbidden":
+        raise ValueError("Packer LVM and swap must be forbidden")
+    vm_bios_boot_mib = _bounded_contract_integer(
+        storage, "bios_boot_mib", minimum=1, maximum=16
+    )
+    vm_boot_mib = _bounded_contract_integer(
+        storage, "boot_mib", minimum=2048, maximum=16384
+    )
+    vm_root_min_mib = _bounded_contract_integer(
+        storage, "root_min_mib", minimum=10240, maximum=1048576
+    )
+    if vm_bios_boot_mib + vm_boot_mib + vm_root_min_mib >= vm_disk_mib:
+        raise ValueError("Packer partitions must leave growable space on the disk")
     if output.exists() or output.is_symlink() or not output.parent.is_dir():
         raise ValueError("output must be a new path below an existing directory")
     iso = bundle / "iso" / source["iso"]
@@ -122,6 +147,13 @@ def render(
         f"artifact_dir = {json.dumps(artifact_path)}\n"
         f"vm_cpus = {vm_cpus}\n"
         f"vm_memory_mib = {vm_memory_mib}\n"
+        f"vm_disk_mib = {vm_disk_mib}\n"
+        f"vm_firmware = {json.dumps(storage['firmware'])}\n"
+        f"vm_partition_table = {json.dumps(storage['partition_table'])}\n"
+        f"vm_bios_boot_mib = {vm_bios_boot_mib}\n"
+        f"vm_boot_mib = {vm_boot_mib}\n"
+        f"vm_root_min_mib = {vm_root_min_mib}\n"
+        f"vm_root_filesystem = {json.dumps(storage['root_filesystem'])}\n"
         f"build_ssh_public_key = {json.dumps(public_key)}\n"
         f"build_ssh_private_key_file = {json.dumps(private_key_path)}\n"
     )

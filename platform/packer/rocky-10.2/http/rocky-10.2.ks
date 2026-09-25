@@ -13,8 +13,10 @@ firewall --disabled
 services --enabled=sshd,chronyd,NetworkManager
 bootloader --location=mbr --append="quiet console=tty0"
 zerombr
-clearpart --all --initlabel --disklabel=gpt
-autopart --type=lvm
+clearpart --all --initlabel --disklabel=${partition_table}
+part biosboot --size=${bios_boot_mib}
+part /boot --fstype=${root_filesystem} --size=${boot_mib}
+part / --fstype=${root_filesystem} --size=${root_min_mib} --grow
 reboot
 
 %packages

@@ -58,6 +58,69 @@ variable "vm_memory_mib" {
   }
 }
 
+variable "vm_disk_mib" {
+  type = number
+
+  validation {
+    condition     = var.vm_disk_mib >= 16384 && var.vm_disk_mib <= 1048576
+    error_message = "Vm_disk_mib must be between 16384 and 1048576."
+  }
+}
+
+variable "vm_firmware" {
+  type = string
+
+  validation {
+    condition     = var.vm_firmware == "bios"
+    error_message = "Vm_firmware must be bios."
+  }
+}
+
+variable "vm_partition_table" {
+  type = string
+
+  validation {
+    condition     = var.vm_partition_table == "gpt"
+    error_message = "Vm_partition_table must be gpt."
+  }
+}
+
+variable "vm_bios_boot_mib" {
+  type = number
+
+  validation {
+    condition     = var.vm_bios_boot_mib >= 1 && var.vm_bios_boot_mib <= 16
+    error_message = "Vm_bios_boot_mib must be between 1 and 16."
+  }
+}
+
+variable "vm_boot_mib" {
+  type = number
+
+  validation {
+    condition     = var.vm_boot_mib >= 2048 && var.vm_boot_mib <= 16384
+    error_message = "Vm_boot_mib must be between 2048 and 16384."
+  }
+}
+
+variable "vm_root_min_mib" {
+  type = number
+
+  validation {
+    condition     = var.vm_root_min_mib >= 10240 && var.vm_root_min_mib <= 1048576
+    error_message = "Vm_root_min_mib must be between 10240 and 1048576."
+  }
+}
+
+variable "vm_root_filesystem" {
+  type = string
+
+  validation {
+    condition     = var.vm_root_filesystem == "xfs"
+    error_message = "Vm_root_filesystem must be xfs."
+  }
+}
+
 variable "image_profile" {
   type    = string
   default = "rke2"

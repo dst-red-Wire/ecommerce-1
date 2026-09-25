@@ -76,8 +76,23 @@ class PackerImageContractTest(unittest.TestCase):
                 "authority": "shared-all-hypervisors",
                 "vcpus": 2,
                 "memory_mib": 4096,
+                "disk_mib": 32768,
             },
             self.image["build"]["resources"],
+        )
+        self.assertEqual(
+            {
+                "authority": "shared-all-hypervisors",
+                "firmware": "bios",
+                "partition_table": "gpt",
+                "bios_boot_mib": 1,
+                "boot_mib": 2048,
+                "root_min_mib": 10240,
+                "root_filesystem": "xfs",
+                "lvm": "forbidden",
+                "swap": "forbidden",
+            },
+            self.image["build"]["storage"],
         )
         self.assertEqual(
             2,
@@ -95,6 +110,10 @@ class PackerImageContractTest(unittest.TestCase):
         )
         self.assertNotRegex(self.packer, r"(?m)^\s*cpus\s*=\s*2$")
         self.assertNotRegex(self.packer, r"(?m)^\s*memory\s*=\s*4096$")
+        self.assertRegex(self.packer, r"(?m)^\s*disk_size\s*=\s*var\.vm_disk_mib$")
+        self.assertIn('disk_size            = "${var.vm_disk_mib}M"', self.packer)
+        self.assertIn("firmware               = var.vm_firmware", self.packer)
+        self.assertIn('efi_boot             = var.vm_firmware == "efi"', self.packer)
 
     def test_renderer_projects_shared_vm_resources(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -121,7 +140,19 @@ class PackerImageContractTest(unittest.TestCase):
                             "authority": "shared-all-hypervisors",
                             "vcpus": 4,
                             "memory_mib": 8192,
-                        }
+                            "disk_mib": 65536,
+                        },
+                        "storage": {
+                            "authority": "shared-all-hypervisors",
+                            "firmware": "bios",
+                            "partition_table": "gpt",
+                            "bios_boot_mib": 1,
+                            "boot_mib": 4096,
+                            "root_min_mib": 20480,
+                            "root_filesystem": "xfs",
+                            "lvm": "forbidden",
+                            "swap": "forbidden",
+                        },
                     },
                 }
             }
@@ -143,6 +174,13 @@ class PackerImageContractTest(unittest.TestCase):
             rendered = output.read_text(encoding="utf-8")
             self.assertIn("vm_cpus = 4\n", rendered)
             self.assertIn("vm_memory_mib = 8192\n", rendered)
+            self.assertIn("vm_disk_mib = 65536\n", rendered)
+            self.assertIn('vm_firmware = "bios"\n', rendered)
+            self.assertIn('vm_partition_table = "gpt"\n', rendered)
+            self.assertIn("vm_bios_boot_mib = 1\n", rendered)
+            self.assertIn("vm_boot_mib = 4096\n", rendered)
+            self.assertIn("vm_root_min_mib = 20480\n", rendered)
+            self.assertIn('vm_root_filesystem = "xfs"\n', rendered)
 
     def test_renderer_rejects_invalid_vm_resources(self):
         with self.assertRaisesRegex(TypeError, "vcpus must be an integer"):
@@ -528,6 +566,17 @@ class PackerImageContractTest(unittest.TestCase):
         ):
             self.assertIn(value, self.packer)
         self.assertNotIn("qemu-guest-agent", self.kickstart)
+
+    def test_storage_layout_is_explicit_and_has_no_lvm_or_swap_partition(self):
+        for expected in (
+            "clearpart --all --initlabel --disklabel=${partition_table}",
+            "part biosboot --size=${bios_boot_mib}",
+            "part /boot --fstype=${root_filesystem} --size=${boot_mib}",
+            "part / --fstype=${root_filesystem} --size=${root_min_mib} --grow",
+        ):
+            self.assertIn(expected, self.kickstart)
+        for forbidden in ("autopart", "volgroup", "logvol", "part swap"):
+            self.assertNotIn(forbidden, self.kickstart)
 
     def test_packer_owns_only_stable_os_prerequisites(self):
         packer_tree = self.packer + "\n" + self.kickstart

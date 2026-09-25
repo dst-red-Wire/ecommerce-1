@@ -159,6 +159,17 @@ packer_image:
       authority: shared-all-hypervisors
       vcpus: 2
       memory_mib: 4096
+      disk_mib: 32768
+    storage:
+      authority: shared-all-hypervisors
+      firmware: bios
+      partition_table: gpt
+      bios_boot_mib: 1
+      boot_mib: 2048
+      root_min_mib: 10240
+      root_filesystem: xfs
+      lvm: forbidden
+      swap: forbidden
     host_tool_versions:
       virtualbox: config/contracts/toolchain-lock.json#versions.VIRTUALBOX_VERSION
       vagrant: config/contracts/toolchain-lock.json#versions.VAGRANT_VERSION

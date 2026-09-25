@@ -10,6 +10,12 @@ not a second authority.
 the central contract into a host-local `rocky-10.2.auto.pkrvars.hcl`; generated
 paths, checksums and temporary key material are never committed.
 
+The same contract is the single authority for CPU, RAM, disk size, BIOS/GPT
+firmware layout and XFS partition sizes. Packer projects it identically to the
+VirtualBox and QEMU builders and renders the Kickstart storage instructions.
+The explicit layout contains `biosboot`, `/boot` and a growable `/` partition;
+LVM and swap are forbidden for this Kubernetes-ready base image.
+
 The shared boot command opens the GRUB console and executes the exact `linux`,
 `initrd` and `boot` commands projected from the locked Rocky ISO. It does not
 depend on menu selection or cursor positioning. VirtualBox uses a bounded 500 ms

@@ -35,6 +35,11 @@ source "virtualbox-iso" "base" {
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
       build_ssh_public_key = trimspace(var.build_ssh_public_key)
+      partition_table      = var.vm_partition_table
+      bios_boot_mib        = var.vm_bios_boot_mib
+      boot_mib             = var.vm_boot_mib
+      root_min_mib         = var.vm_root_min_mib
+      root_filesystem      = var.vm_root_filesystem
     })
   }
   boot_command           = local.boot_command
@@ -45,7 +50,8 @@ source "virtualbox-iso" "base" {
   ssh_timeout            = "30m"
   shutdown_command       = "true"
   guest_additions_mode   = "disable"
-  disk_size              = 32768
+  firmware               = var.vm_firmware
+  disk_size              = var.vm_disk_mib
   cpus                   = var.vm_cpus
   memory                 = var.vm_memory_mib
   hard_drive_interface   = "sata"
@@ -60,6 +66,11 @@ source "qemu" "base" {
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
       build_ssh_public_key = trimspace(var.build_ssh_public_key)
+      partition_table      = var.vm_partition_table
+      bios_boot_mib        = var.vm_bios_boot_mib
+      boot_mib             = var.vm_boot_mib
+      root_min_mib         = var.vm_root_min_mib
+      root_filesystem      = var.vm_root_filesystem
     })
   }
   boot_command         = local.boot_command
@@ -70,7 +81,8 @@ source "qemu" "base" {
   ssh_timeout          = "30m"
   shutdown_command     = "true"
   accelerator          = "kvm"
-  disk_size            = "32G"
+  efi_boot             = var.vm_firmware == "efi"
+  disk_size            = "${var.vm_disk_mib}M"
   disk_interface       = "virtio"
   format               = "qcow2"
   cpus                 = var.vm_cpus
