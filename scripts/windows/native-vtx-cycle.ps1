@@ -372,7 +372,17 @@ function Invoke-VagrantSmokeCommand {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string]$Name
     )
-    $result = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $result = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
+            break
+        }
+        catch {
+            if ($_.Exception.Message -ne "Timed out after 120s: $Vagrant") { throw }
+            if ($attempt -eq 2) { throw "Vagrant native smoke check $Name timed out after 2 bounded attempts" }
+            Start-Sleep -Seconds 5
+        }
+    }
     Assert-ProcessSuccess -Result $result -Operation "Vagrant native smoke check $Name"
     return $result.StdOut.Trim()
 }
@@ -657,7 +667,7 @@ function Invoke-NativeRun {
         $result.observations.memory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'memory' -Command 'awk ''$1 == "MemTotal:" { print $2; exit !($2 >= 3500000) }'' /proc/meminfo'
         $result.vagrant_smoke.expected_memory = 'PASS'
         $diskBytes = [int64]$runtimeContract.resources.disk_mib * 1MB
-        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda); test "$size" -ge {0}; printf ''%s'' "$size"' -f $diskBytes)
+        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda) && test "$size" -ge {0} && printf ''%s'' "$size"' -f $diskBytes)
         $result.vagrant_smoke.expected_disk = 'PASS'
         [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'xfs' -Command 'test "$(findmnt -n -o FSTYPE /)" = xfs')
         $result.vagrant_smoke.xfs = 'PASS'

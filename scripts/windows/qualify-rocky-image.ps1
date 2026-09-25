@@ -62,7 +62,17 @@ function Invoke-SmokeCommand {
         [Parameter(Mandatory = $true)][string]$Name,
         [int]$TimeoutSeconds = 120
     )
-    $result = Invoke-BoundedProcess -FilePath $script:vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $script:stageRoot -Environment $script:environment
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $result = Invoke-BoundedProcess -FilePath $script:vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $script:stageRoot -Environment $script:environment
+            break
+        }
+        catch {
+            if ($_.Exception.Message -ne "Timed out after ${TimeoutSeconds}s: $script:vagrant") { throw }
+            if ($attempt -eq 2) { throw "Vagrant smoke check $Name timed out after 2 bounded attempts" }
+            Start-Sleep -Seconds 5
+        }
+    }
     Assert-ProcessSuccess -Result $result -Operation "Vagrant smoke check $Name"
     $script:evidence.qualification[$Name] = 'PASS'
     return $result.StdOut.Trim()
@@ -183,7 +193,7 @@ try {
     $evidence.observations.architecture_cpu = $architecture
     $systemd = Invoke-SmokeCommand -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s'' "$state"'
     $evidence.observations.systemd = $systemd
-    $disk = Invoke-SmokeCommand -Name 'disk' -Command 'available=$(df --output=avail -BM / | tail -1 | tr -dc ''0-9''); test "$available" -ge 1024; printf ''%s MiB'' "$available"'
+    $disk = Invoke-SmokeCommand -Name 'disk' -Command 'available=$(df --output=avail -BM / | tail -1 | tr -dc ''0-9'') && test "$available" -ge 1024 && printf ''%s MiB'' "$available"'
     $evidence.observations.disk_available = $disk
     $network = Invoke-SmokeCommand -Name 'network' -Command 'ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q ''^default ''; ip -4 -o addr show scope global; ip -4 route show default'
     $evidence.observations.network = $network
