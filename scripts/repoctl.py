@@ -6452,6 +6452,18 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         ),
         (pull_request_policy.get("required") is True, "pull request must be required"),
         (pull_request_policy.get("head_sha_binding") == "exact", "pull request head binding must be exact"),
+        (
+            pull_request_policy.get("metadata_authority")
+            == {
+                "provider": "github",
+                "transport": "gh-api-rest",
+                "endpoint": "repos/{owner}/{repo}/pulls/{number}",
+                "base_sha_selector": ".base.sha",
+                "head_sha_selector": ".head.sha",
+                "subcommand_json_sha_fields": "non-authoritative",
+            },
+            "pull request SHA metadata must come from the canonical GitHub REST endpoint",
+        ),
         (pull_request_policy.get("draft_merge") == "forbidden", "draft PR merge must be forbidden"),
         (
             pull_request_policy.get("record_after_merge") == "retained-by-forge",
@@ -6793,6 +6805,40 @@ def _remote_ref_sha(ref: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def github_pull_request_metadata(gh: str, number: int) -> dict:
+    if type(number) is not int or number < 1:
+        raise RuntimeError("GitHub pull request number must be a positive integer")
+    payload = json.loads(output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{number}"]))
+    if not isinstance(payload, dict) or payload.get("number") != number:
+        raise RuntimeError(f"GitHub REST metadata did not identify pull request #{number}")
+    base = payload.get("base")
+    head = payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} lacks base/head objects")
+    base_sha = base.get("sha")
+    head_sha = head.get("sha")
+    if not isinstance(base_sha, str) or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .base.sha")
+    if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .head.sha")
+    if not isinstance(base.get("ref"), str) or not base["ref"]:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .base.ref")
+    if not isinstance(head.get("ref"), str) or not head["ref"]:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .head.ref")
+    return {
+        "number": number,
+        "url": payload.get("html_url"),
+        "state": payload.get("state"),
+        "is_draft": payload.get("draft"),
+        "merged": payload.get("merged"),
+        "merged_at": payload.get("merged_at"),
+        "base_ref": base["ref"],
+        "base_sha": base_sha,
+        "head_ref": head["ref"],
+        "head_sha": head_sha,
+    }
+
+
 def publish(base: str, message: str) -> int:
     if toolchain_closure():
         return 1
@@ -6935,9 +6981,15 @@ def deliver(base: str, title: str, message: str) -> int:
                 f"body={body.read_text(encoding='utf-8')}",
             ]
         )
-        actual = output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{num}", "--jq", ".head.sha"]).strip()
-        if actual != head:
-            return fail(f"PR head mismatch: expected {head}, got {actual}")
+        metadata = github_pull_request_metadata(gh, int(num))
+        expected_base_sha = git("rev-parse", f"origin/{base_name}").strip()
+        if metadata["base_ref"] != base_name or metadata["base_sha"] != expected_base_sha:
+            return fail(
+                f"PR base mismatch: expected {base_name}@{expected_base_sha}, "
+                f"got {metadata['base_ref']}@{metadata['base_sha']}"
+            )
+        if metadata["head_sha"] != head:
+            return fail(f"PR head mismatch: expected {head}, got {metadata['head_sha']}")
         _record_delivery_wall(evidence, ev, deliver_started)
         print(f"PASS deliver: refreshed PR {url} at {head}")
         return 0
@@ -6957,8 +7009,21 @@ def deliver(base: str, title: str, message: str) -> int:
         ],
         capture=True,
     )
+    created_url = p.stdout.strip()
+    number_match = re.search(r"/pull/([1-9][0-9]*)/?$", created_url)
+    if number_match is None:
+        return fail(f"deliver cannot identify created pull request from URL: {created_url!r}")
+    metadata = github_pull_request_metadata(gh, int(number_match.group(1)))
+    expected_base_sha = git("rev-parse", f"origin/{base_name}").strip()
+    if metadata["base_ref"] != base_name or metadata["base_sha"] != expected_base_sha:
+        return fail(
+            f"created PR base mismatch: expected {base_name}@{expected_base_sha}, "
+            f"got {metadata['base_ref']}@{metadata['base_sha']}"
+        )
+    if metadata["head_sha"] != head:
+        return fail(f"created PR head mismatch: expected {head}, got {metadata['head_sha']}")
     _record_delivery_wall(evidence, ev, deliver_started)
-    print(f"PASS deliver: created PR {p.stdout.strip()} at {head}")
+    print(f"PASS deliver: created PR {created_url} at {head}")
     return 0
 
 
@@ -7811,7 +7876,7 @@ def finish_pr(base: str) -> int:
             "--limit",
             "2",
             "--json",
-            "number,url,headRefOid,baseRefName,isDraft",
+            "number,url",
         ]
     )
     prs = json.loads(raw_prs or "[]")
@@ -7819,12 +7884,17 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr requires exactly one open PR for {branch} -> {base_name}; found {len(prs)}")
     pr = prs[0]
     number = int(pr["number"])
-    if pr.get("isDraft"):
+    metadata = github_pull_request_metadata(gh, number)
+    base_sha = git("rev-parse", base_ref).strip()
+    if metadata["is_draft"]:
         return fail(f"finish-pr refuses draft PR #{number}")
-    if pr.get("baseRefName") != base_name:
-        return fail(f"finish-pr PR #{number} base mismatch: {pr.get('baseRefName')!r}")
-    if pr.get("headRefOid") != head:
-        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {pr.get('headRefOid')!r}")
+    if metadata["base_ref"] != base_name or metadata["base_sha"] != base_sha:
+        return fail(
+            f"finish-pr PR #{number} base mismatch: expected {base_name}@{base_sha}, "
+            f"got {metadata['base_ref']}@{metadata['base_sha']}"
+        )
+    if metadata["head_sha"] != head:
+        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {metadata['head_sha']!r}")
 
     review_ready, review_reason = chatgpt_review_readiness(gh, number, head)
     if not review_ready:
@@ -7888,12 +7958,10 @@ def finish_pr(base: str) -> int:
             print(detail, file=sys.stderr)
         return fail(f"finish-pr merge refused for PR #{number}")
 
-    merged_state = json.loads(
-        output([gh, "pr", "view", str(number), "--json", "state,mergedAt,headRefOid,baseRefName"])
-    )
-    if merged_state.get("state") != "MERGED" or not merged_state.get("mergedAt"):
+    merged_state = github_pull_request_metadata(gh, number)
+    if merged_state["merged"] is not True or not merged_state["merged_at"]:
         return fail(f"finish-pr PR #{number} did not reach MERGED state")
-    if merged_state.get("headRefOid") != head:
+    if merged_state["head_sha"] != head:
         return fail(f"finish-pr merged PR #{number} no longer binds expected head {head}")
 
     run(["git", "fetch", "origin", "--prune"])
