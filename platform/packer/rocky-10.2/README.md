@@ -10,6 +10,10 @@ not a second authority.
 the central contract into a host-local `rocky-10.2.auto.pkrvars.hcl`; generated
 paths, checksums and temporary key material are never committed.
 
+The shared boot command edits the Rocky GRUB entry and uses `F10` to execute it;
+`Enter` is intentionally forbidden because it only inserts a line in GRUB's
+editor and leaves Packer waiting for SSH.
+
 ## Profiles
 
 - `rocky-10.2-base` is a logical shared component: minimal administration,

@@ -415,6 +415,8 @@ class PackerImageContractTest(unittest.TestCase):
         )
         self.assertIn("${local.image_name}-virtualbox.box", self.packer)
         self.assertIn("${local.image_name}-kvm", self.packer)
+        self.assertIn('"<f10>"', self.packer)
+        self.assertNotIn('"<enter>"', self.packer)
 
     def test_packer_build_is_offline_and_profile_separated(self):
         self.assertIn("install -d -m 0700 /tmp/packer-offline", self.packer)

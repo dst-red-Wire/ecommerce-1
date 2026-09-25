@@ -22,7 +22,7 @@ locals {
   boot_command = [
     "<up><wait><tab><wait>",
     " inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks",
-    "<enter>",
+    "<f10>",
   ]
 }
 
