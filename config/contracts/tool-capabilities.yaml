@@ -1,0 +1,1301 @@
+---
+kind: ToolCapabilityRegistry
+non_capability_tools:
+- ansible-lint
+- ast-grep
+- bazel
+- corepack
+- fd
+- gh
+- go
+- helm
+- kubectl
+- kustomize
+- node
+- nx
+- oasdiff
+- oxfmt
+- oxlint
+- pnpm
+- pre-commit
+- rg
+- ruff
+- scap-security-guide
+- shfmt
+- yq
+policy_ref: config/contracts/execution-properties-policy.yaml
+relationships:
+- implements
+- enforces
+- verifies
+- observes
+- produces_evidence
+- aggregates_evidence
+- transports_evidence
+requirement_vocabulary:
+- pinned_inputs
+- immutable_source_versions
+- checksums_verified
+- deterministic_build_definition
+- declared_dependencies
+- network_access_controlled
+- artifact_digest
+- source_sha
+- toolchain_digest
+- second_apply_test
+- second_apply_changes_zero
+- desired_state
+- observed_state
+- convergence_test
+- state_locking
+- bounded_timeout
+- capture_before_mutation
+- restore_on_failure
+- restore_verification
+- valid_signature
+- provenance_attestation
+- policy_pass
+- reconciliation_enabled
+- runtime_evidence
+- referenced_runtime_evidence
+- digest_addressing
+- retention_configured
+- encrypted_secret_source
+- decryption_verified
+- runtime_version_pinned
+- scan_gate_pass
+- policy_loaded
+- fail_closed_result
+- execution_bounds
+- transfer_digest_preserved
+- generator_version_pinned
+- input_contract_digest
+- output_digest
+scopes:
+- infrastructure
+- machine_image
+- machine_configuration
+- bootstrap
+- configuration
+- kubernetes
+- artifact
+- pipeline
+- application
+- security
+semantics: potential-abilities-only
+toolchain_aliases:
+  ansible:
+  - ansible-core
+  - ansible-playbook
+  - ansible-galaxy
+  buildkit:
+  - docker-buildx
+tools:
+  age:
+    capabilities:
+      declarative_reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - encrypted_secret_source
+          - pinned_inputs
+        scopes:
+        - security
+        gate: age-declarative_reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - decryption_verified
+        scopes:
+        - security
+        gate: age-verification
+    discovery:
+    - marker: age
+      path: config/contracts/secret-delivery-policy.yaml
+    not_guaranteed:
+    - convergence
+    - idempotency
+    version_ref: AGE_VERSION
+  ansible:
+    capabilities:
+      bounded_execution:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - bounded_timeout
+        scopes:
+        - configuration
+        gate: ansible-bounded_execution
+      convergence:
+        relationships:
+        - implements
+        requires:
+          all:
+          - desired_state
+          - observed_state
+          - convergence_test
+        scopes:
+        - machine_configuration
+        gate: ansible-convergence
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - configuration
+        gate: ansible-determinism
+      idempotency:
+        relationships:
+        - implements
+        - verifies
+        requires:
+          all:
+          - second_apply_test
+          - second_apply_changes_zero
+        scopes:
+        - machine_configuration
+        gate: ansible-idempotency
+      recovery:
+        relationships:
+        - implements
+        requires:
+          all:
+          - capture_before_mutation
+          - restore_on_failure
+          - restore_verification
+        scopes:
+        - bootstrap
+        gate: ansible-recovery
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - configuration
+        gate: ansible-reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - configuration
+        gate: ansible-verification
+    discovery:
+    - path: platform/ansible/mgmt.yml
+    - path: platform/ansible/requirements.yml
+    not_guaranteed:
+    - artifact_immutability
+    - provenance
+    version_ref: ANSIBLE_CORE_VERSION
+  buildkit:
+    capabilities:
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - artifact
+        gate: buildkit-determinism
+      hermeticity:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - declared_dependencies
+          - network_access_controlled
+        scopes:
+        - artifact
+        gate: buildkit-hermeticity
+      immutability:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: buildkit-immutability
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: buildkit-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - artifact
+        gate: buildkit-reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: buildkit-verification
+    discovery:
+    - marker: build
+      path: platform/tekton/tasks/product-supply-chain.yaml
+    not_guaranteed:
+    - idempotency
+    - convergence
+    version_ref: DOCKER_BUILDX_VERSION
+  cilium:
+    capabilities:
+      convergence:
+        relationships:
+        - implements
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: cilium-convergence
+      drift:
+        relationships:
+        - observes
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: cilium-drift
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - kubernetes
+        gate: cilium-verification
+    discovery:
+    - marker: 'cni: cilium'
+      path: architecture.lock.yaml
+    not_guaranteed:
+    - provenance
+    - idempotency
+    version_ref: CILIUM_VERSION
+  conftest:
+    capabilities:
+      fail_closed:
+        relationships:
+        - enforces
+        - verifies
+        requires:
+          all:
+          - policy_loaded
+          - fail_closed_result
+        scopes:
+        - security
+        gate: conftest-fail_closed
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - policy_pass
+        scopes:
+        - security
+        gate: conftest-verification
+    discovery:
+    - path: config/policies/qualification/repository.rego
+    not_guaranteed:
+    - semantic_authority
+    - provenance
+    version_ref: CONFTEST_VERSION
+  cosign:
+    capabilities:
+      integrity:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - artifact_digest
+          - valid_signature
+        scopes:
+        - artifact
+        gate: cosign-integrity
+      provenance:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+          - provenance_attestation
+          - valid_signature
+        scopes:
+        - artifact
+        gate: cosign-provenance
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - policy_pass
+        scopes:
+        - artifact
+        gate: cosign-verification
+    discovery:
+    - marker: verify-blob
+      path: scripts/repository_delivery.py
+    not_guaranteed:
+    - reproducibility
+    - idempotency
+    - convergence
+    version_ref: COSIGN_VERSION
+  fleet:
+    capabilities:
+      convergence:
+        relationships:
+        - implements
+        - enforces
+        requires:
+          all:
+          - reconciliation_enabled
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: fleet-convergence
+      drift:
+        relationships:
+        - observes
+        - produces_evidence
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: fleet-drift
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+        scopes:
+        - kubernetes
+        gate: fleet-reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - kubernetes
+        gate: fleet-verification
+    discovery:
+    - path: platform/fleet
+    not_guaranteed:
+    - artifact_integrity
+    - idempotency
+    version_ref: FLEET_VERSION
+  gitleaks:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: gitleaks-verification
+    discovery:
+    - marker: gitleaks
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: GITLEAKS_VERSION
+  gosec:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: gosec-verification
+    discovery:
+    - marker: gosec
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: GOSEC_VERSION
+  govulncheck:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: govulncheck-verification
+    discovery:
+    - marker: govulncheck
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: GOVULNCHECK_VERSION
+  harbor:
+    capabilities:
+      artifact_addressing:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - digest_addressing
+        scopes:
+        - artifact
+        gate: harbor-artifact_addressing
+      immutability:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - digest_addressing
+        scopes:
+        - artifact
+        gate: harbor-immutability
+      integrity:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: harbor-integrity
+      provenance_retention:
+        relationships:
+        - transports_evidence
+        requires:
+          all:
+          - retention_configured
+        scopes:
+        - artifact
+        gate: harbor-provenance_retention
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: harbor-verification
+    discovery:
+    - marker: 'registry: harbor'
+      path: architecture.lock.yaml
+    not_guaranteed:
+    - reproducibility
+    - idempotency
+    version_ref: HARBOR_VERSION
+  hubble:
+    capabilities:
+      runtime_evidence:
+        relationships:
+        - observes
+        - produces_evidence
+        requires:
+          all:
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: hubble-runtime_evidence
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - kubernetes
+        gate: hubble-verification
+    discovery:
+    - marker: hubble
+      path: config/contracts/mesh-observability-policy.yaml
+    not_guaranteed:
+    - convergence
+    - reproducibility
+    version_ref: HUBBLE_VERSION
+  k6:
+    capabilities:
+      bounded_execution:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - execution_bounds
+        scopes:
+        - application
+        gate: k6-bounded_execution
+      runtime_evidence:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - application
+        gate: k6-runtime_evidence
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - application
+        gate: k6-verification
+    discovery:
+    - marker: k6
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - convergence
+    - immutability
+    version_ref: K6_VERSION
+  kube-bench:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: kube-bench-verification
+    discovery:
+    - marker: kube-bench
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: KUBE_BENCH_VERSION
+  nuclei:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: nuclei-verification
+    discovery:
+    - marker: nuclei
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: NUCLEI_VERSION
+  oapi-codegen:
+    capabilities:
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: oapi-codegen-determinism
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - application
+        gate: oapi-codegen-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: oapi-codegen-reproducibility
+    discovery:
+    - path: scripts/repoctl.py
+    not_guaranteed:
+    - runtime_convergence
+    - idempotency
+    version_ref: OAPI_CODEGEN_VERSION
+  opa:
+    capabilities:
+      fail_closed:
+        relationships:
+        - enforces
+        - verifies
+        requires:
+          all:
+          - policy_loaded
+          - fail_closed_result
+        scopes:
+        - security
+        gate: opa-fail_closed
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - policy_pass
+        scopes:
+        - security
+        gate: opa-verification
+    discovery:
+    - path: config/policies/qualification/repository.rego
+    not_guaranteed:
+    - semantic_authority
+    - provenance
+    version_ref: OPA_VERSION
+  openscap:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: openscap-verification
+    discovery:
+    - marker: openscap
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: OPENSCAP_VERSION
+  opentofu:
+    capabilities:
+      bounded_execution:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - bounded_timeout
+          - state_locking
+        scopes:
+        - infrastructure
+        gate: opentofu-bounded_execution
+      concurrency_locking:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - bounded_timeout
+          - state_locking
+        scopes:
+        - infrastructure
+        gate: opentofu-concurrency_locking
+      convergence:
+        relationships:
+        - implements
+        - verifies
+        requires:
+          all:
+          - desired_state
+          - observed_state
+          - convergence_test
+        scopes:
+        - infrastructure
+        gate: opentofu-convergence
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - infrastructure
+        gate: opentofu-determinism
+      drift:
+        relationships:
+        - observes
+        - produces_evidence
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - infrastructure
+        gate: opentofu-drift
+      recovery:
+        relationships:
+        - implements
+        requires:
+          all:
+          - capture_before_mutation
+          - restore_on_failure
+          - restore_verification
+        scopes:
+        - infrastructure
+        gate: opentofu-recovery
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - infrastructure
+        gate: opentofu-reproducibility
+    discovery:
+    - path: platform/terraform/environments/mgmt/main.tf
+    - path: platform/terraform/environments/mgmt/.terraform.lock.hcl
+    not_guaranteed:
+    - application_idempotency
+    version_ref: OPENTOFU_VERSION
+  oras:
+    capabilities:
+      artifact_addressing:
+        relationships:
+        - implements
+        requires:
+          all:
+          - artifact_digest
+          - digest_addressing
+        scopes:
+        - artifact
+        gate: oras-artifact_addressing
+      immutability:
+        relationships:
+        - implements
+        requires:
+          all:
+          - artifact_digest
+          - digest_addressing
+        scopes:
+        - artifact
+        gate: oras-immutability
+      provenance_transport:
+        relationships:
+        - transports_evidence
+        requires:
+          all:
+          - provenance_attestation
+        scopes:
+        - artifact
+        gate: oras-provenance_transport
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: oras-verification
+    discovery:
+    - marker: oras
+      path: scripts/repository_delivery.py
+    not_guaranteed:
+    - provenance_generation
+    - convergence
+    version_ref: ORAS_VERSION
+  packer:
+    capabilities:
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+          - checksums_verified
+          - deterministic_build_definition
+        scopes:
+        - machine_image
+        gate: packer-determinism
+      hermeticity:
+        relationships:
+        - implements
+        - enforces
+        requires:
+          all:
+          - declared_dependencies
+          - network_access_controlled
+        scopes:
+        - machine_image
+        gate: packer-hermeticity
+      immutability:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - machine_image
+        gate: packer-immutability
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - machine_image
+        gate: packer-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+          - checksums_verified
+          - deterministic_build_definition
+        scopes:
+        - machine_image
+        gate: packer-reproducibility
+      verification:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - machine_image
+        gate: packer-verification
+    discovery:
+    - marker: packer {
+      path: platform/packer/rocky-10.2/rocky-10.2.pkr.hcl
+    not_guaranteed:
+    - idempotency
+    - convergence
+    version_ref: PACKER_VERSION
+  pint:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: pint-verification
+    discovery:
+    - marker: pint
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: PINT_VERSION
+  qce:
+    capabilities:
+      evidence_aggregation:
+        relationships:
+        - aggregates_evidence
+        requires:
+          all:
+          - referenced_runtime_evidence
+        scopes:
+        - pipeline
+        gate: qce-evidence_aggregation
+      verification:
+        relationships:
+        - aggregates_evidence
+        requires:
+          all:
+          - referenced_runtime_evidence
+        scopes:
+        - pipeline
+        gate: qce-verification
+    discovery:
+    - marker: qce_status
+      path: scripts/modern_engineering.py
+    not_guaranteed:
+    - reproducibility
+    - idempotency
+    - convergence
+    repository_tool: true
+    version_ref: QCE_VERSION
+  rke2:
+    capabilities:
+      convergence:
+        relationships:
+        - implements
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: rke2-convergence
+      drift:
+        relationships:
+        - observes
+        requires:
+          all:
+          - desired_state
+          - observed_state
+        scopes:
+        - kubernetes
+        gate: rke2-drift
+      recovery:
+        relationships:
+        - implements
+        requires:
+          all:
+          - capture_before_mutation
+          - restore_on_failure
+          - restore_verification
+        scopes:
+        - kubernetes
+        gate: rke2-recovery
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - runtime_version_pinned
+        scopes:
+        - kubernetes
+        gate: rke2-reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - kubernetes
+        gate: rke2-verification
+    discovery:
+    - marker: 'kubernetes: rke2'
+      path: architecture.lock.yaml
+    not_guaranteed:
+    - artifact_provenance
+    version_ref: RKE2_VERSION
+  skopeo:
+    capabilities:
+      artifact_transfer:
+        relationships:
+        - transports_evidence
+        requires:
+          all:
+          - transfer_digest_preserved
+        scopes:
+        - artifact
+        gate: skopeo-artifact_transfer
+      digest_preservation:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+          - transfer_digest_preserved
+        scopes:
+        - artifact
+        gate: skopeo-digest_preservation
+      immutability:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+          - transfer_digest_preserved
+        scopes:
+        - artifact
+        gate: skopeo-immutability
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - artifact_digest
+        scopes:
+        - artifact
+        gate: skopeo-verification
+    discovery:
+    - marker: 'command: [skopeo]'
+      path: platform/tekton/tasks/product-supply-chain.yaml
+    not_guaranteed:
+    - provenance_generation
+    - reproducibility
+    version_ref: SKOPEO_VERSION
+  sops:
+    capabilities:
+      declarative_reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - encrypted_secret_source
+          - pinned_inputs
+        scopes:
+        - security
+        gate: sops-declarative_reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - decryption_verified
+        scopes:
+        - security
+        gate: sops-verification
+    discovery:
+    - marker: sops
+      path: config/contracts/secret-delivery-policy.yaml
+    not_guaranteed:
+    - convergence
+    - idempotency
+    version_ref: SOPS_VERSION
+  sqlc:
+    capabilities:
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: sqlc-determinism
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - application
+        gate: sqlc-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: sqlc-reproducibility
+    discovery:
+    - path: sqlc.yaml
+    not_guaranteed:
+    - runtime_convergence
+    - idempotency
+    version_ref: SQLC_VERSION
+  tekton:
+    capabilities:
+      bounded_execution:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - bounded_timeout
+          - state_locking
+        scopes:
+        - pipeline
+        gate: tekton-bounded_execution
+      concurrency_locking:
+        relationships:
+        - enforces
+        requires:
+          all:
+          - bounded_timeout
+          - state_locking
+        scopes:
+        - pipeline
+        gate: tekton-concurrency_locking
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - pipeline
+        gate: tekton-determinism
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - pipeline
+        gate: tekton-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - pinned_inputs
+          - immutable_source_versions
+        scopes:
+        - pipeline
+        gate: tekton-reproducibility
+      verification:
+        relationships:
+        - verifies
+        requires:
+          all:
+          - runtime_evidence
+        scopes:
+        - pipeline
+        gate: tekton-verification
+    discovery:
+    - path: platform/tekton
+    not_guaranteed:
+    - infrastructure_convergence
+    version_ref: TEKTON_VERSION
+  templ:
+    capabilities:
+      determinism:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: templ-determinism
+      provenance:
+        relationships:
+        - produces_evidence
+        requires:
+          all:
+          - source_sha
+          - toolchain_digest
+          - artifact_digest
+        scopes:
+        - application
+        gate: templ-provenance
+      reproducibility:
+        relationships:
+        - implements
+        requires:
+          all:
+          - generator_version_pinned
+          - input_contract_digest
+          - output_digest
+        scopes:
+        - application
+        gate: templ-reproducibility
+    discovery:
+    - path: frontend
+    not_guaranteed:
+    - runtime_convergence
+    - idempotency
+    version_ref: TEMPL_VERSION
+  trivy:
+    capabilities:
+      verification:
+        relationships:
+        - verifies
+        - produces_evidence
+        requires:
+          all:
+          - scan_gate_pass
+          - runtime_evidence
+        scopes:
+        - security
+        gate: trivy-verification
+    discovery:
+    - marker: trivy
+      path: config/contracts/qualification-tools.yaml
+    not_guaranteed:
+    - reproducibility
+    - convergence
+    - idempotency
+    version_ref: TRIVY_VERSION
+version: 1
