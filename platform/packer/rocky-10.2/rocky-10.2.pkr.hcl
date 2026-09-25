@@ -144,6 +144,7 @@ build {
     environment_vars = ["IMAGE_PROFILE=${var.image_profile}"]
     inline = [
       "set -eu",
+      "export PATH=/usr/local/bin:$PATH",
       "cd /tmp/packer-offline/rpm-keys && sha256sum --check SHA256SUMS",
       "rpm --import /tmp/packer-offline/rpm-keys/*.asc",
       "cd /tmp/packer-offline/rpms/base && sha256sum --check SHA256SUMS",

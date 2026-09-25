@@ -220,6 +220,10 @@ aliases for the Windows profile. They do not bypass the native-VT-x preflight.
 structured build evidence. The ISO, RPMs, signing keys and guest tools are
 materialized from central checksum locks. During guest provisioning, all RPM
 repositories are disabled and no guest download is allowed.
+The root provisioner explicitly includes `/usr/local/bin` in `PATH` because
+`sudo` may replace the caller's path; locked external-tool checks run only after
+their offline installation. Static contract tests enforce this ordering before
+another native-boot campaign is authorized.
 
 For a cache-only replay, use:
 

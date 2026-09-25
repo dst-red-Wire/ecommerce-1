@@ -795,6 +795,12 @@ class PackerImageContractTest(unittest.TestCase):
         self.assertTrue(environment["PATH"].startswith("/usr/local/bin:"))
         self.assertNotIn("GH_TOKEN", environment)
 
+    def test_packer_root_provisioner_keeps_locked_tools_on_path(self):
+        export = '"export PATH=/usr/local/bin:$PATH"'
+        self.assertIn(export, self.packer)
+        self.assertLess(self.packer.index(export), self.packer.index('"rg --version'))
+        self.assertLess(self.packer.index(export), self.packer.index('kube-bench version'))
+
 
 if __name__ == "__main__":
     unittest.main()
