@@ -246,6 +246,13 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             r"while\s*\(\s*\$true\s*\)|for\s*\(\s*;;",
         )
 
+    def test_vagrant_ssh_timeout_remains_a_bounded_readiness_retry(self):
+        for source in (self.native, self.qualify):
+            self.assertIn("$attempt -le 12", source)
+            self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", source)
+            self.assertIn('if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }', source)
+            self.assertIn('if ($attempt -lt 12)', source)
+
     def test_process_failure_evidence_preserves_bounded_head_and_tail(self):
         self.assertIn("if ($detail.Length -gt 8000)", self.module)
         self.assertIn("$head = $detail.Substring(0, 2000)", self.module)

@@ -156,10 +156,15 @@ try {
 
     $sshReady = $false
     for ($attempt = 1; $attempt -le 12; $attempt++) {
-        $probe = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 30 -WorkingDirectory $stageRoot -Environment $environment
-        if ($probe.ExitCode -eq 0) {
-            $sshReady = $true
-            break
+        try {
+            $probe = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 60 -WorkingDirectory $stageRoot -Environment $environment
+            if ($probe.ExitCode -eq 0) {
+                $sshReady = $true
+                break
+            }
+        }
+        catch {
+            if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }
         }
         if ($attempt -lt 12) {
             Start-Sleep -Seconds 5

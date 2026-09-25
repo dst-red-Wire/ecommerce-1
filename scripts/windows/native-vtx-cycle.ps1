@@ -618,7 +618,7 @@ function Invoke-NativeRun {
             name = $smokeVmName; box_name = $smokeBoxName
             vagrant_version = [string]$prepared.tools.vagrant.actual_version
             private_key = (Join-Path $preparedStage 'qualification-key')
-            boot_timeout_seconds = 900; ssh_timeout_seconds = 30
+            boot_timeout_seconds = 900; ssh_timeout_seconds = 60
             cpus = [int]$runtimeContract.resources.vcpus
             memory_mib = [int]$runtimeContract.resources.memory_mib
             nic_type = [string]$runtimeContract.virtualbox.network_adapter
@@ -637,8 +637,13 @@ function Invoke-NativeRun {
         $result.vagrant_smoke.boot = 'PASS'
         $sshReady = $false
         for ($attempt = 1; $attempt -le 12; $attempt++) {
-            $probe = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 30 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
-            if ($probe.ExitCode -eq 0) { $sshReady = $true; break }
+            try {
+                $probe = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 60 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+                if ($probe.ExitCode -eq 0) { $sshReady = $true; break }
+            }
+            catch {
+                if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }
+            }
             if ($attempt -lt 12) { Start-Sleep -Seconds 5 }
         }
         if (-not $sshReady) { throw 'Native Vagrant SSH readiness failed' }
