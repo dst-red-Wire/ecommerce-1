@@ -15,12 +15,28 @@ repository_governance:
     kind: AutomationSigningPolicy
     status: enforced
     repository: ecommerce-1
+    rotation:
+      enabled: true
+      validity_days: 90
+      info_days_before_expiry: 30
+      warning_days_before_expiry: 14
+      delivery_block_days_before_expiry: 7
+      expired_key_use: forbidden
+      overlapping_keys_allowed: true
+      overlap_max_days: 7
+      remote_verification_required_before_activation: true
+      revocation_certificate_required: true
+      old_key_retirement_requires_replacement_proven: true
     personal_signing:
       fingerprint: 026264E5634441CB0008D42D56CFD079660EC037
       passphrase_required: true
       automation_use: forbidden
     automation_key:
       fingerprint: 1E017B8EA8721E5B7854D3F4AADEE6601021EBE8
+      previous_fingerprint: null
+      pending_fingerprint: D0E9857876048A4E303B4972BA1BD2FFE663316C
+      pending_expires_at: "2026-12-25T17:33:39Z"
+      rotation_status: pending_remote_verification
       uid: ecommerce-1 automation signing <141283735+dst-red-Wire@users.noreply.github.com>
       algorithm: ed25519
       signing_required: true

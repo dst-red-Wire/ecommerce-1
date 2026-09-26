@@ -35,7 +35,7 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: ## Run global + affected repository CI and cache promotable worktree evidence
+ci: signing-rotation-check ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
@@ -54,8 +54,27 @@ contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compat
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
 
-signing-check: ## Verify local automation signing isolation, validity and rotation window
+signing-check: signing-rotation-check ## Verify local automation signing isolation, validity and rotation window
 	@$(PYTHON) scripts/check_automation_signing.py
+
+.PHONY: signing-rotation-check signing-rotation-status signing-rotate signing-rotation-verify-remote signing-rotation-activate signing-rotation-retire-old
+signing-rotation-check: ## Read-only rotation status and delivery gate
+	@$(PYTHON) scripts/signing_rotation.py rotation-check
+
+signing-rotation-status: ## Show read-only rotation status
+	@$(PYTHON) scripts/signing_rotation.py rotation-status
+
+signing-rotate: ## Prepare the replacement key without activating it
+	@$(PYTHON) scripts/signing_rotation.py rotate
+
+signing-rotation-verify-remote: ## Verify public registration on GitHub and Gitea
+	@$(PYTHON) scripts/signing_rotation.py verify-remote
+
+signing-rotation-activate: ## Activate only after both forge registrations are proven
+	@$(PYTHON) scripts/signing_rotation.py activate
+
+signing-rotation-retire-old: ## Retire old registration after exact replacement proofs
+	@$(PYTHON) scripts/signing_rotation.py retire-old
 
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
@@ -188,10 +207,10 @@ publish: ## Commit, exact-SHA verify and push current feature branch
 publish-change: ## Canonical alias: qualify, commit and push the current feature branch
 	@$(PYTHON) scripts/repoctl.py publish-change --base "$${BASE:-origin/main}" --message "$(MSG)"
 
-deliver: ## Exact-SHA validate, publish and create/update GitHub PR
+deliver: signing-rotation-check ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-finish-pr: ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
+finish-pr: signing-rotation-check ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
 	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
