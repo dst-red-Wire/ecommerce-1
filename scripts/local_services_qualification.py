@@ -274,10 +274,11 @@ def prepare_native_controller_payload(destination: Path, *, offline: bool) -> di
         oras = shutil.which("oras")
         if not oras or not re.search(r"Version:\s+1\.3\.3\b", run([oras, "version"], timeout=30).stdout):
             raise QualificationError("locked ORAS 1.3.3 is unavailable for native controller")
+        oras_binary = Path(oras).resolve(strict=True)
         expected_oras = contract()["runtime"]["native_controller"]["oras_binary_sha256"]
-        if sha256(Path(oras)) != expected_oras:
+        if sha256(oras_binary) != expected_oras:
             raise QualificationError("local ORAS binary digest differs from the native controller contract")
-        shutil.copy2(oras, temporary / "oras")
+        shutil.copy2(oras_binary, temporary / "oras")
         wheels = temporary / "wheels"
         wheels.mkdir()
         requirements = ROOT / "config/python/requirements.lock"
