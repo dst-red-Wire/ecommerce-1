@@ -163,6 +163,21 @@ python3 scripts/repoctl.py reconcile --tags image_pipeline
 
 ## Windows build, qualification and release
 
+The unattended boot design must pass `scripts/windows/native-startup-resume.ps1`
+with `-Action PrepareDryRun` from an elevated PowerShell session before it is
+connected to the real boot cycle. This creates two temporary `AtStartup` tasks
+under `SYSTEM`, runs them manually through Task Scheduler, checks explicit
+Packer, Vagrant and VirtualBox paths, validates the exact-SHA payload on the
+Windows disk, and exercises monotone state transitions, a second idempotent
+resume and a bounded lock rejection. It compares read-only BCD, hypervisor,
+boot time and VirtualBox inventory snapshots before and after the dry-run. The
+tasks are removed when the test ends; its JSON evidence remains under
+`C:\ecommerce-lab\startup-dry-run\<sha>\evidence`.
+
+Until that real `SYSTEM` task execution and the later native integration pass,
+the following existing cycle still uses interactive logon tasks and must not be
+used as an unattended cycle.
+
 The reference workflow uses a guarded two-boot cycle:
 
 ```console
@@ -182,11 +197,8 @@ recorded as `PASS` or `UNSUPPORTED`; it is never treated as runtime proof.
 
 `native-reboot` is the explicit reboot authorization boundary. It verifies the
 staging and task, arms only `bcdedit /bootsequence` for the native entry, and
-reboots. It never changes the permanent default loader. Before changing BCD,
-`Cycle` registers and starts a disposable S4U startup task to prove that the
-elevated noninteractive token can reach the exact WSL worktree, the host-only
-network and the pinned Windows tools. A failed probe stops the cycle before BCD
-mutation. After native boot, the startup task runs without Windows logon and:
+reboots. It never changes the permanent default loader. After interactive Windows
+logon, the temporary task:
 
 1. rejects a second attempt for the same SHA;
 2. verifies the staging manifest and exact tool versions;
@@ -200,8 +212,7 @@ mutation. After native boot, the startup task runs without Windows logon and:
 8. arms the exact normal loader in a `finally`, removes the task, writes evidence,
    and reboots even when qualification fails.
 
-After the normal boot, a second S4U startup task verifies WSL2 and imports the
-exact-SHA evidence without Windows logon. For manual recovery only:
+After the normal boot and WSL2 return:
 
 ```console
 make image-rocky-windows-native-import

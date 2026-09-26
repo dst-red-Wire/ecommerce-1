@@ -39,6 +39,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         cls.qualify = (WINDOWS / "qualify-rocky-image.ps1").read_text(encoding="utf-8")
         cls.release = (WINDOWS / "release-rocky-image.ps1").read_text(encoding="utf-8")
         cls.native = (WINDOWS / "native-vtx-cycle.ps1").read_text(encoding="utf-8")
+        cls.startup_resume = (WINDOWS / "native-startup-resume.ps1").read_text(encoding="utf-8")
         cls.module = (WINDOWS / "RockyImagePipeline.psm1").read_text(encoding="utf-8")
 
     def test_one_responsibility_has_one_canonical_authority(self):
@@ -108,23 +109,30 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NEM", self.native)
 
     def test_native_boot_mutation_fails_early_without_administrator_token(self):
-        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'StartupTaskProbe') -and -not (Test-Administrator))", self.native)
+        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import') -and -not (Test-Administrator))", self.native)
         self.assertIn("BLOCKED_PRIVILEGE", self.native)
         self.assertNotIn("Invoke-ElevatedSelf", self.native)
 
-    def test_native_resume_runs_at_startup_without_interactive_logon(self):
-        native_task = self.native.split("function Register-NativeTask", 1)[1].split("function Remove-NativeTask", 1)[0]
-        resume_task = self.native.split("function Register-NormalResumeTask", 1)[1].split("function Remove-NormalResumeTask", 1)[0]
-        for task in (native_task, resume_task):
-            self.assertIn("New-ScheduledTaskTrigger -AtStartup", task)
-            self.assertIn("-LogonType S4U -RunLevel Highest", task)
-            self.assertNotIn("-AtLogOn", task)
-        preflight = self.native.split("function Invoke-CyclePreflight", 1)[1].split("function Invoke-Resume", 1)[0]
-        self.assertIn("Assert-StartupTaskCapability", preflight)
-        self.assertIn("startup_task='PASS'", preflight)
-        probe = self.native.split("function Invoke-StartupTaskProbe", 1)[1].split("function Assert-StartupTaskCapability", 1)[0]
-        for check in ("Test-Administrator", "Get-GitState", "S4U startup WSL2 kernel probe", "Assert-LocalHostOnlyNetwork", "Get-CurrentWindowsLoaderId"):
-            self.assertIn(check, probe)
+    def test_system_startup_dry_run_has_bounded_state_and_no_mutation_path(self):
+        source = self.startup_resume
+        for phase in (
+            "PREPARED", "BOOT_RESUME_ARMED", "NATIVE_BOOT_PENDING", "NATIVE_BOOTED",
+            "CONTROLLER_START", "QUALIFICATION_RUNNING", "QUALIFICATION_COMPLETE",
+            "RESTORE_PENDING", "RESTORED", "COMPLETE", "FAILED",
+        ):
+            self.assertIn(f"'{phase}'", source)
+        for guard in (
+            "New-ScheduledTaskTrigger -AtStartup", "-UserId 'SYSTEM'",
+            "-LogonType ServiceAccount -RunLevel Highest", "Start-ScheduledTask -TaskName $TaskName",
+            "Start-ScheduledTask -TaskName $PrerequisiteTaskName", "[IO.FileShare]::None",
+            "Get-ScheduledTaskInfo", "LastTaskResult", "source_sha", "idempotent",
+            "7.2.18r175117", "Get-HostMutationSnapshot", "bcd_mutated=$false",
+        ):
+            self.assertIn(guard, source)
+        self.assertNotIn("/set hypervisorlaunchtype", source.lower())
+        self.assertNotIn("Restart-Computer", source)
+        self.assertNotIn("startvm", source.lower())
+        self.assertNotIn("vagrant up", source.lower())
 
     def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):
         self.assertIn("[IO.FileShare]::ReadWrite", self.native)

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'SelfTest', 'StartupTaskProbe')]
+    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'SelfTest')]
     [string]$Action,
     [string]$RepoRoot = '',
     [string]$WslDistribution = '',
@@ -29,7 +29,6 @@ Set-PipelineUtf8
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
 $ResumeTaskName = 'Ecommerce-VirtualBox-Native-Import'
-$StartupProbeTaskName = 'Ecommerce-VirtualBox-Startup-Probe'
 $GuidPattern = '^\{[0-9a-fA-F-]{36}\}$'
 
 function Get-UtcTimestamp {
@@ -323,8 +322,8 @@ function Register-NativeTask {
         '-ExpectedNormalBootId', $NormalBootId, '-ExpectedNativeBootId', $NativeBootId
     )
     $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Highest
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew
     [void](Register-ScheduledTask -TaskName $NativeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
     $registered = Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction Stop
@@ -349,8 +348,8 @@ function Register-NormalResumeTask {
         '-WslDistribution',$Distribution,'-WslRepoRoot',$LinuxRepository
     )
     $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Highest
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
     [void](Register-ScheduledTask -TaskName $ResumeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
     if ((Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop).TaskName -ne $ResumeTaskName) {
@@ -1057,6 +1056,7 @@ function Invoke-Import {
 }
 
 function Invoke-Prepare {
+    throw 'BOOT_RESUME_ARCHITECTURE_NOT_READY: SYSTEM AtStartup dry-run and real-cycle integration are required before BCD mutation'
     $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
     if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
         throw 'Prepare requires valid WSL distribution and repository paths'
@@ -1273,6 +1273,7 @@ function Invoke-Prepare {
 }
 
 function Invoke-Reboot {
+    throw 'BOOT_RESUME_ARCHITECTURE_NOT_READY: SYSTEM AtStartup resume must be proven before native reboot'
     $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
     if ($prepared.status -ne 'PREPARED' -or -not (Test-StagingManifest -Root ([string]$prepared.stage_root))) {
         throw 'Native reboot requires verified PREPARED staging'
@@ -1320,111 +1321,6 @@ function Invoke-Recover {
     [Console]::WriteLine("PASS native-vtx-recover normal boot armed; native entry removed=$nativeRemoved")
 }
 
-function Invoke-StartupTaskProbe {
-    $expectedStage = Join-Path $script:LabRootResolved 'startup-probe'
-    if ([IO.Path]::GetFullPath($StageRoot).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedStage).TrimEnd('\')) {
-        throw 'Startup probe output is outside the governed lab root'
-    }
-    $resultPath = Join-Path $expectedStage 'result.json'
-    try {
-        if (-not (Test-Administrator)) { throw 'Startup task does not hold an administrator token' }
-        if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Startup probe source SHA is invalid' }
-        $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
-        $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
-        if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
-            throw 'Startup task cannot access the exact WSL source worktree'
-        }
-        $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
-        if (-not $gitState.Clean -or $gitState.Head -ne $ExpectedSourceSha) {
-            throw 'Startup task cannot access the clean exact-SHA WSL worktree'
-        }
-        $kernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
-        Assert-ProcessSuccess -Result $kernel -Operation 'S4U startup WSL2 kernel probe'
-        if ($kernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'S4U startup WSL2 kernel is unavailable' }
-        Assert-LocalHostOnlyNetwork
-        $input = Read-JsonFile (Join-Path $expectedStage 'input.json')
-        if ($input.source_sha -ne $ExpectedSourceSha) { throw 'Startup task tool input is stale' }
-        if ((Get-CurrentWindowsLoaderId) -ne [string]$input.normal_boot_id) {
-            throw 'S4U startup task cannot read the normal BCD loader'
-        }
-        foreach ($tool in @(
-            [pscustomobject]@{ Name='packer'; Args=@('version') },
-            [pscustomobject]@{ Name='virtualbox'; Args=@('--version') },
-            [pscustomobject]@{ Name='vagrant'; Args=@('--version') }
-        )) {
-            $path = [string]$input.tools.($tool.Name)
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "S4U startup tool is unavailable: $($tool.Name)" }
-            $version = Invoke-BoundedProcess -FilePath $path -Arguments $tool.Args -TimeoutSeconds 30 -WorkingDirectory $expectedStage
-            Assert-ProcessSuccess -Result $version -Operation "S4U startup $($tool.Name) probe"
-        }
-        Write-Utf8Json -InputObject ([ordered]@{
-            schema=1; status='PASS'; source_sha=$ExpectedSourceSha; administrator=$true
-            wsl_kernel=$kernel.StdOut.Trim(); host_only_network='PASS'; tools='PASS'; completed_at=Get-UtcTimestamp
-        }) -Path $resultPath
-        [Console]::WriteLine("PASS native-vtx-startup-probe sha=$ExpectedSourceSha")
-    }
-    catch {
-        Write-Utf8Json -InputObject ([ordered]@{
-            schema=1; status='FAIL'; source_sha=$ExpectedSourceSha; error=$_.Exception.Message; completed_at=Get-UtcTimestamp
-        }) -Path $resultPath
-        throw
-    }
-}
-
-function Assert-StartupTaskCapability {
-    param([string]$Repository, [string]$Distribution, [string]$LinuxRepository, [string]$SourceSha)
-    if ($null -ne (Get-ScheduledTask -TaskName $StartupProbeTaskName -ErrorAction SilentlyContinue)) {
-        throw 'An earlier startup probe task still exists'
-    }
-    $probeRoot = Join-Path $script:LabRootResolved 'startup-probe'
-    [void](New-Item -ItemType Directory -Path $probeRoot -Force)
-    $resultPath = Join-Path $probeRoot 'result.json'
-    Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
-    foreach ($name in @('native-vtx-cycle.ps1', 'RockyImagePipeline.psm1', 'NativeLocalServices.ps1')) {
-        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $probeRoot $name) -Force
-    }
-    Write-Utf8Json -InputObject ([ordered]@{
-        source_sha=$SourceSha
-        normal_boot_id=(Get-CurrentWindowsLoaderId)
-        tools=[ordered]@{
-            packer=(Resolve-WindowsTool -Name 'packer.exe' -FallbackPaths @((Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'Microsoft\WinGet\Links\packer.exe')))
-            virtualbox=(Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe')))
-            vagrant=(Resolve-WindowsTool -Name 'vagrant.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Vagrant\bin\vagrant.exe')))
-        }
-    }) -Path (Join-Path $probeRoot 'input.json')
-    $runner = Join-Path $probeRoot 'native-vtx-cycle.ps1'
-    $arguments = @(
-        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$runner,
-        '-Action','StartupTaskProbe','-LabRoot',$script:LabRootResolved,'-StageRoot',$probeRoot,
-        '-RepoRoot',$Repository,'-WslDistribution',$Distribution,'-WslRepoRoot',$LinuxRepository,
-        '-ExpectedSourceSha',$SourceSha
-    )
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -MultipleInstances IgnoreNew
-    $registered = $false
-    try {
-        [void](Register-ScheduledTask -TaskName $StartupProbeTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings)
-        $registered = $true
-        Start-ScheduledTask -TaskName $StartupProbeTaskName
-        $deadline = [DateTime]::UtcNow.AddMinutes(3)
-        while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
-            Start-Sleep -Seconds 1
-        }
-        if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw 'S4U startup task did not produce bounded capability evidence' }
-        $result = Read-JsonFile $resultPath
-        if ($result.status -ne 'PASS' -or $result.source_sha -ne $SourceSha) {
-            throw "S4U startup task capability failed: $($result.error)"
-        }
-        Copy-Item -LiteralPath $resultPath -Destination (Join-Path $script:LabRootResolved 'evidence\startup-task-preflight.json') -Force
-    }
-    finally {
-        if ($registered) { Unregister-ScheduledTask -TaskName $StartupProbeTaskName -Confirm:$false }
-    }
-}
-
 function Invoke-CyclePreflight {
     if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
         throw 'Native cycle preflight requires valid WSL distribution and repository paths'
@@ -1455,12 +1351,11 @@ function Invoke-CyclePreflight {
     $kernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
     Assert-ProcessSuccess -Result $kernel -Operation 'normal-boot WSL2 kernel probe'
     if ($kernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'Normal-boot WSL2 kernel is unavailable' }
-    Assert-StartupTaskCapability -Repository $root -Distribution $WslDistribution -LinuxRepository $WslRepoRoot -SourceSha $gitState.Head
     Write-Utf8Json -InputObject ([ordered]@{
         schema=1; status='PASS'; source_sha=$gitState.Head; administrator=$true
         normal_loader_id=$hostState.current_loader_id; hypervisorlaunchtype=$hostState.hypervisorlaunchtype
         hypervisor_present=$hostState.hypervisor_present; wsl_kernel=$kernel.StdOut.Trim()
-        registered_virtualbox_vms=0; host_only_network='PASS'; startup_task='PASS'; completed_at=Get-UtcTimestamp
+        registered_virtualbox_vms=0; host_only_network='PASS'; completed_at=Get-UtcTimestamp
     }) -Path (Join-Path $script:LabRootResolved 'evidence\cycle-preflight.json')
     [Console]::WriteLine("PASS native-vtx-cycle-preflight sha=$($gitState.Head) normal_loader=$($hostState.current_loader_id)")
 }
@@ -1545,13 +1440,12 @@ description             $NativeEntryName
 $script:LabRootResolved = Resolve-LabRoot -Path $LabRoot
 
 try {
-    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'StartupTaskProbe') -and -not (Test-Administrator)) {
+    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import') -and -not (Test-Administrator)) {
         throw 'BLOCKED_PRIVILEGE: native VT-x boot operations require an administrator PowerShell token before preparation'
     }
     switch ($Action) {
         'Prepare' { Invoke-Prepare }
         'Preflight' { Invoke-CyclePreflight }
-        'StartupTaskProbe' { Invoke-StartupTaskProbe }
         'Reboot' { Invoke-Reboot }
         'Recover' { Invoke-Recover }
         'SelfTest' { Invoke-SelfTest }
