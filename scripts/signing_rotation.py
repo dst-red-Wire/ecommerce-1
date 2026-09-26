@@ -484,6 +484,7 @@ def activate() -> None:
     data["activation"] = expected
     save_state(data)
     original = lock.read_text()
+    pending_state = data.copy()
     try:
         run("git", "config", "--local", "user.signingkey", new)
         lock.write_text(source)
@@ -495,6 +496,8 @@ def activate() -> None:
     except Exception:
         lock.write_text(original)
         run("git", "config", "--local", "user.signingkey", old)
+        data.clear()
+        data.update(pending_state)
         data["activation"] = {**expected, "transition": "activation_failed_recovered"}
         save_state(data)
         raise
