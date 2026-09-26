@@ -41,13 +41,6 @@ function Get-LabBackend {
     return 'UNKNOWN'
 }
 
-function Get-LabVmExists {
-    param([string]$VBoxManage, [string]$VmName, [string]$WorkingDirectory)
-    if (-not $VmName) { return $false }
-    $machines = Get-VBoxMachines -VBoxManage $VBoxManage -WorkingDirectory $WorkingDirectory
-    return $machines.ContainsKey($VmName)
-}
-
 $stage = Assert-LabStage -Root $StageRoot
 $prepared = Read-JsonFile (Join-Path $stage 'prepared.json')
 if ($prepared.schema -ne 1 -or $prepared.status -ne 'PREPARED' -or
@@ -72,25 +65,34 @@ if ($Action -eq 'Clean') {
     }
     catch [IO.IOException] { throw 'BLOCKED_RUNTIME another network smoke holds the laboratory runtime lock' }
     $result = Read-JsonFile $resultPath
+    if ($result.status -eq 'CLEANED_AFTER_DIAGNOSTIC' -and $result.cleanup.vm_preserved -eq $false -and
+        $result.cleanup.status -eq 'PASS') {
+        $cleanLock.Dispose()
+        [Console]::WriteLine("PASS lab-network-clean already-clean campaign=$($prepared.campaign_id)")
+        exit 0
+    }
     if ($result.status -ne 'DIAGNOSTIC_PRESERVED' -or $result.campaign_id -ne $prepared.campaign_id -or
         $result.cleanup.vm_preserved -ne $true -or $result.cleanup.vm_name -ne $result.vm_name -or
-        $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$') {
+        $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$' -or
+        $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
         throw 'No owned preserved network-smoke VM is recorded for this campaign'
     }
     $runtime = Read-JsonFile (Join-Path $smokeRoot 'runtime.json')
-    if ($runtime.name -ne $result.vm_name -or $runtime.box_name -ne $result.box_name -or
-        -not (Get-LabVmExists -VBoxManage $vbox -VmName ([string]$result.vm_name) -WorkingDirectory $smokeRoot)) {
+    if ($runtime.name -ne $result.vm_name -or $runtime.box_name -ne $result.box_name) {
         throw 'Preserved VM binding differs from the recorded campaign'
     }
-    $machineIdPath = Join-Path $smokeRoot '.vagrant\machines\default\virtualbox\id'
     $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
-    if (-not (Test-Path -LiteralPath $machineIdPath -PathType Leaf) -or
-        [IO.File]::ReadAllText($machineIdPath).Trim().Trim('{}') -ine ([string]$machines[[string]$result.vm_name]).Trim('{}')) {
-        throw 'Preserved Vagrant machine ID differs from the owned VirtualBox VM'
-    }
     $environment = @{ VAGRANT_HOME = (Join-Path $smokeRoot 'vagrant-home'); VAGRANT_CHECKPOINT_DISABLE = '1'; VAGRANT_DEFAULT_PROVIDER = 'virtualbox'; VAGRANT_NO_PLUGINS = '1' }
-    $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
-    Assert-ProcessSuccess -Result $destroy -Operation 'owned preserved network-smoke VM destroy'
+    if ($machines.ContainsKey([string]$result.vm_name)) {
+        $machineIdPath = Join-Path $smokeRoot '.vagrant\machines\default\virtualbox\id'
+        if (-not (Test-Path -LiteralPath $machineIdPath -PathType Leaf) -or
+            [IO.File]::ReadAllText($machineIdPath).Trim().Trim('{}') -ine ([string]$result.cleanup.vm_id) -or
+            ([string]$machines[[string]$result.vm_name]).Trim('{}') -ine ([string]$result.cleanup.vm_id)) {
+            throw 'Preserved Vagrant machine ID differs from the owned VirtualBox VM'
+        }
+        $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
+        Assert-ProcessSuccess -Result $destroy -Operation 'owned preserved network-smoke VM destroy'
+    }
     $boxRemove = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'remove', '--force', [string]$result.box_name) -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
     Assert-ProcessSuccess -Result $boxRemove -Operation 'owned preserved network-smoke box removal'
     $result.cleanup.vm_preserved = $false
@@ -115,7 +117,7 @@ $result = [ordered]@{
     network_smoke = $null
     timings = [ordered]@{ box_import_seconds = $null; vm_boot_seconds = $null; network_readiness_seconds = $null; ssh_readiness_seconds = $null; cleanup_seconds = $null }
     guest_security = 'NOT_EXECUTED'
-    cleanup = [ordered]@{ policy = if ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
+    cleanup = [ordered]@{ policy = if ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; vm_id = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
     started_at = [DateTime]::UtcNow.ToString('o'); completed_at = $null
     error = $null
 }
@@ -228,7 +230,14 @@ finally {
         catch { $result.cleanup.seed_server = 'FAIL'; $result.status = 'FAIL'; $result.error = "Seed server cleanup failed: $($_.Exception.Message)" }
     }
     $vmExists = $false
-    try { $vmExists = Get-LabVmExists -VBoxManage $vbox -VmName $vmName -WorkingDirectory $stage }
+    $ownedVmId = $null
+    try {
+        if ($vmName) {
+            $ownedMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $stage
+            $vmExists = $ownedMachines.ContainsKey($vmName)
+            if ($vmExists) { $ownedVmId = ([string]$ownedMachines[$vmName]).Trim('{}') }
+        }
+    }
     catch {
         $result.cleanup.status = 'FAIL'
         $result.status = 'FAIL'
@@ -239,6 +248,7 @@ finally {
         $result.status = 'DIAGNOSTIC_PRESERVED'
         $result.cleanup.vm_preserved = $true
         $result.cleanup.vm_name = $vmName
+        $result.cleanup.vm_id = $ownedVmId
         $result.cleanup.reason = $result.error
         $result.cleanup.status = 'PASS'
     }
