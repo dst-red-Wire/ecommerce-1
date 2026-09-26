@@ -287,7 +287,7 @@ class RemoteStatusTests(unittest.TestCase):
             RD.os.environ,
             {
                 "GITEA_HTTPS_URL": "https://gitea.ecommerce.local/",
-                "GITEA_REPOSITORY": "ecommerce-automation/ecommerce-1",
+                "GITEA_REPOSITORY": "dst-red-Wire/ecommerce-1",
                 "GITEA_TOKEN": "secret",
             },
             clear=True,
@@ -295,7 +295,7 @@ class RemoteStatusTests(unittest.TestCase):
             self.assertEqual(
                 (
                     "https://gitea.ecommerce.local/api/v1",
-                    "ecommerce-automation/ecommerce-1",
+                    "dst-red-Wire/ecommerce-1",
                     "secret",
                 ),
                 RD._gitea_config(),
