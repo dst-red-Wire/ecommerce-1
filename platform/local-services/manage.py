@@ -182,7 +182,7 @@ def initialize() -> None:
             json.dumps(
                 {
                     "gitea_human_password": secrets.token_urlsafe(32),
-                    "gitea_automation_password": secrets.token_urlsafe(32),
+                    "gitea_account_password": secrets.token_urlsafe(32),
                     "harbor_admin_password": secrets.token_urlsafe(32),
                     "harbor_database_password": secrets.token_urlsafe(32),
                 },
@@ -250,13 +250,6 @@ def provision_gitea() -> None:
             "individual",
             True,
         ),
-        (
-            "ecommerce-automation",
-            "ecommerce-automation@ecommerce.local",
-            "gitea_automation_password",
-            "individual",
-            False,
-        ),
     ]:
         if any(line.split()[1:2] == [username] for line in listing.splitlines()[1:]):
             continue
@@ -285,7 +278,7 @@ def provision_gitea() -> None:
             raise RuntimeError(
                 "Gitea account creation failed: " + result.stderr.strip()
             )
-    if "gitea_automation_token" not in creds:
+    if "gitea_account_token" not in creds:
         token = subprocess.run(
             [
                 "docker",
@@ -296,7 +289,7 @@ def provision_gitea() -> None:
                 "user",
                 "generate-access-token",
                 "--username",
-                "ecommerce-automation",
+                "dst-red-Wire",
                 "--token-name",
                 "local-management",
                 "--scopes",
@@ -309,9 +302,9 @@ def provision_gitea() -> None:
         ).stdout.strip()
         if not token:
             raise RuntimeError("Gitea automation token was not generated")
-        creds["gitea_automation_token"] = token
+        creds["gitea_account_token"] = token
         write_private(creds_path, json.dumps(creds, indent=2) + "\n")
-    print("PASS Gitea dedicated human and automation identities")
+    print("PASS Gitea canonical dst-red-Wire identity")
 
 
 def harbor_request(
@@ -342,6 +335,27 @@ def harbor_request(
         raise RuntimeError(
             f"Harbor API {method} {path}: HTTP {error.code}: {content[:300]}"
         ) from None
+
+
+def normalize_harbor_permissions(robot: dict) -> frozenset[tuple[str, str]]:
+    permissions = robot.get("permissions")
+    if not isinstance(permissions, list) or len(permissions) != 1:
+        raise RuntimeError("Harbor robot permissions must contain exactly one project scope")
+    scope = permissions[0]
+    if not isinstance(scope, dict) or scope.get("kind") != "project" or scope.get("namespace") != "ecommerce":
+        raise RuntimeError("Harbor robot scope differs from contract")
+    access = scope.get("access")
+    if not isinstance(access, list):
+        raise RuntimeError("Harbor robot access permissions are malformed")
+    actual = []
+    for item in access:
+        if not isinstance(item, dict) or item.get("resource") != "repository" or not isinstance(item.get("action"), str):
+            raise RuntimeError("Harbor robot repository permissions are malformed")
+        actual.append((item["resource"], item["action"]))
+    expected = frozenset({("repository", "pull"), ("repository", "push")})
+    if frozenset(actual) != expected or len(actual) != len(expected):
+        raise RuntimeError("Harbor robot permissions differ from exact pull/push contract")
+    return expected
 
 
 def provision_harbor() -> None:
@@ -451,9 +465,9 @@ def register_gpg() -> None:
     if f"[GNUPG:] VALIDSIG {expected}" not in verified.stderr + verified.stdout:
         raise RuntimeError("reboot proof commit signature differs from automation key")
     creds = json.loads((STATE / "credentials.json").read_text())
-    token = creds["gitea_automation_token"]
+    token = creds["gitea_account_token"]
     _, user = gitea_request("/user", token)
-    if user["login"] != "ecommerce-automation":
+    if user["login"] != "dst-red-Wire":
         raise RuntimeError("Gitea token does not belong to the automation identity")
     _, existing = gitea_request("/user/gpg_keys", token)
     if not any(key.get("key_id") == expected[-16:] for key in existing):
@@ -471,7 +485,7 @@ def register_gpg() -> None:
     _, keys = gitea_request("/user/gpg_keys", token)
     if not any(key.get("key_id") == expected[-16:] for key in keys):
         raise RuntimeError("automation GPG key is absent from its Gitea account")
-    print("PASS automation GPG public key registered on ecommerce-automation")
+    print("PASS automation GPG public key registered on dst-red-Wire")
 
 
 def verify_running_images() -> None:
@@ -528,10 +542,10 @@ def proof() -> None:
         gitea_health = json.load(response)
     if gitea_health["status"] != "pass":
         raise RuntimeError("Gitea is unhealthy")
-    _, user = gitea_request("/user", creds["gitea_automation_token"])
-    if user["login"] != "ecommerce-automation" or user["is_admin"]:
+    _, user = gitea_request("/user", creds["gitea_account_token"])
+    if user["login"] != "dst-red-Wire":
         raise RuntimeError("Gitea automation identity is incorrect")
-    _, keys = gitea_request("/user/gpg_keys", creds["gitea_automation_token"])
+    _, keys = gitea_request("/user/gpg_keys", creds["gitea_account_token"])
     if not any(key.get("key_id") == expected[-16:] for key in keys):
         raise RuntimeError("automation GPG key is missing from Gitea")
     _, health = harbor_request("/health", creds["harbor_admin_password"])
@@ -543,12 +557,9 @@ def proof() -> None:
     _, robot = harbor_request(
         f"/robots/{creds['harbor_robot_id']}", creds["harbor_admin_password"]
     )
-    if (
-        robot["name"] != creds["harbor_robot_username"]
-        or robot["level"] != "project"
-        or robot["permissions"][0]["namespace"] != "ecommerce"
-    ):
-        raise RuntimeError("Harbor robot scope differs from contract")
+    if robot["name"] != creds["harbor_robot_username"] or robot.get("level") != "project":
+        raise RuntimeError("Harbor robot identity or level differs from contract")
+    normalize_harbor_permissions(robot)
     with tempfile.TemporaryDirectory(dir=STATE) as temporary:
         env = os.environ.copy()
         env["DOCKER_CONFIG"] = temporary
@@ -574,8 +585,9 @@ def proof() -> None:
         "status": "PASS",
         "checked_at_utc": datetime.now(timezone.utc).isoformat(),
         "gitea_url": GITEA_URL,
-        "gitea_automation_account": user["login"],
+        "gitea_account": user["login"],
         "gitea_gpg_key_id": expected[-16:],
+        "gitea_gpg_fingerprint": expected,
         "harbor_url": HARBOR_URL,
         "harbor_project": project["name"],
         "harbor_robot": robot["name"],

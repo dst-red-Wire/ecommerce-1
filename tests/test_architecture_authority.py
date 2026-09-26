@@ -636,7 +636,7 @@ graph LR
             projection = root / "platform/local-services/endpoints.env.example"
             projection.write_text(
                 projection.read_text().replace(
-                    "GITEA_ACCOUNT=ecommerce-automation", "GITEA_ACCOUNT=dst-red-Wire"
+                    "GITEA_ACCOUNT=dst-red-Wire", "GITEA_ACCOUNT=wrong-account"
                 )
             )
             self.assertTrue(

@@ -21,8 +21,8 @@ make local-services-proof
 `local-gpg-register` fails closed until
 `.context/reboot-proof/result.json` proves a real Windows reboot,
 a fresh unattended signature and the exact automation fingerprint.
-The registration targets only `ecommerce-automation`. The human
-`dst-red-Wire` account is separate. Harbor creates a private
+The registration targets the canonical dst-red-Wire account and its automation key.
+`dst-red-Wire` account uses the automation GPG fingerprint. Harbor creates a private
 `ecommerce` project with project-scoped `ecommerce-ci` robot
 (`robot$ecommerce+ecommerce-ci` as the registry login name).
 The robot has only repository pull/push permissions and a 90-day lifetime.
