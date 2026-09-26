@@ -497,7 +497,8 @@ tooling:
           authority: python-repoctl
     guest_configuration:
       authority: ansible
-      execution_environment: developer-environment
+      execution_environment: developer-environment-or-exact-sha-native-virtualbox-controller
+      native_controller_contract: config/contracts/local-services-qualification.yaml#runtime.native_controller
     build_resources:
       authority: config/contracts/machine-image-lock.yaml#packer_image.build.resources
       projection: generated-packer-variables

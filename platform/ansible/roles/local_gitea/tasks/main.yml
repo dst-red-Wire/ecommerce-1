@@ -14,6 +14,13 @@
     quiet: true
   no_log: true
 
+- name: Query exact Git runtime
+  ansible.builtin.command:
+    argv: [rpm, -q, git]
+  register: local_gitea_git_query
+  changed_when: false
+  failed_when: false
+
 - name: Stage locked Gitea RPM closure
   ansible.builtin.copy:
     src: "{{ local_gitea_rpm_root }}/"
@@ -21,6 +28,7 @@
     owner: root
     group: root
     mode: preserve
+  when: local_gitea_git_query.rc != 0
 
 - name: Stage approved Rocky RPM signing keys
   ansible.builtin.copy:
@@ -29,18 +37,13 @@
     owner: root
     group: root
     mode: preserve
+  when: local_gitea_git_query.rc != 0
 
 - name: Import approved Rocky RPM signing keys
   ansible.builtin.command:
     argv: [rpm, --import, /var/tmp/ecommerce-gitea-rpm-keys/rocky-10-public.asc]
   changed_when: false
-
-- name: Query exact Git runtime
-  ansible.builtin.command:
-    argv: [rpm, -q, git]
-  register: local_gitea_git_query
-  changed_when: false
-  failed_when: false
+  when: local_gitea_git_query.rc != 0
 
 - name: Enumerate staged Gitea RPM closure
   ansible.builtin.find:
@@ -48,6 +51,7 @@
     patterns: '*.rpm'
     file_type: file
   register: local_gitea_rpm_files
+  when: local_gitea_git_query.rc != 0
 
 - name: Install Git from the locked offline closure
   ansible.builtin.command:
@@ -197,6 +201,8 @@
       default_branch: main
       auto_init: false
     status_code: [201, 409]
+  register: local_gitea_repository_create
+  changed_when: local_gitea_repository_create.status == 201
   no_log: true
 
 - name: Register ephemeral Git client public key
@@ -212,6 +218,8 @@
       key: "{{ local_gitea_git_public_key }}"
       read_only: false
     status_code: [201, 422]
+  register: local_gitea_git_key_create
+  changed_when: local_gitea_git_key_create.status == 201
   no_log: true
 
 - name: Remove staged Gitea RPM inputs

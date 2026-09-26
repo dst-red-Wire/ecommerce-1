@@ -205,6 +205,10 @@ testing. Ansible remains the sole guest and RKE2 configuration authority in both
 profiles. Packer, VirtualBox and Vagrant are forbidden as parallel WSL2
 toolchains, and the Linux profile rejects WSL. Operational detail is in
 `docs/engineering/LOCAL_VM_IMAGE_PIPELINE.md`.
+For Windows native local-service qualification, an ephemeral Rocky VirtualBox
+controller consumes the exact-SHA repository bundle and runs the same Ansible
+roles and qualification program. It uses the existing host-only lab adapter,
+then is destroyed with the Gitea and Harbor VMs after proof capture.
 
 Machine-image distribution is a separate post-release responsibility. ORAS is
 the sole OCI artifact transport to Harbor, pushes are labelled with the exact

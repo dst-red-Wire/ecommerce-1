@@ -104,7 +104,7 @@ try {
             $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 4096, $true)
             $requestLine = $reader.ReadLine()
             while (($line = $reader.ReadLine()) -ne $null -and $line.Length -gt 0) { }
-            $match = [regex]::Match([string]$requestLine, '^GET /(?<name>meta-data|user-data|vendor-data) HTTP/1\.[01]$')
+            $match = [regex]::Match([string]$requestLine, '^GET /(?<name>meta-data|user-data|vendor-data|network-config) HTTP/1\.[01]$')
             if ($match.Success) {
                 $name = $match.Groups['name'].Value
                 $path = Join-Path $seed $name

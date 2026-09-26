@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import json
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -29,11 +31,13 @@ class LocalServicesQualificationTest(unittest.TestCase):
         self.assertEqual("architecture.lock.yaml", self.contract["architecture_authority"])
         self.assertEqual("forbidden", self.contract["production_authority"])
         self.assertEqual("ansible", self.contract["runtime"]["owner"])
-        self.assertEqual("wsl2", self.contract["runtime"]["controller"])
+        self.assertEqual("virtualbox-linux", self.contract["runtime"]["controller"])
+        self.assertFalse(self.contract["runtime"]["native_controller"]["wsl2_required_during_runtime"])
+        self.assertRegex(self.contract["runtime"]["native_controller"]["oras_binary_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual("native-vtx", self.contract["runtime"]["required_virtualbox_backend"])
         self.assertEqual("BLOCKED_RUNTIME", self.contract["runtime"]["unavailable_classification"])
         self.assertEqual(1, self.contract["machine_image"]["sizing"]["simultaneous_active_service_vms"])
-        self.assertEqual("preserve-stopped-after-qualification", self.contract["runtime"]["persistent_disks"])
+        self.assertEqual("destroy-after-qualification", self.contract["runtime"]["persistent_disks"])
 
     def test_active_hypervisor_blocks_service_vms_before_start(self):
         spec = importlib.util.spec_from_file_location("local_services_qualification", ROOT / "scripts/local_services_qualification.py")
@@ -45,6 +49,44 @@ class LocalServicesQualificationTest(unittest.TestCase):
         self.assertEqual("BLOCKED_RUNTIME", result["status"])
         self.assertEqual("NATIVE_VTX_UNAVAILABLE", result["virtualbox_backend"])
         self.assertTrue(result["hypervisor_present"])
+
+    def test_native_controller_accepts_only_observed_exact_sha_without_nem(self):
+        spec = importlib.util.spec_from_file_location("local_services_qualification", ROOT / "scripts/local_services_qualification.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        head = "a" * 40
+        document = {
+            "source_sha": head,
+            "campaign_id": "b" * 32,
+            "controller": "virtualbox-linux",
+            "target_ip": self.contract["runtime"]["native_controller"]["host_only_service_ipv4"],
+            "service_virtualbox_log_sha256": "d" * 64,
+            "runtime": {
+                "hypervisor_present": False,
+                "hardware_virtualization": True,
+                "virtualbox_backend": "NATIVE_VTX",
+                "nem_detected": False,
+                "virtualbox_log_sha256": "c" * 64,
+            },
+        }
+        with patch.object(module.platform, "system", return_value="Linux"), patch.object(module.platform, "release", return_value="6.12.0-rocky"), patch.object(module, "is_virtualbox_guest", return_value=True):
+            self.assertEqual(document["runtime"], module.validate_native_controller_input(document, head))
+            for mutation in (
+                {"controller": "wsl2"},
+                {"source_sha": "d" * 40},
+                {"runtime": {**document["runtime"], "nem_detected": True}},
+                {"runtime": {**document["runtime"], "virtualbox_backend": "UNKNOWN"}},
+                {"runtime": {**document["runtime"], "hypervisor_present": True}},
+                {"runtime": {**document["runtime"], "virtualbox_log_sha256": None}},
+            ):
+                with self.subTest(mutation=mutation), self.assertRaises(module.RuntimeBlocked):
+                    module.validate_native_controller_input({**document, **mutation}, head)
+        with patch.object(module.platform, "system", return_value="Linux"), patch.object(module.platform, "release", return_value="5.15-microsoft-WSL2"):
+            with self.assertRaises(module.RuntimeBlocked):
+                module.validate_native_controller_input(document, head)
+        with patch.object(module.platform, "system", return_value="Linux"), patch.object(module.platform, "release", return_value="6.12.0-rocky"), patch.object(module, "is_virtualbox_guest", return_value=False):
+            with self.assertRaises(module.RuntimeBlocked):
+                module.validate_native_controller_input(document, head)
 
     def test_gitea_harbor_and_oras_versions_are_exact(self):
         self.assertEqual("1.24.6", self.contract["gitea"]["version"])
@@ -119,6 +161,47 @@ class LocalServicesQualificationTest(unittest.TestCase):
         self.assertIn("no_log: true", self.gitea)
         self.assertIn("no_log: true", self.harbor)
         self.assertNotIn("validate_certs: false", self.harbor)
+
+    def test_second_ansible_apply_requires_zero_reported_changes(self):
+        spec = importlib.util.spec_from_file_location(
+            "local_services_qualification", ROOT / "scripts/local_services_qualification.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            executable = runtime / ".venv/qualification/bin/ansible-playbook"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            recap = "PLAY RECAP\nlocal_service : ok=42 changed=0 unreachable=0 failed=0 skipped=3\n"
+            completed = subprocess.CompletedProcess([], 0, recap, "")
+            with patch.object(module, "ROOT", runtime), patch.object(module, "run", return_value=completed):
+                self.assertEqual(
+                    0, module.prove_second_apply(
+                        ROOT / "platform/ansible/tests/local_services_vm/gitea.yml",
+                        runtime / "inventory.json", {}, runtime,
+                    ),
+                )
+                completed.stdout = recap.replace("changed=0", "changed=1")
+                with self.assertRaisesRegex(module.QualificationError, "second Ansible apply changed 1"):
+                    module.prove_second_apply(
+                        ROOT / "platform/ansible/tests/local_services_vm/gitea.yml",
+                        runtime / "inventory.json", {}, runtime,
+                    )
+                completed.stdout = "PLAY RECAP\n"
+                with self.assertRaisesRegex(module.QualificationError, "recap is absent"):
+                    module.prove_second_apply(
+                        ROOT / "platform/ansible/tests/local_services_vm/gitea.yml",
+                        runtime / "inventory.json", {}, runtime,
+                    )
+
+    def test_ansible_roles_can_converge_without_reapplying_firewall_or_post(self):
+        isolation = (ROOT / "platform/ansible/roles/local_service_isolation/tasks/main.yml").read_text()
+        self.assertIn("local_service_isolation_active.rc != 0", isolation)
+        self.assertIn("local_service_isolation_template.changed", isolation)
+        self.assertIn("local_gitea_repository_create.status == 201", self.gitea)
+        self.assertIn("local_gitea_git_key_create.status == 201", self.gitea)
+        self.assertIn("local_harbor_project_create.status == 201", self.harbor)
 
     def test_functional_proof_and_cleanup_are_explicit(self):
         for marker in (

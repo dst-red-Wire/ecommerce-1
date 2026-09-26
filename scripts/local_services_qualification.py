@@ -231,6 +231,91 @@ def materialize_assets(*, offline: bool) -> None:
     print(result.stdout.strip())
 
 
+def prepare_native_controller_payload(destination: Path, *, offline: bool) -> dict:
+    """Freeze the published source and locked Linux tools before WSL2 stops."""
+    head = git("rev-parse", "HEAD")
+    branch = git("symbolic-ref", "--short", "HEAD")
+    if not re.fullmatch(r"[0-9a-f]{40}", head) or branch != "feat/packer-dual-host-rocky-image-pipeline":
+        raise QualificationError("native controller payload requires the published PR branch")
+    if git("status", "--porcelain", "--untracked-files=all"):
+        raise QualificationError("native controller payload requires a clean exact-SHA worktree")
+    if git("rev-parse", "@{upstream}") != head:
+        raise QualificationError("native controller payload requires the published exact SHA")
+    if destination.is_symlink() or destination.exists():
+        manifest = destination / "payload.json"
+        if not manifest.is_file():
+            raise QualificationError(f"stale or incomplete native controller payload: {destination}")
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        if payload.get("source_sha") != head:
+            raise QualificationError("native controller payload is stale for the current SHA")
+        if not isinstance(payload.get("files"), dict) or len(payload["files"]) < 5:
+            raise QualificationError("native controller payload manifest is incomplete")
+        for relative, digest in payload.get("files", {}).items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise QualificationError("native controller payload manifest is invalid")
+            if Path(relative).is_absolute() or any(part in {"", ".", ".."} for part in Path(relative).parts):
+                raise QualificationError("native controller payload path is unsafe")
+            path = destination / relative
+            if not path.resolve().is_relative_to(destination.resolve()) or sha256(path) != digest:
+                raise QualificationError(f"native controller payload checksum differs: {relative}")
+        return payload
+
+    materialize_assets(offline=offline)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f"{destination.name}.{os.getpid()}.tmp")
+    if temporary.exists() or temporary.is_symlink():
+        raise QualificationError(f"stale interrupted native controller preparation: {temporary}")
+    try:
+        temporary.mkdir(mode=0o700)
+        run(["git", "bundle", "create", str(temporary / "source.bundle"), branch], timeout=1800)
+        run(["git", "bundle", "verify", str(temporary / "source.bundle")], timeout=300)
+        shutil.copy2(ROOT / "scripts/native_controller_bootstrap.py", temporary / "bootstrap.py")
+        shutil.copytree(CACHE, temporary / "assets")
+        oras = shutil.which("oras")
+        if not oras or not re.search(r"Version:\s+1\.3\.3\b", run([oras, "version"], timeout=30).stdout):
+            raise QualificationError("locked ORAS 1.3.3 is unavailable for native controller")
+        expected_oras = contract()["runtime"]["native_controller"]["oras_binary_sha256"]
+        if sha256(Path(oras)) != expected_oras:
+            raise QualificationError("local ORAS binary digest differs from the native controller contract")
+        shutil.copy2(oras, temporary / "oras")
+        wheels = temporary / "wheels"
+        wheels.mkdir()
+        requirements = ROOT / "config/python/requirements.lock"
+        index = contract()["runtime"]["native_controller"]["python_package_index"]
+        command = [
+            sys.executable, "-m", "pip", "download", "--require-hashes",
+            "--only-binary=:all:", "--dest", str(wheels), "-r", str(requirements),
+        ]
+        if offline:
+            command.extend(["--no-index", "--find-links", str(ROOT / ".context/cache/native-controller-wheels")])
+        else:
+            if index != "https://pypi.org/simple":
+                raise QualificationError("native controller Python index is not the declared pinned source")
+            command.extend(["--index-url", index])
+        run(command, timeout=3600)
+        if not any(wheels.glob("*.whl")):
+            raise QualificationError("native controller wheelhouse is empty")
+        files = {
+            path.relative_to(temporary).as_posix(): sha256(path)
+            for path in temporary.rglob("*") if path.is_file()
+        }
+        payload = {
+            "schema": 1,
+            "source_sha": head,
+            "source_branch": branch,
+            "source_tree": git("rev-parse", "HEAD^{tree}"),
+            "files": files,
+            "created_at": now(),
+        }
+        write_json(temporary / "payload.json", payload)
+        os.replace(temporary, destination)
+        return payload
+    except BaseException:
+        if temporary.is_dir() and not temporary.is_symlink():
+            shutil.rmtree(temporary)
+        raise
+
+
 def ensure_key(path: Path, comment: str) -> None:
     if path.is_file() and path.with_suffix(".pub").is_file():
         return
@@ -436,7 +521,7 @@ def ansible_inventory(runtime: Path, state: Path, identity: Path, known_hosts: P
     return path
 
 
-def run_ansible(playbook: Path, inventory: Path, variables: dict, runtime: Path) -> None:
+def run_ansible(playbook: Path, inventory: Path, variables: dict, runtime: Path) -> int:
     variables_path = runtime / f"extra-vars-{playbook.stem}.json"
     write_json(variables_path, variables)
     executable = ROOT / ".venv/qualification/bin/ansible-playbook"
@@ -444,12 +529,27 @@ def run_ansible(playbook: Path, inventory: Path, variables: dict, runtime: Path)
         raise QualificationError("qualification Ansible environment is absent; run make seed")
     environment = dict(os.environ)
     environment["ANSIBLE_CONFIG"] = str(ROOT / "platform/ansible/ansible.cfg")
+    environment["ANSIBLE_NOCOLOR"] = "1"
     result = run(
         [str(executable), "-i", str(inventory), str(playbook), "--extra-vars", f"@{variables_path}"],
         env=environment,
         timeout=1800,
     )
     print(result.stdout.strip())
+    recaps = re.findall(
+        r"(?m)^local_service\s+:\s+ok=\d+\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)\b",
+        result.stdout,
+    )
+    if len(recaps) != 1 or int(recaps[0][1]) != 0 or int(recaps[0][2]) != 0:
+        raise QualificationError("Ansible recap is absent, ambiguous or reports an unreachable/failed host")
+    return int(recaps[0][0])
+
+
+def prove_second_apply(playbook: Path, inventory: Path, variables: dict, runtime: Path) -> int:
+    changed = run_ansible(playbook, inventory, variables, runtime)
+    if changed != 0:
+        raise QualificationError(f"second Ansible apply changed {changed} resources: {playbook.name}")
+    return changed
 
 
 @contextmanager
@@ -626,6 +726,248 @@ def oras_qualification(
     }
 
 
+def is_virtualbox_guest() -> bool:
+    try:
+        return "virtualbox" in Path("/sys/class/dmi/id/product_name").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def validate_native_controller_input(document: dict, head: str) -> dict:
+    runtime = document.get("runtime")
+    if (
+        document.get("source_sha") != head
+        or not isinstance(document.get("campaign_id"), str)
+        or re.fullmatch(r"[0-9a-f]{32}", document["campaign_id"]) is None
+        or not isinstance(runtime, dict)
+        or runtime.get("hypervisor_present") is not False
+        or runtime.get("hardware_virtualization") is not True
+        or runtime.get("virtualbox_backend") != "NATIVE_VTX"
+        or runtime.get("nem_detected") is not False
+        or re.fullmatch(r"[0-9a-f]{64}", str(runtime.get("virtualbox_log_sha256"))) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(document.get("service_virtualbox_log_sha256"))) is None
+        or document.get("controller") != "virtualbox-linux"
+        or document.get("target_ip") != contract()["runtime"]["native_controller"]["host_only_service_ipv4"]
+    ):
+        raise RuntimeBlocked("native controller input lacks exact-SHA observed VT-x/no-NEM binding")
+    if platform.system() != "Linux" or "microsoft" in platform.release().lower():
+        raise RuntimeBlocked("native controller must run in a Linux VirtualBox guest, never WSL2")
+    if not is_virtualbox_guest():
+        raise RuntimeBlocked("native controller does not have a VirtualBox guest identity")
+    return runtime
+
+
+def direct_ssh_command(address: str, identity: Path, known_hosts: Path, *remote: str, accept_new: bool = False) -> list[str]:
+    return [
+        "ssh", "-o", f"UserKnownHostsFile={known_hosts}",
+        "-o", f"StrictHostKeyChecking={'accept-new' if accept_new else 'yes'}",
+        "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=5",
+        "-o", "BatchMode=yes",
+        "-i", str(identity), f"qualifier@{address}", *remote,
+    ]
+
+
+def wait_for_direct_ssh(address: str, identity: Path, known_hosts: Path) -> None:
+    for attempt in range(30):
+        probe = run(
+            direct_ssh_command(
+                address, identity, known_hosts,
+                "test -f /var/lib/ecommerce-first-boot-ready && test \"$(getenforce)\" = Enforcing",
+                accept_new=True,
+            ),
+            timeout=15,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return
+        if attempt < 29:
+            time.sleep(3)
+    raise QualificationError("native local-service VM SSH or cloud-init readiness timed out")
+
+
+def direct_ansible_inventory(runtime: Path, address: str, identity: Path, known_hosts: Path) -> Path:
+    path = runtime / "inventory-native.json"
+    write_json(path, {
+        "all": {"hosts": {"local_service": {
+            "ansible_host": address,
+            "ansible_user": "qualifier",
+            "ansible_python_interpreter": "/usr/bin/python3",
+            "ansible_ssh_private_key_file": str(identity),
+            "ansible_ssh_common_args": (
+                f"-o UserKnownHostsFile={known_hosts} -o StrictHostKeyChecking=yes "
+                "-o IdentitiesOnly=yes -o ConnectTimeout=5"
+            ),
+        }}},
+    })
+    return path
+
+
+@contextmanager
+def direct_ssh_tunnel(address: str, identity: Path, known_hosts: Path, forwards: list[tuple[str, int, int]]):
+    command = direct_ssh_command(address, identity, known_hosts)
+    command[1:1] = ["-N"]
+    for local_address, local_port, remote_port in forwards:
+        command[1:1] = ["-L", f"{local_address}:{local_port}:127.0.0.1:{remote_port}"]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    try:
+        for attempt in range(60):
+            if process.poll() is not None:
+                detail = (process.stderr.read() if process.stderr else "").strip()[-1000:]
+                raise QualificationError(f"native SSH tunnel exited before readiness: {detail}")
+            try:
+                for local_address, local_port, _ in forwards:
+                    with socket.create_connection((local_address, local_port), timeout=1):
+                        pass
+                yield
+                return
+            except OSError:
+                if attempt < 59:
+                    time.sleep(0.5)
+        raise QualificationError("native SSH tunnel readiness timed out")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def qualify_native_controller_phase(phase: str, input_path: Path) -> int:
+    head = git("rev-parse", "HEAD")
+    document = json.loads(input_path.read_text(encoding="utf-8"))
+    campaign = document.get("campaign_id")
+    evidence_path = EVIDENCE
+    evidence = {
+        "schema": 1, "status": "FAIL", "source_sha": head, "campaign_id": campaign,
+        "controller": {"type": "virtualbox-linux", "wsl2_required": False},
+        "runtime": document.get("runtime"), "gitea": {}, "harbor": {}, "oras": {},
+        "started_at": now(), "completed_at": None, "error": None,
+    }
+    try:
+        validate_native_controller_input(document, head)
+        os.environ["PATH"] = str(ROOT / ".venv/qualification/bin") + os.pathsep + os.environ.get("PATH", "")
+        if git("status", "--porcelain", "--untracked-files=all"):
+            raise QualificationError("native controller requires a clean exact-SHA checkout")
+        if git("rev-parse", "@{upstream}") != head:
+            raise QualificationError("native controller source SHA is not its bundled upstream")
+        configuration = contract()
+        artifact, digest = validate_released_artifact(configuration, head)
+        evidence["artifact_sha256"] = digest
+        runtime = RUNTIME / str(campaign)
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        identity = Path(document["service_identity"])
+        if identity.is_symlink() or not identity.is_file() or identity.stat().st_mode & 0o077:
+            raise QualificationError("native controller service SSH identity is absent or not private")
+        address = document["target_ip"]
+        known_hosts = runtime / "service-known-hosts"
+        wait_for_direct_ssh(address, identity, known_hosts)
+        inventory = direct_ansible_inventory(runtime, address, identity, known_hosts)
+        secrets_value = ensure_secrets(runtime)
+        if phase == "gitea":
+            git_identity = runtime / "git-identity"
+            ensure_key(git_identity, "ecommerce-local-gitea-client")
+            repository = f"qualification-{head[:12]}-{campaign[:8]}"
+            variables = {
+                "local_gitea_version": configuration["gitea"]["version"],
+                "local_gitea_binary": str(CACHE / configuration["gitea"]["filename"]),
+                "local_gitea_binary_sha256": configuration["gitea"]["sha256"],
+                "local_gitea_rpm_root": str(CACHE / "gitea-rpms"),
+                "local_gitea_rpm_keys": str(CACHE / "rpm-keys"),
+                "local_gitea_admin_password": secrets_value["gitea_admin_password"],
+                "local_gitea_secret_key": secrets_value["gitea_secret_key"],
+                "local_gitea_internal_token": secrets_value["gitea_internal_token"],
+                "local_gitea_lfs_jwt_secret": secrets_value["gitea_lfs_jwt_secret"],
+                "local_gitea_repository_name": repository,
+                "local_gitea_git_public_key": git_identity.with_suffix(".pub").read_text(encoding="utf-8").strip(),
+            }
+            playbook = FIXTURE / "gitea.yml"
+            run_ansible(playbook, inventory, variables, runtime)
+            changed = prove_second_apply(playbook, inventory, variables, runtime)
+            http_port, git_port = local_free_port(), local_free_port()
+            with direct_ssh_tunnel(address, identity, known_hosts, [
+                ("127.0.0.1", http_port, 3000), ("127.0.0.1", git_port, 2222),
+            ]):
+                with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/api/healthz", timeout=10) as response:
+                    health = json.load(response)
+                if health.get("status") != "pass":
+                    raise QualificationError("Gitea health response is not pass")
+                git_proof = git_qualification(runtime, git_port, git_identity, repository)
+            evidence["gitea"] = {
+                "status": "PASS", "install": "PASS", "health": "PASS",
+                "second_apply_changes": changed, **git_proof,
+            }
+            evidence["status"] = "GITEA_PASS"
+        elif phase == "harbor":
+            previous = json.loads(evidence_path.read_text(encoding="utf-8"))
+            if (
+                previous.get("source_sha") != head
+                or previous.get("campaign_id") != campaign
+                or previous.get("status") != "GITEA_PASS"
+                or previous.get("runtime") != document.get("runtime")
+                or previous.get("gitea", {}).get("status") != "PASS"
+                or previous.get("gitea", {}).get("second_apply_changes") != 0
+            ):
+                raise QualificationError("native Harbor phase lacks the matching Gitea campaign")
+            evidence["gitea"] = previous["gitea"]
+            ca_cert, harbor_cert, harbor_key = ensure_tls(runtime)
+            harbor_port = local_free_port("127.0.0.2")
+            docker = configuration["harbor"]["container_runtime"]
+            variables = {
+                "local_harbor_version": configuration["harbor"]["version"],
+                "local_harbor_archive": str(CACHE / configuration["harbor"]["filename"]),
+                "local_harbor_archive_sha256": configuration["harbor"]["sha256"],
+                "local_harbor_nested_archive_sha256": configuration["harbor"]["nested_image_archive_sha256"],
+                "local_harbor_docker_rpm_root": str(CACHE / "docker-rpms"),
+                "local_harbor_docker_signing_key": str(CACHE / docker["signing_key"]["filename"]),
+                "local_harbor_docker_signing_key_sha256": docker["signing_key"]["sha256"],
+                "local_harbor_admin_password": secrets_value["harbor_admin_password"],
+                "local_harbor_database_password": secrets_value["harbor_database_password"],
+                "local_harbor_tls_certificate": str(harbor_cert),
+                "local_harbor_tls_private_key": str(harbor_key),
+                "local_harbor_tls_ca": str(ca_cert),
+                "local_harbor_external_port": harbor_port,
+                "local_harbor_project": configuration["harbor"]["project"],
+                "local_harbor_images": configuration["harbor"]["images"],
+            }
+            playbook = FIXTURE / "harbor.yml"
+            run_ansible(playbook, inventory, variables, runtime)
+            changed = prove_second_apply(playbook, inventory, variables, runtime)
+            with direct_ssh_tunnel(address, identity, known_hosts, [("127.0.0.2", harbor_port, 443)]):
+                health = tls_health(f"https://127.0.0.2:{harbor_port}/api/v2.0/health", ca_cert)
+                if health.get("status") != "healthy":
+                    raise QualificationError("Harbor health response is not healthy")
+                evidence["harbor"] = {
+                    "status": "PASS", "install": "PASS", "health": "PASS",
+                    "second_apply_changes": changed,
+                }
+                evidence["oras"] = oras_qualification(
+                    configuration, runtime, ca_cert, harbor_port, secrets_value["harbor_admin_password"]
+                )
+            if (
+                evidence["oras"].get("push") != "PASS"
+                or evidence["oras"].get("pull_by_digest") != "PASS"
+                or evidence["oras"].get("source_sha256") != evidence["oras"].get("pulled_sha256")
+                or evidence["oras"].get("source_sha256") != digest
+            ):
+                raise QualificationError("native ORAS digest identity is not proven")
+            evidence["status"] = "PASS"
+        else:
+            raise QualificationError(f"unknown native controller phase: {phase}")
+    except RuntimeBlocked as exc:
+        evidence["status"] = "BLOCKED_RUNTIME"
+        evidence["error"] = str(exc)[:2000]
+    except (KeyError, OSError, QualificationError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        evidence["error"] = str(exc)[:2000]
+    evidence["completed_at"] = now()
+    write_json(evidence_path, evidence)
+    if evidence["status"] not in {"GITEA_PASS", "PASS"}:
+        print(f"{evidence['status']} native-controller-{phase}: {evidence['error']}", file=sys.stderr)
+        return 1
+    print(f"PASS native-controller-{phase} campaign={campaign} sha={head}")
+    return 0
+
+
 def bootstrap_vm(state: Path, identity: Path, known_hosts: Path) -> None:
     seed = state / "seed"
     runtime = json.loads((state / "runtime.json").read_text(encoding="utf-8"))
@@ -718,6 +1060,7 @@ def qualify(*, offline: bool) -> int:
             "local_gitea_git_public_key": git_identity.with_suffix(".pub").read_text(encoding="utf-8").strip(),
         }
         run_ansible(FIXTURE / "gitea.yml", gitea_inventory, gitea_variables, runtime)
+        gitea_second_changes = prove_second_apply(FIXTURE / "gitea.yml", gitea_inventory, gitea_variables, runtime)
         http_port, git_port = local_free_port(), local_free_port()
         with ssh_tunnel(states["gitea"], identity, gitea_known, [("127.0.0.1", http_port, 3000), ("127.0.0.1", git_port, 2222)]):
             with urllib.request.urlopen(f"http://127.0.0.1:{http_port}/api/healthz", timeout=10) as response:
@@ -727,6 +1070,7 @@ def qualify(*, offline: bool) -> int:
             git_proof = git_qualification(runtime, git_port, git_identity, repository)
         evidence["gitea"] = {
             "version": configuration["gitea"]["version"],
+            "second_apply_changes": gitea_second_changes,
             "install": "PASS", "service": "PASS", "health": "PASS",
             "repository_create": "PASS", "push": "PASS", "clone": "PASS", "fetch": "PASS",
             "sha_integrity": "PASS", **git_proof,
@@ -757,12 +1101,14 @@ def qualify(*, offline: bool) -> int:
             "local_harbor_images": configuration["harbor"]["images"],
         }
         run_ansible(FIXTURE / "harbor.yml", harbor_inventory, harbor_variables, runtime)
+        harbor_second_changes = prove_second_apply(FIXTURE / "harbor.yml", harbor_inventory, harbor_variables, runtime)
         with ssh_tunnel(states["harbor"], identity, harbor_known, [("127.0.0.2", harbor_port, 443)]):
             health = tls_health(f"https://127.0.0.2:{harbor_port}/api/v2.0/health", ca_cert)
             if health.get("status") != "healthy":
                 raise QualificationError("Harbor health response is not healthy")
             evidence["harbor"] = {
                 "version": configuration["harbor"]["version"],
+                "second_apply_changes": harbor_second_changes,
                 "install": "PASS", "service": "PASS", "health": "PASS", "project_create": "PASS",
                 "image_digests": "PASS",
             }
@@ -817,8 +1163,10 @@ def recover() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("assets", "capabilities", "qualify", "recover"))
+    parser.add_argument("action", choices=("assets", "capabilities", "qualify", "recover", "native-payload", "controller-gitea", "controller-harbor"))
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--stage", type=Path)
+    parser.add_argument("--input", type=Path)
     args = parser.parse_args()
     if args.action == "capabilities":
         print(json.dumps(runtime_capabilities(), indent=2, sort_keys=True))
@@ -835,6 +1183,16 @@ def main() -> int:
     if args.action == "assets":
         materialize_assets(offline=args.offline)
         return 0
+    if args.action == "native-payload":
+        if args.stage is None:
+            parser.error("native-payload requires --stage")
+        payload = prepare_native_controller_payload(args.stage, offline=args.offline)
+        print(f"PASS native-controller-payload sha={payload['source_sha']} stage={args.stage}")
+        return 0
+    if args.action in {"controller-gitea", "controller-harbor"}:
+        if args.input is None:
+            parser.error(f"{args.action} requires --input")
+        return qualify_native_controller_phase(args.action.split("-", 1)[1], args.input)
     if args.action == "recover":
         return recover()
     return qualify(offline=args.offline)

@@ -339,40 +339,36 @@ make local-services-capabilities
 make local-services-qualify
 ```
 
-WSL2 remains the Ansible/SSH controller. `local-services-capabilities` observes
-the actual WSL2 tools, Windows interop, `HypervisorPresent`, and firmware
-virtualization before a service VM is created. The qualification records
-`BLOCKED_RUNTIME` when native VT-x is unavailable; after a VM starts, it also
-checks that VM's `VBox.log` and rejects NEM before Ansible runs. A blocked
-result is not a failed Gitea, Harbor, or ORAS proof and cannot be promoted to
-`PASS`.
+`local-services-capabilities` remains a read-only diagnostic for the normal
+WSL2 boot. It records `BLOCKED_RUNTIME` when native VT-x is unavailable.
+The native Windows cycle stages an exact-SHA Git bundle, hash-locked offline
+assets and Python wheels before WSL2 stops. During native boot, a Rocky Linux
+VirtualBox controller runs the repository's canonical Ansible roles and
+qualification program. Every VM must have a `NATIVE_VTX` VirtualBox log with
+no NEM marker. A blocked result cannot be promoted to `PASS`.
 
 On this workstation, the normal Windows boot keeps the Microsoft hypervisor
-active for WSL2. VirtualBox then uses NEM, which has produced runtime errors;
-the native VT-x boot disables the hypervisor and WSL2. These two observed boot
-capabilities cannot provide both the WSL2 controller and the required native
-VirtualBox backend at once. Do not start service VMs under the normal boot to
-manufacture a qualification result. Keep the development boot and WSL2 as the
-permanent environment. For image build and smoke only, use the controlled
-`image-rocky-windows-native-prepare` → explicitly authorized
-`image-rocky-windows-native-reboot` → Windows native scheduled cycle → normal
-boot → `image-rocky-windows-native-import` sequence above. The cycle stages
-inputs before WSL2 stops, checks the real backend, and returns automatically.
-Service qualification remains `BLOCKED_RUNTIME` until a runtime with both
-WSL2 and a working, contract-approved VirtualBox backend is demonstrated; the
-native image cycle by itself does not supply an Ansible controller.
+active for WSL2. The native VT-x boot disables the hypervisor and WSL2. The
+cycle creates an ephemeral Rocky controller on the existing host-only adapter
+(`192.168.22.241`) and one service VM at a time (`192.168.22.242`). The
+controller receives the exact-SHA Git bundle without a network clone and uses
+the same checked-in playbooks and roles. NoCloud seed traffic uses VirtualBox
+NAT only during first boot; NAT is disconnected before qualification. The
+controller proves Gitea first, destroys its VM, then proves Harbor and the
+ORAS digest round trip and destroys both remaining VMs. The normal-boot task
+imports evidence, checks the original BCD loader and hypervisor state, removes
+the owned native loader and verifies that WSL2 can start.
 
-The controller uses Ansible to install and probe Gitea first, proves repository
-creation plus push/clone/fetch SHA integrity, and stops that VM while preserving
-its disk. It then installs Harbor from the verified offline archive on a separate
-sized VM, verifies all loaded image IDs, uses a runtime private CA, creates the
-project, and performs ORAS login, push, immutable-digest pull, SHA-256 comparison
-and wrong-digest rejection. Guest output and forwarding use a persistent
-default-deny nftables policy after bootstrap. Both service VMs are stopped after
-the proof so the limited host never retains Packer, Gitea and Harbor workloads
-running together.
+The controller uses Ansible twice per service and requires zero changes on the
+second apply. It probes Gitea and proves repository creation plus
+push/clone/fetch SHA integrity. It then installs Harbor from the verified
+offline archive, verifies loaded image IDs, uses a runtime private CA, creates
+the project, and performs ORAS login, push, immutable-digest pull, SHA-256
+comparison and wrong-digest rejection. Guest output and forwarding use a
+persistent default-deny nftables policy after bootstrap. Every VM disk is
+destroyed after evidence capture.
 
-Recovery is bounded to owned service VMs and preserves their disks:
+Recovery is bounded to owned service VMs and the dedicated native BCD loader:
 
 ```console
 make local-services-recover

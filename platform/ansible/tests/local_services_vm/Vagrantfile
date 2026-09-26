@@ -2,11 +2,17 @@ require "json"
 
 runtime = JSON.parse(File.read(File.join(__dir__, "runtime.json")))
 name = runtime.fetch("name")
-raise "invalid owned local-service VM name" unless name.match?(/\Aecommerce-local-(gitea|harbor)-[0-9a-f]{12}\z/)
+raise "invalid owned local-service VM name" unless name.match?(/\Aecommerce-local-(controller|gitea|harbor)-[0-9a-f]{12}\z/)
 port = Integer(runtime.fetch("ssh_host_port"))
 raise "invalid SSH host port" unless (1024..65_535).cover?(port)
 seed_port = Integer(runtime.fetch("seed_port"))
 raise "invalid seed port" unless (1024..65_535).cover?(seed_port)
+adapter = runtime["host_only_adapter"]
+mac = runtime["host_only_mac"]
+if adapter
+  raise "invalid owned host-only adapter" unless adapter == "VirtualBox Host-Only Ethernet Adapter"
+  raise "invalid owned host-only MAC" unless mac.match?(/\A02EECC[0-9A-F]{6}\z/)
+end
 
 Vagrant.require_version "= #{runtime.fetch("vagrant_version")}"
 Vagrant.configure("2") do |config|
@@ -32,7 +38,12 @@ Vagrant.configure("2") do |config|
       "VBoxInternal/Devices/pcbios/0/Config/DmiSystemSerial",
       "ds=nocloud-net;s=http://10.0.2.2:#{seed_port}/",
     ]
-    (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
+    if adapter
+      vm.customize ["modifyvm", :id, "--nic2", "hostonly", "--hostonlyadapter2", adapter, "--macaddress2", mac]
+    else
+      vm.customize ["modifyvm", :id, "--nic2", "none"]
+    end
+    (3..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
     vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]
   end
 end

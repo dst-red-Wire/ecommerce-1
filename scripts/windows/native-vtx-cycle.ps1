@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Prepare', 'Reboot', 'Run', 'Import', 'Recover', 'SelfTest')]
+    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'SelfTest')]
     [string]$Action,
     [string]$RepoRoot = '',
     [string]$WslDistribution = '',
@@ -24,9 +24,11 @@ $env:PSModulePath = @(
 ) -join ';'
 Import-Module (Join-Path $PSScriptRoot 'RockyImagePipeline.psm1') -Force
 Set-PipelineUtf8
+. (Join-Path $PSScriptRoot 'NativeLocalServices.ps1')
 
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
+$ResumeTaskName = 'Ecommerce-VirtualBox-Native-Import'
 $GuidPattern = '^\{[0-9a-fA-F-]{36}\}$'
 
 function Get-UtcTimestamp {
@@ -62,39 +64,6 @@ function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function ConvertTo-SingleQuotedPowerShellLiteral {
-    param([Parameter(Mandatory = $true)][string]$Value)
-    return "'" + $Value.Replace("'", "''") + "'"
-}
-
-function Invoke-ElevatedSelf {
-    $parameters = @(
-        '-Action', $Action,
-        '-LabRoot', $LabRoot
-    )
-    if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) { $parameters += @('-RepoRoot', $RepoRoot) }
-    if (-not [string]::IsNullOrWhiteSpace($WslDistribution)) { $parameters += @('-WslDistribution', $WslDistribution) }
-    if (-not [string]::IsNullOrWhiteSpace($WslRepoRoot)) { $parameters += @('-WslRepoRoot', $WslRepoRoot) }
-    if (-not [string]::IsNullOrWhiteSpace($StageRoot)) { $parameters += @('-StageRoot', $StageRoot) }
-    if ($Offline.IsPresent) { $parameters += '-Offline' }
-    $parts = @('&', (ConvertTo-SingleQuotedPowerShellLiteral $PSCommandPath))
-    foreach ($parameter in $parameters) {
-        if ([string]$parameter -match '^-[A-Za-z][A-Za-z0-9]*$') {
-            $parts += [string]$parameter
-        }
-        else {
-            $parts += ConvertTo-SingleQuotedPowerShellLiteral ([string]$parameter)
-        }
-    }
-    $encoded = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes(($parts -join ' '))
-    )
-    $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ArgumentList @(
-        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded
-    )
-    exit $process.ExitCode
 }
 
 function Assert-Guid {
@@ -147,6 +116,58 @@ function Get-CurrentWindowsLoaderId {
     return Assert-Guid -Value $entries[0].Id
 }
 
+function Get-HypervisorLaunchType {
+    param([Parameter(Mandatory = $true)][string]$BcdText)
+    $modeMatches = @([regex]::Matches($BcdText, '(?im)^\s*hypervisorlaunchtype\s+(?<value>auto|off)\s*$'))
+    if ($modeMatches.Count -gt 1) { throw 'Ambiguous hypervisorlaunchtype in current Windows loader' }
+    if ($modeMatches.Count -eq 0) { return 'DEFAULT_ABSENT' }
+    return $modeMatches[0].Groups['value'].Value.ToLowerInvariant()
+}
+
+function Get-NormalHostState {
+    $current = Invoke-BcdEdit -Arguments @('/enum', '{current}', '/v')
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    $features = [ordered]@{}
+    foreach ($name in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform', 'Microsoft-Hyper-V-All')) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction SilentlyContinue
+        $features[$name] = if ($null -eq $feature) { 'ABSENT' } else { [string]$feature.State }
+    }
+    $services = [ordered]@{}
+    foreach ($name in @('vmcompute', 'LxssManager', 'WslService')) {
+        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+        $services[$name] = if ($null -eq $service) { 'ABSENT' } else { [string]$service.Status }
+    }
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $currentDigest = ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($current.StdOut + $current.StdErr).Trim())))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $hasher.Dispose() }
+    return [ordered]@{
+        current_loader_id = Get-CurrentWindowsLoaderId
+        current_loader_sha256 = $currentDigest
+        hypervisorlaunchtype = Get-HypervisorLaunchType -BcdText ($current.StdOut + $current.StdErr)
+        hypervisor_present = [bool]$computer.HypervisorPresent
+        features = $features
+        services = $services
+        captured_at = Get-UtcTimestamp
+    }
+}
+
+function Assert-NormalHostRestored {
+    param([Parameter(Mandatory = $true)]$Before)
+    $after = Get-NormalHostState
+    if (
+        $after.current_loader_id -ne $Before.current_loader_id -or
+        $after.current_loader_sha256 -ne $Before.current_loader_sha256 -or
+        $after.hypervisorlaunchtype -ne $Before.hypervisorlaunchtype -or
+        $after.hypervisor_present -ne $Before.hypervisor_present
+    ) { throw 'Normal Windows loader, BCD state or hypervisor capability differs after native cycle' }
+    foreach ($name in $Before.features.PSObject.Properties.Name) {
+        if ($after.features.$name -ne $Before.features.$name) { throw "Windows optional feature changed during native cycle: $name" }
+    }
+    return $after
+}
+
 function Find-NativeWindowsLoaderIds {
     $result = Invoke-BcdEdit -Arguments @('/enum', 'all', '/v')
     $entries = @(Get-BcdEntries -Text ($result.StdOut + "`n" + $result.StdErr))
@@ -179,7 +200,7 @@ function Write-StagingManifest {
         $relative = $file.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
         if (
             $relative -in @('.prepared.json', 'qualification-key', 'qualification-key.pub') -or
-            $relative -match '^(artifacts|evidence|logs|smoke-run)/'
+            $relative -match '^(artifacts|evidence|logs|smoke-run|local-services-run)/'
         ) {
             continue
         }
@@ -219,7 +240,7 @@ function Test-StagingManifest {
         } | Where-Object {
             $_ -ne 'SHA256SUMS' -and
             $_ -notin @('.prepared.json', 'qualification-key', 'qualification-key.pub') -and
-            $_ -notmatch '^(artifacts|evidence|logs|smoke-run|probe)/'
+            $_ -notmatch '^(artifacts|evidence|logs|smoke-run|probe|local-services-run)/'
         }
     )
     if ($currentPaths.Count -ne $manifestPaths.Count) { return $false }
@@ -315,6 +336,30 @@ function Remove-NativeTask {
     $task = Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction SilentlyContinue
     if ($null -ne $task) {
         Unregister-ScheduledTask -TaskName $NativeTaskName -Confirm:$false
+    }
+}
+
+function Register-NormalResumeTask {
+    param([string]$Runner, [string]$Root, [string]$Repository, [string]$Distribution, [string]$LinuxRepository)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $arguments = @(
+        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-Action','Resume','-LabRoot',$Root,'-RepoRoot',$Repository,
+        '-WslDistribution',$Distribution,'-WslRepoRoot',$LinuxRepository
+    )
+    $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $ResumeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
+    if ((Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop).TaskName -ne $ResumeTaskName) {
+        throw 'Normal-boot import resume task registration failed'
+    }
+}
+
+function Remove-NormalResumeTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $ResumeTaskName -Confirm:$false
     }
 }
 
@@ -461,6 +506,12 @@ function Invoke-NativeRun {
         }
         observations = [ordered]@{}
         supply_chain = $null
+        local_services = [ordered]@{
+            status = 'NOT_EXECUTED'; controller = 'NOT_EXECUTED'; gitea = 'NOT_EXECUTED'
+            harbor = 'NOT_EXECUTED'; backend_logs = [ordered]@{}
+            campaign_id = $null; evidence_sha256 = $null
+            cleanup = 'NOT_EXECUTED'
+        }
         cleanup = 'NOT_EXECUTED'
         qualification_key_cleanup = 'NOT_EXECUTED'
         bootsequence_return_normal = 'NOT_EXECUTED'
@@ -511,6 +562,10 @@ function Invoke-NativeRun {
         if ((Get-FileSha256 -Path (Join-Path $preparedStage 'SHA256SUMS')) -ne [string]$prepared.staging_manifest_sha256) {
             throw 'Native staging manifest digest differs from preparation evidence'
         }
+        if (
+            [string]$prepared.native_controller_payload_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            (Get-FileSha256 -Path (Join-Path $preparedStage 'controller\payload.json')) -ne [string]$prepared.native_controller_payload_sha256
+        ) { throw 'Native controller payload manifest differs from prepared exact-SHA evidence' }
         foreach ($keyBinding in @(
             [pscustomobject]@{ Name = 'qualification-key'; Digest = [string]$prepared.qualification_private_key_sha256 },
             [pscustomobject]@{ Name = 'qualification-key.pub'; Digest = [string]$prepared.qualification_public_key_sha256 }
@@ -712,6 +767,12 @@ function Invoke-NativeRun {
         $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
         $result.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $artifactSha256 -RpmInventory $rpmInventory -RequiredPackages $packages
         Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages $packages
+        $smokeDestroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+        Assert-ProcessSuccess -Result $smokeDestroy -Operation 'native smoke VM destroy before local services'
+        Invoke-NativeLocalServices -Prepared $prepared -Result $result -Stage $preparedStage -Artifact $artifact -Vagrant $vagrant -VBoxManage $vbox
+        if ($result.local_services.status -ne 'PASS' -or $result.local_services.cleanup -ne 'PASS') {
+            throw 'Native controller, Gitea, Harbor or ORAS campaign did not complete'
+        }
         $result.status = 'PASS'
     }
     catch {
@@ -775,11 +836,24 @@ function Invoke-NativeRun {
 }
 
 function Invoke-Import {
-    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
     if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
         throw 'Import requires valid WSL distribution and repository paths'
     }
+    $wslKernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $wslKernel -Operation 'post-reboot WSL2 kernel probe'
+    if ($wslKernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') {
+        throw 'Normal boot did not restore a running WSL2 kernel'
+    }
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Import repository root must be the exact WSL worktree that owns the source SHA'
+    }
     $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    $before = Read-JsonFile (Join-Path $script:LabRootResolved 'normal-host-state.json')
+    $after = Assert-NormalHostRestored -Before $before
+    Write-Utf8Json -InputObject $after -Path (Join-Path $script:LabRootResolved 'evidence\normal-host-restored.json')
+    Write-Utf8Json -InputObject ([ordered]@{schema=1;status='PASS';distribution=$WslDistribution;kernel=$wslKernel.StdOut.Trim();verified_at=Get-UtcTimestamp}) -Path (Join-Path $script:LabRootResolved 'evidence\wsl2-restored.json')
     $sourceSha = [string]$prepared.source_git_sha
     $sourceTree = [string]$prepared.source_tree_sha
     $preparedStage = [string]$prepared.stage_root
@@ -801,6 +875,11 @@ function Invoke-Import {
         $result.native_vtx -ne 'PASS' -or $result.precheck -ne 'PASS' -or
         $result.packer.init -ne 'PASS' -or $result.packer.fmt -ne 'PASS' -or
         $result.packer.validate -ne 'PASS' -or $result.packer.build -ne 'PASS' -or
+        $result.local_services.status -ne 'PASS' -or
+        $result.local_services.controller -ne 'PASS' -or
+        $result.local_services.gitea -ne 'GITEA_PASS' -or
+        $result.local_services.harbor -ne 'PASS' -or
+        $result.local_services.cleanup -ne 'PASS' -or
         $result.cleanup -ne 'PASS' -or
         $result.qualification_key_cleanup -ne 'PASS' -or
         $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS'
@@ -843,6 +922,34 @@ function Invoke-Import {
     foreach ($key in @('qualification-key', 'qualification-key.pub')) {
         if (Test-Path -LiteralPath (Join-Path $preparedStage $key)) { throw 'Ephemeral qualification key remains after native runtime' }
     }
+    foreach ($role in @('controller', 'gitea', 'harbor')) {
+        $digest = [string]$result.local_services.backend_logs.$role
+        $path = Join-Path $preparedStage "logs\local-$role-VBox.log"
+        if ($digest -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $path) -ne $digest) {
+            throw "Native local-service VirtualBox log is absent or stale: $role"
+        }
+        if ((Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $path)) -ne 'NATIVE_VTX') {
+            throw "Native local-service VirtualBox backend is not VT-x: $role"
+        }
+    }
+    $localServiceSource = Join-Path $preparedStage 'evidence\local-services-qualification.json'
+    if ([string]$result.local_services.evidence_sha256 -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $localServiceSource) -ne [string]$result.local_services.evidence_sha256) {
+        throw 'Native local-service evidence checksum differs from the runtime result'
+    }
+    $localServiceEvidence = Read-JsonFile $localServiceSource
+    if (
+        $localServiceEvidence.status -ne 'PASS' -or
+        $localServiceEvidence.source_sha -ne $sourceSha -or
+        $localServiceEvidence.campaign_id -ne $result.local_services.campaign_id -or
+        $localServiceEvidence.gitea.status -ne 'PASS' -or
+        $localServiceEvidence.gitea.second_apply_changes -ne 0 -or
+        $localServiceEvidence.harbor.status -ne 'PASS' -or
+        $localServiceEvidence.harbor.second_apply_changes -ne 0 -or
+        $localServiceEvidence.oras.push -ne 'PASS' -or
+        $localServiceEvidence.oras.pull_by_digest -ne 'PASS' -or
+        $localServiceEvidence.oras.source_sha256 -ne $artifactSha256 -or
+        $localServiceEvidence.oras.pulled_sha256 -ne $artifactSha256
+    ) { throw 'Native Gitea, Harbor and ORAS digest evidence is absent or incomplete' }
 
     $artifactRoot = Join-Path $root '.artifacts\packer\rocky-10.2\windows'
     $evidenceRoot = Join-Path $root '.context\evidence\rocky-image\rocky-10.2\windows'
@@ -854,6 +961,15 @@ function Invoke-Import {
     if ((Get-FileSha256 -Path $artifactTemporary) -ne $artifactSha256) { throw 'Artifact changed while importing native evidence' }
     Move-Item -LiteralPath $artifactTemporary -Destination $artifactTarget -Force
     [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS'), "$artifactSha256  rocky-10.2-rke2-virtualbox.box`n", (New-Object Text.UTF8Encoding($false)))
+    $wslRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    $wslArtifactRoot = Join-Path $wslRoot '.artifacts\packer\rocky-10.2\windows'
+    [void](New-Item -ItemType Directory -Path $wslArtifactRoot -Force)
+    $wslArtifact = Join-Path $wslArtifactRoot 'rocky-10.2-rke2-virtualbox.box'
+    if ([IO.Path]::GetFullPath($artifactTarget) -ne [IO.Path]::GetFullPath($wslArtifact)) {
+        Copy-Item -LiteralPath $artifactTarget -Destination $wslArtifact -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS') -Destination (Join-Path $wslArtifactRoot 'SHA256SUMS') -Force
+    if ((Get-FileSha256 -Path $wslArtifact) -ne $artifactSha256) { throw 'Native box changed during WSL evidence import' }
 
     $buildEvidence = [ordered]@{
         schema = 1; image = 'rocky-10.2'; profile = 'rke2'; builder = 'packer'; hypervisor = 'virtualbox'
@@ -904,11 +1020,38 @@ function Invoke-Import {
     Write-Utf8Json -InputObject $qualificationEvidence -Path (Join-Path $evidenceRoot 'qualification.json')
     Write-Utf8Json -InputObject $releaseEvidence -Path (Join-Path $evidenceRoot 'release.json')
     Copy-Item -LiteralPath $resultPath -Destination (Join-Path $evidenceRoot 'native-result.json') -Force
+    $localServiceTarget = Join-Path $root '.context\evidence\local-services-vm\qualification.json'
+    [void](New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($localServiceTarget)) -Force)
+    Copy-Item -LiteralPath $localServiceSource -Destination $localServiceTarget -Force
+    $wslEvidence = Join-Path $wslRoot '.context\evidence\local-services-vm\qualification.json'
+    [void](New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($wslEvidence)) -Force)
+    Copy-Item -LiteralPath $localServiceSource -Destination $wslEvidence -Force
+    if ((Get-FileSha256 -Path $wslEvidence) -ne (Get-FileSha256 -Path $localServiceSource)) {
+        throw 'Native service evidence changed during WSL import'
+    }
+    $wslImageEvidence = Join-Path $wslRoot '.context\evidence\rocky-image\rocky-10.2\windows'
+    [void](New-Item -ItemType Directory -Path $wslImageEvidence -Force)
+    foreach ($name in @('preflight.json','build.json','qualification.json','release.json','native-result.json')) {
+        Copy-Item -LiteralPath (Join-Path $evidenceRoot $name) -Destination (Join-Path $wslImageEvidence $name) -Force
+    }
+    $nativeId = Assert-Guid -Value ([string]$prepared.native_boot_id) -Forbidden ([string]$prepared.normal_boot_id)
+    if ((Get-CurrentWindowsLoaderId) -ne [string]$prepared.normal_boot_id) {
+        throw 'Native BCD loader cleanup requires the original normal Windows loader'
+    }
+    $ownedNative = @(Find-NativeWindowsLoaderIds)
+    if ($ownedNative.Count -gt 1 -or ($ownedNative.Count -eq 1 -and $ownedNative[0] -ne $nativeId)) {
+        throw 'Native BCD loader cleanup found an ambiguous or foreign loader'
+    }
+    if ($ownedNative.Count -eq 1) { [void](Invoke-BcdEdit -Arguments @('/delete', $nativeId, '/f')) }
+    if (@(Find-NativeWindowsLoaderIds).Count -ne 0) { throw 'Owned native BCD loader remains after import' }
+    Remove-NormalResumeTask
     Write-Utf8Json -InputObject ([ordered]@{
         schema = 1; status = 'PASS'; source_git_sha = $sourceSha; source_tree_sha = $sourceTree
         staging_manifest_sha256 = $manifestSha256; artifact_sha256 = $artifactSha256
-        virtualbox_backend = 'NATIVE_VTX'; imported_at = Get-UtcTimestamp
+        virtualbox_backend = 'NATIVE_VTX'; wsl2_restored = 'PASS'; bcd_restored = 'PASS'
+        imported_at = Get-UtcTimestamp
     }) -Path (Join-Path $evidenceRoot 'native-import.json')
+    Copy-Item -LiteralPath (Join-Path $evidenceRoot 'native-import.json') -Destination (Join-Path $wslImageEvidence 'native-import.json') -Force
     [Console]::WriteLine("PASS native-vtx-import sha=$sourceSha artifact_sha256=$artifactSha256")
 }
 
@@ -916,6 +1059,10 @@ function Invoke-Prepare {
     $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
     if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
         throw 'Prepare requires valid WSL distribution and repository paths'
+    }
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Prepare repository root must be the exact WSL worktree that owns the source SHA'
     }
     Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preparation'
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
@@ -927,6 +1074,15 @@ function Invoke-Prepare {
     if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw 'Prepare could not resolve full Git source identities'
     }
+    $normalHostState = Get-NormalHostState
+    $hostStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
+    if (Test-Path -LiteralPath $hostStatePath -PathType Leaf) {
+        $previousHostState = Read-JsonFile $hostStatePath
+        if ($previousHostState.current_loader_id -ne $normalHostState.current_loader_id -or $previousHostState.current_loader_sha256 -ne $normalHostState.current_loader_sha256) {
+            throw 'Existing normal host-state checkpoint differs from current BCD loader'
+        }
+    }
+    else { Write-Utf8Json -InputObject $normalHostState -Path $hostStatePath }
     $guestSmokePreflight = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @(
         'scripts/validate_guest_smoke_commands.py'
     ) -TimeoutSeconds 60
@@ -973,6 +1129,7 @@ function Invoke-Prepare {
         Copy-Item -LiteralPath (Join-Path $root 'platform\vagrant\rocky-image-smoke\Vagrantfile') -Destination (Join-Path $preparedStage 'smoke\Vagrantfile')
         Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\RockyImagePipeline.psm1') -Destination (Join-Path $preparedStage 'runner\RockyImagePipeline.psm1')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeLocalServices.ps1') -Destination (Join-Path $preparedStage 'runner\NativeLocalServices.ps1')
 
         $preflightPath = Join-Path $preparedStage 'evidence\preflight-prepare.json'
         $preflight = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
@@ -996,6 +1153,18 @@ function Invoke-Prepare {
         if ($Offline.IsPresent) { $materializeArguments += '--offline' }
         $materialize = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments $materializeArguments -TimeoutSeconds 7200
         Assert-ProcessSuccess -Result $materialize -Operation 'Native VT-x offline input materialization'
+
+        $controllerArguments = @(
+            'scripts/local_services_qualification.py', 'native-payload',
+            '--stage', "$stageWsl/controller"
+        )
+        if ($Offline.IsPresent) { $controllerArguments += '--offline' }
+        $controllerPayload = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments $controllerArguments -TimeoutSeconds 7200
+        Assert-ProcessSuccess -Result $controllerPayload -Operation 'Exact-SHA offline native controller payload'
+        $localServiceFixture = Join-Path $preparedStage 'runner\local-services'
+        [void](New-Item -ItemType Directory -Path $localServiceFixture -Force)
+        Copy-Item -LiteralPath (Join-Path $root 'platform\ansible\tests\local_services_vm\Vagrantfile') -Destination $localServiceFixture
+        Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\local-services-seed-server.ps1') -Destination $localServiceFixture
 
         $sshKeygen = Resolve-WindowsTool -Name 'ssh-keygen.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'))
         $privateKey = Join-Path $preparedStage 'qualification-key'
@@ -1060,6 +1229,7 @@ function Invoke-Prepare {
         stage_root = $preparedStage
         staging_manifest = $manifestPath
         staging_manifest_sha256 = $manifestSha256
+        native_controller_payload_sha256 = (Get-FileSha256 -Path (Join-Path $preparedStage 'controller\payload.json'))
         qualification_private_key_sha256 = $qualificationPrivateKeySha256
         qualification_public_key_sha256 = $qualificationPublicKeySha256
         normal_boot_id = $normalBootId
@@ -1077,6 +1247,7 @@ function Invoke-Prepare {
     Write-Utf8Json -InputObject $prepared -Path $preparedPath
     Write-Utf8Json -InputObject $prepared -Path (Join-Path $script:LabRootResolved 'prepared.json')
     Register-NativeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -PreparedStage $preparedStage -Root $script:LabRootResolved -SourceSha $sourceSha -SourceTree $sourceTree -ManifestSha256 $manifestSha256 -NormalBootId $normalBootId -NativeBootId $nativeBootId
+    Register-NormalResumeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -Root $script:LabRootResolved -Repository $root -Distribution $WslDistribution -LinuxRepository $WslRepoRoot
     $prepareEvidence = [ordered]@{
         schema = 1
         status = 'PASS'
@@ -1117,18 +1288,94 @@ function Invoke-Reboot {
 
 function Invoke-Recover {
     $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
-    Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id)
+    $normalId = Assert-Guid -Value ([string]$prepared.normal_boot_id)
+    $nativeId = Assert-Guid -Value ([string]$prepared.native_boot_id) -Forbidden $normalId
+    Set-OneShotBootSequence -BootId $normalId
     Remove-NativeTask
+    Remove-NormalResumeTask
+    $current = Get-CurrentWindowsLoaderId
+    $nativeRemoved = $false
+    if ($current -eq $normalId) {
+        $owned = @(Find-NativeWindowsLoaderIds)
+        if ($owned.Count -gt 1 -or ($owned.Count -eq 1 -and $owned[0] -ne $nativeId)) {
+            throw 'Recovery found a different or ambiguous native BCD loader'
+        }
+        if ($owned.Count -eq 1) { [void](Invoke-BcdEdit -Arguments @('/delete', $nativeId, '/f')) }
+        $nativeRemoved = $true
+        $before = Read-JsonFile (Join-Path $script:LabRootResolved 'normal-host-state.json')
+        [void](Assert-NormalHostRestored -Before $before)
+    }
+    elseif ($current -ne $nativeId) { throw 'Recovery is outside the owned normal/native Windows loaders' }
     $evidence = [ordered]@{
         schema = 1
-        status = 'PASS'
-        next_boot = [string]$prepared.normal_boot_id
+        status = if ($nativeRemoved) { 'PASS' } else { 'PENDING_NORMAL_BOOT'
+        }
+        next_boot = $normalId
         scheduled_task_removed = $true
-        native_entry_preserved = $true
+        native_entry_removed = $nativeRemoved
         completed_at = Get-UtcTimestamp
     }
     Write-Utf8Json -InputObject $evidence -Path (Join-Path $script:LabRootResolved 'evidence\recovery.json')
-    [Console]::WriteLine('PASS native-vtx-recover normal boot armed; native entry preserved')
+    [Console]::WriteLine("PASS native-vtx-recover normal boot armed; native entry removed=$nativeRemoved")
+}
+
+function Invoke-CyclePreflight {
+    if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
+        throw 'Native cycle preflight requires valid WSL distribution and repository paths'
+    }
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Native cycle preflight must target the exact WSL source worktree'
+    }
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preflight'
+    Assert-LocalHostOnlyNetwork
+    $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))
+    $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $env:SystemRoot
+    if ($machines.Count -ne 0) { throw 'Native cycle preflight requires no registered VirtualBox VM' }
+    $hostState = Get-NormalHostState
+    if (-not $hostState.hypervisor_present) { throw 'Native cycle must start from the WSL2 normal boot with its Microsoft hypervisor present' }
+    if ($null -ne (Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction SilentlyContinue) -or
+        $null -ne (Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction SilentlyContinue)) {
+        throw 'A previous native qualification scheduled task still exists'
+    }
+    $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
+    if (-not $gitState.Clean -or $gitState.Head -notmatch '^[0-9a-f]{40}$') {
+        throw 'Native cycle preflight requires a clean exact-SHA source worktree'
+    }
+    $upstream = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse','@{upstream}') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $upstream -Operation 'published native source SHA'
+    if ($upstream.StdOut.Trim() -ne $gitState.Head) { throw 'Native cycle source SHA is not published upstream' }
+    $kernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $kernel -Operation 'normal-boot WSL2 kernel probe'
+    if ($kernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'Normal-boot WSL2 kernel is unavailable' }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1; status='PASS'; source_sha=$gitState.Head; administrator=$true
+        normal_loader_id=$hostState.current_loader_id; hypervisorlaunchtype=$hostState.hypervisorlaunchtype
+        hypervisor_present=$hostState.hypervisor_present; wsl_kernel=$kernel.StdOut.Trim()
+        registered_virtualbox_vms=0; host_only_network='PASS'; completed_at=Get-UtcTimestamp
+    }) -Path (Join-Path $script:LabRootResolved 'evidence\cycle-preflight.json')
+    [Console]::WriteLine("PASS native-vtx-cycle-preflight sha=$($gitState.Head) normal_loader=$($hostState.current_loader_id)")
+}
+
+function Invoke-Resume {
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    $current = Get-CurrentWindowsLoaderId
+    if ($current -eq [string]$prepared.native_boot_id) {
+        [Console]::WriteLine('PASS native-vtx-resume deferred until normal Windows boot')
+        return
+    }
+    if ($current -ne [string]$prepared.normal_boot_id) { throw 'Resume is outside the original Windows loader' }
+    $resultPath = Join-Path $script:LabRootResolved "evidence\$($prepared.source_git_sha)\result.json"
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        throw 'Normal-boot import is pending the native runtime result'
+    }
+    $nativeResult = Read-JsonFile $resultPath
+    if ($nativeResult.status -ne 'PASS') {
+        Invoke-Recover
+        throw "Native runtime failed and original BCD state was restored: $($nativeResult.error)"
+    }
+    Invoke-Import
 }
 
 function Invoke-SelfTest {
@@ -1149,6 +1396,8 @@ description             $NativeEntryName
 "@
     $entries = @(Get-BcdEntries -Text $fixture)
     if ($entries.Count -ne 2 -or $entries[1].Id -ne $native) { throw 'BCD GUID parsing self-test failed' }
+    if ((Get-HypervisorLaunchType -BcdText $entries[0].Text) -ne 'DEFAULT_ABSENT') { throw 'Absent normal hypervisorlaunchtype must remain absent' }
+    if ((Get-HypervisorLaunchType -BcdText ($entries[1].Text + "`nhypervisorlaunchtype    off")) -ne 'off') { throw 'Native off hypervisorlaunchtype parser failed' }
     try { [void](Assert-Guid -Value '{bootmgr}'); throw 'bootmgr rejection self-test failed' } catch { }
     try { [void](Assert-Guid -Value $normal -Forbidden $normal); throw 'normal loader rejection self-test failed' } catch { }
     if ((Get-VirtualBoxBackendFromLog -Text 'NEM: WHvCapabilityCodeHypervisorPresent is TRUE') -ne 'NEM') { throw 'NEM rejection parser self-test failed' }
@@ -1189,16 +1438,19 @@ description             $NativeEntryName
 $script:LabRootResolved = Resolve-LabRoot -Path $LabRoot
 
 try {
-    if ($Action -in @('Prepare', 'Reboot', 'Recover') -and -not (Test-Administrator)) {
-        Invoke-ElevatedSelf
+    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import') -and -not (Test-Administrator)) {
+        throw 'BLOCKED_PRIVILEGE: native VT-x boot operations require an administrator PowerShell token before preparation'
     }
     switch ($Action) {
         'Prepare' { Invoke-Prepare }
+        'Preflight' { Invoke-CyclePreflight }
         'Reboot' { Invoke-Reboot }
         'Recover' { Invoke-Recover }
         'SelfTest' { Invoke-SelfTest }
         'Run' { Invoke-NativeRun }
         'Import' { Invoke-Import }
+        'Resume' { Invoke-Resume }
+        'Cycle' { Invoke-CyclePreflight; Invoke-Prepare; Invoke-Reboot }
     }
     exit 0
 }

@@ -5,18 +5,35 @@ scope: qualified-rocky-10.2-virtualbox-local-services
 production_authority: forbidden
 runtime:
   owner: ansible
-  controller: wsl2
+  controller: virtualbox-linux
   required_virtualbox_backend: native-vtx
   incompatible_backend: nem
   unavailable_classification: BLOCKED_RUNTIME
-  orchestrator: scripts/local_services_qualification.py
+  orchestrator: scripts/windows/native-vtx-cycle.ps1
+  controller_program: scripts/local_services_qualification.py
   fixture: platform/ansible/tests/local_services_vm
   state_root: .context/runtime/local-services-vm
   evidence: .context/evidence/local-services-vm/qualification.json
   credentials: runtime-generated-untracked-masked
   network_exposure: ssh-tunnel-only
   guest_egress_after_staging: default-deny
-  persistent_disks: preserve-stopped-after-qualification
+  persistent_disks: destroy-after-qualification
+  native_controller:
+    image: exact-sha-rocky-10.2-rke2-virtualbox
+    os_version: rocky-10.2
+    ansible_core_version_ref: config/contracts/toolchain-lock.json#versions.ANSIBLE_CORE_VERSION
+    python_requirements: config/python/requirements.lock
+    python_package_index: https://pypi.org/simple
+    oras_binary_sha256: a9c7694677a72251c89c176331d41b2198d8e85cbaece038bcbc8da0679e1139
+    source_transport: exact-sha-git-bundle
+    wsl2_required_during_runtime: false
+    host_only_adapter: VirtualBox Host-Only Ethernet Adapter
+    host_only_host_ipv4: 192.168.22.1
+    host_only_controller_ipv4: 192.168.22.241
+    host_only_service_ipv4: 192.168.22.242
+    memory_mib: 2048
+    vcpus: 2
+    ephemeral: true
 machine_image:
   contract: config/contracts/machine-image-lock.yaml
   profile: windows

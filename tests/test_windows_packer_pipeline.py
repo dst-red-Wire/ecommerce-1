@@ -107,13 +107,10 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NATIVE_VTX", self.native)
         self.assertIn("NEM", self.native)
 
-    def test_elevated_launcher_keeps_parameter_names_unquoted(self):
-        self.assertIn("$parts += [string]$parameter", self.native)
-        self.assertIn("'^-[A-Za-z][A-Za-z0-9]*$'", self.native)
-        self.assertNotIn(
-            "$parts += ConvertTo-SingleQuotedPowerShellLiteral ([string]$parameter)\n    }",
-            self.native,
-        )
+    def test_native_boot_mutation_fails_early_without_administrator_token(self):
+        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import') -and -not (Test-Administrator))", self.native)
+        self.assertIn("BLOCKED_PRIVILEGE", self.native)
+        self.assertNotIn("Invoke-ElevatedSelf", self.native)
 
     def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):
         self.assertIn("[IO.FileShare]::ReadWrite", self.native)
@@ -215,7 +212,9 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         ):
             self.assertIn(marker, self.native)
         self.assertNotIn("/default", self.native.lower())
-        self.assertNotIn("/delete", self.native.lower())
+        self.assertIn("'/delete', $nativeId, '/f'", self.native)
+        self.assertIn("Assert-NormalHostRestored", self.native)
+        self.assertIn("Register-NormalResumeTask", self.native)
         self.assertIn("Restart-Computer -Force", self.native)
         self.assertLess(
             self.native.index("Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id)"),

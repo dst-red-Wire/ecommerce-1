@@ -14,57 +14,6 @@
     quiet: true
   no_log: true
 
-- name: Create Harbor staging and persistent directories
-  ansible.builtin.file:
-    path: "{{ item.path }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "{{ item.mode }}"
-  loop:
-    - {path: /var/tmp/ecommerce-harbor-rpms, mode: '0700'}
-    - {path: /opt/harbor, mode: '0755'}
-    - {path: "/opt/harbor/{{ local_harbor_version }}", mode: '0750'}
-    - {path: /etc/docker, mode: '0755'}
-    - {path: /etc/harbor/tls, mode: '0700'}
-    - {path: /data, mode: '0750'}
-    - {path: /var/log/harbor, mode: '0750'}
-
-- name: Stage locked Docker RPM closure
-  ansible.builtin.copy:
-    src: "{{ local_harbor_docker_rpm_root }}/"
-    dest: /var/tmp/ecommerce-harbor-rpms/
-    owner: root
-    group: root
-    mode: preserve
-
-- name: Stage Docker RPM signing key
-  ansible.builtin.copy:
-    src: "{{ local_harbor_docker_signing_key }}"
-    dest: /var/tmp/ecommerce-docker-signing-key.asc
-    owner: root
-    group: root
-    mode: '0600'
-
-- name: Verify staged Docker RPM signing key checksum
-  ansible.builtin.stat:
-    path: /var/tmp/ecommerce-docker-signing-key.asc
-    checksum_algorithm: sha256
-  register: local_harbor_docker_key_stat
-  failed_when: local_harbor_docker_key_stat.stat.checksum != local_harbor_docker_signing_key_sha256
-
-- name: Import Docker RPM signing key
-  ansible.builtin.command:
-    argv: [rpm, --import, /var/tmp/ecommerce-docker-signing-key.asc]
-  changed_when: false
-
-- name: Enumerate staged Docker RPM closure
-  ansible.builtin.find:
-    paths: /var/tmp/ecommerce-harbor-rpms
-    patterns: '*.rpm'
-    file_type: file
-  register: local_harbor_rpm_files
-
 - name: Query exact Docker runtime
   ansible.builtin.command:
     argv:
@@ -77,6 +26,70 @@
   register: local_harbor_docker_query
   changed_when: false
   failed_when: false
+
+- name: Create Harbor staging and persistent directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /opt/harbor, mode: '0755'}
+    - {path: "/opt/harbor/{{ local_harbor_version }}", mode: '0750'}
+    - {path: /etc/docker, mode: '0755'}
+    - {path: /etc/harbor/tls, mode: '0700'}
+    - {path: /data, mode: '0750'}
+    - {path: /var/log/harbor, mode: '0750'}
+
+- name: Create Harbor RPM staging directory only when Docker is absent
+  ansible.builtin.file:
+    path: /var/tmp/ecommerce-harbor-rpms
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: local_harbor_docker_query.rc != 0
+
+- name: Stage locked Docker RPM closure
+  ansible.builtin.copy:
+    src: "{{ local_harbor_docker_rpm_root }}/"
+    dest: /var/tmp/ecommerce-harbor-rpms/
+    owner: root
+    group: root
+    mode: preserve
+  when: local_harbor_docker_query.rc != 0
+
+- name: Stage Docker RPM signing key
+  ansible.builtin.copy:
+    src: "{{ local_harbor_docker_signing_key }}"
+    dest: /var/tmp/ecommerce-docker-signing-key.asc
+    owner: root
+    group: root
+    mode: '0600'
+  when: local_harbor_docker_query.rc != 0
+
+- name: Verify staged Docker RPM signing key checksum
+  ansible.builtin.stat:
+    path: /var/tmp/ecommerce-docker-signing-key.asc
+    checksum_algorithm: sha256
+  register: local_harbor_docker_key_stat
+  failed_when: local_harbor_docker_key_stat.stat.checksum != local_harbor_docker_signing_key_sha256
+  when: local_harbor_docker_query.rc != 0
+
+- name: Import Docker RPM signing key
+  ansible.builtin.command:
+    argv: [rpm, --import, /var/tmp/ecommerce-docker-signing-key.asc]
+  changed_when: false
+  when: local_harbor_docker_query.rc != 0
+
+- name: Enumerate staged Docker RPM closure
+  ansible.builtin.find:
+    paths: /var/tmp/ecommerce-harbor-rpms
+    patterns: '*.rpm'
+    file_type: file
+  register: local_harbor_rpm_files
+  when: local_harbor_docker_query.rc != 0
 
 - name: Install Docker and Compose from locked offline RPMs
   ansible.builtin.command:
@@ -107,6 +120,11 @@
     enabled: true
     state: started
 
+- name: Detect existing prepared Harbor compose project
+  ansible.builtin.stat:
+    path: "/opt/harbor/{{ local_harbor_version }}/docker-compose.yml"
+  register: local_harbor_compose
+
 - name: Stage hash-locked Harbor offline installer
   ansible.builtin.copy:
     src: "{{ local_harbor_archive }}"
@@ -114,6 +132,7 @@
     owner: root
     group: root
     mode: '0600'
+  when: not local_harbor_compose.stat.exists
 
 - name: Verify staged Harbor installer checksum
   ansible.builtin.stat:
@@ -121,6 +140,7 @@
     checksum_algorithm: sha256
   register: local_harbor_archive_stat
   failed_when: local_harbor_archive_stat.stat.checksum != local_harbor_archive_sha256
+  when: not local_harbor_compose.stat.exists
 
 - name: Extract Harbor installer exactly once
   ansible.builtin.unarchive:
@@ -129,6 +149,7 @@
     remote_src: true
     extra_opts: [--strip-components=1]
     creates: "/opt/harbor/{{ local_harbor_version }}/install.sh"
+  when: not local_harbor_compose.stat.exists
 
 - name: Verify nested Harbor image archive checksum
   ansible.builtin.stat:
@@ -175,11 +196,6 @@
     group: root
     mode: '0600'
   no_log: true
-
-- name: Detect existing prepared Harbor compose project
-  ansible.builtin.stat:
-    path: "/opt/harbor/{{ local_harbor_version }}/docker-compose.yml"
-  register: local_harbor_compose
 
 - name: Install Harbor from its verified offline bundle
   ansible.builtin.command:
@@ -238,6 +254,8 @@
       public: false
       storage_limit: -1
     status_code: [201, 409]
+  register: local_harbor_project_create
+  changed_when: local_harbor_project_create.status == 201
   no_log: true
 
 - name: Remove staged Docker and Harbor inputs
