@@ -181,6 +181,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             with (
                 mock.patch.object(sys, "argv", ["repoctl.py", "opentofu"]),
                 mock.patch.object(MOD, "ROOT", root),
+                mock.patch("native_workspace.workspace_error", return_value=None),
                 mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,
                 redirect_stdout(io.StringIO()) as output,
             ):
@@ -874,7 +875,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         ):
             self.assertFalse(MOD._canonical_rke2_vagrant_ready())
 
-    def test_rke2_create_failure_cleans_only_new_virtualbox_registration(self):
+    def test_rke2_create_failure_preserves_virtualbox_registration(self):
         workflow = {
             "entrypoint": (
                 "scripts/repoctl.py rke2-local-virtualbox-qualification "
@@ -886,12 +887,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         head = "d" * 40
         approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
         cases = [
-            ("preexisting-vm", "old-uuid", "old-uuid", False),
-            ("no-vm-created", None, None, False),
-            ("fresh-vm-with-stale-key", None, "new-uuid", True),
+            ("preexisting-vm", "old-uuid", "old-uuid"),
+            ("no-vm-created", None, None),
+            ("fresh-vm-with-stale-key", None, "new-uuid"),
         ]
 
-        for name, before, after, cleanup_expected in cases:
+        for name, before, after in cases:
             with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 vm_name = "ecommerce-mgmt-test-policy"
@@ -954,8 +955,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     if call.args and call.args[0][-1].startswith("vm_action=")
                 ]
                 self.assertEqual(
-                    ["vm_action=validate", "vm_action=create"]
-                    + (["vm_action=destroy"] if cleanup_expected else []),
+                    ["vm_action=validate", "vm_action=create"],
                     actions,
                 )
 
@@ -1121,7 +1121,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     2,
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
-        self.assertEqual("vm_action=destroy", run.call_args_list[-1].args[0][-1])
+        self.assertEqual("vm_action=server", run.call_args_list[-1].args[0][-1])
 
     def test_tekton_proof_launcher_consumes_registry_and_records_remote_readback(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")

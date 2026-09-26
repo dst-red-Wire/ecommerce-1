@@ -296,6 +296,41 @@ class RemoteStatusTests(unittest.TestCase):
         self.assertEqual(RD.REMOTE_STATUS_CONTEXT, captured["payload"]["context"])
         self.assertEqual("success", captured["payload"]["state"])
 
+    def test_gitea_https_profile_derives_api_without_enabling_status_by_itself(self):
+        with mock.patch.dict(
+            RD.os.environ, {"GITEA_HTTPS_URL": "https://gitea.ecommerce.local/"}, clear=True
+        ):
+            self.assertIsNone(RD._gitea_config())
+        with mock.patch.dict(
+            RD.os.environ,
+            {
+                "GITEA_HTTPS_URL": "https://gitea.ecommerce.local/",
+                "GITEA_REPOSITORY": "dst-red-Wire/ecommerce-1",
+                "GITEA_TOKEN": "secret",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                (
+                    "https://gitea.ecommerce.local/api/v1",
+                    "dst-red-Wire/ecommerce-1",
+                    "secret",
+                ),
+                RD._gitea_config(),
+            )
+
+    def test_gitea_endpoint_conflict_is_rejected(self):
+        with mock.patch.dict(
+            RD.os.environ,
+            {
+                "GITEA_HTTPS_URL": "https://gitea.ecommerce.local/",
+                "GITEA_API_URL": "https://other.example/api/v1",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "contradicts"):
+                RD._gitea_config()
+
     def test_dual_forge_status_configuration_is_rejected(self):
         env = {
             "GITHUB_REPOSITORY": "owner/repo",

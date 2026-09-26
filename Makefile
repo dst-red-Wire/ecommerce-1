@@ -5,7 +5,11 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+NATIVE_WORKSPACE := $(shell $(PYTHON) scripts/native_workspace.py --quiet >/dev/null 2>&1 && printf PASS)
+ifneq ($(NATIVE_WORKSPACE),PASS)
+$(error Repository operations require a WSL2 checkout on the native Linux filesystem, such as /home/dev/ecommerce-1)
+endif
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -31,7 +35,7 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: ## Run global + affected repository CI and cache promotable worktree evidence
+ci: signing-rotation-check ## Run global + affected repository CI and cache promotable worktree evidence
 	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
@@ -49,6 +53,28 @@ contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compat
 
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
+
+signing-check: signing-rotation-check ## Verify local automation signing isolation, validity and rotation window
+	@$(PYTHON) scripts/check_automation_signing.py
+
+.PHONY: signing-rotation-check signing-rotation-status signing-rotate signing-rotation-verify-remote signing-rotation-activate signing-rotation-retire-old
+signing-rotation-check: ## Read-only rotation status and delivery gate
+	@$(PYTHON) scripts/signing_rotation.py rotation-check
+
+signing-rotation-status: ## Show read-only rotation status
+	@$(PYTHON) scripts/signing_rotation.py rotation-status
+
+signing-rotate: ## Prepare the replacement key without activating it
+	@$(PYTHON) scripts/signing_rotation.py rotate
+
+signing-rotation-verify-remote: ## Verify public registration on GitHub and Gitea
+	@$(PYTHON) scripts/signing_rotation.py verify-remote
+
+signing-rotation-activate: ## Activate only after both forge registrations are proven
+	@$(PYTHON) scripts/signing_rotation.py activate
+
+signing-rotation-retire-old: ## Retire old registration after exact replacement proofs
+	@$(PYTHON) scripts/signing_rotation.py retire-old
 
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
@@ -96,6 +122,21 @@ ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
 .PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover
+.PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
+
+local-services-up: ## Start pinned local Gitea/Harbor on native WSL storage
+	@$(PYTHON) platform/local-services/manage.py up
+
+local-services-provision: ## Create dedicated local Gitea/Harbor identities
+	@$(PYTHON) platform/local-services/manage.py gitea-users
+	@$(PYTHON) platform/local-services/manage.py harbor-robot
+
+local-gpg-register: ## Register public automation key on Gitea only after reboot proof
+	@$(PYTHON) platform/local-services/manage.py register-gpg
+
+local-services-proof: ## Verify TLS, DNS, identities, GPG and Harbor robot login
+	@$(PYTHON) platform/local-services/manage.py proof
+
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
@@ -234,10 +275,10 @@ publish: ## Commit, exact-SHA verify and push current feature branch
 publish-change: ## Canonical alias: qualify, commit and push the current feature branch
 	@$(PYTHON) scripts/repoctl.py publish-change --base "$${BASE:-origin/main}" --message "$(MSG)"
 
-deliver: ## Exact-SHA validate, publish and create/update GitHub PR
+deliver: signing-rotation-check ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-finish-pr: ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
+finish-pr: signing-rotation-check ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
 	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
