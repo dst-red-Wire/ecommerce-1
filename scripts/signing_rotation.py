@@ -235,6 +235,31 @@ def write_pending_lock(old: str, new: str, expires: int) -> None:
     lock.write_text(source)
 
 
+def secret_primary_fingerprints(colon_output: str) -> set[str]:
+    """Return only fingerprints paired with GnuPG secret primary records."""
+    primaries: set[str] = set()
+    awaiting: str | None = None
+    for line in colon_output.splitlines():
+        row = line.split(":")
+        kind = row[0]
+        if kind in {"sec", "ssb"}:
+            if awaiting == "sec":
+                raise ValueError("secret primary fingerprint missing")
+            awaiting = kind
+        elif kind == "fpr":
+            if awaiting is None or len(row) <= 9:
+                raise ValueError("secret fingerprint record unexpected or malformed")
+            if awaiting == "sec":
+                fingerprint = row[9]
+                if not FPR.fullmatch(fingerprint) or fingerprint in primaries:
+                    raise ValueError("secret primary fingerprint invalid or duplicated")
+                primaries.add(fingerprint)
+            awaiting = None
+    if awaiting == "sec" or not primaries:
+        raise ValueError("secret primary fingerprint missing")
+    return primaries
+
+
 def rotate() -> None:
     signing = policy()
     existing = read_state()
@@ -256,7 +281,7 @@ def rotate() -> None:
     key(old)
     identity = signing["automation_key"]["forge_identity"]
     uid = f"{identity['git_name']} <{identity['git_email']}>"
-    all_fprs = {r[9] for r in (line.split(":") for line in run("gpg", "--batch", "--with-colons", "--list-secret-keys").splitlines()) if r[0] == "fpr"}
+    all_fprs = secret_primary_fingerprints(run("gpg", "--batch", "--with-colons", "--list-secret-keys"))
     candidates = []
     for candidate in all_fprs - {old, signing["personal_signing"]["fingerprint"]}:
         details = key(candidate)
@@ -275,7 +300,7 @@ def rotate() -> None:
                       f"Name-Real: {identity['git_name']}\nName-Email: {identity['git_email']}\n"
                       "Expire-Date: 90d\n%commit\n")
         run("gpg", "--batch", "--pinentry-mode", "loopback", "--generate-key", input_text=parameters)
-        after = {r[9] for r in (line.split(":") for line in run("gpg", "--batch", "--with-colons", "--list-secret-keys").splitlines()) if r[0] == "fpr"}
+        after = secret_primary_fingerprints(run("gpg", "--batch", "--with-colons", "--list-secret-keys"))
         created = after - all_fprs
         if len(created) != 1:
             raise ValueError("new key fingerprint ambiguous; inspect GnuPG before retry")

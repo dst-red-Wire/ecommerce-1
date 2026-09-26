@@ -134,6 +134,24 @@ class RotationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ambiguous"):
                 rotation.public_fingerprint("-----BEGIN PGP PUBLIC KEY BLOCK-----")
 
+    def test_secret_primary_fingerprints_ignore_subkeys(self):
+        a, b, c, d = (letter * 40 for letter in "ABCD")
+        records = (f"sec:::::::::\nfpr:::::::::{a}:\n"
+                   f"ssb:::::::::\nfpr:::::::::{b}:\n"
+                   f"ssb:::::::::\nfpr:::::::::{c}:\n"
+                   f"sec:::::::::\nfpr:::::::::{d}:\n")
+        found = rotation.secret_primary_fingerprints(records)
+        self.assertEqual(found, {a, d})
+        self.assertNotIn(b, found)
+        self.assertNotIn(c, found)
+
+    def test_secret_primary_fingerprints_fail_closed_on_malformed_primary(self):
+        for records in ("sec:::::::::\nssb:::::::::\nfpr:::::::::" + "B" * 40 + ":",
+                        "sec:::::::::\nfpr:::::::::not-a-fingerprint:",
+                        "fpr:::::::::" + "A" * 40 + ":"):
+            with self.subTest(records=records), self.assertRaises(ValueError):
+                rotation.secret_primary_fingerprints(records)
+
     def test_activation_retry_converges_existing_new_state(self):
         old, new = "A" * 40, "B" * 40
         data = {"old_fingerprint": old, "new_fingerprint": new, "activated": False,
@@ -265,7 +283,7 @@ class RotationTests(unittest.TestCase):
         details = {old: {"created": created - 100, "expires": created + 10000, "uid": [uid]},
                    candidate: {"created": created, "expires": created + lifespan, "uid": [uid]},
                    generated: {"created": created, "expires": created + 90 * 86400, "uid": [uid]}}
-        calls = {"list": 0, "generate": 0}
+        calls = {"list": 0, "generate": 0, "key": []}
 
         def run(*args, **kwargs):
             if args[:4] == ("git", "config", "--local", "--get"):
@@ -273,7 +291,9 @@ class RotationTests(unittest.TestCase):
             if args[:3] == ("gpg", "--batch", "--with-colons"):
                 calls["list"] += 1
                 fingerprints = [old, candidate] + ([generated] if calls["list"] > 1 else [])
-                return "\n".join(f"fpr:::::::::{f}:" for f in fingerprints)
+                return "\n".join(f"sec:::::::::\nfpr:::::::::{f}:\n"
+                                 f"ssb:::::::::\nfpr:::::::::{chr(69 + index) * 40}:"
+                                 for index, f in enumerate(fingerprints))
             if "--generate-key" in args:
                 calls["generate"] += 1
                 return ""
@@ -292,13 +312,25 @@ class RotationTests(unittest.TestCase):
     def test_reused_candidate_over_90_days_is_rejected_before_lock_write(self):
         self._assert_candidate_boundary(90 * 86400 + 1, accepted=False)
 
+    def test_rotate_never_treats_secret_subkey_fingerprint_as_candidate(self):
+        calls = self._assert_candidate_boundary(90 * 86400, accepted=True)
+        self.assertEqual(calls["key"], ["A" * 40, "B" * 40, "A" * 40, "B" * 40])
+
+    def test_generated_key_diff_uses_only_primary_fingerprints(self):
+        calls = self._assert_candidate_boundary(90 * 86400 + 1, accepted=False)
+        self.assertEqual(calls["generate"], 1)
+        self.assertNotIn("G" * 40, calls["key"])
+
     def _assert_candidate_boundary(self, lifespan, *, accepted):
         old, candidate, generated, signing, details, calls, run, clock = self._candidate_fixture(lifespan)
+        def checked_key(fingerprint):
+            calls["key"].append(fingerprint)
+            return details[fingerprint]
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(rotation, "policy", return_value=signing), \
              patch.object(rotation, "read_state", return_value=None), \
              patch.object(rotation, "run", side_effect=run), \
-             patch.object(rotation, "key", side_effect=lambda fingerprint: details[fingerprint]), \
+             patch.object(rotation, "key", side_effect=checked_key), \
              patch.object(rotation, "certificate", return_value=Path(directory) / "cert.rev"), \
              patch.object(rotation, "ensure_public_export", return_value=Path(directory) / "public.asc"), \
              patch.object(rotation, "export_public", return_value=Path(directory) / "public.asc"), \
@@ -311,6 +343,8 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(calls["generate"], 0 if accepted else 1)
         if not accepted:
             self.assertNotEqual(write_lock.call_args.args[1], candidate)
+        self.assertFalse({"E" * 40, "F" * 40, "G" * 40}.intersection(calls["key"]))
+        return calls
 
     def test_retirement_allowed_at_exactly_seven_days(self):
         self._assert_retirement_boundary(timedelta(days=7), allowed=True)
