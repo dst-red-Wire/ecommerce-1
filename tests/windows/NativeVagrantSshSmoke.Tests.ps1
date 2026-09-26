@@ -51,4 +51,8 @@ if ($failure.tcp_22_ready -ne 'PASS' -or $failure.ssh_auth_ready -ne 'FAIL' -or 
 if (-not $failure.Contains('terminal_auth_error') -or $failure.last_ssh_error -notmatch 'UNPROTECTED PRIVATE KEY FILE') {
     throw 'Private key ACL failure was not preserved precisely'
 }
+if ((Get-NativeSshFailureCode -Stage 'ssh_auth_ready' -Detail $failure.last_ssh_error) -ne 'SSH_AUTH_FAILED' -or
+    (Get-NativeSshFailureCode -Stage 'tcp_22_ready' -Detail 'VirtualBox NAT SSH forwarding is absent') -ne 'VBOX_NETWORK_ERROR') {
+    throw 'SSH authentication and VirtualBox network failure codes are not distinct'
+}
 Write-Output 'PASS NativeVagrantSshSmoke synthetic NAT, IP, TCP, authentication and ACL evidence'

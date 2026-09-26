@@ -16,8 +16,8 @@ function New-NativeSshSmokeEvidence {
         boot_to_ip_seconds = $null; ip_to_tcp22_seconds = $null
         tcp22_to_ssh_auth_seconds = $null; ssh_auth_to_vagrant_ready_seconds = $null
         boot_to_vagrant_ready_seconds = $null
-        failure_stage = $null; failure_reason = $null; last_ssh_error = $null
-        last_vagrant_error = $null; private_key_path = $null
+        failure_stage = $null; failure_code = $null; failure_reason = $null; last_ssh_error = $null
+        last_vagrant_error = $null
         diagnostics_directory = $EvidenceDirectory
     }
 }
@@ -36,6 +36,27 @@ function Get-NativeLastErrorLine {
     $lines = @($source -split "`r?`n" | Where-Object { $_.Trim() })
     if ($lines.Count -eq 0) { return 'Process failed without diagnostic output' }
     return [string]$lines[-1]
+}
+
+function Get-NativeSshFailureCode {
+    param([string]$Stage, [string]$Detail)
+    switch ($Stage) {
+        'vm_running' { return 'VM_NOT_RUNNING' }
+        'ip_ready' { return 'IP_NOT_OBSERVABLE' }
+        'tcp_22_ready' {
+            if ($Detail -match 'NAT SSH forwarding is absent') { return 'VBOX_NETWORK_ERROR' }
+            return 'TCP22_NOT_READY'
+        }
+        'vagrant_ready' { return 'VAGRANT_NOT_READY' }
+        'vagrant_ssh_command' { return 'VAGRANT_NOT_READY' }
+        'ssh_auth_ready' {
+            if ($Detail -match 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED') { return 'SSH_HOST_KEY_FAILED' }
+            if ($Detail -match 'Permission denied|UNPROTECTED PRIVATE KEY FILE|bad permissions|Identity file') { return 'SSH_AUTH_FAILED' }
+            if ($Detail -match 'kex_exchange_identification|banner exchange|Unable to negotiate') { return 'SSH_HANDSHAKE_FAILED' }
+            return 'SSH_AUTH_FAILED'
+        }
+    }
+    return 'GLOBAL_DEADLINE_EXCEEDED'
 }
 
 function Test-NativeTcpPort {
@@ -97,6 +118,7 @@ function Update-NativeSshSmokeEvidence {
             $Evidence.ip_ready_at = [DateTime]::UtcNow.ToString('o')
             $Evidence.ip_observation = 'virtualbox_guestproperty'
         }
+        elseif ($null -eq $Evidence.ip_observation) { $Evidence.ip_observation = 'guestproperty_ipv4_unavailable' }
     }
     if ($null -eq $Evidence.address -or $null -eq $Evidence.port) { return }
     if ($Evidence.tcp_22_ready -ne 'PASS') {
@@ -146,7 +168,6 @@ function Complete-NativeSshSmokeEvidence {
     )
     $diagnostics = [string]$Evidence.diagnostics_directory
     [void](New-Item -ItemType Directory -Path $diagnostics -Force)
-    $Evidence.private_key_path = $PrivateKey
     try {
         $acl = Get-Acl -LiteralPath $PrivateKey -ErrorAction Stop
         [IO.File]::WriteAllText((Join-Path $diagnostics 'private-key-acl.txt'), ($acl | Format-List Owner,AccessToString | Out-String))
@@ -213,13 +234,16 @@ function Complete-NativeSshSmokeEvidence {
         $Evidence.failure_stage = 'ssh_auth_ready'
         $Evidence.failure_reason = [string]$Evidence.last_ssh_error
     }
-    foreach ($stage in @('vm_running','ip_ready','tcp_22_ready','ssh_auth_ready','vagrant_ready','vagrant_ssh_command')) {
+    foreach ($stage in @('vm_running','tcp_22_ready','ssh_auth_ready','ip_ready','vagrant_ready','vagrant_ssh_command')) {
         if ($Evidence.failure_stage) { break }
         if ($Evidence[$stage] -ne 'PASS') {
             $Evidence.failure_stage = $stage
-            $Evidence.failure_reason = if ($stage -in @('ssh_auth_ready','vagrant_ssh_command') -and $Evidence.last_ssh_error) { [string]$Evidence.last_ssh_error } elseif ($stage -eq 'vagrant_ready' -and $Evidence.last_vagrant_error) { [string]$Evidence.last_vagrant_error } else { "Stage $stage did not pass; inspect $diagnostics" }
+            $Evidence.failure_reason = if ($stage -in @('ssh_auth_ready','vagrant_ssh_command') -and $Evidence.last_ssh_error) { [string]$Evidence.last_ssh_error } elseif ($stage -eq 'vagrant_ready' -and $Evidence.last_vagrant_error) { [string]$Evidence.last_vagrant_error } elseif ($stage -eq 'ip_ready') { 'Guest IPv4 is not exposed by VirtualBox guestproperty and could not be read through authenticated SSH' } elseif ($stage -eq 'tcp_22_ready' -and ($null -eq $Evidence.address -or $null -eq $Evidence.port)) { 'VirtualBox NAT SSH forwarding is absent from showvminfo' } elseif ($stage -eq 'tcp_22_ready') { "No SSH banner was observed at $($Evidence.address):$($Evidence.port) before the global deadline" } else { "Stage $stage did not pass; inspect $diagnostics" }
             break
         }
     }
     if ($Evidence.Contains('terminal_auth_error')) { $Evidence.Remove('terminal_auth_error') }
+    if ($Evidence.failure_stage) {
+        $Evidence.failure_code = Get-NativeSshFailureCode -Stage ([string]$Evidence.failure_stage) -Detail ([string]$Evidence.failure_reason)
+    }
 }

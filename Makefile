@@ -121,7 +121,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-clean
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
 local-services-up: ## Start pinned local Gitea/Harbor on native WSL storage
@@ -175,6 +175,18 @@ image-rocky-windows-native-recover: ## Arm the normal Windows boot and remove th
 
 image-rocky-windows-native-self-test: ## Test BCD parsing, backend classification, integrity and stale-evidence rejection without reboot
 	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-self-test
+
+lab-ssh-key: ## Explicitly create or verify the persistent Windows-native Rocky smoke SSH identity
+	@$(PYTHON) scripts/repoctl.py lab-ssh-key
+
+packer-box: ## Verify and reuse the local immutable Rocky box matching current Packer inputs
+	@$(PYTHON) scripts/repoctl.py packer-box $(if $(BOX_PATH),--box "$(BOX_PATH)",)
+
+lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box without running Packer
+	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+
+lab-clean: ## Destroy the explicitly preserved network-smoke VM for CAMPAIGN_ID
+	@$(PYTHON) scripts/repoctl.py lab-clean --campaign-id "$(CAMPAIGN_ID)"
 
 image-rocky-linux-preflight: ## Verify exact Packer/QEMU versions and KVM access on a native Linux host
 	@$(PYTHON) scripts/repoctl.py image-rocky-linux-preflight

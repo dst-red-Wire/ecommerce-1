@@ -3,6 +3,11 @@ require "json"
 runtime = JSON.parse(File.read(File.join(__dir__, "runtime.json")))
 name = runtime.fetch("name")
 raise "invalid owned smoke VM name" unless name.match?(/\Aecommerce-rocky-10-2-smoke-[0-9a-f]{12}\z/)
+seed_port = runtime.key?("seed_port") ? Integer(runtime.fetch("seed_port")) : nil
+ssh_host_port = runtime.key?("ssh_host_port") ? Integer(runtime.fetch("ssh_host_port")) : nil
+raise "invalid seed port" if seed_port && !(1024..65_535).cover?(seed_port)
+raise "invalid SSH host port" if ssh_host_port && !(1024..65_535).cover?(ssh_host_port)
+raise "seed and SSH ports collide" if seed_port && seed_port == ssh_host_port
 
 Vagrant.require_version "= #{runtime.fetch("vagrant_version")}"
 Vagrant.configure("2") do |config|
@@ -10,6 +15,9 @@ Vagrant.configure("2") do |config|
   config.vm.box_check_update = false
   config.vm.boot_timeout = Integer(runtime.fetch("boot_timeout_seconds"))
   config.vm.synced_folder ".", "/vagrant", disabled: true
+  if ssh_host_port
+    config.vm.network "forwarded_port", guest: 22, host: ssh_host_port, host_ip: "127.0.0.1", id: "ssh", auto_correct: false
+  end
 
   config.ssh.username = "packer"
   config.ssh.private_key_path = runtime.fetch("private_key")
@@ -26,6 +34,13 @@ Vagrant.configure("2") do |config|
     vm.customize ["modifyvm", :id, "--ioapic", "on"]
     vm.customize ["modifyvm", :id, "--nic1", "nat"]
     vm.customize ["modifyvm", :id, "--nictype1", runtime.fetch("nic_type")]
+    if seed_port
+      vm.customize ["modifyvm", :id, "--nat-localhostreachable1", "on"]
+      vm.customize [
+        "setextradata", :id, "VBoxInternal/Devices/pcbios/0/Config/DmiSystemSerial",
+        "ds=nocloud-net;s=http://10.0.2.2:#{seed_port}/",
+      ]
+    end
     (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
     vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]
   end

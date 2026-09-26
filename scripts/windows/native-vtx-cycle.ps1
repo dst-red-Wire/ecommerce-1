@@ -13,6 +13,11 @@ param(
     [string]$ExpectedManifestSha256 = '',
     [string]$ExpectedNormalBootId = '',
     [string]$ExpectedNativeBootId = '',
+    [string]$ReuseBoxPath = '',
+    [string]$ReuseBoxSha256 = '',
+    [string]$ReuseBoxInputsDigest = '',
+    [string]$PackerInputsDigest = '',
+    [string]$PackerTemplateDigest = '',
     [switch]$Offline
 )
 
@@ -26,6 +31,7 @@ Import-Module (Join-Path $PSScriptRoot 'RockyImagePipeline.psm1') -Force
 Set-PipelineUtf8
 . (Join-Path $PSScriptRoot 'NativeLocalServices.ps1')
 . (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1')
+. (Join-Path $PSScriptRoot 'LabNetworkSeed.ps1')
 
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
@@ -88,6 +94,46 @@ function Move-NativePhase {
 
 function Get-UtcTimestamp {
     return [DateTime]::UtcNow.ToString('o')
+}
+
+function New-NativeRuntimeIdentity {
+    param([string]$Stage, [string]$ExpectedFingerprint)
+    $source = Join-Path $script:LabRootResolved 'identity\id_ed25519'
+    $public = "$source.pub"
+    $destination = Join-Path $Stage 'lab-runtime-key'
+    if (Test-Path -LiteralPath $destination) { throw 'Native runtime SSH identity copy already exists' }
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf) -or -not (Test-Path -LiteralPath $public -PathType Leaf)) {
+        throw 'Persistent laboratory SSH identity is absent'
+    }
+    $sshKeygen = Resolve-WindowsTool -Name 'ssh-keygen.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'))
+    $fingerprint = Invoke-BoundedProcess -FilePath $sshKeygen -Arguments @('-lf', $public) -TimeoutSeconds 15 -WorkingDirectory $Stage
+    Assert-ProcessSuccess -Result $fingerprint -Operation 'persistent SSH public fingerprint'
+    if ($fingerprint.StdOut -notmatch 'SHA256:([A-Za-z0-9+/]+)' -or "SHA256:$($Matches[1])" -ne $ExpectedFingerprint) {
+        throw 'Persistent laboratory SSH public fingerprint changed since preparation'
+    }
+    Copy-Item -LiteralPath $source -Destination $destination
+    try {
+        $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetOwner($system)
+        $acl.SetAccessRuleProtection($true, $false)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $system, [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $destination -AclObject $acl
+        $derived = Invoke-BoundedProcess -FilePath $sshKeygen -Arguments @('-y', '-f', $destination) -TimeoutSeconds 15 -WorkingDirectory $Stage
+        Assert-ProcessSuccess -Result $derived -Operation 'native runtime SSH identity binding'
+        $expected = (([IO.File]::ReadAllText($public).Trim() -split '\s+') | Select-Object -First 2) -join ' '
+        $actual = (($derived.StdOut.Trim() -split '\s+') | Select-Object -First 2) -join ' '
+        if ($actual -ne $expected) { throw 'Persistent laboratory SSH private/public binding changed' }
+    }
+    catch {
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    return $destination
 }
 
 function Assert-NativeFreeSpace {
@@ -308,7 +354,7 @@ function Write-StagingManifest {
     foreach ($file in (Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName)) {
         $relative = $file.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
         if (
-            $relative -in @('.prepared.json', 'qualification-key', 'qualification-key.pub') -or
+            $relative -in @('.prepared.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -or
             $relative -match '^(artifacts|evidence|logs|smoke-run|local-services-run)/'
         ) {
             continue
@@ -348,7 +394,7 @@ function Test-StagingManifest {
             $_.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
         } | Where-Object {
             $_ -ne 'SHA256SUMS' -and
-            $_ -notin @('.prepared.json', 'qualification-key', 'qualification-key.pub') -and
+            $_ -notin @('.prepared.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -and
             $_ -notmatch '^(artifacts|evidence|logs|smoke-run|probe|local-services-run)/'
         }
     )
@@ -881,6 +927,7 @@ function Invoke-NativeRun {
         native_vtx = 'NOT_EXECUTED'
         precheck = 'NOT_EXECUTED'
         packer = [ordered]@{
+            status = 'NOT_EXECUTED'; inputs_digest = $null; reuse_source_sha = $null
             init = 'NOT_EXECUTED'; fmt = 'NOT_EXECUTED'; validate = 'NOT_EXECUTED'
             build = 'NOT_EXECUTED'; duration_seconds = $null
         }
@@ -896,6 +943,8 @@ function Invoke-NativeRun {
         artifact = $null
         artifact_sha256 = $null
         artifact_size_bytes = $null
+        box_digest_verified = 'NOT_EXECUTED'
+        ssh_identity = [ordered]@{ source = 'controller_persistent'; private_key_present = $false; public_key_fingerprint = $null; private_key_in_box = $null }
         vagrant_smoke = [ordered]@{
             box_add = 'NOT_EXECUTED'; boot = 'NOT_EXECUTED'; ssh = 'NOT_EXECUTED'
             rocky_version = 'NOT_EXECUTED'; expected_arch = 'NOT_EXECUTED'
@@ -917,6 +966,7 @@ function Invoke-NativeRun {
             cleanup = 'NOT_EXECUTED'
         }
         cleanup = 'NOT_EXECUTED'
+        seed_server_cleanup = 'NOT_EXECUTED'
         qualification_key_cleanup = 'NOT_EXECUTED'
         bootsequence_return_normal = 'NOT_EXECUTED'
         native_task_removed = 'NOT_EXECUTED'
@@ -938,6 +988,9 @@ function Invoke-NativeRun {
     $smokeInitialMachines = @{}
     $smokeVmName = $null
     $smokeBoxName = $null
+    $nativeSeedRoot = $null
+    $nativeSeedPort = $null
+    $runtimePrivateKey = $null
     $cleanupFailed = $false
     $transcriptStarted = $false
     $packerEnvironment = @{}
@@ -1026,6 +1079,32 @@ function Invoke-NativeRun {
         $result.nem_detected = $false
         $result.native_vtx = 'PASS'
         $result.precheck = 'PASS'
+        if ($null -ne $prepared.reuse_box) {
+            $reuse = $prepared.reuse_box
+            $artifact = [IO.Path]::GetFullPath([string]$reuse.path)
+            $artifactSha256 = Get-FileSha256 -Path $artifact
+            if ($artifactSha256 -ne [string]$reuse.sha256 -or
+                (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $artifact) 'manifest.json')) -ne [string]$reuse.manifest_sha256) {
+                throw 'Verified Packer box digest or provenance changed before native reuse'
+            }
+            $reuseManifest = Read-JsonFile (Join-Path (Split-Path -Parent $artifact) 'manifest.json')
+            if ($reuseManifest.box_sha256 -ne $artifactSha256 -or
+                $reuseManifest.inputs_digest -ne [string]$reuse.inputs_digest -or
+                $reuseManifest.source_sha -ne [string]$reuse.source_sha -or
+                (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $artifact) 'packer.log')) -ne [string]$reuseManifest.packer_log_sha256) {
+                throw 'Reused Packer source provenance or retained build log changed'
+            }
+            $result.artifact = $artifact
+            $result.artifact_sha256 = $artifactSha256
+            $result.artifact_size_bytes = (Get-Item -LiteralPath $artifact).Length
+            $result.box_digest_verified = 'PASS'
+            $result.packer.status = 'REUSED'
+            $result.packer.inputs_digest = [string]$reuse.inputs_digest
+            $result.packer.reuse_source_sha = [string]$reuse.source_sha
+            $result.packer.build = 'REUSED'
+            $result.packer.duration_seconds = 0
+        }
+        else {
         Assert-NativeFreeSpace -Path $preparedStage -MinimumGiB 24 -Operation 'native Packer build'
 
         $sourceRoot = Join-Path $preparedStage 'packer'
@@ -1101,6 +1180,24 @@ function Invoke-NativeRun {
         $result.artifact = $artifact
         $result.artifact_sha256 = $artifactSha256
         $result.artifact_size_bytes = (Get-Item -LiteralPath $artifact).Length
+        $result.box_digest_verified = 'PASS'
+        $result.packer.status = 'REBUILT'
+        $result.packer.inputs_digest = [string]$prepared.packer_inputs_digest
+        $retainedPackerLog = Join-Path $artifactRoot 'packer.log'
+        Copy-Item -LiteralPath $packerLog -Destination $retainedPackerLog -Force
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema = 1; source_sha = $sourceSha; source_tree_sha = $sourceTree
+            packer_template_digest = [string]$prepared.packer_template_digest
+            inputs_digest = [string]$prepared.packer_inputs_digest
+            rocky_version = '10.2'; virtualbox_version = [string]$prepared.tools.virtualbox.actual_version
+            build_timestamp = [string]$result.milestones.T13_ARTIFACT_EXPORT_COMPLETE
+            box_sha256 = $artifactSha256; box_size_bytes = [int64]$result.artifact_size_bytes
+            box_filename = [IO.Path]::GetFileName($artifact)
+            staging_manifest_sha256 = [string]$prepared.staging_manifest_sha256
+            packer_log_sha256 = Get-FileSha256 -Path $retainedPackerLog
+        }) -Path (Join-Path $artifactRoot 'manifest.json')
+        [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS'), "$artifactSha256  $([IO.Path]::GetFileName($artifact))`n", [Text.UTF8Encoding]::new($false))
+        }
 
         $runtimeContract = Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')
         if ($runtimeContract.resources.vcpus -ne 4 -or $runtimeContract.resources.memory_mib -ne 4096 -or $runtimeContract.resources.disk_mib -ne 32768) {
@@ -1109,13 +1206,28 @@ function Invoke-NativeRun {
         $smokeRoot = Join-Path $preparedStage 'smoke-run'
         [void](New-Item -ItemType Directory -Path $smokeRoot)
         Copy-Item -LiteralPath (Join-Path $preparedStage 'smoke\Vagrantfile') -Destination $smokeRoot
+        $runtimePrivateKey = New-NativeRuntimeIdentity -Stage $preparedStage -ExpectedFingerprint ([string]$prepared.lab_ssh_fingerprint)
+        $result.ssh_identity.private_key_present = $true
+        $result.ssh_identity.public_key_fingerprint = [string]$prepared.lab_ssh_fingerprint
+        $nativeSeedPort = Get-LabPort
+        $sshHostPort = Get-LabPort
+        if ($nativeSeedPort -eq $sshHostPort) { throw 'Native seed and SSH host ports collide' }
+        $publicKey = [IO.File]::ReadAllText((Join-Path $script:LabRootResolved 'identity\id_ed25519.pub'), [Text.Encoding]::UTF8).Trim()
+        $nativeSeedRoot = Write-LabSeed -Root $smokeRoot -Campaign $sourceSha -PublicKey $publicKey
+        $seedServer = Join-Path $preparedStage 'runner\local-services\local-services-seed-server.ps1'
+        $seedStart = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
+            '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,
+            '-Action','Start','-SeedRoot',$nativeSeedRoot,'-Port',[string]$nativeSeedPort
+        ) -TimeoutSeconds 30 -WorkingDirectory $preparedStage
+        Assert-ProcessSuccess -Result $seedStart -Operation 'native Rocky NoCloud SSH seed server start'
         $smokeVmName = "ecommerce-rocky-10-2-smoke-$($artifactSha256.Substring(0, 12))"
         $smokeBoxName = "ecommerce/rocky-10.2-rke2-$($artifactSha256.Substring(0, 12))"
         Write-Utf8Json -InputObject ([ordered]@{
             name = $smokeVmName; box_name = $smokeBoxName
             vagrant_version = [string]$prepared.tools.vagrant.actual_version
-            private_key = (Join-Path $preparedStage 'qualification-key')
+            private_key = $runtimePrivateKey
             boot_timeout_seconds = 900; ssh_timeout_seconds = 60
+            seed_port = [int]$nativeSeedPort; ssh_host_port = [int]$sshHostPort
             cpus = [int]$runtimeContract.resources.vcpus
             memory_mib = [int]$runtimeContract.resources.memory_mib
             nic_type = [string]$runtimeContract.virtualbox.network_adapter
@@ -1140,18 +1252,20 @@ function Invoke-NativeRun {
         try {
             $up = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up', '--provider', 'virtualbox', '--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -OnPoll {
                 try {
-                    Update-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -VmName $smokeVmName -WorkingDirectory $smokeRoot -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable
+                    Update-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -VmName $smokeVmName -WorkingDirectory $smokeRoot -PrivateKey $runtimePrivateKey -SshExecutable $sshExecutable
                 }
                 catch { $sshSmoke.last_ssh_error = $_.Exception.Message }
             } -PollIntervalSeconds 5
         }
         catch { $upError = $_.Exception.Message }
-        Complete-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -Vagrant $vagrant -VmName $smokeVmName -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable -VagrantUpResult $up
+        Complete-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -Vagrant $vagrant -VmName $smokeVmName -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -PrivateKey $runtimePrivateKey -SshExecutable $sshExecutable -VagrantUpResult $up
         if ($upError) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $upError; $($sshSmoke.failure_reason)" }
         if ($up.ExitCode -ne 0) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
         $result.vagrant_smoke.boot = 'PASS'
         if ($sshSmoke.failure_stage) { throw "Native Vagrant SSH failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
         $result.vagrant_smoke.ssh = 'PASS'
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'persistent-ssh-security' -Command 'cloud-init status --wait >/dev/null && test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }')
+        $result.ssh_identity.private_key_in_box = $false
         $result.observations.rocky_version = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rocky-version' -Command 'grep -Fx ''Rocky Linux release 10.2 (Red Quartz)'' /etc/rocky-release'
         $result.vagrant_smoke.rocky_version = 'PASS'
         $result.observations.architecture = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'architecture' -Command 'test "$(uname -m)" = x86_64 && uname -m'
@@ -1203,6 +1317,22 @@ function Invoke-NativeRun {
         if ($result.error.StartsWith('BLOCKED_RUNTIME ', [StringComparison]::Ordinal)) { $result.status = 'BLOCKED_RUNTIME' }
     }
     finally {
+        if ($null -ne $nativeSeedRoot) {
+            try {
+                $seedStop = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
+                    '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',
+                    (Join-Path $preparedStage 'runner\local-services\local-services-seed-server.ps1'),
+                    '-Action','Stop','-SeedRoot',$nativeSeedRoot,'-Port',[string]$nativeSeedPort
+                ) -TimeoutSeconds 30 -WorkingDirectory $preparedStage
+                Assert-ProcessSuccess -Result $seedStop -Operation 'native Rocky NoCloud SSH seed server stop'
+                $result.seed_server_cleanup = 'PASS'
+            }
+            catch {
+                $cleanupFailed = $true; $result.seed_server_cleanup = 'FAIL'
+                if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+            }
+        }
+        else { $result.seed_server_cleanup = 'PASS' }
         try {
             if ($null -ne $smokeRoot -and (Test-Path -LiteralPath $smokeRoot -PathType Container)) {
                 $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
@@ -1222,7 +1352,7 @@ function Invoke-NativeRun {
             if ($null -eq $result.error) { $result.error = $_.Exception.Message }
         }
         try {
-            foreach ($key in @('qualification-key', 'qualification-key.pub')) {
+            foreach ($key in @('qualification-key', 'qualification-key.pub', 'lab-runtime-key')) {
                 $keyPath = Join-Path $preparedStage $key
                 if (Test-Path -LiteralPath $keyPath -PathType Leaf) { Remove-Item -LiteralPath $keyPath -Force }
             }
@@ -1238,7 +1368,7 @@ function Invoke-NativeRun {
         try { Remove-NativeTask; $result.native_task_removed = 'PASS' } catch {
             $result.native_task_removed = 'FAIL'; if ($null -eq $result.error) { $result.error = $_.Exception.Message }
         }
-        if ($cleanupFailed -or $result.cleanup -ne 'PASS' -or $result.qualification_key_cleanup -ne 'PASS' -or $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS') {
+        if ($cleanupFailed -or $result.cleanup -ne 'PASS' -or $result.seed_server_cleanup -ne 'PASS' -or $result.qualification_key_cleanup -ne 'PASS' -or $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS') {
             $result.status = 'FAIL'
         }
         if ($transcriptStarted) {
@@ -1310,21 +1440,28 @@ function Invoke-Import {
         $result.status -ne 'PASS' -or $result.virtualbox_backend -ne 'NATIVE_VTX' -or
         $result.nem_detected -ne $false -or
         $result.native_vtx -ne 'PASS' -or $result.precheck -ne 'PASS' -or
-        $result.packer.init -ne 'PASS' -or $result.packer.fmt -ne 'PASS' -or
-        $result.packer.validate -ne 'PASS' -or $result.packer.build -ne 'PASS' -or
+        $result.packer.build -notin @('PASS','REUSED') -or
+        ($result.packer.build -eq 'PASS' -and ($result.packer.init -ne 'PASS' -or $result.packer.fmt -ne 'PASS' -or $result.packer.validate -ne 'PASS')) -or
+        ($result.packer.build -eq 'REUSED' -and ($result.packer.status -ne 'REUSED' -or $result.packer.inputs_digest -ne $prepared.reuse_box.inputs_digest)) -or
+        $result.box_digest_verified -ne 'PASS' -or
+        $result.ssh_identity.public_key_fingerprint -ne $prepared.lab_ssh_fingerprint -or
+        $result.ssh_identity.private_key_in_box -ne $false -or
         $result.local_services.status -ne 'PASS' -or
         $result.local_services.controller -ne 'PASS' -or
         $result.local_services.gitea -ne 'GITEA_PASS' -or
         $result.local_services.harbor -ne 'PASS' -or
         $result.local_services.cleanup -ne 'PASS' -or
         $result.cleanup -ne 'PASS' -or
+        $result.seed_server_cleanup -ne 'PASS' -or
         $result.qualification_key_cleanup -ne 'PASS' -or
         $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS'
     ) {
         throw 'Native runtime result is absent, stale or not fully PASS'
     }
-    foreach ($field in $result.milestones.PSObject.Properties.Name) {
-        if ($null -eq $result.milestones.$field) { throw "Native runtime milestone is absent: $field" }
+    if ($result.packer.build -eq 'PASS') {
+        foreach ($field in $result.milestones.PSObject.Properties.Name) {
+            if ($null -eq $result.milestones.$field) { throw "Native runtime milestone is absent: $field" }
+        }
     }
     foreach ($field in $result.vagrant_smoke.PSObject.Properties.Name) {
         if ($result.vagrant_smoke.$field -ne 'PASS') { throw "Native Vagrant smoke field is not PASS: $field" }
@@ -1337,7 +1474,7 @@ function Invoke-Import {
         throw 'Native SSH smoke address evidence is incomplete'
     }
     $artifactSource = [string]$result.artifact
-    $expectedArtifactSource = Join-Path $script:LabRootResolved "artifacts\$sourceSha\rocky-10.2-rke2-virtualbox.box"
+    $expectedArtifactSource = if ($result.packer.build -eq 'REUSED') { [string]$prepared.reuse_box.path } else { Join-Path $script:LabRootResolved "artifacts\$sourceSha\rocky-10.2-rke2-virtualbox.box" }
     if ([IO.Path]::GetFullPath($artifactSource) -ne [IO.Path]::GetFullPath($expectedArtifactSource)) {
         throw 'Native artifact path is outside the exact-source artifact location'
     }
@@ -1363,7 +1500,7 @@ function Invoke-Import {
             throw "Native runtime capture digest differs: $($capture.Key)"
         }
     }
-    foreach ($key in @('qualification-key', 'qualification-key.pub')) {
+    foreach ($key in @('qualification-key', 'qualification-key.pub', 'lab-runtime-key')) {
         if (Test-Path -LiteralPath (Join-Path $preparedStage $key)) { throw 'Ephemeral qualification key remains after native runtime' }
     }
     foreach ($role in @('controller', 'gitea', 'harbor')) {
@@ -1405,6 +1542,17 @@ function Invoke-Import {
     if ((Get-FileSha256 -Path $artifactTemporary) -ne $artifactSha256) { throw 'Artifact changed while importing native evidence' }
     Move-Item -LiteralPath $artifactTemporary -Destination $artifactTarget -Force
     [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS'), "$artifactSha256  rocky-10.2-rke2-virtualbox.box`n", (New-Object Text.UTF8Encoding($false)))
+    $sourceArtifactRoot = Split-Path -Parent $artifactSource
+    $artifactManifest = Read-JsonFile (Join-Path $sourceArtifactRoot 'manifest.json')
+    if ($artifactManifest.box_sha256 -ne $artifactSha256 -or
+        $artifactManifest.inputs_digest -ne [string]$prepared.packer_inputs_digest -or
+        $artifactManifest.packer_log_sha256 -ne (Get-FileSha256 -Path (Join-Path $sourceArtifactRoot 'packer.log')) -or
+        ($result.packer.build -eq 'REUSED' -and
+            (Get-FileSha256 -Path (Join-Path $sourceArtifactRoot 'manifest.json')) -ne [string]$prepared.reuse_box.manifest_sha256)) {
+        throw 'Packer box provenance changed before import'
+    }
+    Copy-Item -LiteralPath (Join-Path $sourceArtifactRoot 'manifest.json') -Destination (Join-Path $artifactRoot 'manifest.json') -Force
+    Copy-Item -LiteralPath (Join-Path $sourceArtifactRoot 'packer.log') -Destination (Join-Path $artifactRoot 'packer.log') -Force
     $wslRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
     $wslArtifactRoot = Join-Path $wslRoot '.artifacts\packer\rocky-10.2\windows'
     [void](New-Item -ItemType Directory -Path $wslArtifactRoot -Force)
@@ -1413,6 +1561,8 @@ function Invoke-Import {
         Copy-Item -LiteralPath $artifactTarget -Destination $wslArtifact -Force
     }
     Copy-Item -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS') -Destination (Join-Path $wslArtifactRoot 'SHA256SUMS') -Force
+    Copy-Item -LiteralPath (Join-Path $artifactRoot 'manifest.json') -Destination (Join-Path $wslArtifactRoot 'manifest.json') -Force
+    Copy-Item -LiteralPath (Join-Path $artifactRoot 'packer.log') -Destination (Join-Path $wslArtifactRoot 'packer.log') -Force
     if ((Get-FileSha256 -Path $wslArtifact) -ne $artifactSha256) { throw 'Native box changed during WSL evidence import' }
 
     $buildEvidence = [ordered]@{
@@ -1425,6 +1575,8 @@ function Invoke-Import {
         virtualbox_backend = 'NATIVE_VTX'; preflight = 'PASS'
         packer_init = [string]$result.packer.init; packer_fmt = [string]$result.packer.fmt
         packer_validate = [string]$result.packer.validate; packer_build = [string]$result.packer.build
+        packer_status = [string]$result.packer.status; packer_inputs_digest = [string]$result.packer.inputs_digest
+        reuse_source_sha = [string]$result.packer.reuse_source_sha
         checksum = 'PASS'; cleanup = 'PASS'; qualification_key = 'REMOVED_AFTER_QUALIFICATION'
         resources = (Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')).resources
         storage = (Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')).storage
@@ -1509,7 +1661,8 @@ function Invoke-Prepare {
     if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
         throw 'Prepare repository root must be the exact WSL worktree that owns the source SHA'
     }
-    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preparation'
+    $minimumStageGiB = if ($ReuseBoxPath) { 24 } else { 40 }
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB $minimumStageGiB -Operation 'native cycle preparation'
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
     if (-not $gitState.Clean) { throw 'Native VT-x staging requires a clean exact-SHA worktree' }
     $treeResult = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD^{tree}') -TimeoutSeconds 60
@@ -1518,6 +1671,42 @@ function Invoke-Prepare {
     $sourceTree = $treeResult.StdOut.Trim()
     if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw 'Prepare could not resolve full Git source identities'
+    }
+    if ($PackerInputsDigest -notmatch '^[0-9a-f]{64}$' -or $PackerTemplateDigest -notmatch '^[0-9a-f]{64}$' -or
+        ($ReuseBoxPath -and $ReuseBoxInputsDigest -ne $PackerInputsDigest)) {
+        throw 'Native Packer semantic image input digests are invalid'
+    }
+    $identity = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+        (Join-Path $PSScriptRoot 'LabSshIdentity.ps1'), '-Action', 'Verify'
+    ) -TimeoutSeconds 30 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $identity -Operation 'persistent laboratory SSH identity verification'
+    if ($identity.StdOut -notmatch 'FINGERPRINT=(SHA256:[A-Za-z0-9+/]+)') {
+        throw 'Persistent laboratory SSH identity fingerprint is absent'
+    }
+    $labSshFingerprint = $Matches[1]
+    $reuseBox = $null
+    if ($ReuseBoxPath) {
+        $reuseRoot = [IO.Path]::GetFullPath((Join-Path $script:LabRootResolved 'artifacts')).TrimEnd('\') + '\'
+        $candidate = [IO.Path]::GetFullPath($ReuseBoxPath)
+        if (-not $candidate.StartsWith($reuseRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            $ReuseBoxSha256 -notmatch '^[0-9a-f]{64}$' -or
+            $ReuseBoxInputsDigest -notmatch '^[0-9a-f]{64}$' -or
+            (Get-FileSha256 -Path $candidate) -ne $ReuseBoxSha256) {
+            throw 'Requested Packer box reuse path, digest or provenance is invalid'
+        }
+        $manifest = Read-JsonFile (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
+        if ($manifest.box_sha256 -ne $ReuseBoxSha256 -or $manifest.inputs_digest -ne $ReuseBoxInputsDigest -or
+            $manifest.box_filename -ne [IO.Path]::GetFileName($candidate) -or
+            $manifest.box_size_bytes -ne (Get-Item -LiteralPath $candidate).Length -or
+            $manifest.packer_log_sha256 -ne (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'packer.log'))) {
+            throw 'Requested Packer box reuse manifest or retained build log differs'
+        }
+        $reuseBox = [ordered]@{
+            path = $candidate; sha256 = $ReuseBoxSha256; inputs_digest = $ReuseBoxInputsDigest
+            manifest_sha256 = Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
+            source_sha = [string]$manifest.source_sha
+        }
     }
     [void](Assert-StartupDryRunProof -SourceSha $sourceSha)
     $normalHostState = Get-NormalHostState
@@ -1577,6 +1766,7 @@ function Invoke-Prepare {
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeLocalServices.ps1') -Destination (Join-Path $preparedStage 'runner\NativeLocalServices.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1') -Destination (Join-Path $preparedStage 'runner\NativeVagrantSshSmoke.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LabNetworkSeed.ps1') -Destination (Join-Path $preparedStage 'runner\LabNetworkSeed.ps1')
 
         $preflightPath = Join-Path $preparedStage 'evidence\preflight-prepare.json'
         $preflight = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
@@ -1686,6 +1876,10 @@ function Invoke-Prepare {
         native_controller_payload_sha256 = (Get-FileSha256 -Path (Join-Path $preparedStage 'controller\payload.json'))
         qualification_private_key_sha256 = $qualificationPrivateKeySha256
         qualification_public_key_sha256 = $qualificationPublicKeySha256
+        lab_ssh_fingerprint = $labSshFingerprint
+        packer_inputs_digest = $PackerInputsDigest
+        packer_template_digest = $PackerTemplateDigest
+        reuse_box = $reuseBox
         normal_boot_id = $normalBootId
         native_boot_id = $nativeBootId
         native_entry_name = $NativeEntryName

@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS_SOURCES = (
-    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 16),
+    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 17),
     (ROOT / "scripts/windows/qualify-rocky-image.ps1", "Invoke-SmokeCommand", 10),
 )
 
@@ -60,6 +60,14 @@ def _windows_commands() -> list[tuple[str, str]]:
                 raise GuestSmokePreflightError(f"guest command is not a PowerShell literal: {owner}")
             command = match.group(1).replace("''", "'").replace("{0}", "34359738368")
             commands.append((owner, command))
+    network = ROOT / "scripts/windows/LabNetworkSmoke.ps1"
+    security = [line for line in network.read_text(encoding="utf-8").splitlines() if "-Arguments @('ssh','-c'," in line]
+    if len(security) != 1:
+        raise GuestSmokePreflightError("network-only guest security command inventory changed")
+    match = re.search(r"-Arguments @\('ssh','-c','((?:''|[^'])*)'\)", security[0])
+    if match is None:
+        raise GuestSmokePreflightError("network-only guest security command is not a PowerShell literal")
+    commands.append(("LabNetworkSmoke.ps1:guest-security", match.group(1).replace("''", "'")))
     return commands
 
 

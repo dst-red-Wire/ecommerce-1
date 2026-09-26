@@ -59,9 +59,25 @@ try {
     $evidence.checks.preflight = 'PASS'
 
     $build = Read-JsonFile (Join-Path $evidenceRoot 'build.json')
-    foreach ($field in @('preflight', 'packer_init', 'packer_fmt', 'packer_validate', 'packer_build', 'checksum', 'cleanup')) {
+    foreach ($field in @('preflight', 'checksum', 'cleanup')) {
         if ($build.$field -ne 'PASS' -and -not ($field -eq 'cleanup' -and $build.$field -eq 'NOT_NEEDED')) {
             throw "Build evidence field is not PASS: $field"
+        }
+    }
+    if ($build.packer_build -eq 'REUSED') {
+        if ($build.packer_status -ne 'REUSED' -or [string]$build.packer_inputs_digest -notmatch '^[0-9a-f]{64}$') {
+            throw 'Reused Packer box lacks exact image input provenance'
+        }
+        $manifest = Read-JsonFile (Join-Path $artifactRoot 'manifest.json')
+        if ($manifest.inputs_digest -ne $build.packer_inputs_digest -or
+            $manifest.box_sha256 -ne $build.sha256 -or
+            $manifest.packer_log_sha256 -ne (Get-FileSha256 -Path (Join-Path $artifactRoot 'packer.log'))) {
+            throw 'Reused Packer box manifest or retained build log differs'
+        }
+    }
+    else {
+        foreach ($field in @('packer_init', 'packer_fmt', 'packer_validate', 'packer_build')) {
+            if ($build.$field -ne 'PASS') { throw "Build evidence field is not PASS: $field" }
         }
     }
     if ($build.status -ne 'PASS') {

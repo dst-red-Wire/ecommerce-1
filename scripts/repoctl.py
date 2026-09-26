@@ -7207,11 +7207,94 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
     ]
     if action == "prepare" and offline:
         command.append("-Offline")
+    if action == "prepare":
+        import rocky_box_catalog
+
+        source_sha = output(["git", "rev-parse", "HEAD"]).strip()
+        try:
+            image_inputs = rocky_box_catalog.build_inputs(source_sha)
+        except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
+            return fail(f"cannot bind Packer semantic image inputs: {exc}")
+        command.extend(["-PackerInputsDigest", image_inputs["inputs_digest"],
+                        "-PackerTemplateDigest", image_inputs["packer_template_digest"]])
+        try:
+            box = rocky_box_catalog.find_matching_box(source_sha)
+            manifest = rocky_box_catalog.verify(box, source_sha)
+            box_windows = output(["wslpath", "-w", str(box)]).strip()
+            command.extend(["-ReuseBoxPath", box_windows, "-ReuseBoxSha256", manifest["box_sha256"],
+                            "-ReuseBoxInputsDigest", manifest["inputs_digest"]])
+            print(f"PACKER_REBUILD_DECISION=REUSE box_sha256={manifest['box_sha256']}")
+        except ValueError as exc:
+            if "found 0" not in str(exc):
+                return fail(f"ambiguous Packer box reuse decision: {exc}")
+            print(f"PACKER_REBUILD_DECISION=BUILD reason={exc}")
     return run(
         command,
         cwd=windows_working_directory,
         env=_windows_powershell_environment(),
         check=False,
+    ).returncode
+
+
+def windows_lab_ssh_identity() -> int:
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    windows_working_directory = Path("/mnt/c/Windows")
+    if not powershell.is_file() or not windows_working_directory.is_dir():
+        return fail("laboratory SSH identity requires Windows PowerShell through WSL interop")
+    try:
+        script = output(["wslpath", "-w", str(ROOT / "scripts/windows/LabSshIdentity.ps1")]).strip()
+    except RuntimeError as exc:
+        return fail(f"cannot locate laboratory SSH identity script: {exc}")
+    if not script.startswith("\\\\"):
+        return fail("laboratory SSH identity script must resolve through the WSL UNC bridge")
+    return run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Action", "Ensure"],
+        cwd=windows_working_directory,
+        env=_windows_powershell_environment(),
+        check=False,
+    ).returncode
+
+
+def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_failed_vm: bool = False,
+                      global_deadline: int = 900) -> int:
+    """Verify a retained box or stage a single exact-SHA native network smoke."""
+    import rocky_box_catalog
+
+    source_sha = output(["git", "rev-parse", "HEAD"]).strip()
+    try:
+        selected = Path(box) if box else rocky_box_catalog.find_matching_box(source_sha)
+        if not selected.is_file():
+            return fail(f"verified Rocky box is absent: {selected}")
+        if action == "verify":
+            manifest = rocky_box_catalog.verify(selected, source_sha)
+            print(json.dumps({"box_reuse": "REUSED", "box_sha256": manifest["box_sha256"],
+                              "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
+        elif action == "prepare-smoke":
+            prepared = rocky_box_catalog.prepare_smoke(
+                selected, source_sha, box_sha256, keep_failed_vm, global_deadline
+            )
+            print(json.dumps(prepared, sort_keys=True))
+        else:
+            return fail(f"unsupported box action: {action}")
+    except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
+        return fail(f"box reuse {action}: {exc}")
+    return 0
+
+
+def lab_network_clean(campaign_id: str) -> int:
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-clean requires an exact network-smoke CAMPAIGN_ID")
+    stage = Path("/mnt/c/ecommerce-lab/network-smoke") / campaign_id
+    runner = stage / "scripts/windows/LabNetworkSmoke.ps1"
+    if not runner.is_file():
+        return fail(f"network-smoke campaign is absent: {campaign_id}")
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    stage_windows = output(["wslpath", "-w", str(stage)]).strip()
+    runner_windows = output(["wslpath", "-w", str(runner)]).strip()
+    return run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", runner_windows, "-Action", "Clean", "-StageRoot", stage_windows],
+        cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
     ).returncode
 
 
@@ -8324,6 +8407,16 @@ def main() -> int:
     sub.add_parser("image-rocky-windows-native-import")
     sub.add_parser("image-rocky-windows-native-recover")
     sub.add_parser("image-rocky-windows-native-self-test")
+    sub.add_parser("lab-ssh-key")
+    packer_box = sub.add_parser("packer-box")
+    packer_box.add_argument("--box", default=os.environ.get("BOX_PATH", ""))
+    network_smoke = sub.add_parser("lab-network-smoke")
+    network_smoke.add_argument("--box", default=os.environ.get("BOX_PATH", ""))
+    network_smoke.add_argument("--box-sha256", default=os.environ.get("BOX_SHA256", ""))
+    network_smoke.add_argument("--keep-failed-vm", action="store_true")
+    network_smoke.add_argument("--global-deadline", type=int, default=900)
+    lab_clean = sub.add_parser("lab-clean")
+    lab_clean.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
     sub.add_parser("image-rocky-linux-static-validate")
     image_linux_build = sub.add_parser("image-rocky-linux-build")
@@ -8575,6 +8668,15 @@ def main() -> int:
             return windows_native_vtx_cycle("recover")
         if args.cmd == "image-rocky-windows-native-self-test":
             return windows_native_vtx_cycle("selftest")
+        if args.cmd == "lab-ssh-key":
+            return windows_lab_ssh_identity()
+        if args.cmd == "packer-box":
+            return rocky_box_command("verify", box=args.box)
+        if args.cmd == "lab-network-smoke":
+            return rocky_box_command("prepare-smoke", box=args.box, box_sha256=args.box_sha256,
+                                     keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline)
+        if args.cmd == "lab-clean":
+            return lab_network_clean(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":
             return linux_image_pipeline("preflight")
         if args.cmd == "image-rocky-linux-static-validate":
