@@ -182,8 +182,11 @@ recorded as `PASS` or `UNSUPPORTED`; it is never treated as runtime proof.
 
 `native-reboot` is the explicit reboot authorization boundary. It verifies the
 staging and task, arms only `bcdedit /bootsequence` for the native entry, and
-reboots. It never changes the permanent default loader. After interactive Windows
-logon, the temporary task:
+reboots. It never changes the permanent default loader. Before changing BCD,
+`Cycle` registers and starts a disposable S4U startup task to prove that the
+elevated noninteractive token can reach the exact WSL worktree, the host-only
+network and the pinned Windows tools. A failed probe stops the cycle before BCD
+mutation. After native boot, the startup task runs without Windows logon and:
 
 1. rejects a second attempt for the same SHA;
 2. verifies the staging manifest and exact tool versions;
@@ -197,7 +200,8 @@ logon, the temporary task:
 8. arms the exact normal loader in a `finally`, removes the task, writes evidence,
    and reboots even when qualification fails.
 
-After the normal boot and WSL2 return:
+After the normal boot, a second S4U startup task verifies WSL2 and imports the
+exact-SHA evidence without Windows logon. For manual recovery only:
 
 ```console
 make image-rocky-windows-native-import

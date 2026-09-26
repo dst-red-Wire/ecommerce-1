@@ -334,6 +334,9 @@ packer_image:
       lab_root: C:/ecommerce-lab
       boot_entry_name: Windows - VirtualBox VT-x native
       scheduled_task_name: Ecommerce-VirtualBox-Native-Qualification
+      scheduled_task_trigger: at-startup
+      scheduled_task_logon_type: s4u
+      noninteractive_startup_probe: required-before-bcd-mutation
       max_native_boot_attempts: 1
       normal_boot:
         hyper_v: enabled
