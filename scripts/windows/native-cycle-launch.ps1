@@ -1,9 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{40}$')][string]$ExpectedSourceSha,
-    [string]$RepoRoot = '\\wsl.localhost\Ubuntu-24.04\home\dev\Project\ecommerce-rke2-local-virtualbox',
+    [string]$RepoRoot = '\\wsl.localhost\Ubuntu-24.04\home\dev\ecommerce-1',
     [string]$WslDistribution = 'Ubuntu-24.04',
-    [string]$WslRepoRoot = '/home/dev/Project/ecommerce-rke2-local-virtualbox',
+    [string]$WslRepoRoot = '/home/dev/ecommerce-1',
     [string]$LabRoot = 'C:\ecommerce-lab'
 )
 
