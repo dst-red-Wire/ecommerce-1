@@ -3,11 +3,13 @@
 }
 
 https://gitea.ecommerce.local {
+    bind 127.0.0.1
     tls /certs/server.crt /certs/server.key
     reverse_proxy 127.0.0.1:3000
 }
 
 https://harbor.ecommerce.local {
+    bind 127.0.0.1
     tls /certs/server.crt /certs/server.key
     reverse_proxy https://127.0.0.1:8443 {
         transport http {
