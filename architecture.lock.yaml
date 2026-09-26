@@ -103,6 +103,21 @@ platform:
     certified_nodes: fixed
     preprod_perf_burst: gate-only
 
+local_management_services:
+  status: active
+  endpoint_profile: local
+  endpoint_override_policy: environment-only
+  identities:
+    gitea_human: dst-red-Wire
+    gitea_automation: ecommerce-automation
+    harbor_project: ecommerce
+    harbor_automation_account: ecommerce-ci
+  endpoints:
+    gitea_https_url: https://gitea.ecommerce.local/
+    harbor_url: https://harbor.ecommerce.local/
+  automation_signing_fingerprint: 1E017B8EA8721E5B7854D3F4AADEE6601021EBE8
+  gpg_registration_gate: post-windows-reboot-proof-pass
+
 management_plane:
   provider: hetzner-cloud
   lifecycle: persistent

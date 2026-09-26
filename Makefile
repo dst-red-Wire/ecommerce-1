@@ -102,6 +102,21 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
+.PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
+
+local-services-up: ## Start pinned local Gitea/Harbor on native WSL storage
+	@$(PYTHON) platform/local-services/manage.py up
+
+local-services-provision: ## Create dedicated local Gitea/Harbor identities
+	@$(PYTHON) platform/local-services/manage.py gitea-users
+	@$(PYTHON) platform/local-services/manage.py harbor-robot
+
+local-gpg-register: ## Register public automation key on Gitea only after reboot proof
+	@$(PYTHON) platform/local-services/manage.py register-gpg
+
+local-services-proof: ## Verify TLS, DNS, identities, GPG and Harbor robot login
+	@$(PYTHON) platform/local-services/manage.py proof
+
 .PHONY: mgmt-runtime-inventory
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
