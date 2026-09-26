@@ -32,6 +32,11 @@ repository_governance:
       private_key_in_repository: forbidden
       private_key_export: forbidden
       global_git_configuration: forbidden
+      forge_identity:
+        account: dst-red-Wire
+        git_name: PIERMATH BOUYA
+        git_email: 141283735+dst-red-Wire@users.noreply.github.com
+        separate_automation_forge_account: forbidden
   transverse_rule_contract:
     source_of_truth: architecture.lock.yaml
     rule_definition: central-contract-only
@@ -109,7 +114,7 @@ local_management_services:
   endpoint_override_policy: environment-only
   identities:
     gitea_human: dst-red-Wire
-    gitea_automation: ecommerce-automation
+    gitea_automation: dst-red-Wire
     harbor_project: ecommerce
     harbor_automation_account: ecommerce-ci
   endpoints:

@@ -89,7 +89,7 @@ V5_SECTION_KEYS = {
         {"fingerprint", "uid", "algorithm", "signing_required", "passphrase",
          "expiration_days_max", "warning_days_before_expiration", "local_git_config_only",
          "revocation_certificate_required", "private_key_in_repository", "private_key_export",
-         "global_git_configuration"}
+         "global_git_configuration", "forge_identity"}
     ),
     "repository_governance.transverse_rule_contract": frozenset(
         {
@@ -1341,7 +1341,7 @@ def validate(root):
             "endpoint_override_policy": "environment-only",
             "identities": {
                 "gitea_human": "dst-red-Wire",
-                "gitea_automation": "ecommerce-automation",
+                "gitea_automation": "dst-red-Wire",
                 "harbor_project": "ecommerce",
                 "harbor_automation_account": "ecommerce-ci",
             },
