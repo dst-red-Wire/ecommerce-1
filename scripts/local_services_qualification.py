@@ -271,10 +271,16 @@ def prepare_native_controller_payload(destination: Path, *, offline: bool) -> di
         run(["git", "bundle", "verify", str(temporary / "source.bundle")], timeout=300)
         shutil.copy2(ROOT / "scripts/native_controller_bootstrap.py", temporary / "bootstrap.py")
         shutil.copytree(CACHE, temporary / "assets")
-        oras = shutil.which("oras")
-        if not oras or not re.search(r"Version:\s+1\.3\.3\b", run([oras, "version"], timeout=30).stdout):
+        oras_candidates = (
+            Path.home() / ".local/bin/oras",
+            Path("/usr/local/bin/oras"),
+            Path("/usr/bin/oras"),
+        )
+        oras_binary = next((candidate.resolve() for candidate in oras_candidates if candidate.is_file()), None)
+        if oras_binary is None or not re.search(
+            r"Version:\s+1\.3\.3\b", run([str(oras_binary), "version"], timeout=30).stdout
+        ):
             raise QualificationError("locked ORAS 1.3.3 is unavailable for native controller")
-        oras_binary = Path(oras).resolve(strict=True)
         expected_oras = contract()["runtime"]["native_controller"]["oras_binary_sha256"]
         if sha256(oras_binary) != expected_oras:
             raise QualificationError("local ORAS binary digest differs from the native controller contract")
