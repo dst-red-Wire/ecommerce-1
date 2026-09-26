@@ -329,7 +329,9 @@ def remote_registration(data: dict) -> tuple[bool, bool]:
     keys = _json_url(gitea + "/user/gpg_keys", token=token, cafile=ca)
     gt_ok = isinstance(keys, list) and any(
         public_fingerprint(item["public_key"]) == data["new_fingerprint"]
-        and item.get("verified") is True and item.get("can_sign") is True
+        and item.get("can_sign") is True
+        and any(email.get("email") == "141283735+dst-red-Wire@users.noreply.github.com"
+                and email.get("verified") is True for email in item.get("emails", []))
         for item in keys if isinstance(item, dict) and item.get("public_key"))
     return gh_ok, gt_ok
 
@@ -396,8 +398,8 @@ def verify_remote() -> None:
 def signed_probe(fingerprint: str) -> str:
     tree = run("git", "rev-parse", "HEAD^{tree}")
     parent = run("git", "rev-parse", "HEAD")
-    commit = run("git", "-c", f"user.signingkey={fingerprint}", "-c", "commit.gpgsign=true",
-                 "commit-tree", tree, "-p", parent, input_text="automation signing rotation probe\n")
+    commit = run("git", "-c", f"user.signingkey={fingerprint}", "commit-tree", tree, "-p", parent,
+                 f"-S{fingerprint}", input_text="automation signing rotation probe\n")
     verified = subprocess.run(["git", "verify-commit", "--raw", commit], cwd=ROOT,
                               capture_output=True, text=True, check=False)
     if verified.returncode or f"[GNUPG:] VALIDSIG {fingerprint}" not in verified.stdout + verified.stderr:
