@@ -91,7 +91,9 @@ if ($Action -eq 'Clean') {
             throw 'Preserved Vagrant machine ID differs from the owned VirtualBox VM'
         }
         $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
-        Assert-ProcessSuccess -Result $destroy -Operation 'owned preserved network-smoke VM destroy'
+        if ($destroy.ExitCode -ne 0) {
+            [void](Remove-OwnedVirtualMachine -Name ([string]$result.vm_name) -InitialMachines @{} -VBoxManage $vbox -WorkingDirectory $smokeRoot)
+        }
     }
     $boxRemove = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'remove', '--force', [string]$result.box_name) -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
     Assert-ProcessSuccess -Result $boxRemove -Operation 'owned preserved network-smoke box removal'
@@ -126,6 +128,7 @@ $seedRoot = $null
 $boxAdded = $false
 $vmName = $null
 $campaignLock = $null
+$initial = @{}
 try {
     try {
         $campaignLock = [IO.File]::Open('C:\ecommerce-lab\network-smoke\.runtime.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -231,6 +234,7 @@ finally {
     }
     $vmExists = $false
     $ownedVmId = $null
+    $inventoryFailed = $false
     try {
         if ($vmName) {
             $ownedMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $stage
@@ -239,6 +243,7 @@ finally {
         }
     }
     catch {
+        $inventoryFailed = $true
         $result.cleanup.status = 'FAIL'
         $result.status = 'FAIL'
         $result.error = "VirtualBox ownership check failed: $($_.Exception.Message); prior error: $($result.error)"
@@ -254,15 +259,18 @@ finally {
     }
     elseif (Test-Path -LiteralPath (Join-Path $smokeRoot 'runtime.json') -PathType Leaf) {
         try {
-            if ($vmExists) {
+            if ($vmExists -or $inventoryFailed) {
                 $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy','--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
-                Assert-ProcessSuccess -Result $destroy -Operation 'network-smoke VM cleanup'
+                if ($destroy.ExitCode -ne 0 -and $vmExists -and -not $inventoryFailed) {
+                    [void](Remove-OwnedVirtualMachine -Name $vmName -InitialMachines $initial -VBoxManage $vbox -WorkingDirectory $smokeRoot)
+                }
+                else { Assert-ProcessSuccess -Result $destroy -Operation 'network-smoke VM cleanup' }
             }
             if ($boxAdded) {
                 $boxRemove = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box','remove','--force',[string]$result.box_name) -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $environment
                 Assert-ProcessSuccess -Result $boxRemove -Operation 'network-smoke box cache cleanup'
             }
-            $result.cleanup.status = 'PASS'
+            if (-not $inventoryFailed) { $result.cleanup.status = 'PASS' }
         }
         catch { $result.cleanup.status = 'FAIL'; $result.status = 'FAIL'; $result.error = "Network-smoke cleanup failed: $($_.Exception.Message); prior error: $($result.error)" }
     }
