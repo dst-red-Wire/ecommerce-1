@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import math
 import os
@@ -113,6 +113,26 @@ def certificate(fingerprint: str) -> Path:
     return path
 
 
+def ensure_public_export(fingerprint: str, expected_path: str | Path) -> Path:
+    path = Path(expected_path)
+    if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_uid != os.getuid()
+                                                or path.stat().st_mode & 0o077)):
+        raise ValueError("public export path unsafe")
+    content = run("gpg", "--batch", "--armor", "--export", fingerprint).encode("ascii") + b"\n"
+    if PUBLIC not in content or b"PRIVATE KEY" in content or b"SECRET KEY" in content:
+        raise ValueError("GPG public export invalid")
+    if path.exists():
+        if path.read_bytes() != content:
+            raise ValueError("public export path drift")
+        return path
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return path
+
+
 def validate_pending(signing: dict, data: dict) -> dict:
     old, new = data["old_fingerprint"], data["new_fingerprint"]
     if old == signing["personal_signing"]["fingerprint"] or new == old or new == signing["personal_signing"]["fingerprint"]:
@@ -137,12 +157,8 @@ def validate_pending(signing: dict, data: dict) -> dict:
         raise ValueError("replacement UID mismatch")
     if str(certificate(new)) != data.get("revocation_certificate_path"):
         raise ValueError("revocation certificate path mismatch")
-    public_path = Path(data["public_key_path"])
-    if public_path.is_symlink() or not public_path.is_file() or public_path.stat().st_uid != os.getuid():
-        raise ValueError("public export missing or unsafe")
+    public_path = ensure_public_export(new, data["public_key_path"])
     content = public_path.read_bytes()
-    if PUBLIC not in content or b"PRIVATE KEY" in content or b"SECRET KEY" in content:
-        raise ValueError("public export is invalid")
     records = run("gpg", "--batch", "--with-colons", "--show-keys", str(public_path))
     if f"fpr:::::::::{new}:" not in records:
         raise ValueError("public export fingerprint mismatch")
@@ -192,16 +208,7 @@ def check() -> None:
 
 def export_public(fingerprint: str) -> Path:
     path = Path(f"/tmp/ecommerce-1-automation-signing-{fingerprint}.asc")
-    data = run("gpg", "--batch", "--armor", "--export", fingerprint).encode("ascii") + b"\n"
-    if PUBLIC not in data or b"PRIVATE KEY" in data or b"SECRET KEY" in data:
-        raise ValueError("GPG public export invalid")
-    if not path.exists():
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-    if path.is_symlink() or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077 or path.read_bytes() != data:
-        raise ValueError("public export path drift")
-    return path
+    return ensure_public_export(fingerprint, path)
 
 
 def write_pending_lock(old: str, new: str, expires: int) -> None:
@@ -253,7 +260,11 @@ def rotate() -> None:
     candidates = []
     for candidate in all_fprs - {old, signing["personal_signing"]["fingerprint"]}:
         details = key(candidate)
-        if uid in details["uid"] and details["created"] >= key(old)["created"]:
+        if (uid in details["uid"] and details["created"] >= key(old)["created"]
+                and details["expires"] > datetime.now(timezone.utc).timestamp()
+                and details["expires"] - details["created"] <= signing["rotation"]["validity_days"] * 86400):
+            certificate(candidate)
+            ensure_public_export(candidate, f"/tmp/ecommerce-1-automation-signing-{candidate}.asc")
             candidates.append(candidate)
     if len(candidates) > 1:
         raise ValueError("multiple replacement candidates; manual recovery required")
@@ -306,10 +317,19 @@ def public_fingerprint(armor: str) -> str:
     if result.returncode:
         raise ValueError("forge public key packet invalid")
     records = result.stdout.decode()
-    fingerprints = [row[9] for row in (line.split(":") for line in records.splitlines()) if row[0] == "fpr"]
-    if len(fingerprints) != 1 or not FPR.fullmatch(fingerprints[0]):
+    primaries = []
+    kind = None
+    for row in (line.split(":") for line in records.splitlines()):
+        if row[0] == "pub":
+            kind = "pub"
+        elif row[0] == "sub":
+            kind = "sub"
+        elif row[0] == "fpr" and kind == "pub":
+            primaries.append(row[9])
+            kind = "pub-fpr"
+    if len(primaries) != 1 or not FPR.fullmatch(primaries[0]):
         raise ValueError("forge public key fingerprint ambiguous")
-    return fingerprints[0]
+    return primaries[0]
 
 
 def remote_registration(data: dict) -> tuple[bool, bool]:
@@ -412,6 +432,24 @@ def activate() -> None:
     data = read_state()
     if not data:
         raise ValueError("no prepared rotation")
+    transition = data.get("activation")
+    if transition and transition.get("transition") == "activating":
+        old, new = transition["old_signer"], transition["new_signer"]
+        lock = ROOT / "architecture.lock.yaml"
+        lock_text = lock.read_text()
+        signer = run("git", "config", "--local", "--get", "user.signingkey")
+        converged = signer == new and f"      fingerprint: {new}\n" in lock_text
+        if converged:
+            data["activated"] = True
+            data["activated_at"] = datetime.now(timezone.utc).isoformat()
+            data["old_key_status"] = "overlap"
+            data.pop("activation", None)
+            save_state(data)
+            print(f"PASS activation recovered signer={new}")
+            return
+        run("git", "config", "--local", "user.signingkey", old)
+        data["activation"] = {**transition, "transition": "activation_failed_recovered"}
+        save_state(data)
     validate_pending(signing, data)
     if data.get("activated"):
         raise ValueError("double activation forbidden")
@@ -426,24 +464,40 @@ def activate() -> None:
     signed_probe(new)
     run("gpgconf", "--kill", "gpg-agent")
     signed_probe(new)
-    run("git", "config", "--local", "user.signingkey", new)
     lock = ROOT / "architecture.lock.yaml"
     source = lock.read_text()
     old_line = f"      fingerprint: {old}\n"
     if source.count(old_line) != 1:
         run("git", "config", "--local", "user.signingkey", old)
         raise ValueError("canonical active fingerprint drift")
+    previous = re.search(r"^      previous_fingerprint: .*\n", source, re.MULTILINE)
+    if not previous:
+        raise ValueError("canonical previous fingerprint missing")
     source = source.replace(old_line, f"      fingerprint: {new}\n", 1)
-    source = source.replace("      previous_fingerprint: null", f"      previous_fingerprint: {old}", 1)
+    source = source[:previous.start()] + f"      previous_fingerprint: {old}\n" + source[previous.end():]
     source = source.replace("      rotation_status: pending_remote_verification", "      rotation_status: active_overlap", 1)
     source = source.replace(f"      uid: {signing['automation_key']['uid']}",
                             f"      uid: {signing['automation_key']['forge_identity']['git_name']} <{signing['automation_key']['forge_identity']['git_email']}>", 1)
     source = source.replace(f"  automation_signing_fingerprint: {old}", f"  automation_signing_fingerprint: {new}", 1)
-    lock.write_text(source)
-    data["activated"] = True
-    data["activated_at"] = datetime.now(timezone.utc).isoformat()
-    data["old_key_status"] = "overlap"
+    expected = {"transition": "activating", "old_signer": old, "new_signer": new,
+                "expected_lock_before": old, "expected_lock_after": new}
+    data["activation"] = expected
     save_state(data)
+    original = lock.read_text()
+    try:
+        run("git", "config", "--local", "user.signingkey", new)
+        lock.write_text(source)
+        data["activated"] = True
+        data["activated_at"] = datetime.now(timezone.utc).isoformat()
+        data["old_key_status"] = "overlap"
+        data.pop("activation", None)
+        save_state(data)
+    except Exception:
+        lock.write_text(original)
+        run("git", "config", "--local", "user.signingkey", old)
+        data["activation"] = {**expected, "transition": "activation_failed_recovered"}
+        save_state(data)
+        raise
     print(f"PASS activation local signer={new}; fresh-agent proof PASS")
     print("BLOCKED_REMOTE_VERIFICATION pending signed commit verification on both forges")
 
@@ -473,7 +527,7 @@ def retire_old() -> None:
     if verified.returncode or f"[GNUPG:] VALIDSIG {data['new_fingerprint']}" not in verified.stdout + verified.stderr:
         raise ValueError("reboot proof signature mismatch")
     exact_sha = remote_commit_proof(data["new_fingerprint"])
-    if (datetime.now(timezone.utc) - datetime.fromisoformat(data["activated_at"])).days > signing["rotation"]["overlap_max_days"]:
+    if datetime.now(timezone.utc) - datetime.fromisoformat(data["activated_at"]) > timedelta(days=signing["rotation"]["overlap_max_days"]):
         raise ValueError("overlap deadline exceeded; manual recovery required")
     # Remote deletion requires a separate explicit operator decision; preserve historical verification.
     data["retired_old"] = True
