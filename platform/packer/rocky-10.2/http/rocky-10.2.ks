@@ -33,7 +33,7 @@ if [ -c /dev/ttyS0 ]; then
     (
         while :; do
             for name in anaconda storage program packaging; do
-                log="/tmp/${name}.log"
+                log="/tmp/$name.log"
                 if [ -f "$log" ]; then
                     printf 'ECOMMERCE_INSTALLER_LOG %s BEGIN\n' "$name"
                     tail -n 8 "$log"
