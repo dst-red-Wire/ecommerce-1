@@ -69,9 +69,22 @@ V5_SECTION_KEYS = {
     "repository_governance": frozenset(
         {
             "scope",
+            "automation_signing",
             "transverse_rule_contract",
             "owner_authorization",
         }
+    ),
+    "repository_governance.automation_signing": frozenset(
+        {"version", "kind", "status", "repository", "personal_signing", "automation_key"}
+    ),
+    "repository_governance.automation_signing.personal_signing": frozenset(
+        {"fingerprint", "passphrase_required", "automation_use"}
+    ),
+    "repository_governance.automation_signing.automation_key": frozenset(
+        {"fingerprint", "uid", "algorithm", "signing_required", "passphrase",
+         "expiration_days_max", "warning_days_before_expiration", "local_git_config_only",
+         "revocation_certificate_required", "private_key_in_repository", "private_key_export",
+         "global_git_configuration"}
     ),
     "repository_governance.transverse_rule_contract": frozenset(
         {

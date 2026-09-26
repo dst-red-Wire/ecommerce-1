@@ -5,7 +5,7 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -49,6 +49,9 @@ contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compat
 
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
+
+signing-check: ## Verify local automation signing isolation, validity and rotation window
+	@$(PYTHON) scripts/check_automation_signing.py
 
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
