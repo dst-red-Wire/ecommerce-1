@@ -16,6 +16,10 @@ function Invoke-BoundedProcess {
             return [pscustomobject]@{ ExitCode = 0; StdOut = 'Name: /VirtualBox/GuestInfo/Net/0/V4/IP, value: 10.0.2.15, timestamp: 1'; StdErr = '' }
         }
         default {
+            if ($Arguments -notcontains 'StrictHostKeyChecking=accept-new' -or
+                -not @($Arguments | Where-Object { $_ -like 'UserKnownHostsFile=*' }).Count) {
+                throw 'SSH probe does not pin the observed guest host key'
+            }
             if ($script:FixtureMode -eq 'acl_failure') {
                 return [pscustomobject]@{ ExitCode = 255; StdOut = ''; StdErr = 'WARNING: UNPROTECTED PRIVATE KEY FILE! Key ignored.' }
             }
@@ -52,6 +56,7 @@ if (-not $failure.Contains('terminal_auth_error') -or $failure.last_ssh_error -n
     throw 'Private key ACL failure was not preserved precisely'
 }
 if ((Get-NativeSshFailureCode -Stage 'ssh_auth_ready' -Detail $failure.last_ssh_error) -ne 'SSH_AUTH_FAILED' -or
+    (Get-NativeSshFailureCode -Stage 'ssh_auth_ready' -Detail 'Host key verification failed.') -ne 'SSH_HOST_KEY_FAILED' -or
     (Get-NativeSshFailureCode -Stage 'tcp_22_ready' -Detail 'VirtualBox NAT SSH forwarding is absent') -ne 'VBOX_NETWORK_ERROR') {
     throw 'SSH authentication and VirtualBox network failure codes are not distinct'
 }

@@ -132,9 +132,10 @@ function Update-NativeSshSmokeEvidence {
         $Evidence.first_ssh_probe_delay_seconds = Get-NativeSshSeconds -Start $Evidence.vm_running_at -End $Evidence.first_ssh_probe_at
     }
     $Evidence.ssh_probe_count = [int]$Evidence.ssh_probe_count + 1
+    $knownHosts = Join-Path $WorkingDirectory 'ssh_known_hosts'
     $ssh = Invoke-BoundedProcess -FilePath $SshExecutable -Arguments @(
         '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
-        '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=NUL',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', "UserKnownHostsFile=$knownHosts",
         '-o', 'ConnectTimeout=5', '-o', 'NumberOfPasswordPrompts=0',
         '-i', $PrivateKey, '-p', [string]$Evidence.port,
         "$($Evidence.user)@$($Evidence.address)", 'ip -4 -o addr show scope global'
