@@ -4,6 +4,34 @@ project: ecommerce
 
 repository_governance:
   scope: entire-repository
+  windows_workspace:
+    status: enforced
+    execution: wsl2
+    repository_filesystem: native-linux
+    windows_mounts: forbidden
+    scope: all-repository-operations
+  automation_signing:
+    version: 1
+    kind: AutomationSigningPolicy
+    status: enforced
+    repository: ecommerce-1
+    personal_signing:
+      fingerprint: 026264E5634441CB0008D42D56CFD079660EC037
+      passphrase_required: true
+      automation_use: forbidden
+    automation_key:
+      fingerprint: 1E017B8EA8721E5B7854D3F4AADEE6601021EBE8
+      uid: ecommerce-1 automation signing <141283735+dst-red-Wire@users.noreply.github.com>
+      algorithm: ed25519
+      signing_required: true
+      passphrase: forbidden
+      expiration_days_max: 90
+      warning_days_before_expiration: 14
+      local_git_config_only: true
+      revocation_certificate_required: true
+      private_key_in_repository: forbidden
+      private_key_export: forbidden
+      global_git_configuration: forbidden
   transverse_rule_contract:
     source_of_truth: architecture.lock.yaml
     rule_definition: central-contract-only
@@ -74,6 +102,21 @@ platform:
     event_driven_pods: keda
     certified_nodes: fixed
     preprod_perf_burst: gate-only
+
+local_management_services:
+  status: active
+  endpoint_profile: local
+  endpoint_override_policy: environment-only
+  identities:
+    gitea_human: dst-red-Wire
+    gitea_automation: ecommerce-automation
+    harbor_project: ecommerce
+    harbor_automation_account: ecommerce-ci
+  endpoints:
+    gitea_https_url: https://gitea.ecommerce.local/
+    harbor_url: https://harbor.ecommerce.local/
+  automation_signing_fingerprint: 1E017B8EA8721E5B7854D3F4AADEE6601021EBE8
+  gpg_registration_gate: post-windows-reboot-proof-pass
 
 management_plane:
   provider: hetzner-cloud
@@ -533,6 +576,7 @@ machine_contracts:
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
   kratix_platform: config/infrastructure/kratix-platform.yaml
   machine_image_lock: config/contracts/machine-image-lock.yaml
+  vm_lifecycle_policy: config/contracts/vm-lifecycle-policy.yaml
   observability_topology: config/contracts/observability-topology.yaml
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml

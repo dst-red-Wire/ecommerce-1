@@ -50,6 +50,7 @@ V5_ROOT_KEYS = frozenset(
         "business",
         "platform",
         "management_plane",
+        "local_management_services",
         "stateful",
         "dns",
         "observability",
@@ -69,9 +70,26 @@ V5_SECTION_KEYS = {
     "repository_governance": frozenset(
         {
             "scope",
+            "automation_signing",
+            "windows_workspace",
             "transverse_rule_contract",
             "owner_authorization",
         }
+    ),
+    "repository_governance.windows_workspace": frozenset(
+        {"status", "execution", "repository_filesystem", "windows_mounts", "scope"}
+    ),
+    "repository_governance.automation_signing": frozenset(
+        {"version", "kind", "status", "repository", "personal_signing", "automation_key"}
+    ),
+    "repository_governance.automation_signing.personal_signing": frozenset(
+        {"fingerprint", "passphrase_required", "automation_use"}
+    ),
+    "repository_governance.automation_signing.automation_key": frozenset(
+        {"fingerprint", "uid", "algorithm", "signing_required", "passphrase",
+         "expiration_days_max", "warning_days_before_expiration", "local_git_config_only",
+         "revocation_certificate_required", "private_key_in_repository", "private_key_export",
+         "global_git_configuration"}
     ),
     "repository_governance.transverse_rule_contract": frozenset(
         {
@@ -154,6 +172,17 @@ V5_SECTION_KEYS = {
             "performance",
             "forbidden_authorities",
         }
+    ),
+    "local_management_services": frozenset(
+        {"status", "endpoint_profile", "endpoint_override_policy", "identities",
+         "endpoints", "automation_signing_fingerprint", "gpg_registration_gate"}
+    ),
+    "local_management_services.identities": frozenset(
+        {"gitea_human", "gitea_automation", "harbor_project",
+         "harbor_automation_account"}
+    ),
+    "local_management_services.endpoints": frozenset(
+        {"gitea_https_url", "harbor_url"}
     ),
     "management_plane": frozenset(
         {
@@ -1305,6 +1334,38 @@ def validate(root):
             errors.append("developer_platform must match the approved V5 PR-driven platform contract")
         if lock.get("platform", {}).get("infrastructure_api") != "crossplane":
             errors.append("platform.infrastructure_api must remain crossplane")
+        local = lock["local_management_services"]
+        if local != {
+            "status": "active",
+            "endpoint_profile": "local",
+            "endpoint_override_policy": "environment-only",
+            "identities": {
+                "gitea_human": "dst-red-Wire",
+                "gitea_automation": "ecommerce-automation",
+                "harbor_project": "ecommerce",
+                "harbor_automation_account": "ecommerce-ci",
+            },
+            "endpoints": {
+                "gitea_https_url": "https://gitea.ecommerce.local/",
+                "harbor_url": "https://harbor.ecommerce.local/",
+            },
+            "automation_signing_fingerprint":
+                "1E017B8EA8721E5B7854D3F4AADEE6601021EBE8",
+            "gpg_registration_gate": "post-windows-reboot-proof-pass",
+        }:
+            errors.append("local_management_services must match the approved local contract")
+        endpoint_projection = root / "platform/local-services/endpoints.env.example"
+        expected_endpoint_projection = (
+            "# Public local profile; override URLs for a remote environment.\n"
+            f"GITEA_HTTPS_URL={local['endpoints']['gitea_https_url']}\n"
+            f"GITEA_ACCOUNT={local['identities']['gitea_automation']}\n"
+            f"HARBOR_URL={local['endpoints']['harbor_url']}\n"
+            f"HARBOR_PROJECT={local['identities']['harbor_project']}\n"
+            f"HARBOR_AUTOMATION_ACCOUNT={local['identities']['harbor_automation_account']}\n"
+        )
+        if (not endpoint_projection.is_file()
+                or endpoint_projection.read_text() != expected_endpoint_projection):
+            errors.append("local management endpoint projection differs from architecture.lock.yaml")
         if lock.get("management_plane", {}).get("developer_portal") != "backstage":
             errors.append("management_plane.developer_portal must remain backstage")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:

@@ -3779,6 +3779,12 @@ def _git_neutral_test_env() -> dict[str, str]:
     for name in output(["git", "rev-parse", "--local-env-vars"]).splitlines():
         if name:
             env.pop(name, None)
+    # Synthetic repositories in tests must not prompt for the workstation's
+    # passphrase-protected personal signing key.
+    index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env[f"GIT_CONFIG_KEY_{index}"] = "commit.gpgsign"
+    env[f"GIT_CONFIG_VALUE_{index}"] = "false"
+    env["GIT_CONFIG_COUNT"] = str(index + 1)
     return env
 
 
@@ -6792,6 +6798,8 @@ def _remote_ref_sha(ref: str) -> str:
 def publish(base: str, message: str) -> int:
     if toolchain_closure():
         return 1
+    if run([sys.executable, "scripts/check_automation_signing.py"], check=False).returncode:
+        return fail("publish requires the repository automation signing gate")
     policy = repository_delivery_policy()
     default_branch = str(policy["default_branch"])
     base_name = base.removeprefix("origin/")
@@ -7118,39 +7126,15 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server",
         "destroy",
     ]
-    vm_created = False
-    create_identity_before: str | None = None
-
     for action in actions:
         if not source_is_frozen():
-            if vm_created:
-                run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source changed after freeze")
-        if action == "create":
-            create_identity_before = _rke2_registered_vm_identity(vm_name)
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
-            cleanup_owned = vm_created
-            if action == "create":
-                create_identity_after = _rke2_registered_vm_identity(vm_name)
-                cleanup_owned = (
-                    create_identity_before is None
-                    and create_identity_after is not None
-                )
-            if action not in {"validate", "destroy"} and cleanup_owned:
-                run([*command, "-e", "vm_action=destroy"], check=False)
             return result.returncode
-        if action == "create":
-            vm_created = True
-        elif action == "destroy":
-            vm_created = False
         if action == "server" and not source_evidence_matches():
-            if vm_created:
-                run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
         if not source_is_frozen():
-            if vm_created:
-                run([*command, "-e", "vm_action=destroy"], check=False)
             return fail("RKE2 local qualification source changed during execution")
     return 0
 
@@ -7639,6 +7623,9 @@ def main() -> int:
     qp = sub.add_parser("qualification-proof")
     qp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     rke2q = sub.add_parser("rke2-local-virtualbox-qualification")
+    vm = sub.add_parser("vm")
+    vm.add_argument("action", choices=["reconcile"])
+    vm.add_argument("--config", required=True, help="JSON VM declaration below .context")
     rke2q.add_argument(
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
@@ -7727,7 +7714,16 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
+    from native_workspace import workspace_error
+
+    workspace_failure = workspace_error(ROOT)
+    if workspace_failure:
+        return fail(workspace_failure)
     try:
+        if args.cmd == "vm":
+            from vm_lifecycle import reconcile_cli
+
+            return reconcile_cli(ROOT, Path(args.config))
         if args.cmd == "toolchain-closure":
             return toolchain_closure()
         if args.cmd == "governance":
