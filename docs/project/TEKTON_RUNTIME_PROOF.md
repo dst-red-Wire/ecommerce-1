@@ -36,7 +36,8 @@ The referenced signing Secret must expose the keys `cosign.key`, `cosign.pub`, a
 `cosign.password`. The registry Secret must expose `.dockerconfigjson`. The dedicated
 status Secret must expose exactly one provider shape already supported by
 `repository_delivery.py`: either `GITHUB_REPOSITORY` + `GITHUB_TOKEN`, or
-`GITEA_API_URL` + `GITEA_REPOSITORY` + `GITEA_TOKEN`.
+`GITEA_HTTPS_URL` + `GITEA_REPOSITORY` + `GITEA_TOKEN` (or the explicit
+`GITEA_API_URL` in place of `GITEA_HTTPS_URL`).
 
 ## Execution
 

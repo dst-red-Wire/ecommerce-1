@@ -624,8 +624,24 @@ graph LR
         shutil.copytree(ROOT / "contracts", root / "contracts")
         shutil.copytree(ROOT / "docs", root / "docs")
         shutil.copytree(ROOT / "instruction", root / "instruction")
+        projection = Path("platform/local-services/endpoints.env.example")
+        (root / projection.parent).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / projection, root / projection)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         return root
+
+    def test_local_management_endpoint_projection_drift_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            projection = root / "platform/local-services/endpoints.env.example"
+            projection.write_text(
+                projection.read_text().replace(
+                    "GITEA_ACCOUNT=ecommerce-automation", "GITEA_ACCOUNT=dst-red-Wire"
+                )
+            )
+            self.assertTrue(
+                any("endpoint projection" in error for error in authority.validate(root))
+            )
 
     def test_mutated_lock_is_rejected(self):
         mutations = {

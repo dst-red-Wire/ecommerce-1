@@ -1,0 +1,45 @@
+version: 1
+kind: VmLifecyclePolicy
+status: enforced
+architecture_authority: architecture.lock.yaml#machine_contracts.vm_lifecycle_policy
+image_contract: config/contracts/machine-image-lock.yaml
+principles: [reproducibility, determinism, idempotency, convergence, immutability, hermeticity, provenance, runtime-verification, recovery, bounded-execution, concurrency-locking]
+boot:
+  poll_interval_seconds: 5
+  global_timeout_seconds: 120
+  phases:
+    running: 20
+    tcp22: 30
+    ssh: 30
+    os_ready: 40
+recovery:
+  sequence: [probe, retry_probe, reprovision, reload, power_cycle, reclone, rebuild]
+  destructive_retry: forbidden
+  vm_reuse_on_provision_failure: required
+  rebuild_only_on_image_failure_or_source_change: required
+  reboot_only_when_required: required
+packer:
+  immutable_base_image_cache: required
+  rebuild_on_source_change_or_invalid_artifact_only: required
+vagrant:
+  version: 2.4.9
+  existing_vm_reuse: required
+  reprovision_before_recreate: required
+virtualbox:
+  lifecycle_state_detection: required
+  unnecessary_power_cycle: forbidden
+failures:
+  PACKER_INPUT_INVALID: {retryable: false, action: fail, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: false}
+  PACKER_BUILD_FAILED: {retryable: false, action: fail, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: false}
+  IMAGE_CORRUPT: {retryable: false, action: rebuild, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: true}
+  VBOX_PROVIDER_ERROR: {retryable: false, action: fail, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: false}
+  VBOX_NETWORK_ERROR: {retryable: false, action: fail, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: false}
+  VM_BOOT_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  TCP22_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  SSH_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  OS_READY_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  PROVISION_FAILED: {retryable: true, action: reprovision, destructive: false, max_retries: 1, delay_seconds: 0, rebuild: false}
+  REBOOT_REQUIRED: {retryable: true, action: reload, destructive: false, max_retries: 1, delay_seconds: 0, rebuild: false}
+  REBOOT_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  SERVICE_READY_TIMEOUT: {retryable: true, action: retry_probe, destructive: false, max_retries: 1, delay_seconds: 5, rebuild: false}
+  UNKNOWN_RUNTIME_FAILURE: {retryable: false, action: fail, destructive: false, max_retries: 0, delay_seconds: 0, rebuild: false}

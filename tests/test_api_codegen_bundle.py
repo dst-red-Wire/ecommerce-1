@@ -161,6 +161,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
             root = pathlib.Path(temp_name)
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
+            shutil.copy2(ROOT / "scripts/native_workspace.py", root / "scripts/native_workspace.py")
             shutil.copy2(
                 ROOT / "scripts/qualification_cache.py",
                 root / "scripts/qualification_cache.py",
