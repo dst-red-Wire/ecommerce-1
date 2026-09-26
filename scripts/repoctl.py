@@ -626,7 +626,11 @@ def toolchain_closure_violations(
         installer_tags = frozenset()
         violations.append(f"developer toolchain installer tags cannot be audited: {exc}")
 
-    approved_non_graph_provisioners = {"packer-bundle"}
+    approved_non_graph_provisioners = {
+        "native-linux-host",
+        "packer-bundle",
+        "windows-host",
+    }
     for name, entry in active.items():
         capability_name = entry.get("capability")
         capability = capabilities.get(capability_name)
@@ -6454,6 +6458,18 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         ),
         (pull_request_policy.get("required") is True, "pull request must be required"),
         (pull_request_policy.get("head_sha_binding") == "exact", "pull request head binding must be exact"),
+        (
+            pull_request_policy.get("metadata_authority")
+            == {
+                "provider": "github",
+                "transport": "gh-api-rest",
+                "endpoint": "repos/{owner}/{repo}/pulls/{number}",
+                "base_sha_selector": ".base.sha",
+                "head_sha_selector": ".head.sha",
+                "subcommand_json_sha_fields": "non-authoritative",
+            },
+            "pull request SHA metadata must come from the canonical GitHub REST endpoint",
+        ),
         (pull_request_policy.get("draft_merge") == "forbidden", "draft PR merge must be forbidden"),
         (
             pull_request_policy.get("record_after_merge") == "retained-by-forge",
@@ -6795,6 +6811,40 @@ def _remote_ref_sha(ref: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def github_pull_request_metadata(gh: str, number: int) -> dict:
+    if type(number) is not int or number < 1:
+        raise RuntimeError("GitHub pull request number must be a positive integer")
+    payload = json.loads(output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{number}"]))
+    if not isinstance(payload, dict) or payload.get("number") != number:
+        raise RuntimeError(f"GitHub REST metadata did not identify pull request #{number}")
+    base = payload.get("base")
+    head = payload.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} lacks base/head objects")
+    base_sha = base.get("sha")
+    head_sha = head.get("sha")
+    if not isinstance(base_sha, str) or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .base.sha")
+    if not isinstance(head_sha, str) or re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .head.sha")
+    if not isinstance(base.get("ref"), str) or not base["ref"]:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .base.ref")
+    if not isinstance(head.get("ref"), str) or not head["ref"]:
+        raise RuntimeError(f"GitHub REST metadata for pull request #{number} has an invalid .head.ref")
+    return {
+        "number": number,
+        "url": payload.get("html_url"),
+        "state": payload.get("state"),
+        "is_draft": payload.get("draft"),
+        "merged": payload.get("merged"),
+        "merged_at": payload.get("merged_at"),
+        "base_ref": base["ref"],
+        "base_sha": base_sha,
+        "head_ref": head["ref"],
+        "head_sha": head_sha,
+    }
+
+
 def publish(base: str, message: str) -> int:
     if toolchain_closure():
         return 1
@@ -6941,9 +6991,15 @@ def deliver(base: str, title: str, message: str) -> int:
                 f"body={body.read_text(encoding='utf-8')}",
             ]
         )
-        actual = output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{num}", "--jq", ".head.sha"]).strip()
-        if actual != head:
-            return fail(f"PR head mismatch: expected {head}, got {actual}")
+        metadata = github_pull_request_metadata(gh, int(num))
+        expected_base_sha = git("rev-parse", f"origin/{base_name}").strip()
+        if metadata["base_ref"] != base_name or metadata["base_sha"] != expected_base_sha:
+            return fail(
+                f"PR base mismatch: expected {base_name}@{expected_base_sha}, "
+                f"got {metadata['base_ref']}@{metadata['base_sha']}"
+            )
+        if metadata["head_sha"] != head:
+            return fail(f"PR head mismatch: expected {head}, got {metadata['head_sha']}")
         _record_delivery_wall(evidence, ev, deliver_started)
         print(f"PASS deliver: refreshed PR {url} at {head}")
         return 0
@@ -6963,8 +7019,21 @@ def deliver(base: str, title: str, message: str) -> int:
         ],
         capture=True,
     )
+    created_url = p.stdout.strip()
+    number_match = re.search(r"/pull/([1-9][0-9]*)/?$", created_url)
+    if number_match is None:
+        return fail(f"deliver cannot identify created pull request from URL: {created_url!r}")
+    metadata = github_pull_request_metadata(gh, int(number_match.group(1)))
+    expected_base_sha = git("rev-parse", f"origin/{base_name}").strip()
+    if metadata["base_ref"] != base_name or metadata["base_sha"] != expected_base_sha:
+        return fail(
+            f"created PR base mismatch: expected {base_name}@{expected_base_sha}, "
+            f"got {metadata['base_ref']}@{metadata['base_sha']}"
+        )
+    if metadata["head_sha"] != head:
+        return fail(f"created PR head mismatch: expected {head}, got {metadata['head_sha']}")
     _record_delivery_wall(evidence, ev, deliver_started)
-    print(f"PASS deliver: created PR {p.stdout.strip()} at {head}")
+    print(f"PASS deliver: created PR {created_url} at {head}")
     return 0
 
 
@@ -7013,6 +7082,606 @@ def _canonical_rke2_vagrant_ready() -> bool:
         return False
     expected = f"Vagrant {_canonical_rke2_vagrant_version()}"
     return (result.stdout or "").strip() == expected
+
+
+def _windows_powershell_environment() -> dict[str, str]:
+    """Keep Windows PowerShell 5.1 from loading incompatible PowerShell 7 modules."""
+    environment = dict(os.environ)
+    environment["PSModulePath"] = (
+        r"C:\Windows\system32\WindowsPowerShell\v1.0\Modules;"
+        r"C:\Program Files\WindowsPowerShell\Modules"
+    )
+    inherited_wslenv = [
+        entry
+        for entry in environment.get("WSLENV", "").split(":")
+        if entry and entry.split("/", 1)[0].lower() != "psmodulepath"
+    ]
+    environment["WSLENV"] = ":".join(["PSModulePath", *inherited_wslenv])
+    return environment
+
+
+def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
+    scripts = {
+        "preflight": "packer-preflight.ps1",
+        "build": "build-rocky-image.ps1",
+        "qualify": "qualify-rocky-image.ps1",
+        "release": "release-rocky-image.ps1",
+    }
+    script_name = scripts.get(action)
+    if script_name is None:
+        return fail(f"unsupported Windows image pipeline action: {action}")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("Windows image pipeline requires WSL2 and WSL_DISTRO_NAME")
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    windows_working_directory = Path("/mnt/c/Windows")
+    if not powershell.is_file() or not windows_working_directory.is_dir():
+        return fail("native Windows PowerShell is unavailable through WSL interop")
+    try:
+        windows_root = output(["wslpath", "-w", str(ROOT)]).strip()
+        windows_script = output(
+            ["wslpath", "-w", str(ROOT / "scripts/windows" / script_name)]
+        ).strip()
+    except RuntimeError as exc:
+        return fail(f"cannot convert WSL paths for Windows image pipeline: {exc}")
+    if not windows_root.startswith("\\\\") or not windows_script.startswith("\\\\"):
+        return fail("repository must resolve through the governed WSL UNC bridge")
+    command = [
+        str(powershell),
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        windows_script,
+        "-RepoRoot",
+        windows_root,
+        "-WslDistribution",
+        distribution,
+        "-WslRepoRoot",
+        str(ROOT),
+    ]
+    if action == "build" and offline:
+        command.append("-Offline")
+    return run(
+        command,
+        cwd=windows_working_directory,
+        env=_windows_powershell_environment(),
+        check=False,
+    ).returncode
+
+
+def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
+    if action not in {"prepare", "reboot", "import", "recover", "selftest"}:
+        return fail(f"unsupported Windows native VT-x cycle action: {action}")
+    cycle = (
+        ruby_yaml("config/contracts/machine-image-lock.yaml")
+        .get("packer_image", {})
+        .get("local_pipeline", {})
+        .get("windows_native_vtx_cycle", {})
+    )
+    lab_root = cycle.get("lab_root")
+    if not isinstance(lab_root, str) or re.fullmatch(r"[A-Z]:/[A-Za-z0-9._/-]+", lab_root) is None:
+        return fail("Windows native VT-x lab_root contract is invalid")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("Windows native VT-x cycle requires WSL2 and WSL_DISTRO_NAME")
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    windows_working_directory = Path("/mnt/c/Windows")
+    if not powershell.is_file() or not windows_working_directory.is_dir():
+        return fail("native Windows PowerShell is unavailable through WSL interop")
+    try:
+        windows_root = output(["wslpath", "-w", str(ROOT)]).strip()
+        windows_script = output(
+            ["wslpath", "-w", str(ROOT / "scripts/windows/native-vtx-cycle.ps1")]
+        ).strip()
+    except RuntimeError as exc:
+        return fail(f"cannot convert WSL paths for native VT-x cycle: {exc}")
+    if not windows_root.startswith("\\\\") or not windows_script.startswith("\\\\"):
+        return fail("native VT-x preparation must start through the governed WSL UNC bridge")
+    powershell_action = {
+        "prepare": "Prepare",
+        "reboot": "Reboot",
+        "import": "Import",
+        "recover": "Recover",
+        "selftest": "SelfTest",
+    }[action]
+    command = [
+        str(powershell),
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        windows_script,
+        "-Action",
+        powershell_action,
+        "-RepoRoot",
+        windows_root,
+        "-WslDistribution",
+        distribution,
+        "-WslRepoRoot",
+        str(ROOT),
+        "-LabRoot",
+        lab_root.replace("/", "\\"),
+    ]
+    if action == "prepare" and offline:
+        command.append("-Offline")
+    return run(
+        command,
+        cwd=windows_working_directory,
+        env=_windows_powershell_environment(),
+        check=False,
+    ).returncode
+
+
+def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
+    if action not in {"static-validate", "preflight", "build", "qualify", "release"}:
+        return fail(f"unsupported Linux image pipeline action: {action}")
+    command = [sys.executable, str(ROOT / "scripts/linux_image_pipeline.py"), action]
+    if action == "build" and offline:
+        command.append("--offline")
+    return run(command, cwd=ROOT, check=False).returncode
+
+
+def image_phase_with_runtime(command: str, *, offline: bool = False) -> int:
+    """Serialize image phase entrypoints with the governed host/user lock."""
+    if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
+        raise RuntimeError("image phase wrapper cannot be entered recursively")
+    child_args = [command, *(["--offline"] if offline else [])]
+    records: list[dict] = []
+
+    def execute(runtime_env: dict[str, str]) -> int:
+        result = run(_controller_command(*child_args), check=False, env=runtime_env)
+        records.append(
+            {"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL", "exit_code": result.returncode}
+        )
+        return result.returncode
+
+    return _execute_with_runtime(
+        [], execute, workflow=f"image:{command}", head="WORKTREE",
+        environment=os.environ.copy(),
+        workflow_capabilities=["local-virtualization-serialization"],
+        records=records,
+    )
+
+
+def local_services_qualification(action: str, *, offline: bool = False) -> int:
+    if action not in {"assets", "capabilities", "qualify", "recover"}:
+        return fail(f"unsupported local services qualification action: {action}")
+    command = [sys.executable, str(ROOT / "scripts/local_services_qualification.py"), action]
+    if action in {"assets", "qualify"} and offline:
+        command.append("--offline")
+    return run(command, cwd=ROOT, check=False).returncode
+
+
+_ORAS_REPOSITORY = re.compile(
+    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[0-9]+)?"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
+)
+_ORAS_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _validate_oras_repository(value: str) -> str:
+    repository = value.strip()
+    if not repository or _ORAS_REPOSITORY.fullmatch(repository) is None:
+        raise RuntimeError(
+            "ORAS repository must be a lowercase registry/repository without scheme, tag or digest"
+        )
+    return repository
+
+
+def _validate_oras_digest_reference(value: str) -> tuple[str, str]:
+    reference = value.strip()
+    if reference.count("@") != 1:
+        raise RuntimeError("ORAS pull requires repository@sha256:<64 lowercase hex characters>")
+    repository, digest = reference.rsplit("@", 1)
+    _validate_oras_repository(repository)
+    if _ORAS_DIGEST.fullmatch(digest) is None:
+        raise RuntimeError("ORAS pull requires repository@sha256:<64 lowercase hex characters>")
+    return repository, digest
+
+
+def _machine_image_transport_contract() -> tuple[dict, dict]:
+    contract = ruby_yaml("config/contracts/machine-image-lock.yaml")
+    image = contract.get("packer_image")
+    if not isinstance(image, dict):
+        raise TypeError("machine-image contract has no packer_image mapping")
+    distribution = image.get("distribution")
+    if not isinstance(distribution, dict) or distribution.get("authority") != "oras":
+        raise RuntimeError("machine-image distribution authority must be ORAS")
+    cache = distribution.get("cache")
+    if not isinstance(cache, dict) or cache.get("environment") != "ORAS_CACHE":
+        raise RuntimeError("machine-image distribution must declare ORAS_CACHE")
+    if cache.get("synchronization") != "rsync" or cache.get("integrity") != "sha256-before-and-after-sync":
+        raise RuntimeError("machine-image cache must use rsync with SHA-256 verification")
+    return image, distribution
+
+
+def _machine_image_transport_profile(profile: str) -> tuple[dict, dict, dict]:
+    image, distribution = _machine_image_transport_contract()
+    pipeline_profiles = image.get("local_pipeline", {}).get("profiles", {})
+    distribution_profiles = distribution.get("profiles", {})
+    pipeline_profile = pipeline_profiles.get(profile)
+    distribution_profile = distribution_profiles.get(profile)
+    if not isinstance(pipeline_profile, dict) or not isinstance(distribution_profile, dict):
+        raise TypeError(f"unsupported machine-image distribution profile: {profile}")
+    if pipeline_profile.get("artifact") != distribution_profile.get("artifact"):
+        raise RuntimeError(f"machine-image artifact drift for profile: {profile}")
+    return image, distribution, pipeline_profile | distribution_profile
+
+
+def _machine_image_transport_paths(
+    profile: str, action: str
+) -> tuple[Path, Path, Path, dict, dict]:
+    _, distribution, profile_contract = _machine_image_transport_profile(profile)
+    artifact_root = ROOT / profile_contract["artifact_root"]
+    artifact = artifact_root / profile_contract["artifact"]
+    checksums = artifact_root / "SHA256SUMS"
+    evidence_relative = distribution.get("evidence_by_profile", {}).get(profile, {}).get(action)
+    if not isinstance(evidence_relative, str) or not evidence_relative:
+        raise RuntimeError(f"missing ORAS {action} evidence path for profile: {profile}")
+    return artifact, checksums, ROOT / evidence_relative, distribution, profile_contract
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"regular artifact file required: {path}")
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _verified_artifact_sha256(artifact: Path, checksums: Path) -> str:
+    if not checksums.is_file() or checksums.is_symlink():
+        raise RuntimeError(f"regular SHA256SUMS file required: {checksums}")
+    if checksums.stat().st_size > 4096:
+        raise RuntimeError("SHA256SUMS exceeds the 4096-byte safety limit")
+    match = re.fullmatch(
+        rf"([0-9a-f]{{64}})  {re.escape(artifact.name)}\n?",
+        checksums.read_text(encoding="utf-8"),
+    )
+    if match is None:
+        raise RuntimeError(f"SHA256SUMS must contain exactly one entry for {artifact.name}")
+    actual = _file_sha256(artifact)
+    if actual != match.group(1):
+        raise RuntimeError(f"artifact SHA-256 mismatch: {artifact.name}")
+    return actual
+
+
+def _oras_cache_root(distribution: dict) -> Path:
+    cache_contract = distribution["cache"]
+    environment = cache_contract["environment"]
+    configured = os.environ.get(environment, "").strip()
+    raw = configured or cache_contract.get("default", "")
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError("ORAS cache path is empty")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    cache = candidate.resolve(strict=False)
+    forbidden = {Path("/").resolve(), Path.home().resolve(), ROOT.resolve()}
+    if cache in forbidden:
+        raise RuntimeError("ORAS_CACHE must be a dedicated cache directory")
+    if candidate.is_symlink():
+        raise RuntimeError("ORAS_CACHE must not be a symbolic link")
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return cache
+
+
+def _oras_runtime_arguments(distribution: dict) -> list[str]:
+    policy = distribution.get("runtime_tls", {})
+    if policy.get("insecure_skip_verify") != "forbidden":
+        raise RuntimeError("ORAS runtime TLS must forbid insecure verification")
+    arguments: list[str] = []
+    for contract_key, option, secret in (
+        ("ca_file_environment", "--ca-file", False),
+        ("registry_config_environment", "--registry-config", True),
+    ):
+        environment = policy.get(contract_key)
+        if not isinstance(environment, str) or not environment:
+            raise RuntimeError(f"ORAS runtime TLS is missing {contract_key}")
+        configured = os.environ.get(environment, "").strip()
+        if not configured:
+            continue
+        candidate = Path(configured).expanduser()
+        if candidate.is_symlink() or not candidate.is_file():
+            raise RuntimeError(f"{environment} must reference a regular non-symlink file")
+        path = candidate.resolve()
+        if secret and path.stat().st_mode & 0o077:
+            raise RuntimeError(f"{environment} must not be group/world accessible")
+        arguments.extend((option, str(path)))
+    return arguments
+
+
+def _run_bounded_transport(
+    command: list[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str] | None,
+    timeout_seconds: int,
+    operation: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{operation} timed out after {timeout_seconds}s") from exc
+    if result.returncode:
+        detail = " ".join((result.stderr or result.stdout or "").split())[:1024]
+        raise RuntimeError(f"{operation} failed: {detail or f'exit {result.returncode}'}")
+    return result
+
+
+def _rsync_artifact_pair(
+    artifact: Path,
+    checksums: Path,
+    destination: Path,
+    *,
+    timeout_seconds: int,
+) -> tuple[Path, Path, str]:
+    rsync = require("rsync")
+    digest = _verified_artifact_sha256(artifact, checksums)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _run_bounded_transport(
+        [
+            rsync,
+            "--archive",
+            "--checksum",
+            "--partial",
+            "--delay-updates",
+            "--",
+            str(artifact),
+            str(checksums),
+            f"{destination}{os.sep}",
+        ],
+        cwd=ROOT,
+        environment=None,
+        timeout_seconds=timeout_seconds,
+        operation="rsync machine-image artifact cache synchronization",
+    )
+    synced_artifact = destination / artifact.name
+    synced_checksums = destination / checksums.name
+    if _verified_artifact_sha256(synced_artifact, synced_checksums) != digest:
+        raise RuntimeError("artifact SHA-256 changed during rsync synchronization")
+    return synced_artifact, synced_checksums, digest
+
+
+def _write_machine_image_transport_evidence(path: Path, evidence: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _released_machine_image_expected_sha256(profile: str, artifact: Path, image: dict) -> tuple[str, str]:
+    status = git("status", "--porcelain", "--untracked-files=all").strip()
+    if status:
+        raise RuntimeError("ORAS transport requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise RuntimeError("ORAS push could not resolve the exact source SHA")
+    upstream = git("rev-parse", "@{upstream}").strip()
+    if upstream != head:
+        raise RuntimeError("ORAS push requires the exact source SHA to be published upstream")
+    release_relative = image.get("outputs", {}).get("evidence_by_profile", {}).get(profile, {}).get("release")
+    if not isinstance(release_relative, str) or not release_relative:
+        raise RuntimeError(f"release evidence path is missing for profile: {profile}")
+    try:
+        release = json.loads((ROOT / release_relative).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read release evidence for {profile}: {exc}") from exc
+    if (
+        release.get("status") != "PASS"
+        or release.get("source_sha") != head
+        or release.get("artifact") != artifact.name
+        or not isinstance(release.get("artifact_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", release["artifact_sha256"]) is None
+        or release.get("remote_publication") != "NOT_PERFORMED"
+    ):
+        raise RuntimeError("ORAS transport requires PASS release evidence for the exact SHA-256 artifact")
+    return head, release["artifact_sha256"]
+
+
+def _released_machine_image(profile: str, artifact: Path, digest: str, image: dict) -> str:
+    head, expected_digest = _released_machine_image_expected_sha256(profile, artifact, image)
+    if digest != expected_digest:
+        raise RuntimeError("ORAS push artifact differs from the exact-SHA release")
+    return head
+
+
+def _oras_json(result: subprocess.CompletedProcess[str], operation: str) -> dict:
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{operation} did not return JSON") from exc
+    if not isinstance(document, dict):
+        raise TypeError(f"{operation} returned an invalid JSON document")
+    return document
+
+
+def image_oras_push(profile: str, repository: str) -> int:
+    artifact, checksums, evidence_path, distribution, profile_contract = _machine_image_transport_paths(
+        profile, "push"
+    )
+    evidence = {
+        "schema": 1,
+        "action": "push",
+        "profile": profile,
+        "artifact": artifact.name,
+        "artifact_sha256": None,
+        "source_sha": None,
+        "oras_manifest_digest": None,
+        "immutable_reference": None,
+        "cache_environment": "ORAS_CACHE",
+        "status": "FAIL",
+        "completed_at": None,
+        "error": None,
+    }
+    try:
+        repository = _validate_oras_repository(repository)
+        oras = require("oras")
+        digest = _verified_artifact_sha256(artifact, checksums)
+        head = _released_machine_image(profile, artifact, digest, _machine_image_transport_contract()[0])
+        cache = _oras_cache_root(distribution)
+        timeout = distribution["timeouts_seconds"]
+        cached_root = cache / "materialized" / "sha256" / digest
+        cached_artifact, _, synced_digest = _rsync_artifact_pair(
+            artifact,
+            checksums,
+            cached_root,
+            timeout_seconds=timeout["rsync"],
+        )
+        target = f"{repository}:git-{head}"
+        environment = dict(os.environ)
+        environment["ORAS_CACHE"] = str(cache)
+        result = _run_bounded_transport(
+            [
+                oras,
+                "push",
+                *_oras_runtime_arguments(distribution),
+                target,
+                "--artifact-type",
+                distribution["artifact_type"],
+                "--annotation",
+                f"org.opencontainers.image.revision={head}",
+                "--format",
+                "json",
+                "--no-tty",
+                f"{cached_artifact.name}:{profile_contract['layer_media_type']}",
+                "SHA256SUMS:text/plain",
+            ],
+            cwd=cached_root,
+            environment=environment,
+            timeout_seconds=timeout["oras"],
+            operation="ORAS machine-image push",
+        )
+        response = _oras_json(result, "ORAS machine-image push")
+        manifest_digest = response.get("digest")
+        immutable_reference = response.get("reference")
+        if not isinstance(manifest_digest, str) or _ORAS_DIGEST.fullmatch(manifest_digest) is None:
+            raise RuntimeError("ORAS push returned an invalid manifest digest")
+        if immutable_reference != f"{repository}@{manifest_digest}":
+            raise RuntimeError("ORAS push did not return the expected immutable reference")
+        evidence.update(
+            {
+                "artifact_sha256": synced_digest,
+                "source_sha": head,
+                "oras_manifest_digest": manifest_digest,
+                "immutable_reference": immutable_reference,
+                "status": "PASS",
+            }
+        )
+    except (KeyError, OSError, RuntimeError, TypeError) as exc:
+        evidence["error"] = str(exc)[:1024]
+    evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _write_machine_image_transport_evidence(evidence_path, evidence)
+    if evidence["status"] != "PASS":
+        return fail(f"image-rocky-oras-push: {evidence['error']}", 1)
+    print(
+        f"PASS image-rocky-oras-push profile={profile} "
+        f"reference={evidence['immutable_reference']} artifact_sha256={evidence['artifact_sha256']}"
+    )
+    return 0
+
+
+def image_oras_pull(profile: str, reference: str) -> int:
+    artifact, checksums, evidence_path, distribution, _ = _machine_image_transport_paths(profile, "pull")
+    evidence = {
+        "schema": 1,
+        "action": "pull",
+        "profile": profile,
+        "artifact": artifact.name,
+        "artifact_sha256": None,
+        "requested_reference": None,
+        "oras_manifest_digest": None,
+        "cache_environment": "ORAS_CACHE",
+        "status": "FAIL",
+        "completed_at": None,
+        "error": None,
+    }
+    try:
+        _, requested_digest = _validate_oras_digest_reference(reference)
+        evidence["requested_reference"] = reference
+        image, _ = _machine_image_transport_contract()
+        _, expected_artifact_digest = _released_machine_image_expected_sha256(profile, artifact, image)
+        oras = require("oras")
+        require("rsync")
+        cache = _oras_cache_root(distribution)
+        timeout = distribution["timeouts_seconds"]
+        temporary_root = ROOT / ".context" / "oras-pull"
+        temporary_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        environment = dict(os.environ)
+        environment["ORAS_CACHE"] = str(cache)
+        with tempfile.TemporaryDirectory(prefix=f"{profile}-", dir=temporary_root) as directory:
+            pulled = Path(directory)
+            result = _run_bounded_transport(
+                [
+                    oras,
+                    "pull",
+                    *_oras_runtime_arguments(distribution),
+                    reference,
+                    "--output",
+                    str(pulled),
+                    "--format",
+                    "json",
+                    "--no-tty",
+                ],
+                cwd=ROOT,
+                environment=environment,
+                timeout_seconds=timeout["oras"],
+                operation="ORAS digest-addressed machine-image pull",
+            )
+            response = _oras_json(result, "ORAS digest-addressed machine-image pull")
+            if response.get("reference") != reference:
+                raise RuntimeError("ORAS pull resolved a reference different from the requested digest")
+            entries = {path.name: path for path in pulled.iterdir()}
+            if set(entries) != {artifact.name, "SHA256SUMS"}:
+                raise RuntimeError("ORAS pull must contain exactly the artifact and SHA256SUMS")
+            pulled_artifact = entries[artifact.name]
+            pulled_checksums = entries["SHA256SUMS"]
+            digest = _verified_artifact_sha256(pulled_artifact, pulled_checksums)
+            if digest != expected_artifact_digest:
+                raise RuntimeError("ORAS pull artifact differs from the exact-SHA release")
+            cached_root = cache / "materialized" / "sha256" / digest
+            cached_artifact, cached_checksums, synced_digest = _rsync_artifact_pair(
+                pulled_artifact,
+                pulled_checksums,
+                cached_root,
+                timeout_seconds=timeout["rsync"],
+            )
+            _rsync_artifact_pair(
+                cached_artifact,
+                cached_checksums,
+                artifact.parent,
+                timeout_seconds=timeout["rsync"],
+            )
+        if _verified_artifact_sha256(artifact, checksums) != synced_digest:
+            raise RuntimeError("artifact SHA-256 changed after final rsync synchronization")
+        evidence.update(
+            {
+                "artifact_sha256": synced_digest,
+                "oras_manifest_digest": requested_digest,
+                "status": "PASS",
+            }
+        )
+    except (KeyError, OSError, RuntimeError, TypeError) as exc:
+        evidence["error"] = str(exc)[:1024]
+    evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _write_machine_image_transport_evidence(evidence_path, evidence)
+    if evidence["status"] != "PASS":
+        return fail(f"image-rocky-oras-pull: {evidence['error']}", 1)
+    print(
+        f"PASS image-rocky-oras-pull profile={profile} reference={reference} "
+        f"artifact_sha256={evidence['artifact_sha256']}"
+    )
+    return 0
 
 
 def _rke2_registered_vm_identity(vm_name: str) -> str | None:
@@ -7352,7 +8021,7 @@ def finish_pr(base: str) -> int:
             "--limit",
             "2",
             "--json",
-            "number,url,headRefOid,baseRefName,isDraft",
+            "number,url",
         ]
     )
     prs = json.loads(raw_prs or "[]")
@@ -7360,12 +8029,17 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr requires exactly one open PR for {branch} -> {base_name}; found {len(prs)}")
     pr = prs[0]
     number = int(pr["number"])
-    if pr.get("isDraft"):
+    metadata = github_pull_request_metadata(gh, number)
+    base_sha = git("rev-parse", base_ref).strip()
+    if metadata["is_draft"]:
         return fail(f"finish-pr refuses draft PR #{number}")
-    if pr.get("baseRefName") != base_name:
-        return fail(f"finish-pr PR #{number} base mismatch: {pr.get('baseRefName')!r}")
-    if pr.get("headRefOid") != head:
-        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {pr.get('headRefOid')!r}")
+    if metadata["base_ref"] != base_name or metadata["base_sha"] != base_sha:
+        return fail(
+            f"finish-pr PR #{number} base mismatch: expected {base_name}@{base_sha}, "
+            f"got {metadata['base_ref']}@{metadata['base_sha']}"
+        )
+    if metadata["head_sha"] != head:
+        return fail(f"finish-pr PR #{number} head mismatch: expected {head}, got {metadata['head_sha']!r}")
 
     review_ready, review_reason = chatgpt_review_readiness(gh, number, head)
     if not review_ready:
@@ -7429,12 +8103,10 @@ def finish_pr(base: str) -> int:
             print(detail, file=sys.stderr)
         return fail(f"finish-pr merge refused for PR #{number}")
 
-    merged_state = json.loads(
-        output([gh, "pr", "view", str(number), "--json", "state,mergedAt,headRefOid,baseRefName"])
-    )
-    if merged_state.get("state") != "MERGED" or not merged_state.get("mergedAt"):
+    merged_state = github_pull_request_metadata(gh, number)
+    if merged_state["merged"] is not True or not merged_state["merged_at"]:
         return fail(f"finish-pr PR #{number} did not reach MERGED state")
-    if merged_state.get("headRefOid") != head:
+    if merged_state["head_sha"] != head:
         return fail(f"finish-pr merged PR #{number} no longer binds expected head {head}")
 
     run(["git", "fetch", "origin", "--prune"])
@@ -7636,6 +8308,48 @@ def main() -> int:
         "--inputs",
         default=os.environ.get("RKE2_LOCAL_QUALIFICATION_INPUTS", ".context/mgmt-vm-inputs.json"),
     )
+    sub.add_parser("image-rocky-preflight")
+    image_build = sub.add_parser("image-rocky-build")
+    image_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-qualify")
+    sub.add_parser("image-rocky-release")
+    sub.add_parser("image-rocky-windows-preflight")
+    image_windows_build = sub.add_parser("image-rocky-windows-build")
+    image_windows_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-windows-qualify")
+    sub.add_parser("image-rocky-windows-release")
+    image_native_prepare = sub.add_parser("image-rocky-windows-native-prepare")
+    image_native_prepare.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-windows-native-reboot")
+    sub.add_parser("image-rocky-windows-native-import")
+    sub.add_parser("image-rocky-windows-native-recover")
+    sub.add_parser("image-rocky-windows-native-self-test")
+    sub.add_parser("image-rocky-linux-preflight")
+    sub.add_parser("image-rocky-linux-static-validate")
+    image_linux_build = sub.add_parser("image-rocky-linux-build")
+    image_linux_build.add_argument("--offline", action="store_true")
+    sub.add_parser("image-rocky-linux-qualify")
+    sub.add_parser("image-rocky-linux-release")
+    image_oras_push_parser = sub.add_parser("image-rocky-oras-push")
+    image_oras_push_parser.add_argument(
+        "--profile", choices=("windows", "linux"), default=os.environ.get("PROFILE", "windows")
+    )
+    image_oras_push_parser.add_argument(
+        "--repository", default=os.environ.get("ORAS_REPOSITORY", "")
+    )
+    image_oras_pull_parser = sub.add_parser("image-rocky-oras-pull")
+    image_oras_pull_parser.add_argument(
+        "--profile", choices=("windows", "linux"), default=os.environ.get("PROFILE", "windows")
+    )
+    image_oras_pull_parser.add_argument(
+        "--reference", default=os.environ.get("ORAS_REF", "")
+    )
+    local_services_assets = sub.add_parser("local-services-assets")
+    local_services_assets.add_argument("--offline", action="store_true")
+    local_services_qualify = sub.add_parser("local-services-qualify")
+    sub.add_parser("local-services-capabilities")
+    local_services_qualify.add_argument("--offline", action="store_true")
+    sub.add_parser("local-services-recover")
     pcamp = sub.add_parser("perf-campaign")
     pcamp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     pcamp.add_argument("--output", default=os.environ.get("PERF_CAMPAIGN_OUTPUT", ""))
@@ -7825,6 +8539,64 @@ def main() -> int:
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
+        if args.cmd in {
+            "image-rocky-preflight", "image-rocky-build", "image-rocky-qualify", "image-rocky-release",
+            "image-rocky-windows-preflight", "image-rocky-windows-build",
+            "image-rocky-windows-qualify", "image-rocky-windows-release",
+            "image-rocky-windows-native-prepare", "image-rocky-windows-native-reboot",
+            "image-rocky-windows-native-import", "image-rocky-windows-native-recover",
+            "image-rocky-linux-preflight", "image-rocky-linux-build",
+            "image-rocky-linux-qualify", "image-rocky-linux-release",
+        } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+            return image_phase_with_runtime(args.cmd, offline=getattr(args, "offline", False))
+        if args.cmd == "image-rocky-preflight":
+            return windows_image_pipeline("preflight")
+        if args.cmd == "image-rocky-build":
+            return windows_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-qualify":
+            return windows_image_pipeline("qualify")
+        if args.cmd == "image-rocky-release":
+            return windows_image_pipeline("release")
+        if args.cmd == "image-rocky-windows-preflight":
+            return windows_image_pipeline("preflight")
+        if args.cmd == "image-rocky-windows-build":
+            return windows_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-windows-qualify":
+            return windows_image_pipeline("qualify")
+        if args.cmd == "image-rocky-windows-release":
+            return windows_image_pipeline("release")
+        if args.cmd == "image-rocky-windows-native-prepare":
+            return windows_native_vtx_cycle("prepare", offline=args.offline)
+        if args.cmd == "image-rocky-windows-native-reboot":
+            return windows_native_vtx_cycle("reboot")
+        if args.cmd == "image-rocky-windows-native-import":
+            return windows_native_vtx_cycle("import")
+        if args.cmd == "image-rocky-windows-native-recover":
+            return windows_native_vtx_cycle("recover")
+        if args.cmd == "image-rocky-windows-native-self-test":
+            return windows_native_vtx_cycle("selftest")
+        if args.cmd == "image-rocky-linux-preflight":
+            return linux_image_pipeline("preflight")
+        if args.cmd == "image-rocky-linux-static-validate":
+            return linux_image_pipeline("static-validate")
+        if args.cmd == "image-rocky-linux-build":
+            return linux_image_pipeline("build", offline=args.offline)
+        if args.cmd == "image-rocky-linux-qualify":
+            return linux_image_pipeline("qualify")
+        if args.cmd == "image-rocky-linux-release":
+            return linux_image_pipeline("release")
+        if args.cmd == "image-rocky-oras-push":
+            return image_oras_push(args.profile, args.repository)
+        if args.cmd == "image-rocky-oras-pull":
+            return image_oras_pull(args.profile, args.reference)
+        if args.cmd == "local-services-assets":
+            return local_services_qualification("assets", offline=args.offline)
+        if args.cmd == "local-services-capabilities":
+            return local_services_qualification("capabilities")
+        if args.cmd == "local-services-qualify":
+            return local_services_qualification("qualify", offline=args.offline)
+        if args.cmd == "local-services-recover":
+            return local_services_qualification("recover")
         if args.cmd == "rke2-local-virtualbox-qualification":
             if os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
                 input_path = Path(args.inputs)

@@ -9,11 +9,20 @@
     - "{{ local_share }}"
     - "{{ local_share }}/tools"
     - "{{ local_cache }}"
-  tags: [toolchain, agent_tools, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
+  tags: [toolchain, agent_tools, artifact_transport, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
 - name: Reconcile forbidden legacy IaC artifacts
   ansible.builtin.import_tasks: opentofu_cleanup.yml
   tags: [toolchain, opentofu]
+
+- name: Remove superseded WSL Packer installation
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ local_bin }}/packer"
+    - "{{ local_share }}/tools/packer-{{ toolchain_lock.versions.PACKER_VERSION }}"
+  tags: [toolchain, workstation, image_pipeline]
 
 - name: Install native build prerequisites for CGO and archive handling
   ansible.builtin.apt:
@@ -33,6 +42,15 @@
     cache_valid_time: 86400
   become: true
   tags: [toolchain, go, cgo, node]
+
+- name: Install pinned artifact transport prerequisite
+  ansible.builtin.apt:
+    name: "rsync={{ rsync_package_version }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [toolchain, artifact_transport]
 
 - name: Detect ansible-lint pipx prerequisite
   ansible.builtin.command:
@@ -240,14 +258,14 @@
     dest: "{{ local_cache }}/oras-{{ oras_version }}.tar.gz"
     checksum: "sha256:{{ oras_sha256 }}"
     mode: '0644'
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, artifact_transport]
 
 - name: Create ORAS version directory
   ansible.builtin.file:
     path: "{{ local_share }}/tools/oras-{{ oras_version }}"
     state: directory
     mode: '0755'
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, artifact_transport]
 
 - name: Extract pinned ORAS
   ansible.builtin.unarchive:
@@ -255,7 +273,7 @@
     dest: "{{ local_share }}/tools/oras-{{ oras_version }}"
     remote_src: true
     creates: "{{ local_share }}/tools/oras-{{ oras_version }}/oras"
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, artifact_transport]
 
 - name: Link ORAS into the user path
   ansible.builtin.file:
@@ -263,7 +281,7 @@
     dest: "{{ local_bin }}/oras"
     state: link
     force: true
-  tags: [toolchain, agent_tools]
+  tags: [toolchain, agent_tools, artifact_transport]
 
 - name: Download pinned GitHub CLI archive
   ansible.builtin.get_url:

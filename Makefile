@@ -121,6 +121,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
 local-services-up: ## Start pinned local Gitea/Harbor on native WSL storage
@@ -136,10 +137,77 @@ local-gpg-register: ## Register public automation key on Gitea only after reboot
 local-services-proof: ## Verify TLS, DNS, identities, GPG and Harbor robot login
 	@$(PYTHON) platform/local-services/manage.py proof
 
-.PHONY: mgmt-runtime-inventory
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
+
+image-rocky-preflight: image-rocky-windows-preflight ## Default profile: verify the native Windows image toolchain
+
+image-rocky-build: image-rocky-windows-build ## Default profile: build the Windows/VirtualBox artifact
+
+image-rocky-qualify: image-rocky-windows-qualify ## Default profile: qualify the Windows/VirtualBox artifact
+
+image-rocky-release: image-rocky-windows-release ## Default profile: release-check the Windows artifact
+
+image-rocky-windows-preflight: ## Verify exact native Windows Packer, VirtualBox and Vagrant versions without starting a VM
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-preflight
+
+image-rocky-windows-build: ## Build the checksum-locked Rocky Linux 10.2 VirtualBox box with native Windows Packer
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-build $(if $(OFFLINE),--offline,)
+
+image-rocky-windows-qualify: ## Boot and smoke-test the exact Rocky box through isolated native Windows Vagrant state
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-qualify
+
+image-rocky-windows-release: ## Verify exact Windows build and qualification evidence without remote publication
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-release
+
+image-rocky-windows-native-prepare: ## Prepare exact-SHA Windows staging, guarded BCD entry and one-shot task; does not reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-prepare $(if $(OFFLINE),--offline,)
+
+image-rocky-windows-native-reboot: ## Explicitly authorize the one-shot native VT-x boot and automatic return
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-reboot
+
+image-rocky-windows-native-import: ## Import exact-SHA native VT-x build and smoke evidence after WSL2 returns
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-import
+
+image-rocky-windows-native-recover: ## Arm the normal Windows boot and remove the temporary task while preserving the native entry
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-recover
+
+image-rocky-windows-native-self-test: ## Test BCD parsing, backend classification, integrity and stale-evidence rejection without reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-self-test
+
+image-rocky-linux-preflight: ## Verify exact Packer/QEMU versions and KVM access on a native Linux host
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-preflight
+
+image-rocky-linux-static-validate: ## Validate QEMU Packer source/plugins through Windows without claiming KVM runtime
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-static-validate
+
+image-rocky-linux-build: ## Build the checksum-locked Rocky Linux 10.2 qcow2 with native Linux Packer/QEMU
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-build $(if $(OFFLINE),--offline,)
+
+image-rocky-linux-qualify: ## Boot and smoke-test the exact qcow2 through bounded native QEMU/KVM
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-qualify
+
+image-rocky-linux-release: ## Verify exact Linux build and qualification evidence without remote publication
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-release
+
+image-rocky-oras-push: ## Push PROFILE=windows|linux release to ORAS_REPOSITORY and report its immutable digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-push --profile "$${PROFILE:-windows}" --repository "$${ORAS_REPOSITORY:-}"
+
+image-rocky-oras-pull: ## Pull PROFILE=windows|linux from immutable ORAS_REF=repository@sha256:digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-pull --profile "$${PROFILE:-windows}" --reference "$${ORAS_REF:-}"
+
+local-services-assets: ## Materialize exact Gitea, Harbor and Docker offline inputs
+	@$(PYTHON) scripts/repoctl.py local-services-assets $(if $(OFFLINE),--offline,)
+
+local-services-capabilities: ## Observe WSL2, Ansible, SSH and Windows VirtualBox runtime prerequisites
+	@$(PYTHON) scripts/repoctl.py local-services-capabilities
+
+local-services-qualify: ## Qualify Gitea, Harbor and ORAS on the exact released Rocky box
+	@$(PYTHON) scripts/repoctl.py local-services-qualify $(if $(OFFLINE),--offline,)
+
+local-services-recover: ## Stop only owned local service VMs while preserving their disks
+	@$(PYTHON) scripts/repoctl.py local-services-recover
 
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 

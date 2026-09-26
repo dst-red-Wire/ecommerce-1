@@ -1,0 +1,2070 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'ProbeS4U', 'ProbeSystem', 'Watchdog', 'SelfTest')]
+    [string]$Action,
+    [string]$RepoRoot = '',
+    [string]$WslDistribution = '',
+    [string]$WslRepoRoot = '',
+    [string]$LabRoot = 'C:\ecommerce-lab',
+    [string]$StageRoot = '',
+    [string]$ExpectedSourceSha = '',
+    [string]$ExpectedSourceTree = '',
+    [string]$ExpectedManifestSha256 = '',
+    [string]$ExpectedNormalBootId = '',
+    [string]$ExpectedNativeBootId = '',
+    [switch]$Offline
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$env:PSModulePath = @(
+    (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')
+    (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules')
+) -join ';'
+Import-Module (Join-Path $PSScriptRoot 'RockyImagePipeline.psm1') -Force
+Set-PipelineUtf8
+. (Join-Path $PSScriptRoot 'NativeLocalServices.ps1')
+. (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1')
+
+$NativeEntryName = 'Windows - VirtualBox VT-x native'
+$NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
+$WatchdogTaskName = 'Ecommerce-VirtualBox-Native-Watchdog'
+$ResumeTaskName = 'Ecommerce-VirtualBox-Native-Import'
+$GuidPattern = '^\{[0-9a-fA-F-]{36}\}$'
+$NativePhases = @('PREPARED','BOOT_RESUME_ARMED','NATIVE_BOOT_PENDING','NATIVE_BOOTED','CONTROLLER_START','QUALIFICATION_RUNNING','QUALIFICATION_COMPLETE','RESTORE_PENDING','RESTORED','COMPLETE','FAILED')
+
+function Get-NativeStatePath {
+    param([Parameter(Mandatory = $true)][string]$SourceSha)
+    if ($SourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Native state requires a full exact source SHA' }
+    return Join-Path $script:LabRootResolved "startup-real\$SourceSha\state.json"
+}
+
+function Initialize-NativeState {
+    param([string]$SourceSha, [string]$SourceTree, [string]$ManifestSha256, [string]$NormalBootId)
+    $path = Get-NativeStatePath -SourceSha $SourceSha
+    if (Test-Path -LiteralPath $path) { throw 'Existing native startup state requires explicit recovery' }
+    $normal = Assert-Guid -Value $NormalBootId
+    $state = [ordered]@{
+        schema=1; mode='REAL'; source_sha=$SourceSha; source_tree=$SourceTree
+        staging_manifest_sha256=$ManifestSha256; normal_boot_id=$normal
+        native_boot_id=$null; phase='PREPARED'
+        history=@([ordered]@{phase='PREPARED';at=Get-UtcTimestamp})
+    }
+    Write-Utf8Json -InputObject $state -Path $path
+}
+
+function Move-NativePhase {
+    param([string]$SourceSha, [string]$Expected, [string]$Next, [string]$NativeBootId = '')
+    $path = Get-NativeStatePath -SourceSha $SourceSha
+    $lockPath = Join-Path (Split-Path -Parent $path) 'state.lock'
+    $lock = $null
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); break }
+        catch [IO.IOException] { Start-Sleep -Milliseconds 500 }
+    }
+    if ($null -eq $lock) { throw 'Native startup state lock timed out after five seconds' }
+    try {
+        $state = Read-JsonFile $path
+        if ($state.mode -ne 'REAL' -or $state.source_sha -ne $SourceSha -or $state.phase -ne $Expected) {
+            throw "Native startup state is inconsistent: expected=$Expected actual=$($state.phase)"
+        }
+        $current = [array]::IndexOf($NativePhases, $Expected)
+        $nextIndex = [array]::IndexOf($NativePhases, $Next)
+        if ($current -lt 0 -or ($Next -ne 'FAILED' -and $nextIndex -ne ($current + 1)) -or
+            ($Next -eq 'FAILED' -and $Expected -in @('COMPLETE','FAILED'))) {
+            throw "Non-monotone native startup transition: $Expected -> $Next"
+        }
+        if ($NativeBootId) {
+            if ($Expected -ne 'PREPARED') { throw 'Native boot ID can only be bound while arming startup resume' }
+            $state.native_boot_id = Assert-Guid -Value $NativeBootId -Forbidden ([string]$state.normal_boot_id)
+        }
+        $state.phase = $Next
+        $state.history += [pscustomobject]@{phase=$Next;at=Get-UtcTimestamp}
+        Write-Utf8Json -InputObject $state -Path $path
+    }
+    finally { $lock.Dispose() }
+}
+
+function Get-UtcTimestamp {
+    return [DateTime]::UtcNow.ToString('o')
+}
+
+function Assert-NativeFreeSpace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int]$MinimumGiB,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+    $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
+    $drive = [IO.DriveInfo]::new($root)
+    if (-not $drive.IsReady) { throw "BLOCKED_RUNTIME $Operation`: drive $root is unavailable" }
+    $minimum = [long]$MinimumGiB * 1GB
+    if ($drive.AvailableFreeSpace -lt $minimum) {
+        $available = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
+        throw "BLOCKED_RUNTIME $Operation`: $available GiB free on $root; $MinimumGiB GiB required"
+    }
+}
+
+function Get-PackerPluginDefinitions {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $contract = Read-JsonFile (Join-Path $Stage 'runtime-contract.json')
+    $plugins = $contract.packer_plugins
+    if ($contract.authority -ne 'config/contracts/machine-image-lock.yaml' -or
+        @($plugins.PSObject.Properties).Count -ne 3) { throw 'Rendered Packer plugin authority is incomplete' }
+    $definitions = @()
+    foreach ($name in @('virtualbox','qemu','vagrant')) {
+        $version = [string]$plugins.$name
+        if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "Rendered Packer plugin version is invalid: $name" }
+        $definitions += [pscustomobject]@{Name=$name;Version=$version}
+    }
+    return $definitions
+}
+
+function Get-StagedPackerEnvironment {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $plugins = Join-Path $Stage 'packer-plugins'
+    foreach ($definition in @(Get-PackerPluginDefinitions -Stage $Stage)) {
+        $filename = "packer-plugin-$($definition.Name)_v$($definition.Version)_x5.0_windows_amd64.exe"
+        $folder = Join-Path $plugins "github.com\hashicorp\$($definition.Name)"
+        $binary = Join-Path $folder $filename
+        $checksum = "$binary`_SHA256SUM"
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf) -or -not (Test-Path -LiteralPath $checksum -PathType Leaf)) {
+            throw "Exact Windows Packer plugin is absent from native staging: $filename"
+        }
+        $expected = [IO.File]::ReadAllText($checksum, [Text.Encoding]::ASCII).Trim().ToLowerInvariant()
+        if ($expected -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $binary) -ne $expected) {
+            throw "Staged Windows Packer plugin checksum differs: $filename"
+        }
+    }
+    return @{ PACKER_PLUGIN_PATH=$plugins; CHECKPOINT_DISABLE='1' }
+}
+
+function Stage-PackerPlugins {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $source = Join-Path $env:APPDATA 'packer.d\plugins'
+    $destination = Join-Path $Stage 'packer-plugins'
+    if (-not (Test-Path -LiteralPath $destination -PathType Container)) {
+        if (-not (Test-Path -LiteralPath $source -PathType Container)) { throw 'Exact Windows Packer plugin cache is absent' }
+        [void](New-Item -ItemType Directory -Path $destination -Force)
+        foreach ($definition in @(Get-PackerPluginDefinitions -Stage $Stage)) {
+            $filename = "packer-plugin-$($definition.Name)_v$($definition.Version)_x5.0_windows_amd64.exe"
+            $relative = "github.com\hashicorp\$($definition.Name)"
+            $target = Join-Path $destination $relative
+            [void](New-Item -ItemType Directory -Path $target -Force)
+            foreach ($suffix in @('', '_SHA256SUM')) {
+                Copy-Item -LiteralPath (Join-Path (Join-Path $source $relative) ($filename + $suffix)) -Destination $target -ErrorAction Stop
+            }
+        }
+    }
+    return Get-StagedPackerEnvironment -Stage $Stage
+}
+
+function Resolve-LabRoot {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($resolved -notmatch '^[A-Za-z]:\\[^\\].+' -or $resolved.StartsWith('\\')) {
+        throw "LabRoot must be a non-root local Windows drive path: $resolved"
+    }
+    return $resolved
+}
+
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Assert-Guid {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [string]$Forbidden = ''
+    )
+    if ($Value -notmatch $GuidPattern -or $Value -ieq '{bootmgr}') {
+        throw "Invalid or forbidden BCD identifier: $Value"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Forbidden) -and $Value -ieq $Forbidden) {
+        throw "Refusing to use the normal Windows loader as the native loader: $Value"
+    }
+    return $Value.ToLowerInvariant()
+}
+
+function Invoke-BcdEdit {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [switch]$AllowFailure
+    )
+    $result = Invoke-BoundedProcess -FilePath (Join-Path $env:SystemRoot 'System32\bcdedit.exe') -Arguments $Arguments -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+    if (-not $AllowFailure.IsPresent) {
+        Assert-ProcessSuccess -Result $result -Operation "bcdedit $($Arguments -join ' ')"
+    }
+    return $result
+}
+
+function Get-BcdEntries {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $entries = @()
+    foreach ($block in ($Text -split "(?:\r?\n){2,}")) {
+        $identifier = [regex]::Match($block, '\{[0-9a-fA-F-]{36}\}')
+        if ($identifier.Success) {
+            $entries += [pscustomobject]@{
+                Id = $identifier.Value.ToLowerInvariant()
+                Text = $block
+            }
+        }
+    }
+    return @($entries)
+}
+
+function Get-CurrentWindowsLoaderId {
+    $result = Invoke-BcdEdit -Arguments @('/enum', '{current}', '/v')
+    $entries = @(Get-BcdEntries -Text ($result.StdOut + "`n" + $result.StdErr))
+    if ($entries.Count -ne 1 -or $entries[0].Text -notmatch '(?i)winload\.(efi|exe)') {
+        throw 'Cannot resolve exactly one current Windows loader from BCD'
+    }
+    return Assert-Guid -Value $entries[0].Id
+}
+
+function Get-HypervisorLaunchType {
+    param([Parameter(Mandatory = $true)][string]$BcdText)
+    $modeMatches = @([regex]::Matches($BcdText, '(?im)^\s*hypervisorlaunchtype\s+(?<value>auto|off)\s*$'))
+    if ($modeMatches.Count -gt 1) { throw 'Ambiguous hypervisorlaunchtype in current Windows loader' }
+    if ($modeMatches.Count -eq 0) { return 'DEFAULT_ABSENT' }
+    return $modeMatches[0].Groups['value'].Value.ToLowerInvariant()
+}
+
+function Get-NormalHostState {
+    $current = Invoke-BcdEdit -Arguments @('/enum', '{current}', '/v')
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+    $features = [ordered]@{}
+    foreach ($name in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform', 'Microsoft-Hyper-V-All')) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $name -ErrorAction SilentlyContinue
+        $features[$name] = if ($null -eq $feature) { 'ABSENT' } else { [string]$feature.State }
+    }
+    $services = [ordered]@{}
+    foreach ($name in @('vmcompute', 'LxssManager', 'WslService')) {
+        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+        $services[$name] = if ($null -eq $service) { 'ABSENT' } else { [string]$service.Status }
+    }
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $currentDigest = ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($current.StdOut + $current.StdErr).Trim())))).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $hasher.Dispose() }
+    return [ordered]@{
+        current_loader_id = Get-CurrentWindowsLoaderId
+        current_loader_sha256 = $currentDigest
+        hypervisorlaunchtype = Get-HypervisorLaunchType -BcdText ($current.StdOut + $current.StdErr)
+        hypervisor_present = [bool]$computer.HypervisorPresent
+        features = $features
+        services = $services
+        captured_at = Get-UtcTimestamp
+    }
+}
+
+function Assert-NormalHostRestored {
+    param([Parameter(Mandatory = $true)]$Before)
+    $after = Get-NormalHostState
+    if (
+        $after.current_loader_id -ne $Before.current_loader_id -or
+        $after.current_loader_sha256 -ne $Before.current_loader_sha256 -or
+        $after.hypervisorlaunchtype -ne $Before.hypervisorlaunchtype -or
+        $after.hypervisor_present -ne $Before.hypervisor_present
+    ) { throw 'Normal Windows loader, BCD state or hypervisor capability differs after native cycle' }
+    foreach ($name in $Before.features.PSObject.Properties.Name) {
+        if ($after.features.$name -ne $Before.features.$name) { throw "Windows optional feature changed during native cycle: $name" }
+    }
+    return $after
+}
+
+function Find-NativeWindowsLoaderIds {
+    $result = Invoke-BcdEdit -Arguments @('/enum', 'all', '/v')
+    $entries = @(Get-BcdEntries -Text ($result.StdOut + "`n" + $result.StdErr))
+    return @(
+        $entries | Where-Object {
+            $_.Text -match '(?i)winload\.(efi|exe)' -and
+            $_.Text -match ('(?m)^.*' + [regex]::Escape($NativeEntryName) + '\s*$')
+        } | ForEach-Object { $_.Id }
+    )
+}
+
+function Set-OneShotBootSequence {
+    param([Parameter(Mandatory = $true)][string]$BootId)
+    $validated = Assert-Guid -Value $BootId
+    [void](Invoke-BcdEdit -Arguments @('/bootsequence', $validated))
+    $bootManager = Invoke-BcdEdit -Arguments @('/enum', '{bootmgr}', '/v')
+    if (($bootManager.StdOut + $bootManager.StdErr) -notmatch [regex]::Escape($validated)) {
+        throw "BCD bootsequence does not reference the expected loader: $validated"
+    }
+}
+
+function Write-StagingManifest {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $manifest = Join-Path $Root 'SHA256SUMS'
+    if (Test-Path -LiteralPath $manifest) {
+        throw "Staging manifest already exists: $manifest"
+    }
+    $lines = @()
+    foreach ($file in (Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName)) {
+        $relative = $file.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
+        if (
+            $relative -in @('.prepared.json', 'qualification-key', 'qualification-key.pub') -or
+            $relative -match '^(artifacts|evidence|logs|smoke-run|local-services-run)/'
+        ) {
+            continue
+        }
+        $lines += "$(Get-FileSha256 -Path $file.FullName)  $relative"
+    }
+    if ($lines.Count -lt 8) {
+        throw 'Staging manifest is unexpectedly small'
+    }
+    [IO.File]::WriteAllText(
+        $manifest,
+        (($lines -join "`n") + "`n"),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    return $manifest
+}
+
+function Test-StagingManifest {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $manifest = Join-Path $Root 'SHA256SUMS'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return $false }
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $manifestPaths = @{}
+    foreach ($line in [IO.File]::ReadAllLines($manifest, [Text.Encoding]::UTF8)) {
+        if ($line -notmatch '^(?<digest>[0-9a-f]{64})  (?<path>[^\r\n]+)$') { return $false }
+        $relative = $Matches.path
+        if ($manifestPaths.ContainsKey($relative)) { return $false }
+        $manifestPaths[$relative] = $true
+        if ([IO.Path]::IsPathRooted($relative) -or $relative -match '(^|/)\.\.(/|$)') { return $false }
+        $candidate = [IO.Path]::GetFullPath((Join-Path $rootPath $relative.Replace('/', '\')))
+        if (-not $candidate.StartsWith($rootPath + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $false }
+        if ((Get-FileSha256 -Path $candidate) -ne $Matches.digest) { return $false }
+    }
+    $currentPaths = @(
+        Get-ChildItem -LiteralPath $Root -File -Recurse | ForEach-Object {
+            $_.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
+        } | Where-Object {
+            $_ -ne 'SHA256SUMS' -and
+            $_ -notin @('.prepared.json', 'qualification-key', 'qualification-key.pub') -and
+            $_ -notmatch '^(artifacts|evidence|logs|smoke-run|probe|local-services-run)/'
+        }
+    )
+    if ($currentPaths.Count -ne $manifestPaths.Count) { return $false }
+    foreach ($relative in $currentPaths) {
+        if (-not $manifestPaths.ContainsKey($relative)) { return $false }
+    }
+    return $true
+}
+
+function Get-VirtualBoxBackendFromLog {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    if ($Text -match '(?im)Attempting fall back to NEM|\bNEM:|WHvCapabilityCodeHypervisorPresent') {
+        return 'NEM'
+    }
+    if ($Text -match '(?im)\bHM:.*(?:VT-x|AMD-V)') {
+        return 'NATIVE_VTX'
+    }
+    return 'UNKNOWN'
+}
+
+function Read-SharedUtf8Text {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutSeconds = 20
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try {
+                $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true)
+                try { return $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            }
+            finally { $stream.Dispose() }
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw "Cannot read shared VirtualBox log within $TimeoutSeconds seconds: $Path"
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+}
+
+function Assert-ResultBinding {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$SourceSha,
+        [Parameter(Mandatory = $true)][string]$SourceTree,
+        [Parameter(Mandatory = $true)][string]$ManifestSha256
+    )
+    if (
+        $Result.source_git_sha -ne $SourceSha -or
+        $Result.source_tree_sha -ne $SourceTree -or
+        $Result.staging_manifest_sha256 -ne $ManifestSha256
+    ) {
+        throw 'Native Windows evidence does not bind the expected source and staging manifest'
+    }
+}
+
+function Assert-StartupDryRunProof {
+    param([Parameter(Mandatory = $true)][string]$SourceSha)
+    $path = Join-Path $script:LabRootResolved "startup-dry-run\$SourceSha\evidence\summary.json"
+    $proof = Read-JsonFile $path
+    if (
+        $proof.status -ne 'PASS' -or $proof.source_sha -ne $SourceSha -or
+        $proof.startup_task_registered -ne 'PASS' -or
+        $proof.startup_task_principal -ne 'SYSTEM' -or
+        $proof.stored_user_credentials -ne $false -or
+        $proof.manual_task_trigger -ne 'PASS' -or
+        $proof.resume_state_read -ne 'PASS' -or
+        $proof.resume_state_transition -ne 'PASS' -or
+        $proof.resume_idempotency -ne 'PASS' -or
+        $proof.concurrency_lock -ne 'PASS' -or
+        $proof.boot_prerequisites -ne 'PASS' -or
+        $proof.vboxmanage_system_context -ne 'PASS' -or
+        $proof.bcd_mutated -ne $false -or $proof.reboot_occurred -ne $false
+    ) { throw 'Exact-SHA SYSTEM startup dry-run evidence is absent or incomplete' }
+    return $proof
+}
+
+function Assert-S4UResumeProof {
+    param([Parameter(Mandatory = $true)][string]$SourceSha)
+    $path = Join-Path $script:LabRootResolved 's4u-wsl-probe.json'
+    $proof = Read-JsonFile $path
+    $expectedSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($proof.status -ne 'PASS' -or $proof.source_sha -ne $SourceSha -or
+        $proof.sid -ne $expectedSid -or $proof.administrator -ne $true -or
+        $proof.kernel -notmatch '(?i)microsoft.*wsl2' -or
+        $proof.repo_manifest_accessible -ne $true) {
+        throw 'Passwordless S4U AtStartup WSL2 repository resume is not proven for this administrator'
+    }
+}
+
+function Invoke-S4UProbe {
+    if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$' -or $WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or
+        -not $WslRepoRoot.StartsWith('/')) { throw 'S4U probe requires exact source and WSL paths' }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+    if (-not (Test-Administrator) -or $identity.User.Value -eq 'S-1-5-18') { throw 'S4U probe requires the elevated repository owner' }
+    $kernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 90
+    Assert-ProcessSuccess -Result $kernel -Operation 'S4U WSL2 kernel startup'
+    if ($kernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'S4U task did not start a WSL2 kernel' }
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'architecture.lock.yaml') -PathType Leaf)) {
+        throw 'S4U task cannot read the repository authority over WSL UNC'
+    }
+    $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
+    if (-not $gitState.Clean -or $gitState.Head -ne $ExpectedSourceSha) {
+        throw 'S4U task cannot read the clean exact-SHA repository'
+    }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1; status='PASS'; source_sha=$ExpectedSourceSha; sid=$identity.User.Value
+        administrator=$true; pid=$PID; kernel=$kernel.StdOut.Trim()
+        repo_manifest_accessible=$true; completed_at=Get-UtcTimestamp
+    }) -Path (Join-Path $script:LabRootResolved 's4u-wsl-probe.json')
+    }
+    catch {
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema=1; status='FAIL'; source_sha=$ExpectedSourceSha; sid=$identity.User.Value
+            pid=$PID; error=$_.Exception.Message; completed_at=Get-UtcTimestamp
+        }) -Path (Join-Path $script:LabRootResolved 's4u-wsl-probe.json')
+        throw
+    }
+}
+
+function Invoke-S4UProbeTask {
+    param([string]$Runner, [string]$SourceSha, [string]$Repository, [string]$Distribution, [string]$LinuxRepository)
+    $name = 'Ecommerce-VirtualBox-Native-S4U-Probe'
+    if ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { throw 'Existing S4U probe task requires inspection' }
+    $evidence = Join-Path $script:LabRootResolved 's4u-wsl-probe.json'
+    if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Force }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-Action','ProbeS4U','-LabRoot',$script:LabRootResolved,'-RepoRoot',$Repository,
+        '-WslDistribution',$Distribution,'-WslRepoRoot',$LinuxRepository,'-ExpectedSourceSha',$SourceSha)
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 3) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings)
+    try {
+        $registered = Get-ScheduledTask -TaskName $name -ErrorAction Stop
+        if ((Get-TaskPrincipalSid -Task $registered) -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -or
+            [string]$registered.Principal.LogonType -ne 'S4U' -or [string]$registered.Principal.RunLevel -ne 'Highest' -or
+            [string]$registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') { throw 'S4U probe task registration differs' }
+        $triggered = [DateTime]::UtcNow
+        Start-ScheduledTask -TaskName $name
+        $deadline = $triggered.AddMinutes(2)
+        while (-not (Test-Path -LiteralPath $evidence -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Seconds 1 }
+        if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) { throw 'S4U probe task evidence timed out' }
+        $probeResult = Read-JsonFile $evidence
+        if ($probeResult.status -ne 'PASS') { throw "S4U probe task failed: $($probeResult.error)" }
+        while ((Get-ScheduledTask -TaskName $name).State -eq 'Running' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $info = Get-ScheduledTaskInfo -TaskName $name
+        if ($info.LastTaskResult -ne 0 -or $info.LastRunTime.ToUniversalTime() -lt $triggered.AddSeconds(-2)) {
+            throw 'S4U probe task exit code or timestamp is invalid'
+        }
+        Assert-S4UResumeProof -SourceSha $SourceSha
+    }
+    finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue }
+}
+
+function Invoke-SystemRuntimeProbe {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $evidence = Join-Path $script:LabRootResolved "system-runtime-probe-$ExpectedSourceSha.json"
+    try {
+        if ($identity.User.Value -ne 'S-1-5-18' -or -not (Test-Administrator)) { throw 'System runtime probe requires SYSTEM Highest' }
+        if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$' -or $ExpectedManifestSha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'System runtime probe requires exact source and staging digests'
+        }
+        $stage = [IO.Path]::GetFullPath($StageRoot).TrimEnd('\')
+        $base = [IO.Path]::GetFullPath((Join-Path $script:LabRootResolved 'staging')).TrimEnd('\')
+        if (-not $stage.StartsWith($base + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'System runtime probe stage escapes the lab' }
+        if (-not (Test-StagingManifest -Root $stage) -or (Get-FileSha256 -Path (Join-Path $stage 'SHA256SUMS')) -ne $ExpectedManifestSha256) {
+            throw 'System runtime probe staging manifest differs'
+        }
+        $payload = Read-JsonFile (Join-Path $stage 'controller\payload.json')
+        if ($payload.source_sha -ne $ExpectedSourceSha) { throw 'System runtime probe payload source differs' }
+        $tools = (Read-JsonFile (Join-Path $stage 'evidence\preflight-prepare.json')).tools
+        $packerEnvironment = Get-StagedPackerEnvironment -Stage $stage
+        $validate = Invoke-BoundedProcess -FilePath ([string]$tools.packer.executable) -Arguments @(
+            'validate', "-var-file=$(Join-Path $stage 'rocky-10.2.auto.pkrvars.hcl')", (Join-Path $stage 'packer')
+        ) -TimeoutSeconds 120 -WorkingDirectory $stage -Environment $packerEnvironment
+        Assert-ProcessSuccess -Result $validate -Operation 'SYSTEM staged Packer plugin validation'
+        $vbox = Invoke-BoundedProcess -FilePath ([string]$tools.virtualbox.executable) -Arguments @('--version') -TimeoutSeconds 15 -WorkingDirectory $stage
+        Assert-ProcessSuccess -Result $vbox -Operation 'SYSTEM VirtualBox version'
+        if ($vbox.StdOut.Trim() -ne '7.2.18r175117') { throw 'SYSTEM VirtualBox version differs from the native lock' }
+        $vagrant = Invoke-BoundedProcess -FilePath ([string]$tools.vagrant.executable) -Arguments @('--version') -TimeoutSeconds 15 -WorkingDirectory $stage
+        Assert-ProcessSuccess -Result $vagrant -Operation 'SYSTEM Vagrant version'
+        if ($vagrant.StdOut.Trim() -ne 'Vagrant 2.4.9') { throw 'SYSTEM Vagrant version differs from the native lock' }
+        Assert-LocalHostOnlyNetwork
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema=1; status='PASS'; source_sha=$ExpectedSourceSha; manifest_sha256=$ExpectedManifestSha256
+            sid=$identity.User.Value; pid=$PID; packer_plugins='PASS'; packer_validate='PASS'
+            virtualbox=$vbox.StdOut.Trim(); vagrant=$vagrant.StdOut.Trim(); host_only_network='PASS'
+            completed_at=Get-UtcTimestamp
+        }) -Path $evidence
+    }
+    catch {
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema=1; status='FAIL'; source_sha=$ExpectedSourceSha; sid=$identity.User.Value
+            pid=$PID; error=$_.Exception.Message; completed_at=Get-UtcTimestamp
+        }) -Path $evidence
+        throw
+    }
+}
+
+function Invoke-SystemRuntimeProbeTask {
+    param([string]$Runner, [string]$Stage, [string]$SourceSha, [string]$ManifestSha256)
+    $name = 'Ecommerce-VirtualBox-Native-System-Probe'
+    if ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { throw 'Existing SYSTEM runtime probe task requires inspection' }
+    $evidence = Join-Path $script:LabRootResolved "system-runtime-probe-$SourceSha.json"
+    if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Force }
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-Action','ProbeSystem','-LabRoot',$script:LabRootResolved,'-StageRoot',$Stage,
+        '-ExpectedSourceSha',$SourceSha,'-ExpectedManifestSha256',$ManifestSha256)
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument (($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings)
+    try {
+        $registered = Get-ScheduledTask -TaskName $name -ErrorAction Stop
+        if ((Get-TaskPrincipalSid -Task $registered) -ne 'S-1-5-18' -or
+            [string]$registered.Principal.LogonType -ne 'ServiceAccount' -or [string]$registered.Principal.RunLevel -ne 'Highest' -or
+            [string]$registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') { throw 'SYSTEM runtime probe task registration differs' }
+        $triggered = [DateTime]::UtcNow
+        Start-ScheduledTask -TaskName $name
+        $deadline = $triggered.AddMinutes(15)
+        while (-not (Test-Path -LiteralPath $evidence -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Seconds 1 }
+        if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) { throw 'SYSTEM runtime probe task evidence timed out' }
+        $probeResult = Read-JsonFile $evidence
+        if ($probeResult.status -ne 'PASS') { throw "SYSTEM runtime probe task failed: $($probeResult.error)" }
+        while ((Get-ScheduledTask -TaskName $name).State -eq 'Running' -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $info = Get-ScheduledTaskInfo -TaskName $name
+        if ($info.LastTaskResult -ne 0 -or $info.LastRunTime.ToUniversalTime() -lt $triggered.AddSeconds(-2)) {
+            throw 'SYSTEM runtime probe task exit code or timestamp is invalid'
+        }
+        if ($probeResult.source_sha -ne $SourceSha -or $probeResult.manifest_sha256 -ne $ManifestSha256 -or
+            $probeResult.sid -ne 'S-1-5-18' -or $probeResult.packer_validate -ne 'PASS' -or
+            $probeResult.virtualbox -ne '7.2.18r175117') { throw 'SYSTEM runtime probe evidence binding differs' }
+    }
+    finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue }
+}
+
+function Assert-SystemRuntimeProbeProof {
+    param([string]$SourceSha, [string]$ManifestSha256)
+    $proof = Read-JsonFile (Join-Path $script:LabRootResolved "system-runtime-probe-$SourceSha.json")
+    if ($proof.status -ne 'PASS' -or $proof.source_sha -ne $SourceSha -or
+        $proof.manifest_sha256 -ne $ManifestSha256 -or $proof.sid -ne 'S-1-5-18' -or
+        $proof.packer_plugins -ne 'PASS' -or $proof.packer_validate -ne 'PASS' -or
+        $proof.virtualbox -ne '7.2.18r175117' -or $proof.vagrant -ne 'Vagrant 2.4.9' -or
+        $proof.host_only_network -ne 'PASS') {
+        throw 'Exact-SHA SYSTEM staged runtime probe is absent or incomplete'
+    }
+}
+
+function Get-TaskPrincipalSid {
+    param([Parameter(Mandatory = $true)]$Task)
+    $userId = [string]$Task.Principal.UserId
+    if ($userId -match '^S-1-') { return $userId }
+    return [Security.Principal.NTAccount]::new($userId).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Register-NativeTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$Runner,
+        [Parameter(Mandatory = $true)][string]$PreparedStage,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$SourceSha,
+        [Parameter(Mandatory = $true)][string]$SourceTree,
+        [Parameter(Mandatory = $true)][string]$ManifestSha256,
+        [Parameter(Mandatory = $true)][string]$NormalBootId,
+        [Parameter(Mandatory = $true)][string]$NativeBootId
+    )
+    $arguments = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $Runner, '-Action', 'Run', '-StageRoot', $PreparedStage, '-LabRoot', $Root,
+        '-ExpectedSourceSha', $SourceSha, '-ExpectedSourceTree', $SourceTree,
+        '-ExpectedManifestSha256', $ManifestSha256,
+        '-ExpectedNormalBootId', $NormalBootId, '-ExpectedNativeBootId', $NativeBootId
+    )
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $actionArguments = ($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' '
+    $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $actionArguments
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 4) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $NativeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
+    $registered = Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction Stop
+    if ($registered.TaskName -ne $NativeTaskName -or (Get-TaskPrincipalSid -Task $registered) -ne 'S-1-5-18' -or
+        [string]$registered.Principal.LogonType -ne 'ServiceAccount' -or
+        [string]$registered.Principal.RunLevel -ne 'Highest' -or [string]$registered.Actions[0].Execute -ine $powershell -or
+        [string]$registered.Actions[0].Arguments -ne $actionArguments -or
+        [string]$registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') {
+        throw 'Native qualification scheduled task registration failed'
+    }
+}
+
+function Remove-NativeTask {
+    $task = Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction SilentlyContinue
+    if ($null -ne $task) {
+        Unregister-ScheduledTask -TaskName $NativeTaskName -Confirm:$false
+    }
+}
+
+function Register-NativeWatchdogTask {
+    param([string]$Runner, [string]$Root, [string]$SourceSha)
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-Action','Watchdog','-LabRoot',$Root,'-ExpectedSourceSha',$SourceSha)
+    $actionArguments = ($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' '
+    $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $actionArguments
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 5) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $WatchdogTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
+    $registered = Get-ScheduledTask -TaskName $WatchdogTaskName -ErrorAction Stop
+    if ((Get-TaskPrincipalSid -Task $registered) -ne 'S-1-5-18' -or
+        [string]$registered.Principal.LogonType -ne 'ServiceAccount' -or
+        [string]$registered.Principal.RunLevel -ne 'Highest' -or
+        [string]$registered.Actions[0].Execute -ine $powershell -or
+        [string]$registered.Actions[0].Arguments -ne $actionArguments -or
+        [string]$registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') {
+        throw 'Native watchdog scheduled task registration failed'
+    }
+}
+
+function Remove-NativeWatchdogTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $WatchdogTaskName -Confirm:$false
+    }
+}
+
+function Invoke-NativeWatchdog {
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+        throw 'Native watchdog requires the SYSTEM startup principal'
+    }
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$' -or $prepared.source_git_sha -ne $ExpectedSourceSha) {
+        throw 'Native watchdog source binding is inconsistent'
+    }
+    $normalId = Assert-Guid -Value ([string]$prepared.normal_boot_id)
+    $nativeId = Assert-Guid -Value ([string]$prepared.native_boot_id) -Forbidden $normalId
+    $current = Get-CurrentWindowsLoaderId
+    if ($current -eq $normalId) { return }
+    if ($current -ne $nativeId) { throw 'Native watchdog is outside the owned Windows loaders' }
+    $statePath = Get-NativeStatePath -SourceSha $ExpectedSourceSha
+    $resultPath = Join-Path $script:LabRootResolved "evidence\$ExpectedSourceSha\result.json"
+    $deadline = [DateTime]::UtcNow.AddMinutes(270)
+    $resultObservedAt = $null
+    do {
+        $state = Read-JsonFile $statePath
+        if ($state.source_sha -ne $ExpectedSourceSha -or $state.normal_boot_id -ne $normalId -or
+            $state.native_boot_id -ne $nativeId -or $state.staging_manifest_sha256 -ne $prepared.staging_manifest_sha256) {
+            throw 'Native watchdog state binding is inconsistent'
+        }
+        if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+            if ($null -eq $resultObservedAt) { $resultObservedAt = [DateTime]::UtcNow }
+            if ([DateTime]::UtcNow -ge $resultObservedAt.AddMinutes(10)) { break }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Seconds 30
+    } while ($true)
+    $state = Read-JsonFile $statePath
+    if ($state.phase -notin @('RESTORE_PENDING','FAILED')) {
+        Move-NativePhase -SourceSha $ExpectedSourceSha -Expected ([string]$state.phase) -Next 'FAILED'
+    }
+    $reason = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        'Native task wrote a result but did not return to normal boot within ten minutes'
+    } else { 'Native task exceeded the 270-minute watchdog deadline without a result' }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1;status='FAIL';source_sha=$ExpectedSourceSha;reason=$reason
+        principal='SYSTEM';pid=$PID;normal_boot_id=$normalId;observed_at=Get-UtcTimestamp
+    }) -Path (Join-Path $script:LabRootResolved "evidence\$ExpectedSourceSha\watchdog.json")
+    Set-OneShotBootSequence -BootId $normalId
+    Restart-Computer -Force
+}
+
+function Register-NormalResumeTask {
+    param([string]$Runner, [string]$Root, [string]$Repository, [string]$Distribution, [string]$LinuxRepository)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $arguments = @(
+        '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
+        '-Action','Resume','-LabRoot',$Root,'-RepoRoot',$Repository,
+        '-WslDistribution',$Distribution,'-WslRepoRoot',$LinuxRepository
+    )
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $actionArguments = ($arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' '
+    $taskAction = New-ScheduledTaskAction -Execute $powershell -Argument $actionArguments
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType S4U -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+    [void](Register-ScheduledTask -TaskName $ResumeTaskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Force)
+    $registered = Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop
+    if ($registered.TaskName -ne $ResumeTaskName -or (Get-TaskPrincipalSid -Task $registered) -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -or
+        [string]$registered.Principal.LogonType -ne 'S4U' -or
+        [string]$registered.Principal.RunLevel -ne 'Highest' -or [string]$registered.Actions[0].Execute -ine $powershell -or
+        [string]$registered.Actions[0].Arguments -ne $actionArguments -or
+        [string]$registered.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger') {
+        throw 'Normal-boot import resume task registration failed'
+    }
+}
+
+function Remove-NormalResumeTask {
+    if ($null -ne (Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $ResumeTaskName -Confirm:$false
+    }
+}
+
+function Invoke-EmergencyNativeReturn {
+    param([Parameter(Mandatory = $true)][string]$Failure)
+    $failures = @()
+    $normalBootId = $null
+    try {
+        $globalPrepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+        $normalBootId = Assert-Guid -Value ([string]$globalPrepared.normal_boot_id)
+        Set-OneShotBootSequence -BootId $normalBootId
+    }
+    catch { $failures += "normal boot sequence: $($_.Exception.Message)" }
+    try { Remove-NativeTask } catch { $failures += "scheduled task cleanup: $($_.Exception.Message)" }
+    try {
+        $emergencyRoot = Join-Path $script:LabRootResolved 'evidence'
+        [void](New-Item -ItemType Directory -Path $emergencyRoot -Force)
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema = 1; status = 'FAIL'; failure = $Failure
+            normal_boot_id = $normalBootId; cleanup_failures = $failures
+            completed_at = Get-UtcTimestamp
+        }) -Path (Join-Path $emergencyRoot 'native-emergency-return.json')
+    }
+    catch { $failures += "emergency evidence: $($_.Exception.Message)" }
+    try { Restart-Computer -Force }
+    catch { throw "Native emergency return could not reboot: $($failures + $_.Exception.Message -join '; ')" }
+}
+
+function Invoke-NativeBackendProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$VBoxManage,
+        [Parameter(Mandatory = $true)][string]$PreparedStage,
+        [Parameter(Mandatory = $true)][string]$SourceSha
+    )
+    $name = "ecommerce-rocky-10-2-native-probe-$($SourceSha.Substring(0, 12))"
+    $probeRoot = Join-Path $PreparedStage 'probe'
+    [void](New-Item -ItemType Directory -Path $probeRoot -Force)
+    $initial = Get-VBoxMachines -VBoxManage $VBoxManage -WorkingDirectory $PreparedStage
+    if ($initial.ContainsKey($name)) { throw "Native backend probe VM already exists: $name" }
+    try {
+        $create = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('createvm', '--name', $name, '--ostype', 'RedHat_64', '--basefolder', $probeRoot, '--register') -TimeoutSeconds 30 -WorkingDirectory $PreparedStage
+        Assert-ProcessSuccess -Result $create -Operation 'VirtualBox native backend probe creation'
+        $modify = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('modifyvm', $name, '--memory', '256', '--cpus', '1', '--audio-enabled', 'off', '--nic1', 'none') -TimeoutSeconds 30 -WorkingDirectory $PreparedStage
+        Assert-ProcessSuccess -Result $modify -Operation 'VirtualBox native backend probe configuration'
+        $start = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments @('startvm', $name, '--type', 'headless') -TimeoutSeconds 60 -WorkingDirectory $PreparedStage
+        Assert-ProcessSuccess -Result $start -Operation 'VirtualBox native backend probe start'
+        $log = Join-Path $probeRoot "$name\Logs\VBox.log"
+        $backend = 'UNKNOWN'
+        for ($attempt = 1; $attempt -le 20; $attempt++) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+                $backend = Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $log)
+                if ($backend -ne 'UNKNOWN') { break }
+            }
+            Start-Sleep -Seconds 1
+        }
+        if ($backend -ne 'NATIVE_VTX') {
+            throw "VirtualBox backend is $backend; native VT-x is required and NEM is forbidden"
+        }
+        return $backend
+    }
+    finally {
+        [void](Remove-OwnedVirtualMachine -Name $name -InitialMachines $initial -VBoxManage $VBoxManage -WorkingDirectory $PreparedStage)
+    }
+}
+
+function Invoke-VagrantSmokeCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Vagrant,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][hashtable]$Environment,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $result = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
+            break
+        }
+        catch {
+            if ($_.Exception.Message -ne "Timed out after 120s: $Vagrant") { throw }
+            if ($attempt -eq 2) { throw "Vagrant native smoke check $Name timed out after 2 bounded attempts" }
+            Start-Sleep -Seconds 5
+        }
+    }
+    Assert-ProcessSuccess -Result $result -Operation "Vagrant native smoke check $Name"
+    return $result.StdOut.Trim()
+}
+
+function Invoke-NativeRun {
+    if (-not (Test-Administrator)) { throw 'Native runtime task requires an elevated token' }
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
+        throw 'Native runtime task requires the proven SYSTEM startup principal'
+    }
+    $preparedStage = [IO.Path]::GetFullPath($StageRoot).TrimEnd('\')
+    $stagingBase = [IO.Path]::GetFullPath((Join-Path $script:LabRootResolved 'staging')).TrimEnd('\')
+    if (-not $preparedStage.StartsWith($stagingBase + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Native runtime stage is outside the governed lab staging root'
+    }
+    $prepared = Read-JsonFile (Join-Path $preparedStage '.prepared.json')
+    $sourceSha = [string]$prepared.source_git_sha
+    $sourceTree = [string]$prepared.source_tree_sha
+    if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
+        throw 'Prepared native runtime has invalid Git identities'
+    }
+    $resultRoot = Join-Path $script:LabRootResolved "evidence\$sourceSha"
+    [void](New-Item -ItemType Directory -Path $resultRoot -Force)
+    $resultPath = Join-Path $resultRoot 'result.json'
+    $attemptPath = Join-Path $resultRoot 'attempt.json'
+    $artifactRoot = Join-Path $script:LabRootResolved "artifacts\$sourceSha"
+    [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
+    $result = [ordered]@{
+        schema = 1
+        status = 'FAIL'
+        source_git_sha = $sourceSha
+        source_tree_sha = $sourceTree
+        staging_manifest_sha256 = [string]$prepared.staging_manifest_sha256
+        virtualbox_backend = 'UNKNOWN'
+        nem_detected = $null
+        native_vtx = 'NOT_EXECUTED'
+        precheck = 'NOT_EXECUTED'
+        packer = [ordered]@{
+            init = 'NOT_EXECUTED'; fmt = 'NOT_EXECUTED'; validate = 'NOT_EXECUTED'
+            build = 'NOT_EXECUTED'; duration_seconds = $null
+        }
+        milestones = [ordered]@{
+            T0_PACKER_START = $null; T1_VM_CREATED = $null; T2_ISO_BOOT = $null
+            T3_KICKSTART_START = $null; T4_NETWORK_READY = $null
+            T5_RPM_INSTALLATION_START = $null; T6_RPM_INSTALLATION_END = $null
+            T7_FIRST_REBOOT = $null; T8_INSTALLED_OS_BOOT = $null
+            T9_SSHD_READY = $null; T10_PACKER_SSH_CONNECTION = $null
+            T11_PROVISIONING_COMPLETE = $null; T12_SHUTDOWN = $null
+            T13_ARTIFACT_EXPORT_COMPLETE = $null
+        }
+        artifact = $null
+        artifact_sha256 = $null
+        artifact_size_bytes = $null
+        vagrant_smoke = [ordered]@{
+            box_add = 'NOT_EXECUTED'; boot = 'NOT_EXECUTED'; ssh = 'NOT_EXECUTED'
+            rocky_version = 'NOT_EXECUTED'; expected_arch = 'NOT_EXECUTED'
+            expected_cpu = 'NOT_EXECUTED'; expected_memory = 'NOT_EXECUTED'
+            expected_disk = 'NOT_EXECUTED'; xfs = 'NOT_EXECUTED'
+            lvm_absent = 'NOT_EXECUTED'; swap_absent = 'NOT_EXECUTED'
+            rpm_profile = 'NOT_EXECUTED'; kernel = 'NOT_EXECUTED'
+            systemd = 'NOT_EXECUTED'; network = 'NOT_EXECUTED'
+            fundamental_tools = 'NOT_EXECUTED'; rke2_prerequisites = 'NOT_EXECUTED'
+            security = 'NOT_EXECUTED'
+        }
+        ssh_smoke = $null
+        observations = [ordered]@{}
+        supply_chain = $null
+        local_services = [ordered]@{
+            status = 'NOT_EXECUTED'; controller = 'NOT_EXECUTED'; gitea = 'NOT_EXECUTED'
+            harbor = 'NOT_EXECUTED'; backend_logs = [ordered]@{}
+            campaign_id = $null; evidence_sha256 = $null
+            cleanup = 'NOT_EXECUTED'
+        }
+        cleanup = 'NOT_EXECUTED'
+        qualification_key_cleanup = 'NOT_EXECUTED'
+        bootsequence_return_normal = 'NOT_EXECUTED'
+        native_task_removed = 'NOT_EXECUTED'
+        runtime_capture = [ordered]@{
+            systeminfo_sha256 = $null; bcd_current_sha256 = $null
+            transcript = $null; transcript_sha256 = $null
+        }
+        started_at = Get-UtcTimestamp
+        completed_at = $null
+        error = $null
+    }
+    $vbox = [string]$prepared.tools.virtualbox.executable
+    $packer = [string]$prepared.tools.packer.executable
+    $vagrant = [string]$prepared.tools.vagrant.executable
+    $ownedBuildVm = 'ecommerce-rocky-10-2-build-rke2'
+    $initialBuildMachines = @{}
+    $smokeRoot = $null
+    $smokeEnvironment = @{}
+    $smokeInitialMachines = @{}
+    $smokeVmName = $null
+    $smokeBoxName = $null
+    $cleanupFailed = $false
+    $transcriptStarted = $false
+    $packerEnvironment = @{}
+    try {
+        if (
+            $ExpectedSourceSha -notmatch '^[0-9a-f]{40}$' -or
+            $ExpectedSourceTree -notmatch '^[0-9a-f]{40}$' -or
+            $ExpectedManifestSha256 -notmatch '^[0-9a-f]{64}$'
+        ) {
+            throw 'Native scheduled task has invalid expected source bindings'
+        }
+        $expectedNormal = Assert-Guid -Value $ExpectedNormalBootId
+        $expectedNative = Assert-Guid -Value $ExpectedNativeBootId -Forbidden $expectedNormal
+        if (
+            $sourceSha -ne $ExpectedSourceSha -or $sourceTree -ne $ExpectedSourceTree -or
+            [string]$prepared.staging_manifest_sha256 -ne $ExpectedManifestSha256 -or
+            [string]$prepared.normal_boot_id -ne $expectedNormal -or
+            [string]$prepared.native_boot_id -ne $expectedNative
+        ) {
+            throw 'Native staged metadata differs from the scheduled exact-source bindings'
+        }
+        $startupState = Read-JsonFile (Get-NativeStatePath -SourceSha $sourceSha)
+        if ($startupState.phase -ne 'NATIVE_BOOT_PENDING' -or $startupState.native_boot_id -ne $expectedNative -or
+            $startupState.normal_boot_id -ne $expectedNormal -or $startupState.staging_manifest_sha256 -ne $ExpectedManifestSha256) {
+            throw 'Native startup state is not bound to this boot and exact staging manifest'
+        }
+        if (Test-Path -LiteralPath $attemptPath) {
+            throw 'FAIL_ALREADY_ATTEMPTED: MAX_NATIVE_BOOT_ATTEMPTS=1'
+        }
+        Write-Utf8Json -InputObject ([ordered]@{ source_git_sha = $sourceSha; attempt = 1; started_at = Get-UtcTimestamp }) -Path $attemptPath
+        Move-NativePhase -SourceSha $sourceSha -Expected 'NATIVE_BOOT_PENDING' -Next 'NATIVE_BOOTED'
+        if (-not (Test-StagingManifest -Root $preparedStage)) { throw 'Native staging integrity verification failed before build' }
+        $packerEnvironment = Get-StagedPackerEnvironment -Stage $preparedStage
+        if ((Get-FileSha256 -Path (Join-Path $preparedStage 'SHA256SUMS')) -ne [string]$prepared.staging_manifest_sha256) {
+            throw 'Native staging manifest digest differs from preparation evidence'
+        }
+        if (
+            [string]$prepared.native_controller_payload_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            (Get-FileSha256 -Path (Join-Path $preparedStage 'controller\payload.json')) -ne [string]$prepared.native_controller_payload_sha256
+        ) { throw 'Native controller payload manifest differs from prepared exact-SHA evidence' }
+        foreach ($keyBinding in @(
+            [pscustomobject]@{ Name = 'qualification-key'; Digest = [string]$prepared.qualification_private_key_sha256 },
+            [pscustomobject]@{ Name = 'qualification-key.pub'; Digest = [string]$prepared.qualification_public_key_sha256 }
+        )) {
+            $keyPath = Join-Path $preparedStage $keyBinding.Name
+            if ($keyBinding.Digest -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $keyPath) -ne $keyBinding.Digest) {
+                throw "Ephemeral qualification key binding failed: $($keyBinding.Name)"
+            }
+        }
+        $transcriptPath = Join-Path $preparedStage 'logs\native-qualification-transcript.txt'
+        [void](Start-Transcript -LiteralPath $transcriptPath -Force)
+        $transcriptStarted = $true
+        $result.runtime_capture.transcript = $transcriptPath
+        $currentBootId = Get-CurrentWindowsLoaderId
+        if ($currentBootId -ne [string]$prepared.native_boot_id) {
+            throw "Native task is running under unexpected Windows loader: $currentBootId"
+        }
+        $computer = Get-CimInstance -ClassName Win32_ComputerSystem
+        $processors = @(Get-CimInstance -ClassName Win32_Processor)
+        if ($computer.HypervisorPresent) { throw 'Microsoft hypervisor remains active in the native boot' }
+        if ($processors.Count -eq 0 -or @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -gt 0) {
+            throw 'Firmware virtualization is unavailable in the native boot'
+        }
+        $systemInfo = Invoke-BoundedProcess -FilePath (Join-Path $env:SystemRoot 'System32\systeminfo.exe') -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+        Assert-ProcessSuccess -Result $systemInfo -Operation 'native boot systeminfo capture'
+        $systemInfoPath = Join-Path $preparedStage 'logs\systeminfo.txt'
+        [IO.File]::WriteAllText($systemInfoPath, $systemInfo.StdOut, (New-Object Text.UTF8Encoding($false)))
+        $result.runtime_capture.systeminfo_sha256 = Get-FileSha256 -Path $systemInfoPath
+        $bcdCurrent = Invoke-BcdEdit -Arguments @('/enum', '{current}', '/v')
+        $bcdCurrentPath = Join-Path $preparedStage 'logs\bcd-current.txt'
+        [IO.File]::WriteAllText($bcdCurrentPath, ($bcdCurrent.StdOut + $bcdCurrent.StdErr), (New-Object Text.UTF8Encoding($false)))
+        $result.runtime_capture.bcd_current_sha256 = Get-FileSha256 -Path $bcdCurrentPath
+        foreach ($tool in @(
+            [pscustomobject]@{ Path = $packer; Args = @('version'); Pattern = '^Packer v(?<version>[0-9]+\.[0-9]+\.[0-9]+)'; Expected = [string]$prepared.tools.packer.actual_version; Name = 'Packer' },
+            [pscustomobject]@{ Path = $vbox; Args = @('--version'); Pattern = '^(?<version>[0-9]+\.[0-9]+\.[0-9]+)r'; Expected = [string]$prepared.tools.virtualbox.actual_version; Name = 'VirtualBox' },
+            [pscustomobject]@{ Path = $vagrant; Args = @('--version'); Pattern = '^Vagrant (?<version>[0-9]+\.[0-9]+\.[0-9]+)$'; Expected = [string]$prepared.tools.vagrant.actual_version; Name = 'Vagrant' }
+        )) {
+            $versionResult = Invoke-BoundedProcess -FilePath $tool.Path -Arguments $tool.Args -TimeoutSeconds 15 -WorkingDirectory $preparedStage
+            Assert-ProcessSuccess -Result $versionResult -Operation "$($tool.Name) native version probe"
+            $versionOutput = ($versionResult.StdOut + $versionResult.StdErr).Trim()
+            if ($versionOutput -notmatch $tool.Pattern -or $Matches.version -ne $tool.Expected) {
+                throw "$($tool.Name) native version differs from prepared exact version"
+            }
+        }
+        $result.virtualbox_backend = Invoke-NativeBackendProbe -VBoxManage $vbox -PreparedStage $preparedStage -SourceSha $sourceSha
+        $result.nem_detected = $false
+        $result.native_vtx = 'PASS'
+        $result.precheck = 'PASS'
+        Assert-NativeFreeSpace -Path $preparedStage -MinimumGiB 24 -Operation 'native Packer build'
+
+        $sourceRoot = Join-Path $preparedStage 'packer'
+        $varFile = Join-Path $preparedStage 'rocky-10.2.auto.pkrvars.hcl'
+        foreach ($operation in @(
+            [pscustomobject]@{ Field = 'init'; Args = @('init', $sourceRoot); Timeout = 300; Name = 'packer init' },
+            [pscustomobject]@{ Field = 'fmt'; Args = @('fmt', '-check', $sourceRoot); Timeout = 120; Name = 'packer fmt -check' },
+            [pscustomobject]@{ Field = 'validate'; Args = @('validate', "-var-file=$varFile", $sourceRoot); Timeout = 120; Name = 'packer validate' }
+        )) {
+            $operationResult = Invoke-BoundedProcess -FilePath $packer -Arguments $operation.Args -TimeoutSeconds $operation.Timeout -WorkingDirectory $preparedStage -Environment $packerEnvironment
+            Assert-ProcessSuccess -Result $operationResult -Operation $operation.Name
+            $result.packer[$operation.Field] = 'PASS'
+        }
+
+        $serialLog = Join-Path $preparedStage 'artifacts\virtualbox-serial.log'
+        $packerLog = Join-Path $preparedStage 'logs\packer-build.log'
+        $milestoneTokens = [ordered]@{
+            T3_KICKSTART_START = 'ECOMMERCE_MILESTONE T3_KICKSTART_START'
+            T4_NETWORK_READY = 'ECOMMERCE_MILESTONE T4_NETWORK_READY'
+            T5_RPM_INSTALLATION_START = 'ECOMMERCE_MILESTONE T5_RPM_INSTALLATION_START'
+            T6_RPM_INSTALLATION_END = 'ECOMMERCE_MILESTONE T6_RPM_INSTALLATION_END'
+            T7_FIRST_REBOOT = 'ECOMMERCE_MILESTONE T7_FIRST_REBOOT'
+            T8_INSTALLED_OS_BOOT = 'ECOMMERCE_MILESTONE T8_INSTALLED_OS_BOOT'
+            T9_SSHD_READY = 'ECOMMERCE_MILESTONE T9_SSHD_READY'
+            T10_PACKER_SSH_CONNECTION = 'ECOMMERCE_MILESTONE T10_PACKER_SSH_CONNECTION'
+            T11_PROVISIONING_COMPLETE = 'ECOMMERCE_MILESTONE T11_PROVISIONING_COMPLETE'
+            T12_SHUTDOWN = 'ECOMMERCE_MILESTONE T12_SHUTDOWN'
+        }
+        $initialBuildMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $preparedStage
+        if ($initialBuildMachines.ContainsKey($ownedBuildVm)) { throw "Owned Packer VM already exists: $ownedBuildVm" }
+        $result.milestones.T0_PACKER_START = Get-UtcTimestamp
+        $observeProgress = {
+            $observedAt = Get-UtcTimestamp
+            if ($null -eq $result.milestones.T1_VM_CREATED) {
+                try {
+                    $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $preparedStage
+                    if ($machines.ContainsKey($ownedBuildVm)) { $result.milestones.T1_VM_CREATED = $observedAt }
+                }
+                catch { }
+            }
+            try {
+                if (Test-Path -LiteralPath $serialLog -PathType Leaf) {
+                    $serialInfo = Get-Item -LiteralPath $serialLog
+                    if ($serialInfo.Length -gt 0 -and $null -eq $result.milestones.T2_ISO_BOOT) { $result.milestones.T2_ISO_BOOT = $observedAt }
+                    $serial = [IO.File]::ReadAllText($serialLog, [Text.Encoding]::UTF8)
+                    foreach ($name in $milestoneTokens.Keys) {
+                        if ($null -eq $result.milestones[$name] -and $serial.Contains($milestoneTokens[$name])) { $result.milestones[$name] = $observedAt }
+                    }
+                }
+            }
+            catch { }
+        }.GetNewClosure()
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $buildEnvironment = $packerEnvironment.Clone()
+        $buildEnvironment['PACKER_LOG'] = '1'
+        $buildEnvironment['PACKER_LOG_PATH'] = $packerLog
+        $build = Invoke-BoundedProcess -FilePath $packer -Arguments @('build', '-only=rocky-10.2-base.virtualbox-iso.base', "-var-file=$varFile", '-var=image_profile=rke2', $sourceRoot) -TimeoutSeconds 7200 -WorkingDirectory $preparedStage -Environment $buildEnvironment -OnPoll $observeProgress -PollIntervalSeconds 5
+        $stopwatch.Stop()
+        Assert-ProcessSuccess -Result $build -Operation 'native VT-x packer build'
+        $result.packer.duration_seconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+        $result.packer.build = 'PASS'
+        $artifactSource = Join-Path $preparedStage 'artifacts\rocky-10.2-rke2-virtualbox.box'
+        if (-not (Test-Path -LiteralPath $artifactSource -PathType Leaf)) { throw 'Packer produced no contracted VirtualBox box' }
+        $result.milestones.T13_ARTIFACT_EXPORT_COMPLETE = Get-UtcTimestamp
+        $missingMilestones = @($result.milestones.Keys | Where-Object { $null -eq $result.milestones[$_] })
+        if ($missingMilestones.Count -gt 0) { throw "Packer runtime milestones are incomplete: $($missingMilestones -join ', ')" }
+        $artifactSha256 = Get-FileSha256 -Path $artifactSource
+        $artifact = Join-Path $artifactRoot 'rocky-10.2-rke2-virtualbox.box'
+        $temporaryArtifact = "$artifact.$([Guid]::NewGuid().ToString('N')).tmp"
+        Copy-Item -LiteralPath $artifactSource -Destination $temporaryArtifact
+        if ((Get-FileSha256 -Path $temporaryArtifact) -ne $artifactSha256) { throw 'Artifact digest changed during native promotion' }
+        Move-Item -LiteralPath $temporaryArtifact -Destination $artifact -Force
+        $result.artifact = $artifact
+        $result.artifact_sha256 = $artifactSha256
+        $result.artifact_size_bytes = (Get-Item -LiteralPath $artifact).Length
+
+        $runtimeContract = Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')
+        if ($runtimeContract.resources.vcpus -ne 4 -or $runtimeContract.resources.memory_mib -ne 4096 -or $runtimeContract.resources.disk_mib -ne 32768) {
+            throw 'Generated runtime resource contract differs from the canonical reference image'
+        }
+        $smokeRoot = Join-Path $preparedStage 'smoke-run'
+        [void](New-Item -ItemType Directory -Path $smokeRoot)
+        Copy-Item -LiteralPath (Join-Path $preparedStage 'smoke\Vagrantfile') -Destination $smokeRoot
+        $smokeVmName = "ecommerce-rocky-10-2-smoke-$($artifactSha256.Substring(0, 12))"
+        $smokeBoxName = "ecommerce/rocky-10.2-rke2-$($artifactSha256.Substring(0, 12))"
+        Write-Utf8Json -InputObject ([ordered]@{
+            name = $smokeVmName; box_name = $smokeBoxName
+            vagrant_version = [string]$prepared.tools.vagrant.actual_version
+            private_key = (Join-Path $preparedStage 'qualification-key')
+            boot_timeout_seconds = 900; ssh_timeout_seconds = 60
+            cpus = [int]$runtimeContract.resources.vcpus
+            memory_mib = [int]$runtimeContract.resources.memory_mib
+            nic_type = [string]$runtimeContract.virtualbox.network_adapter
+        }) -Path (Join-Path $smokeRoot 'runtime.json')
+        $smokeEnvironment = @{
+            VAGRANT_HOME = (Join-Path $smokeRoot 'vagrant-home')
+            VAGRANT_CHECKPOINT_DISABLE = '1'; VAGRANT_DEFAULT_PROVIDER = 'virtualbox'; VAGRANT_NO_PLUGINS = '1'
+        }
+        $smokeInitialMachines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
+        if ($smokeInitialMachines.ContainsKey($smokeVmName)) { throw "Owned smoke VM already exists: $smokeVmName" }
+        Assert-NativeFreeSpace -Path $smokeRoot -MinimumGiB 16 -Operation 'Vagrant smoke import'
+        $boxAdd = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'add', '--name', $smokeBoxName, '--provider', 'virtualbox', '--checksum-type', 'sha256', '--checksum', $artifactSha256, $artifact) -TimeoutSeconds 600 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+        Assert-ProcessSuccess -Result $boxAdd -Operation 'native Vagrant box add'
+        $result.vagrant_smoke.box_add = 'PASS'
+        $sshExecutable = Resolve-WindowsTool -Name 'ssh.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'))
+        $sshEvidenceDirectory = Join-Path $preparedStage 'logs\ssh-smoke'
+        $sshSmoke = New-NativeSshSmokeEvidence -VmName $smokeVmName -User 'packer' -EvidenceDirectory $sshEvidenceDirectory
+        $result.ssh_smoke = $sshSmoke
+        $sshSmoke.vagrant_up_started_at = Get-UtcTimestamp
+        $up = $null
+        $upError = $null
+        try {
+            $up = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up', '--provider', 'virtualbox', '--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -OnPoll {
+                try {
+                    Update-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -VmName $smokeVmName -WorkingDirectory $smokeRoot -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable
+                }
+                catch { $sshSmoke.last_ssh_error = $_.Exception.Message }
+            } -PollIntervalSeconds 5
+        }
+        catch { $upError = $_.Exception.Message }
+        Complete-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -Vagrant $vagrant -VmName $smokeVmName -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable -VagrantUpResult $up
+        if ($upError) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $upError; $($sshSmoke.failure_reason)" }
+        if ($up.ExitCode -ne 0) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
+        $result.vagrant_smoke.boot = 'PASS'
+        if ($sshSmoke.failure_stage) { throw "Native Vagrant SSH failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
+        $result.vagrant_smoke.ssh = 'PASS'
+        $result.observations.rocky_version = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rocky-version' -Command 'grep -Fx ''Rocky Linux release 10.2 (Red Quartz)'' /etc/rocky-release'
+        $result.vagrant_smoke.rocky_version = 'PASS'
+        $result.observations.architecture = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'architecture' -Command 'test "$(uname -m)" = x86_64 && uname -m'
+        $result.vagrant_smoke.expected_arch = 'PASS'
+        $result.observations.cpu = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'cpu' -Command 'test "$(getconf _NPROCESSORS_ONLN)" -eq 4 && getconf _NPROCESSORS_ONLN'
+        $result.vagrant_smoke.expected_cpu = 'PASS'
+        $result.observations.memory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'memory' -Command 'awk ''$1 == "MemTotal:" { print $2; exit !($2 >= 3500000) }'' /proc/meminfo'
+        $result.vagrant_smoke.expected_memory = 'PASS'
+        $diskBytes = [int64]$runtimeContract.resources.disk_mib * 1MB
+        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda) && test "$size" -ge {0} && printf ''%s'' "$size"' -f $diskBytes)
+        $result.vagrant_smoke.expected_disk = 'PASS'
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'xfs' -Command 'test "$(findmnt -n -o FSTYPE /)" = xfs')
+        $result.vagrant_smoke.xfs = 'PASS'
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'lvm-absent' -Command '! lsblk -n -o TYPE | grep -qx lvm')
+        $result.vagrant_smoke.lvm_absent = 'PASS'
+        [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'swap-absent' -Command 'test -z "$(swapon --noheadings --show)"')
+        $result.vagrant_smoke.swap_absent = 'PASS'
+        $packages = @($runtimeContract.rpm_profile_roots)
+        if ($packages.Count -lt 10 -or @($packages | Where-Object { $_ -notmatch '^[A-Za-z0-9+_.-]+$' }).Count -gt 0) { throw 'Runtime RPM profile roots are invalid' }
+        $result.observations.rpm_profile = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rpm-profile' -Command ("rpm -q " + ($packages -join ' '))
+        $result.vagrant_smoke.rpm_profile = 'PASS'
+        $result.observations.kernel = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'kernel' -Command 'uname -r'
+        $result.vagrant_smoke.kernel = 'PASS'
+        $result.observations.systemd = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s'' "$state"'
+        $result.vagrant_smoke.systemd = 'PASS'
+        $result.observations.network = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'network' -Command 'ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q ''^default ''; ip -4 -o addr show scope global; ip -4 route show default'
+        $result.vagrant_smoke.network = 'PASS'
+        $result.observations.fundamental_tools = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'fundamental-tools' -Command 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf ''required-tools-present'''
+        $result.vagrant_smoke.fundamental_tools = 'PASS'
+        $result.observations.rke2_prerequisites = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rke2-prerequisites' -Command 'test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf ''rke2-prerequisites-present'''
+        $result.vagrant_smoke.rke2_prerequisites = 'PASS'
+        $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml'
+        $result.vagrant_smoke.security = 'PASS'
+        $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
+        $result.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $artifactSha256 -RpmInventory $rpmInventory -RequiredPackages $packages
+        Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages $packages
+        $smokeDestroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+        Assert-ProcessSuccess -Result $smokeDestroy -Operation 'native smoke VM destroy before local services'
+        Move-NativePhase -SourceSha $sourceSha -Expected 'NATIVE_BOOTED' -Next 'CONTROLLER_START'
+        Move-NativePhase -SourceSha $sourceSha -Expected 'CONTROLLER_START' -Next 'QUALIFICATION_RUNNING'
+        Invoke-NativeLocalServices -Prepared $prepared -Result $result -Stage $preparedStage -Artifact $artifact -Vagrant $vagrant -VBoxManage $vbox
+        if ($result.local_services.status -ne 'PASS' -or $result.local_services.cleanup -ne 'PASS') {
+            throw 'Native controller, Gitea, Harbor or ORAS campaign did not complete'
+        }
+        $result.status = 'PASS'
+    }
+    catch {
+        $result.error = $_.Exception.Message
+        if ($result.error.StartsWith('BLOCKED_RUNTIME ', [StringComparison]::Ordinal)) { $result.status = 'BLOCKED_RUNTIME' }
+    }
+    finally {
+        try {
+            if ($null -ne $smokeRoot -and (Test-Path -LiteralPath $smokeRoot -PathType Container)) {
+                $destroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+                if ($destroy.ExitCode -ne 0 -and $null -ne $smokeVmName) { [void](Remove-OwnedVirtualMachine -Name $smokeVmName -InitialMachines $smokeInitialMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot) }
+                if ($null -ne $smokeBoxName) {
+                    $boxRemove = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'remove', '--force', $smokeBoxName) -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
+                    if ($boxRemove.ExitCode -ne 0 -and $result.vagrant_smoke.box_add -eq 'PASS') { throw 'Native Vagrant box cleanup failed' }
+                }
+            }
+            if ($initialBuildMachines.Count -gt 0 -or (Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $preparedStage).ContainsKey($ownedBuildVm)) {
+                [void](Remove-OwnedVirtualMachine -Name $ownedBuildVm -InitialMachines $initialBuildMachines -VBoxManage $vbox -WorkingDirectory $preparedStage)
+            }
+            $result.cleanup = 'PASS'
+        }
+        catch {
+            $cleanupFailed = $true; $result.cleanup = 'FAIL'
+            if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+        }
+        try {
+            foreach ($key in @('qualification-key', 'qualification-key.pub')) {
+                $keyPath = Join-Path $preparedStage $key
+                if (Test-Path -LiteralPath $keyPath -PathType Leaf) { Remove-Item -LiteralPath $keyPath -Force }
+            }
+            $result.qualification_key_cleanup = 'PASS'
+        }
+        catch {
+            $cleanupFailed = $true; $result.qualification_key_cleanup = 'FAIL'
+            if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+        }
+        try { Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id); $result.bootsequence_return_normal = 'PASS' } catch {
+            $result.bootsequence_return_normal = 'FAIL'; if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+        }
+        try { Remove-NativeTask; $result.native_task_removed = 'PASS' } catch {
+            $result.native_task_removed = 'FAIL'; if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+        }
+        if ($cleanupFailed -or $result.cleanup -ne 'PASS' -or $result.qualification_key_cleanup -ne 'PASS' -or $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS') {
+            $result.status = 'FAIL'
+        }
+        if ($transcriptStarted) {
+            try {
+                [void](Stop-Transcript)
+                $transcriptStarted = $false
+                $result.runtime_capture.transcript_sha256 = Get-FileSha256 -Path ([string]$result.runtime_capture.transcript)
+            }
+            catch {
+                $result.status = 'FAIL'
+                if ($null -eq $result.error) { $result.error = "Native transcript flush failed: $($_.Exception.Message)" }
+            }
+        }
+        $result.completed_at = Get-UtcTimestamp
+        try {
+            $startupState = Read-JsonFile (Get-NativeStatePath -SourceSha $sourceSha)
+            if ($result.status -eq 'PASS' -and $startupState.phase -eq 'QUALIFICATION_RUNNING') {
+                Move-NativePhase -SourceSha $sourceSha -Expected 'QUALIFICATION_RUNNING' -Next 'QUALIFICATION_COMPLETE'
+                Move-NativePhase -SourceSha $sourceSha -Expected 'QUALIFICATION_COMPLETE' -Next 'RESTORE_PENDING'
+            }
+            elseif ($startupState.phase -notin @('FAILED','COMPLETE')) {
+                Move-NativePhase -SourceSha $sourceSha -Expected ([string]$startupState.phase) -Next 'FAILED'
+            }
+        }
+        catch {
+            $result.status = 'FAIL'
+            if ($null -eq $result.error) { $result.error = "Native state checkpoint failed: $($_.Exception.Message)" }
+        }
+        try { Write-Utf8Json -InputObject $result -Path $resultPath }
+        finally { Restart-Computer -Force }
+    }
+}
+
+function Invoke-Import {
+    if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
+        throw 'Import requires valid WSL distribution and repository paths'
+    }
+    $wslKernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $wslKernel -Operation 'post-reboot WSL2 kernel probe'
+    if ($wslKernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') {
+        throw 'Normal boot did not restore a running WSL2 kernel'
+    }
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Import repository root must be the exact WSL worktree that owns the source SHA'
+    }
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    $before = Read-JsonFile (Join-Path $script:LabRootResolved 'normal-host-state.json')
+    $after = Assert-NormalHostRestored -Before $before
+    Write-Utf8Json -InputObject $after -Path (Join-Path $script:LabRootResolved 'evidence\normal-host-restored.json')
+    Write-Utf8Json -InputObject ([ordered]@{schema=1;status='PASS';distribution=$WslDistribution;kernel=$wslKernel.StdOut.Trim();verified_at=Get-UtcTimestamp}) -Path (Join-Path $script:LabRootResolved 'evidence\wsl2-restored.json')
+    $sourceSha = [string]$prepared.source_git_sha
+    $sourceTree = [string]$prepared.source_tree_sha
+    $preparedStage = [string]$prepared.stage_root
+    $resultPath = Join-Path $script:LabRootResolved "evidence\$sourceSha\result.json"
+    $result = Read-JsonFile $resultPath
+    $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
+    if (-not $gitState.Clean -or $gitState.Head -ne $sourceSha) {
+        throw 'Native evidence import requires the clean exact staged source SHA'
+    }
+    $treeResult = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD^{tree}') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $treeResult -Operation 'Native evidence import Git tree resolution'
+    if ($treeResult.StdOut.Trim() -ne $sourceTree) { throw 'Native evidence source tree is stale' }
+    if (-not (Test-StagingManifest -Root $preparedStage)) { throw 'Native evidence staging manifest no longer verifies' }
+    $manifestSha256 = Get-FileSha256 -Path (Join-Path $preparedStage 'SHA256SUMS')
+    Assert-ResultBinding -Result $result -SourceSha $sourceSha -SourceTree $sourceTree -ManifestSha256 $manifestSha256
+    if (
+        $result.status -ne 'PASS' -or $result.virtualbox_backend -ne 'NATIVE_VTX' -or
+        $result.nem_detected -ne $false -or
+        $result.native_vtx -ne 'PASS' -or $result.precheck -ne 'PASS' -or
+        $result.packer.init -ne 'PASS' -or $result.packer.fmt -ne 'PASS' -or
+        $result.packer.validate -ne 'PASS' -or $result.packer.build -ne 'PASS' -or
+        $result.local_services.status -ne 'PASS' -or
+        $result.local_services.controller -ne 'PASS' -or
+        $result.local_services.gitea -ne 'GITEA_PASS' -or
+        $result.local_services.harbor -ne 'PASS' -or
+        $result.local_services.cleanup -ne 'PASS' -or
+        $result.cleanup -ne 'PASS' -or
+        $result.qualification_key_cleanup -ne 'PASS' -or
+        $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS'
+    ) {
+        throw 'Native runtime result is absent, stale or not fully PASS'
+    }
+    foreach ($field in $result.milestones.PSObject.Properties.Name) {
+        if ($null -eq $result.milestones.$field) { throw "Native runtime milestone is absent: $field" }
+    }
+    foreach ($field in $result.vagrant_smoke.PSObject.Properties.Name) {
+        if ($result.vagrant_smoke.$field -ne 'PASS') { throw "Native Vagrant smoke field is not PASS: $field" }
+    }
+    if ($null -eq $result.ssh_smoke) { throw 'Native SSH smoke evidence is absent' }
+    foreach ($field in @('vm_running','ip_ready','tcp_22_ready','ssh_auth_ready','vagrant_ready','vagrant_ssh_command')) {
+        if ($result.ssh_smoke.$field -ne 'PASS') { throw "Native SSH smoke field is not PASS: $field" }
+    }
+    if (-not $result.ssh_smoke.guest_ip -or -not $result.ssh_smoke.address -or -not $result.ssh_smoke.port) {
+        throw 'Native SSH smoke address evidence is incomplete'
+    }
+    $artifactSource = [string]$result.artifact
+    $expectedArtifactSource = Join-Path $script:LabRootResolved "artifacts\$sourceSha\rocky-10.2-rke2-virtualbox.box"
+    if ([IO.Path]::GetFullPath($artifactSource) -ne [IO.Path]::GetFullPath($expectedArtifactSource)) {
+        throw 'Native artifact path is outside the exact-source artifact location'
+    }
+    if (-not (Test-Path -LiteralPath $artifactSource -PathType Leaf)) { throw 'Native artifact is missing' }
+    $artifactSha256 = Get-FileSha256 -Path $artifactSource
+    if ($artifactSha256 -ne [string]$result.artifact_sha256) { throw 'Native artifact SHA-256 differs from runtime evidence' }
+    $runtimeContract = Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')
+    Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages @($runtimeContract.rpm_profile_roots)
+    if ((Get-Item -LiteralPath $artifactSource).Length -ne [int64]$result.artifact_size_bytes) {
+        throw 'Native artifact size differs from runtime evidence'
+    }
+    $captureFiles = [ordered]@{
+        systeminfo_sha256 = (Join-Path $preparedStage 'logs\systeminfo.txt')
+        bcd_current_sha256 = (Join-Path $preparedStage 'logs\bcd-current.txt')
+        transcript_sha256 = (Join-Path $preparedStage 'logs\native-qualification-transcript.txt')
+    }
+    if ([IO.Path]::GetFullPath([string]$result.runtime_capture.transcript) -ne [IO.Path]::GetFullPath($captureFiles.transcript_sha256)) {
+        throw 'Native transcript path differs from the governed staging path'
+    }
+    foreach ($capture in $captureFiles.GetEnumerator()) {
+        $expectedDigest = [string]$result.runtime_capture.($capture.Key)
+        if ($expectedDigest -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $capture.Value) -ne $expectedDigest) {
+            throw "Native runtime capture digest differs: $($capture.Key)"
+        }
+    }
+    foreach ($key in @('qualification-key', 'qualification-key.pub')) {
+        if (Test-Path -LiteralPath (Join-Path $preparedStage $key)) { throw 'Ephemeral qualification key remains after native runtime' }
+    }
+    foreach ($role in @('controller', 'gitea', 'harbor')) {
+        $digest = [string]$result.local_services.backend_logs.$role
+        $path = Join-Path $preparedStage "logs\local-$role-VBox.log"
+        if ($digest -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $path) -ne $digest) {
+            throw "Native local-service VirtualBox log is absent or stale: $role"
+        }
+        if ((Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $path)) -ne 'NATIVE_VTX') {
+            throw "Native local-service VirtualBox backend is not VT-x: $role"
+        }
+    }
+    $localServiceSource = Join-Path $preparedStage 'evidence\local-services-qualification.json'
+    if ([string]$result.local_services.evidence_sha256 -notmatch '^[0-9a-f]{64}$' -or (Get-FileSha256 -Path $localServiceSource) -ne [string]$result.local_services.evidence_sha256) {
+        throw 'Native local-service evidence checksum differs from the runtime result'
+    }
+    $localServiceEvidence = Read-JsonFile $localServiceSource
+    if (
+        $localServiceEvidence.status -ne 'PASS' -or
+        $localServiceEvidence.source_sha -ne $sourceSha -or
+        $localServiceEvidence.campaign_id -ne $result.local_services.campaign_id -or
+        $localServiceEvidence.gitea.status -ne 'PASS' -or
+        $localServiceEvidence.gitea.second_apply_changes -ne 0 -or
+        $localServiceEvidence.harbor.status -ne 'PASS' -or
+        $localServiceEvidence.harbor.second_apply_changes -ne 0 -or
+        $localServiceEvidence.oras.push -ne 'PASS' -or
+        $localServiceEvidence.oras.pull_by_digest -ne 'PASS' -or
+        $localServiceEvidence.oras.source_sha256 -ne $artifactSha256 -or
+        $localServiceEvidence.oras.pulled_sha256 -ne $artifactSha256
+    ) { throw 'Native Gitea, Harbor and ORAS digest evidence is absent or incomplete' }
+
+    $artifactRoot = Join-Path $root '.artifacts\packer\rocky-10.2\windows'
+    $evidenceRoot = Join-Path $root '.context\evidence\rocky-image\rocky-10.2\windows'
+    [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
+    [void](New-Item -ItemType Directory -Path $evidenceRoot -Force)
+    $artifactTarget = Join-Path $artifactRoot 'rocky-10.2-rke2-virtualbox.box'
+    $artifactTemporary = "$artifactTarget.$([Guid]::NewGuid().ToString('N')).tmp"
+    Copy-Item -LiteralPath $artifactSource -Destination $artifactTemporary
+    if ((Get-FileSha256 -Path $artifactTemporary) -ne $artifactSha256) { throw 'Artifact changed while importing native evidence' }
+    Move-Item -LiteralPath $artifactTemporary -Destination $artifactTarget -Force
+    [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS'), "$artifactSha256  rocky-10.2-rke2-virtualbox.box`n", (New-Object Text.UTF8Encoding($false)))
+    $wslRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    $wslArtifactRoot = Join-Path $wslRoot '.artifacts\packer\rocky-10.2\windows'
+    [void](New-Item -ItemType Directory -Path $wslArtifactRoot -Force)
+    $wslArtifact = Join-Path $wslArtifactRoot 'rocky-10.2-rke2-virtualbox.box'
+    if ([IO.Path]::GetFullPath($artifactTarget) -ne [IO.Path]::GetFullPath($wslArtifact)) {
+        Copy-Item -LiteralPath $artifactTarget -Destination $wslArtifact -Force
+    }
+    Copy-Item -LiteralPath (Join-Path $artifactRoot 'SHA256SUMS') -Destination (Join-Path $wslArtifactRoot 'SHA256SUMS') -Force
+    if ((Get-FileSha256 -Path $wslArtifact) -ne $artifactSha256) { throw 'Native box changed during WSL evidence import' }
+
+    $buildEvidence = [ordered]@{
+        schema = 1; image = 'rocky-10.2'; profile = 'rke2'; builder = 'packer'; hypervisor = 'virtualbox'
+        status = 'PASS'; source_sha = $sourceSha; source_tree = $sourceTree; source_clean = $true
+        artifact = 'rocky-10.2-rke2-virtualbox.box'; sha256 = $artifactSha256
+        packer_version = [string]$prepared.tools.packer.actual_version
+        virtualbox_version = [string]$prepared.tools.virtualbox.actual_version
+        vagrant_version = [string]$prepared.tools.vagrant.actual_version
+        virtualbox_backend = 'NATIVE_VTX'; preflight = 'PASS'
+        packer_init = [string]$result.packer.init; packer_fmt = [string]$result.packer.fmt
+        packer_validate = [string]$result.packer.validate; packer_build = [string]$result.packer.build
+        checksum = 'PASS'; cleanup = 'PASS'; qualification_key = 'REMOVED_AFTER_QUALIFICATION'
+        resources = (Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')).resources
+        storage = (Read-JsonFile (Join-Path $preparedStage 'runtime-contract.json')).storage
+        milestones = $result.milestones; started_at = $result.started_at; completed_at = $result.completed_at; error = $null
+    }
+    $qualificationEvidence = [ordered]@{
+        schema = 1; image = 'rocky-10.2'; artifact = 'rocky-10.2-rke2-virtualbox.box'
+        artifact_sha256 = $artifactSha256; source_sha = $sourceSha; status = 'PASS'
+        qualification = [ordered]@{
+            preflight = 'PASS'; checksum = 'PASS'; box_add = 'PASS'; boot = 'PASS'; ssh = 'PASS'
+            rocky_release = 'PASS'; kernel = 'PASS'; architecture_cpu = 'PASS'; systemd = 'PASS'
+            disk = 'PASS'; network = 'PASS'; fundamental_tools = 'PASS'; rke2_prerequisites = 'PASS'
+            security = 'PASS'; cleanup = 'PASS'; key_cleanup = 'PASS'
+            expected_memory = 'PASS'; root_filesystem_xfs = 'PASS'; lvm_absent = 'PASS'
+            swap_absent = 'PASS'; rpm_profile = 'PASS'
+        }
+        observations = $result.observations; supply_chain = $result.supply_chain; started_at = $result.started_at; completed_at = $result.completed_at; error = $null
+    }
+    $releaseEvidence = [ordered]@{
+        schema = 1; image = 'rocky-10.2'; artifact = 'rocky-10.2-rke2-virtualbox.box'
+        artifact_sha256 = $artifactSha256; source_sha = $sourceSha; status = 'PASS'
+        remote_publication = 'NOT_PERFORMED'
+        checks = [ordered]@{
+            preflight = 'PASS'; exact_source_sha = 'PASS'; clean_source = 'PASS'
+            build_evidence = 'PASS'; checksum = 'PASS'; qualification_evidence = 'PASS'
+            cleanup = 'PASS'; ephemeral_key_absent = 'PASS'; sbom = 'PASS'; package_manifest = 'PASS'; profile_inventory = 'PASS'
+        }
+        completed_at = Get-UtcTimestamp; error = $null
+    }
+    $preflightEvidence = [ordered]@{
+        schema = 1; check = 'windows-packer-native-vtx-preflight'; status = 'PASS'
+        source_sha = $sourceSha; virtualbox_backend = 'NATIVE_VTX'; tools = $prepared.tools
+        completed_at = $result.completed_at; error = $null
+    }
+    Write-Utf8Json -InputObject $preflightEvidence -Path (Join-Path $evidenceRoot 'preflight.json')
+    Write-Utf8Json -InputObject $buildEvidence -Path (Join-Path $evidenceRoot 'build.json')
+    Write-Utf8Json -InputObject $qualificationEvidence -Path (Join-Path $evidenceRoot 'qualification.json')
+    Write-Utf8Json -InputObject $releaseEvidence -Path (Join-Path $evidenceRoot 'release.json')
+    Copy-Item -LiteralPath $resultPath -Destination (Join-Path $evidenceRoot 'native-result.json') -Force
+    $localServiceTarget = Join-Path $root '.context\evidence\local-services-vm\qualification.json'
+    [void](New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($localServiceTarget)) -Force)
+    Copy-Item -LiteralPath $localServiceSource -Destination $localServiceTarget -Force
+    $wslEvidence = Join-Path $wslRoot '.context\evidence\local-services-vm\qualification.json'
+    [void](New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($wslEvidence)) -Force)
+    Copy-Item -LiteralPath $localServiceSource -Destination $wslEvidence -Force
+    if ((Get-FileSha256 -Path $wslEvidence) -ne (Get-FileSha256 -Path $localServiceSource)) {
+        throw 'Native service evidence changed during WSL import'
+    }
+    $wslImageEvidence = Join-Path $wslRoot '.context\evidence\rocky-image\rocky-10.2\windows'
+    [void](New-Item -ItemType Directory -Path $wslImageEvidence -Force)
+    foreach ($name in @('preflight.json','build.json','qualification.json','release.json','native-result.json')) {
+        Copy-Item -LiteralPath (Join-Path $evidenceRoot $name) -Destination (Join-Path $wslImageEvidence $name) -Force
+    }
+    $nativeId = Assert-Guid -Value ([string]$prepared.native_boot_id) -Forbidden ([string]$prepared.normal_boot_id)
+    if ((Get-CurrentWindowsLoaderId) -ne [string]$prepared.normal_boot_id) {
+        throw 'Native BCD loader cleanup requires the original normal Windows loader'
+    }
+    $ownedNative = @(Find-NativeWindowsLoaderIds)
+    if ($ownedNative.Count -gt 1 -or ($ownedNative.Count -eq 1 -and $ownedNative[0] -ne $nativeId)) {
+        throw 'Native BCD loader cleanup found an ambiguous or foreign loader'
+    }
+    if ($ownedNative.Count -eq 1) { [void](Invoke-BcdEdit -Arguments @('/delete', $nativeId, '/f')) }
+    if (@(Find-NativeWindowsLoaderIds).Count -ne 0) { throw 'Owned native BCD loader remains after import' }
+    Remove-NormalResumeTask
+    Remove-NativeWatchdogTask
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema = 1; status = 'PASS'; source_git_sha = $sourceSha; source_tree_sha = $sourceTree
+        staging_manifest_sha256 = $manifestSha256; artifact_sha256 = $artifactSha256
+        virtualbox_backend = 'NATIVE_VTX'; wsl2_restored = 'PASS'; bcd_restored = 'PASS'
+        imported_at = Get-UtcTimestamp
+    }) -Path (Join-Path $evidenceRoot 'native-import.json')
+    Copy-Item -LiteralPath (Join-Path $evidenceRoot 'native-import.json') -Destination (Join-Path $wslImageEvidence 'native-import.json') -Force
+    [Console]::WriteLine("PASS native-vtx-import sha=$sourceSha artifact_sha256=$artifactSha256")
+}
+
+function Invoke-Prepare {
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
+        throw 'Prepare requires valid WSL distribution and repository paths'
+    }
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Prepare repository root must be the exact WSL worktree that owns the source SHA'
+    }
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preparation'
+    $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
+    if (-not $gitState.Clean) { throw 'Native VT-x staging requires a clean exact-SHA worktree' }
+    $treeResult = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD^{tree}') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $treeResult -Operation 'Git tree resolution'
+    $sourceSha = $gitState.Head
+    $sourceTree = $treeResult.StdOut.Trim()
+    if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
+        throw 'Prepare could not resolve full Git source identities'
+    }
+    [void](Assert-StartupDryRunProof -SourceSha $sourceSha)
+    $normalHostState = Get-NormalHostState
+    $hostStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
+    if (Test-Path -LiteralPath $hostStatePath -PathType Leaf) {
+        $previousHostState = Read-JsonFile $hostStatePath
+        if ($previousHostState.current_loader_id -ne $normalHostState.current_loader_id -or $previousHostState.current_loader_sha256 -ne $normalHostState.current_loader_sha256) {
+            throw 'Existing normal host-state checkpoint differs from current BCD loader'
+        }
+    }
+    else { Write-Utf8Json -InputObject $normalHostState -Path $hostStatePath }
+    $guestSmokePreflight = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @(
+        'scripts/validate_guest_smoke_commands.py'
+    ) -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $guestSmokePreflight -Operation 'Guest smoke command host-interpolation and shell-syntax preflight'
+
+    foreach ($directory in @('bcd', 'staging', 'evidence', 'logs', 'artifacts')) {
+        [void](New-Item -ItemType Directory -Path (Join-Path $script:LabRootResolved $directory) -Force)
+    }
+    $preparedStage = Join-Path $script:LabRootResolved "staging\$sourceSha"
+    $preparedPath = Join-Path $preparedStage '.prepared.json'
+    $manifestPath = Join-Path $preparedStage 'SHA256SUMS'
+    $reused = $false
+    $qualificationPrivateKeySha256 = $null
+    $qualificationPublicKeySha256 = $null
+    if (Test-Path -LiteralPath $preparedStage -PathType Container) {
+        if (-not (Test-Path -LiteralPath $preparedPath -PathType Leaf) -or -not (Test-StagingManifest -Root $preparedStage)) {
+            throw "Existing staging is incomplete or invalid and requires explicit cleanup: $preparedStage"
+        }
+        $prepared = Read-JsonFile $preparedPath
+        if ($prepared.source_git_sha -ne $sourceSha -or $prepared.source_tree_sha -ne $sourceTree) {
+            throw 'Existing staging source binding is stale'
+        }
+        $qualificationPrivateKeySha256 = [string]$prepared.qualification_private_key_sha256
+        $qualificationPublicKeySha256 = [string]$prepared.qualification_public_key_sha256
+        if (
+            $qualificationPrivateKeySha256 -notmatch '^[0-9a-f]{64}$' -or
+            $qualificationPublicKeySha256 -notmatch '^[0-9a-f]{64}$' -or
+            (Get-FileSha256 -Path (Join-Path $preparedStage 'qualification-key')) -ne $qualificationPrivateKeySha256 -or
+            (Get-FileSha256 -Path (Join-Path $preparedStage 'qualification-key.pub')) -ne $qualificationPublicKeySha256
+        ) {
+            throw 'Existing staging ephemeral qualification key binding is invalid'
+        }
+        $reused = $true
+    }
+    else {
+        [void](New-Item -ItemType Directory -Path $preparedStage)
+        foreach ($directory in @('packer', 'smoke', 'runner', 'artifacts', 'evidence', 'logs')) {
+            [void](New-Item -ItemType Directory -Path (Join-Path $preparedStage $directory))
+        }
+        foreach ($definition in @('rocky-10.2.pkr.hcl', 'variables.pkr.hcl')) {
+            Copy-Item -LiteralPath (Join-Path $root "platform\packer\rocky-10.2\$definition") -Destination (Join-Path $preparedStage 'packer')
+        }
+        Copy-Item -LiteralPath (Join-Path $root 'platform\packer\rocky-10.2\http') -Destination (Join-Path $preparedStage 'packer') -Recurse
+        Copy-Item -LiteralPath (Join-Path $root 'platform\vagrant\rocky-image-smoke\Vagrantfile') -Destination (Join-Path $preparedStage 'smoke\Vagrantfile')
+        Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\RockyImagePipeline.psm1') -Destination (Join-Path $preparedStage 'runner\RockyImagePipeline.psm1')
+        Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeLocalServices.ps1') -Destination (Join-Path $preparedStage 'runner\NativeLocalServices.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1') -Destination (Join-Path $preparedStage 'runner\NativeVagrantSshSmoke.ps1')
+
+        $preflightPath = Join-Path $preparedStage 'evidence\preflight-prepare.json'
+        $preflight = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+            (Join-Path $PSScriptRoot 'packer-preflight.ps1'), '-RepoRoot', $root,
+            '-WslDistribution', $WslDistribution, '-WslRepoRoot', $WslRepoRoot,
+            '-EvidencePath', $preflightPath, '-PreparationOnly'
+        ) -TimeoutSeconds 120 -WorkingDirectory $env:SystemRoot
+        Assert-ProcessSuccess -Result $preflight -Operation 'Native VT-x preparation preflight'
+        $preflightDocument = Read-JsonFile $preflightPath
+        if ($preflightDocument.status -ne 'PASS') { throw 'Preparation preflight is not PASS' }
+
+        $stageWsl = Convert-ToWslPath -WindowsPath $preparedStage -Distribution $WslDistribution -TimeoutSeconds 15
+        $materializeArguments = @(
+            'scripts/materialize_packer_rpm_repo.py',
+            '--contract', 'config/contracts/machine-image-lock.yaml',
+            '--package-lock', 'config/artifacts/rocky-10.2-base-packages.lock.json',
+            '--toolchain-lock', 'config/contracts/toolchain-lock.json',
+            '--cache', '.context/cache/packer', '--output', "$stageWsl/offline"
+        )
+        if ($Offline.IsPresent) { $materializeArguments += '--offline' }
+        $materialize = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments $materializeArguments -TimeoutSeconds 7200
+        Assert-ProcessSuccess -Result $materialize -Operation 'Native VT-x offline input materialization'
+
+        $controllerArguments = @(
+            'scripts/local_services_qualification.py', 'native-payload',
+            '--stage', "$stageWsl/controller"
+        )
+        if ($Offline.IsPresent) { $controllerArguments += '--offline' }
+        $controllerPayload = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments $controllerArguments -TimeoutSeconds 7200
+        Assert-ProcessSuccess -Result $controllerPayload -Operation 'Exact-SHA offline native controller payload'
+        $localServiceFixture = Join-Path $preparedStage 'runner\local-services'
+        [void](New-Item -ItemType Directory -Path $localServiceFixture -Force)
+        Copy-Item -LiteralPath (Join-Path $root 'platform\ansible\tests\local_services_vm\Vagrantfile') -Destination $localServiceFixture
+        Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\local-services-seed-server.ps1') -Destination $localServiceFixture
+
+        $sshKeygen = Resolve-WindowsTool -Name 'ssh-keygen.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'))
+        $privateKey = Join-Path $preparedStage 'qualification-key'
+        $keygen = Invoke-BoundedProcess -FilePath $sshKeygen -Arguments @('-q', '-t', 'ed25519', '-N', '', '-C', 'ecommerce-rocky-image-qualification', '-f', $privateKey) -TimeoutSeconds 30 -WorkingDirectory $preparedStage
+        Assert-ProcessSuccess -Result $keygen -Operation 'Native VT-x ephemeral SSH key generation'
+        $qualificationPrivateKeySha256 = Get-FileSha256 -Path $privateKey
+        $qualificationPublicKeySha256 = Get-FileSha256 -Path "$privateKey.pub"
+
+        $render = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'python3' -Arguments @(
+            'scripts/render_packer_vars.py', '--contract', 'config/contracts/machine-image-lock.yaml',
+            '--bundle', "$stageWsl/offline", '--build-public-key-file', "$stageWsl/qualification-key.pub",
+            '--build-private-key-file', "$stageWsl/qualification-key", '--artifact-dir', "$stageWsl/artifacts",
+            '--target-platform', 'windows', '--runtime-contract-output', "$stageWsl/runtime-contract.json",
+            '--output', "$stageWsl/rocky-10.2.auto.pkrvars.hcl"
+        ) -TimeoutSeconds 300
+        Assert-ProcessSuccess -Result $render -Operation 'Native VT-x variable rendering'
+
+        $packer = [string]$preflightDocument.tools.packer.executable
+        $packerEnvironment = Stage-PackerPlugins -Stage $preparedStage
+        foreach ($operation in @(
+            [pscustomobject]@{ Args = @('init', (Join-Path $preparedStage 'packer')); Timeout = 300; Name = 'packer init' },
+            [pscustomobject]@{ Args = @('fmt', '-check', (Join-Path $preparedStage 'packer')); Timeout = 120; Name = 'packer fmt -check' },
+            [pscustomobject]@{ Args = @('validate', "-var-file=$(Join-Path $preparedStage 'rocky-10.2.auto.pkrvars.hcl')", (Join-Path $preparedStage 'packer')); Timeout = 120; Name = 'packer validate' }
+        )) {
+            $result = Invoke-BoundedProcess -FilePath $packer -Arguments $operation.Args -TimeoutSeconds $operation.Timeout -WorkingDirectory $preparedStage -Environment $packerEnvironment
+            Assert-ProcessSuccess -Result $result -Operation $operation.Name
+        }
+        $manifestPath = Write-StagingManifest -Root $preparedStage
+    }
+
+    [void](Get-StagedPackerEnvironment -Stage $preparedStage)
+    if (-not (Test-StagingManifest -Root $preparedStage)) { throw 'Staging SHA-256 verification failed' }
+    $manifestSha256 = Get-FileSha256 -Path $manifestPath
+    Invoke-S4UProbeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -SourceSha $sourceSha -Repository $root -Distribution $WslDistribution -LinuxRepository $WslRepoRoot
+    Invoke-SystemRuntimeProbeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -Stage $preparedStage -SourceSha $sourceSha -ManifestSha256 $manifestSha256
+    $normalBootId = Get-CurrentWindowsLoaderId
+    Initialize-NativeState -SourceSha $sourceSha -SourceTree $sourceTree -ManifestSha256 $manifestSha256 -NormalBootId $normalBootId
+    $nativeBootId = $null
+    try {
+    $backupPath = Join-Path $script:LabRootResolved "bcd\bcd-$sourceSha.bak"
+    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+        [void](Invoke-BcdEdit -Arguments @('/export', $backupPath))
+    }
+    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or (Get-Item -LiteralPath $backupPath).Length -lt 1024) {
+        throw 'BCD backup is absent or unexpectedly small'
+    }
+    $backupSha256 = Get-FileSha256 -Path $backupPath
+
+    $nativeIds = @(Find-NativeWindowsLoaderIds)
+    if ($nativeIds.Count -gt 1) { throw 'Multiple canonical native VirtualBox BCD entries exist; explicit cleanup is required' }
+    if ($nativeIds.Count -eq 0) {
+        $copy = Invoke-BcdEdit -Arguments @('/copy', $normalBootId, '/d', $NativeEntryName)
+        $match = [regex]::Match(($copy.StdOut + "`n" + $copy.StdErr), '\{[0-9a-fA-F-]{36}\}')
+        if (-not $match.Success) { throw 'Cannot parse the native BCD identifier returned by bcdedit /copy' }
+        $nativeBootId = Assert-Guid -Value $match.Value -Forbidden $normalBootId
+    }
+    else {
+        $nativeBootId = Assert-Guid -Value $nativeIds[0] -Forbidden $normalBootId
+    }
+    [void](Invoke-BcdEdit -Arguments @('/set', $nativeBootId, 'hypervisorlaunchtype', 'off'))
+    $vsm = Invoke-BcdEdit -Arguments @('/set', $nativeBootId, 'vsmlaunchtype', 'off') -AllowFailure
+    $vsmStatus = if ($vsm.ExitCode -eq 0) { 'PASS' } else { 'UNSUPPORTED' }
+
+    $prepared = [ordered]@{
+        schema = 1
+        status = 'PREPARED'
+        source_git_sha = $sourceSha
+        source_tree_sha = $sourceTree
+        stage_root = $preparedStage
+        staging_manifest = $manifestPath
+        staging_manifest_sha256 = $manifestSha256
+        native_controller_payload_sha256 = (Get-FileSha256 -Path (Join-Path $preparedStage 'controller\payload.json'))
+        qualification_private_key_sha256 = $qualificationPrivateKeySha256
+        qualification_public_key_sha256 = $qualificationPublicKeySha256
+        normal_boot_id = $normalBootId
+        native_boot_id = $nativeBootId
+        native_entry_name = $NativeEntryName
+        resume_user_sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        bcd_backup = $backupPath
+        bcd_backup_sha256 = $backupSha256
+        hypervisorlaunchtype = 'off'
+        vsmlaunchtype = $vsmStatus
+        scheduled_task = $NativeTaskName
+        max_native_boot_attempts = 1
+        tools = (Read-JsonFile (Join-Path $preparedStage 'evidence\preflight-prepare.json')).tools
+        prepared_at = Get-UtcTimestamp
+    }
+    Write-Utf8Json -InputObject $prepared -Path $preparedPath
+    Write-Utf8Json -InputObject $prepared -Path (Join-Path $script:LabRootResolved 'prepared.json')
+    Register-NativeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -PreparedStage $preparedStage -Root $script:LabRootResolved -SourceSha $sourceSha -SourceTree $sourceTree -ManifestSha256 $manifestSha256 -NormalBootId $normalBootId -NativeBootId $nativeBootId
+    Register-NativeWatchdogTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -Root $script:LabRootResolved -SourceSha $sourceSha
+    Register-NormalResumeTask -Runner (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1') -Root $script:LabRootResolved -Repository $root -Distribution $WslDistribution -LinuxRepository $WslRepoRoot
+    Move-NativePhase -SourceSha $sourceSha -Expected 'PREPARED' -Next 'BOOT_RESUME_ARMED' -NativeBootId $nativeBootId
+    $prepareEvidence = [ordered]@{
+        schema = 1
+        status = 'PASS'
+        source_git_sha = $sourceSha
+        source_tree_sha = $sourceTree
+        bcd_backup = 'PASS'
+        normal_boot_id_captured = 'PASS'
+        native_entry = if ($reused) { 'REUSED' } else { 'CREATED_OR_REUSED' }
+        hypervisorlaunchtype = 'PASS'
+        vsmlaunchtype = $vsmStatus
+        windows_staging = 'PASS'
+        guest_smoke_commands = 'PASS'
+        staging_integrity = 'PASS'
+        staging_manifest_sha256 = $manifestSha256
+        scheduled_task = 'PASS'
+        bootsequence_native = 'NOT_ARMED'
+        reboot_required = $true
+        completed_at = Get-UtcTimestamp
+    }
+    Write-Utf8Json -InputObject $prepareEvidence -Path (Join-Path $script:LabRootResolved "evidence\prepare-$sourceSha.json")
+    [Console]::WriteLine("PASS native-vtx-prepare sha=$sourceSha stage=$preparedStage reboot=EXPLICITLY_REQUIRED")
+    }
+    catch {
+        $failure = $_.Exception.Message
+        try { Remove-NativeTask; Remove-NativeWatchdogTask; Remove-NormalResumeTask } catch { $failure += "; task cleanup: $($_.Exception.Message)" }
+        try {
+            if ($null -ne $nativeBootId -and (Get-CurrentWindowsLoaderId) -eq $normalBootId -and
+                @(Find-NativeWindowsLoaderIds) -contains $nativeBootId) {
+                [void](Invoke-BcdEdit -Arguments @('/delete', $nativeBootId, '/f'))
+            }
+        }
+        catch { $failure += "; BCD copy cleanup: $($_.Exception.Message)" }
+        try {
+            $state = Read-JsonFile (Get-NativeStatePath -SourceSha $sourceSha)
+            if ($state.phase -in @('PREPARED','BOOT_RESUME_ARMED')) {
+                Move-NativePhase -SourceSha $sourceSha -Expected ([string]$state.phase) -Next 'FAILED'
+            }
+        }
+        catch { $failure += "; state checkpoint: $($_.Exception.Message)" }
+        throw "Native preparation failed closed: $failure"
+    }
+}
+
+function Invoke-Reboot {
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    if ($prepared.status -ne 'PREPARED' -or -not (Test-StagingManifest -Root ([string]$prepared.stage_root))) {
+        throw 'Native reboot requires verified PREPARED staging'
+    }
+    if ($prepared.max_native_boot_attempts -ne 1) { throw 'Native boot attempt contract must equal one' }
+    [void](Assert-StartupDryRunProof -SourceSha ([string]$prepared.source_git_sha))
+    Assert-S4UResumeProof -SourceSha ([string]$prepared.source_git_sha)
+    Assert-SystemRuntimeProbeProof -SourceSha ([string]$prepared.source_git_sha) -ManifestSha256 ([string]$prepared.staging_manifest_sha256)
+    $state = Read-JsonFile (Get-NativeStatePath -SourceSha ([string]$prepared.source_git_sha))
+    if ($state.phase -ne 'BOOT_RESUME_ARMED' -or $state.native_boot_id -ne $prepared.native_boot_id -or
+        $state.normal_boot_id -ne $prepared.normal_boot_id -or $state.staging_manifest_sha256 -ne $prepared.staging_manifest_sha256) {
+        throw 'Native startup state is not coherently armed for exactly one reboot'
+    }
+    $nativeTask = Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction Stop
+    $watchdogTask = Get-ScheduledTask -TaskName $WatchdogTaskName -ErrorAction Stop
+    $normalTask = Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop
+    if ((Get-TaskPrincipalSid -Task $nativeTask) -ne 'S-1-5-18' -or
+        [string]$nativeTask.Principal.LogonType -ne 'ServiceAccount' -or [string]$nativeTask.Principal.RunLevel -ne 'Highest' -or
+        [string]$nativeTask.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger' -or
+        -not ([string]$nativeTask.Actions[0].Arguments).Contains(([string]$prepared.source_git_sha)) -or
+        -not ([string]$nativeTask.Actions[0].Arguments).Contains('-Action Run')) {
+        throw 'Native SYSTEM AtStartup task is not armed'
+    }
+    if ((Get-TaskPrincipalSid -Task $watchdogTask) -ne 'S-1-5-18' -or
+        [string]$watchdogTask.Principal.LogonType -ne 'ServiceAccount' -or
+        [string]$watchdogTask.Principal.RunLevel -ne 'Highest' -or
+        [string]$watchdogTask.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger' -or
+        -not ([string]$watchdogTask.Actions[0].Arguments).Contains(([string]$prepared.source_git_sha)) -or
+        -not ([string]$watchdogTask.Actions[0].Arguments).Contains('-Action Watchdog')) {
+        throw 'Native SYSTEM AtStartup watchdog is not armed'
+    }
+    if ([string]$normalTask.Principal.LogonType -ne 'S4U' -or [string]$normalTask.Principal.RunLevel -ne 'Highest' -or
+        [string]$normalTask.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskBootTrigger' -or
+        -not ([string]$normalTask.Actions[0].Arguments).Contains('-Action Resume')) {
+        throw 'Normal-boot S4U AtStartup task is not armed'
+    }
+    $normalPrincipal = Get-TaskPrincipalSid -Task $normalTask
+    if ($normalPrincipal -ne [string]$prepared.resume_user_sid) { throw 'Normal-boot S4U task is bound to another user' }
+    Assert-NativeFreeSpace -Path ([string]$prepared.stage_root) -MinimumGiB 24 -Operation 'native cycle reboot'
+    Move-NativePhase -SourceSha ([string]$prepared.source_git_sha) -Expected 'BOOT_RESUME_ARMED' -Next 'NATIVE_BOOT_PENDING'
+    try {
+        Set-OneShotBootSequence -BootId ([string]$prepared.native_boot_id)
+        [Console]::WriteLine("PASS native-vtx-reboot-authorized next=$($prepared.native_boot_id)")
+        Restart-Computer -Force
+    }
+    catch {
+        $failure = $_.Exception.Message
+        Move-NativePhase -SourceSha ([string]$prepared.source_git_sha) -Expected 'NATIVE_BOOT_PENDING' -Next 'FAILED'
+        try { Invoke-Recover }
+        catch { $failure += "; normal boot recovery: $($_.Exception.Message)" }
+        throw "Native reboot failed closed: $failure"
+    }
+}
+
+function Invoke-Recover {
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    $normalId = Assert-Guid -Value ([string]$prepared.normal_boot_id)
+    $nativeId = Assert-Guid -Value ([string]$prepared.native_boot_id) -Forbidden $normalId
+    Set-OneShotBootSequence -BootId $normalId
+    Remove-NativeTask
+    Remove-NativeWatchdogTask
+    Remove-NormalResumeTask
+    $current = Get-CurrentWindowsLoaderId
+    $nativeRemoved = $false
+    if ($current -eq $normalId) {
+        $owned = @(Find-NativeWindowsLoaderIds)
+        if ($owned.Count -gt 1 -or ($owned.Count -eq 1 -and $owned[0] -ne $nativeId)) {
+            throw 'Recovery found a different or ambiguous native BCD loader'
+        }
+        if ($owned.Count -eq 1) { [void](Invoke-BcdEdit -Arguments @('/delete', $nativeId, '/f')) }
+        $nativeRemoved = $true
+        $before = Read-JsonFile (Join-Path $script:LabRootResolved 'normal-host-state.json')
+        [void](Assert-NormalHostRestored -Before $before)
+    }
+    elseif ($current -ne $nativeId) { throw 'Recovery is outside the owned normal/native Windows loaders' }
+    $evidence = [ordered]@{
+        schema = 1
+        status = if ($nativeRemoved) { 'PASS' } else { 'PENDING_NORMAL_BOOT'
+        }
+        next_boot = $normalId
+        scheduled_task_removed = $true
+        native_entry_removed = $nativeRemoved
+        completed_at = Get-UtcTimestamp
+    }
+    Write-Utf8Json -InputObject $evidence -Path (Join-Path $script:LabRootResolved 'evidence\recovery.json')
+    [Console]::WriteLine("PASS native-vtx-recover normal boot armed; native entry removed=$nativeRemoved")
+}
+
+function Invoke-CyclePreflight {
+    if ($WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or -not $WslRepoRoot.StartsWith('/')) {
+        throw 'Native cycle preflight requires valid WSL distribution and repository paths'
+    }
+    $root = Get-RepositoryRoot -RequestedRoot $RepoRoot
+    $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
+    if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
+        throw 'Native cycle preflight must target the exact WSL source worktree'
+    }
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preflight'
+    Assert-LocalHostOnlyNetwork
+    $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))
+    $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $env:SystemRoot
+    if ($machines.Count -ne 0) { throw 'Native cycle preflight requires no registered VirtualBox VM' }
+    $hostState = Get-NormalHostState
+    if (-not $hostState.hypervisor_present) { throw 'Native cycle must start from the WSL2 normal boot with its Microsoft hypervisor present' }
+    if ($null -ne (Get-ScheduledTask -TaskName $NativeTaskName -ErrorAction SilentlyContinue) -or
+        $null -ne (Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction SilentlyContinue)) {
+        throw 'A previous native qualification scheduled task still exists'
+    }
+    $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
+    if (-not $gitState.Clean -or $gitState.Head -notmatch '^[0-9a-f]{40}$') {
+        throw 'Native cycle preflight requires a clean exact-SHA source worktree'
+    }
+    $upstream = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse','@{upstream}') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $upstream -Operation 'published native source SHA'
+    if ($upstream.StdOut.Trim() -ne $gitState.Head) { throw 'Native cycle source SHA is not published upstream' }
+    $kernel = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 60
+    Assert-ProcessSuccess -Result $kernel -Operation 'normal-boot WSL2 kernel probe'
+    if ($kernel.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'Normal-boot WSL2 kernel is unavailable' }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1; status='PASS'; source_sha=$gitState.Head; administrator=$true
+        normal_loader_id=$hostState.current_loader_id; hypervisorlaunchtype=$hostState.hypervisorlaunchtype
+        hypervisor_present=$hostState.hypervisor_present; wsl_kernel=$kernel.StdOut.Trim()
+        registered_virtualbox_vms=0; host_only_network='PASS'; completed_at=Get-UtcTimestamp
+    }) -Path (Join-Path $script:LabRootResolved 'evidence\cycle-preflight.json')
+    [Console]::WriteLine("PASS native-vtx-cycle-preflight sha=$($gitState.Head) normal_loader=$($hostState.current_loader_id)")
+}
+
+function Invoke-Resume {
+    $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+    if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne [string]$prepared.resume_user_sid) {
+        throw 'Normal-boot resume requires the bound passwordless S4U administrator'
+    }
+    $current = Get-CurrentWindowsLoaderId
+    if ($current -eq [string]$prepared.native_boot_id) {
+        [Console]::WriteLine('PASS native-vtx-resume deferred until normal Windows boot')
+        return
+    }
+    if ($current -ne [string]$prepared.normal_boot_id) { throw 'Resume is outside the original Windows loader' }
+    $sourceSha = [string]$prepared.source_git_sha
+    $startupState = Read-JsonFile (Get-NativeStatePath -SourceSha $sourceSha)
+    if ($startupState.source_sha -ne $sourceSha -or $startupState.native_boot_id -ne $prepared.native_boot_id -or
+        $startupState.normal_boot_id -ne $prepared.normal_boot_id -or
+        $startupState.phase -notin @('NATIVE_BOOT_PENDING','NATIVE_BOOTED','CONTROLLER_START','QUALIFICATION_RUNNING','RESTORE_PENDING','FAILED')) {
+        throw 'Normal-boot startup state is inconsistent; refusing a new qualification'
+    }
+    $resultPath = Join-Path $script:LabRootResolved "evidence\$($prepared.source_git_sha)\result.json"
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        if ($startupState.phase -ne 'FAILED') { Move-NativePhase -SourceSha $sourceSha -Expected ([string]$startupState.phase) -Next 'FAILED' }
+        Invoke-Recover
+        throw 'Native runtime result is absent; original boot state was restored'
+    }
+    $nativeResult = Read-JsonFile $resultPath
+    if ($nativeResult.status -ne 'PASS') {
+        if ($startupState.phase -ne 'FAILED') { Move-NativePhase -SourceSha $sourceSha -Expected ([string]$startupState.phase) -Next 'FAILED' }
+        Invoke-Recover
+        throw "Native runtime failed and original BCD state was restored: $($nativeResult.error)"
+    }
+    if ($startupState.phase -ne 'RESTORE_PENDING') {
+        if ($startupState.phase -ne 'FAILED') { Move-NativePhase -SourceSha $sourceSha -Expected ([string]$startupState.phase) -Next 'FAILED' }
+        Invoke-Recover
+        throw 'PASS runtime result conflicts with startup state; original boot state was restored'
+    }
+    try {
+        $wslReady = $false
+        $wslFailure = ''
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                $wslWake = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'uname' -Arguments @('-r') -TimeoutSeconds 90
+                Assert-ProcessSuccess -Result $wslWake -Operation 'S4U normal-boot WSL2 startup'
+                if ($wslWake.StdOut.Trim() -notmatch '(?i)microsoft.*wsl2') { throw 'S4U normal boot did not start WSL2' }
+                $wslReady = $true
+                break
+            }
+            catch {
+                $wslFailure = $_.Exception.Message
+                if ($attempt -lt 3) { Start-Sleep -Seconds 10 }
+            }
+        }
+        if (-not $wslReady) { throw "S4U WSL2 startup failed after three bounded attempts: $wslFailure" }
+        Invoke-Import
+        Move-NativePhase -SourceSha $sourceSha -Expected 'RESTORE_PENDING' -Next 'RESTORED'
+        Move-NativePhase -SourceSha $sourceSha -Expected 'RESTORED' -Next 'COMPLETE'
+    }
+    catch {
+        $failure = $_.Exception.Message
+        $stateAfter = Read-JsonFile (Get-NativeStatePath -SourceSha $sourceSha)
+        if ($stateAfter.phase -notin @('FAILED','COMPLETE')) {
+            Move-NativePhase -SourceSha $sourceSha -Expected ([string]$stateAfter.phase) -Next 'FAILED'
+        }
+        try { Invoke-Recover } catch { $failure += "; recovery: $($_.Exception.Message)" }
+        throw "Normal-boot import failed closed: $failure"
+    }
+}
+
+function Invoke-SelfTest {
+    $normal = '{11111111-1111-1111-1111-111111111111}'
+    $native = '{22222222-2222-2222-2222-222222222222}'
+    $fixture = @"
+Windows Boot Loader
+-------------------
+identifier              $normal
+path                    \Windows\system32\winload.efi
+description             Windows 11
+
+Chargeur de démarrage Windows
+-----------------------------
+identificateur          $native
+path                    \Windows\system32\winload.efi
+description             $NativeEntryName
+"@
+    $entries = @(Get-BcdEntries -Text $fixture)
+    if ($entries.Count -ne 2 -or $entries[1].Id -ne $native) { throw 'BCD GUID parsing self-test failed' }
+    if ((Get-HypervisorLaunchType -BcdText $entries[0].Text) -ne 'DEFAULT_ABSENT') { throw 'Absent normal hypervisorlaunchtype must remain absent' }
+    if ((Get-HypervisorLaunchType -BcdText ($entries[1].Text + "`nhypervisorlaunchtype    off")) -ne 'off') { throw 'Native off hypervisorlaunchtype parser failed' }
+    try { [void](Assert-Guid -Value '{bootmgr}'); throw 'bootmgr rejection self-test failed' } catch { }
+    try { [void](Assert-Guid -Value $normal -Forbidden $normal); throw 'normal loader rejection self-test failed' } catch { }
+    if ((Get-VirtualBoxBackendFromLog -Text 'NEM: WHvCapabilityCodeHypervisorPresent is TRUE') -ne 'NEM') { throw 'NEM rejection parser self-test failed' }
+    if ((Get-VirtualBoxBackendFromLog -Text 'HM: HMR3Init: VT-x w/ nested paging') -ne 'NATIVE_VTX') { throw 'native VT-x parser self-test failed' }
+    $temporary = Join-Path ([IO.Path]::GetTempPath()) ("native-vtx-selftest-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -ItemType Directory -Path $temporary)
+        foreach ($name in 1..8) { [IO.File]::WriteAllText((Join-Path $temporary "$name.txt"), "value-$name", [Text.Encoding]::UTF8) }
+        $manifest = Write-StagingManifest -Root $temporary
+        if (-not (Test-StagingManifest -Root $temporary)) { throw 'staging manifest acceptance self-test failed' }
+        [IO.File]::AppendAllText((Join-Path $temporary '1.txt'), 'tampered', [Text.Encoding]::UTF8)
+        if (Test-StagingManifest -Root $temporary) { throw 'staging tamper rejection self-test failed' }
+        $heldLog = Join-Path $temporary 'held-vbox.log'
+        $writer = [IO.File]::Open($heldLog, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes('HM: HMR3Init: VT-x w/ nested paging')
+            $writer.Write($bytes, 0, $bytes.Length)
+            $writer.Flush()
+            if ((Get-VirtualBoxBackendFromLog -Text (Read-SharedUtf8Text -Path $heldLog)) -ne 'NATIVE_VTX') {
+                throw 'shared VirtualBox log read self-test failed'
+            }
+        }
+        finally { $writer.Dispose() }
+        $result = [pscustomobject]@{ source_git_sha = 'a' * 40; source_tree_sha = 'b' * 40; staging_manifest_sha256 = 'c' * 64 }
+        Assert-ResultBinding -Result $result -SourceSha ('a' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64)
+        try { Assert-ResultBinding -Result $result -SourceSha ('d' * 40) -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64); throw 'stale evidence rejection self-test failed' } catch { }
+        $spaceBlocked = $false
+        try { Assert-NativeFreeSpace -Path $temporary -MinimumGiB 1024 -Operation 'self-test' }
+        catch { $spaceBlocked = $_.Exception.Message.StartsWith('BLOCKED_RUNTIME self-test', [StringComparison]::Ordinal) }
+        if (-not $spaceBlocked) { throw 'insufficient native disk space rejection self-test failed' }
+        $previousRoot = $script:LabRootResolved
+        try {
+            $script:LabRootResolved = $temporary
+            $sha = 'a' * 40
+            Initialize-NativeState -SourceSha $sha -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64) -NormalBootId $normal
+            Move-NativePhase -SourceSha $sha -Expected 'PREPARED' -Next 'BOOT_RESUME_ARMED' -NativeBootId $native
+            foreach ($phase in $NativePhases[2..($NativePhases.Count - 2)]) {
+                $state = Read-JsonFile (Get-NativeStatePath -SourceSha $sha)
+                Move-NativePhase -SourceSha $sha -Expected ([string]$state.phase) -Next $phase
+            }
+            $complete = Read-JsonFile (Get-NativeStatePath -SourceSha $sha)
+            if ($complete.phase -ne 'COMPLETE' -or @($complete.history).Count -ne ($NativePhases.Count - 1)) {
+                throw 'Native startup state did not reach COMPLETE monotonically'
+            }
+            $rejected = $false
+            try { Move-NativePhase -SourceSha $sha -Expected 'COMPLETE' -Next 'NATIVE_BOOT_PENDING' }
+            catch { $rejected = $true }
+            if (-not $rejected) { throw 'Completed native startup state accepted a replay' }
+        }
+        finally { $script:LabRootResolved = $previousRoot }
+        Write-Utf8Json -Path (Join-Path $temporary 'runtime-contract.json') -InputObject ([ordered]@{
+            authority='config/contracts/machine-image-lock.yaml'
+            packer_plugins=[ordered]@{virtualbox='1.1.5';qemu='1.1.6';vagrant='1.1.7'}
+        })
+        foreach ($plugin in @(@('virtualbox','1.1.5'),@('qemu','1.1.6'),@('vagrant','1.1.7'))) {
+            $folder = Join-Path $temporary "packer-plugins\github.com\hashicorp\$($plugin[0])"
+            [void](New-Item -ItemType Directory -Path $folder -Force)
+            $binary = Join-Path $folder "packer-plugin-$($plugin[0])_v$($plugin[1])_x5.0_windows_amd64.exe"
+            [IO.File]::WriteAllText($binary, "fixture-$($plugin[0])", [Text.Encoding]::ASCII)
+            [IO.File]::WriteAllText("${binary}_SHA256SUM", (Get-FileSha256 -Path $binary), [Text.Encoding]::ASCII)
+        }
+        $pluginEnvironment = Get-StagedPackerEnvironment -Stage $temporary
+        if ($pluginEnvironment.PACKER_PLUGIN_PATH -ne (Join-Path $temporary 'packer-plugins')) { throw 'Staged Packer plugin path self-test failed' }
+        [IO.File]::AppendAllText((Join-Path $temporary 'packer-plugins\github.com\hashicorp\virtualbox\packer-plugin-virtualbox_v1.1.5_x5.0_windows_amd64.exe'), 'tampered')
+        $pluginTamperRejected = $false
+        try { [void](Get-StagedPackerEnvironment -Stage $temporary) }
+        catch { $pluginTamperRejected = $true }
+        if (-not $pluginTamperRejected) { throw 'Staged Packer plugin tamper was accepted' }
+        [Console]::WriteLine('PASS native-vtx-self-test BCD GUID parsing, backend, staging, plugin integrity and monotone startup state')
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
+    }
+}
+
+$script:LabRootResolved = Resolve-LabRoot -Path $LabRoot
+
+try {
+    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator)) {
+        throw 'BLOCKED_PRIVILEGE: native VT-x boot operations require an administrator PowerShell token before preparation'
+    }
+    switch ($Action) {
+        'Prepare' { Invoke-Prepare }
+        'Preflight' { Invoke-CyclePreflight }
+        'Reboot' { Invoke-Reboot }
+        'Recover' { Invoke-Recover }
+        'SelfTest' { Invoke-SelfTest }
+        'Run' { Invoke-NativeRun }
+        'Import' { Invoke-Import }
+        'Resume' { Invoke-Resume }
+        'ProbeS4U' { Invoke-S4UProbe }
+        'ProbeSystem' { Invoke-SystemRuntimeProbe }
+        'Watchdog' { Invoke-NativeWatchdog }
+        'Cycle' { Invoke-CyclePreflight; Invoke-Prepare; Invoke-Reboot }
+    }
+    exit 0
+}
+catch {
+    if ($Action -eq 'Run' -and (Test-Administrator)) {
+        [Console]::Error.WriteLine("FAIL native-vtx-run-before-guarded-finally: $($_.Exception.Message)")
+        Invoke-EmergencyNativeReturn -Failure $_.Exception.Message
+    }
+    [Console]::Error.WriteLine("FAIL native-vtx-$($Action.ToLowerInvariant()): $($_.Exception.Message)")
+    exit 1
+}

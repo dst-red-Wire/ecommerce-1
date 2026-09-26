@@ -1,0 +1,231 @@
+---
+- name: Validate local Gitea runtime inputs
+  ansible.builtin.assert:
+    that:
+      - local_gitea_version == '1.24.6'
+      - local_gitea_binary | length > 0
+      - local_gitea_binary_sha256 is match('^[0-9a-f]{64}$')
+      - local_gitea_admin_password | length >= 24
+      - local_gitea_secret_key | length >= 32
+      - local_gitea_internal_token | length >= 32
+      - local_gitea_lfs_jwt_secret | length >= 32
+      - local_gitea_repository_name is match('^qualification-[0-9a-f-]+$')
+      - local_gitea_git_public_key is match('^ssh-ed25519 [A-Za-z0-9+/]+={0,3} .+$')
+    quiet: true
+  no_log: true
+
+- name: Query exact Git runtime
+  ansible.builtin.command:
+    argv: [rpm, -q, git]
+  register: local_gitea_git_query
+  changed_when: false
+  failed_when: false
+
+- name: Stage locked Gitea RPM closure
+  ansible.builtin.copy:
+    src: "{{ local_gitea_rpm_root }}/"
+    dest: /var/tmp/ecommerce-gitea-rpms/
+    owner: root
+    group: root
+    mode: preserve
+  when: local_gitea_git_query.rc != 0
+
+- name: Stage approved Rocky RPM signing keys
+  ansible.builtin.copy:
+    src: "{{ local_gitea_rpm_keys }}/"
+    dest: /var/tmp/ecommerce-gitea-rpm-keys/
+    owner: root
+    group: root
+    mode: preserve
+  when: local_gitea_git_query.rc != 0
+
+- name: Import approved Rocky RPM signing keys
+  ansible.builtin.command:
+    argv: [rpm, --import, /var/tmp/ecommerce-gitea-rpm-keys/rocky-10-public.asc]
+  changed_when: false
+  when: local_gitea_git_query.rc != 0
+
+- name: Enumerate staged Gitea RPM closure
+  ansible.builtin.find:
+    paths: /var/tmp/ecommerce-gitea-rpms
+    patterns: '*.rpm'
+    file_type: file
+  register: local_gitea_rpm_files
+  when: local_gitea_git_query.rc != 0
+
+- name: Install Git from the locked offline closure
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['dnf', '-y', '--disablerepo=*', '--setopt=localpkg_gpgcheck=1',
+        '--setopt=install_weak_deps=False', 'install']
+        + (local_gitea_rpm_files.files | map(attribute='path') | list)
+      }}
+  when: local_gitea_git_query.rc != 0
+  changed_when: true
+
+- name: Create Gitea system group
+  ansible.builtin.group:
+    name: git
+    system: true
+
+- name: Create locked Gitea system account
+  ansible.builtin.user:
+    name: git
+    group: git
+    system: true
+    home: /var/lib/gitea
+    shell: /usr/sbin/nologin
+    password_lock: true
+    create_home: false
+
+- name: Create Gitea persistent and configuration directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: git
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /var/lib/gitea, owner: git, mode: '0750'}
+    - {path: /var/lib/gitea/data, owner: git, mode: '0750'}
+    - {path: /var/lib/gitea/log, owner: git, mode: '0750'}
+    - {path: /var/lib/gitea/repositories, owner: git, mode: '0750'}
+    - {path: /etc/gitea, owner: root, mode: '0750'}
+
+- name: Install hash-locked Gitea binary
+  ansible.builtin.copy:
+    src: "{{ local_gitea_binary }}"
+    dest: /usr/local/bin/gitea
+    owner: root
+    group: root
+    mode: '0755'
+  notify: Restart local Gitea
+
+- name: Verify installed Gitea binary checksum
+  ansible.builtin.stat:
+    path: /usr/local/bin/gitea
+    checksum_algorithm: sha256
+  register: local_gitea_binary_stat
+  failed_when: local_gitea_binary_stat.stat.checksum != local_gitea_binary_sha256
+
+- name: Verify exact Gitea runtime version
+  ansible.builtin.command:
+    argv: [/usr/local/bin/gitea, --version]
+  register: local_gitea_version_output
+  changed_when: false
+  failed_when: "'Gitea version ' + local_gitea_version + ' ' not in local_gitea_version_output.stdout"
+
+- name: Render secret-bearing Gitea configuration
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: /etc/gitea/app.ini
+    owner: root
+    group: git
+    mode: '0640'
+  no_log: true
+  notify: Restart local Gitea
+
+- name: Install hardened Gitea systemd unit
+  ansible.builtin.template:
+    src: gitea.service.j2
+    dest: /etc/systemd/system/gitea.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart local Gitea
+
+- name: Activate Gitea handlers before probing
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Gitea
+  ansible.builtin.systemd_service:
+    name: gitea
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for Gitea health
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3000/api/healthz
+    method: GET
+    status_code: 200
+    return_content: true
+  register: local_gitea_health
+  retries: 30
+  delay: 2
+  until: local_gitea_health.status == 200 and local_gitea_health.json.status == 'pass'
+
+- name: Inspect qualification administrator
+  become: true
+  become_user: git
+  ansible.builtin.command:
+    argv: [/usr/local/bin/gitea, --config, /etc/gitea/app.ini, admin, user, list, --admin]
+  register: local_gitea_admin_list
+  changed_when: false
+
+- name: Create qualification administrator
+  become: true
+  become_user: git
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/gitea
+      - --config
+      - /etc/gitea/app.ini
+      - admin
+      - user
+      - create
+      - --admin
+      - --username
+      - "{{ local_gitea_admin_username }}"
+      - --password
+      - "{{ local_gitea_admin_password }}"
+      - --email
+      - "{{ local_gitea_admin_email }}"
+      - --must-change-password=false
+  when: local_gitea_admin_username not in local_gitea_admin_list.stdout
+  changed_when: true
+  no_log: true
+
+- name: Create qualification repository
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3000/api/v1/user/repos
+    method: POST
+    force_basic_auth: true
+    url_username: "{{ local_gitea_admin_username }}"
+    url_password: "{{ local_gitea_admin_password }}"
+    body_format: json
+    body:
+      name: "{{ local_gitea_repository_name }}"
+      private: true
+      default_branch: main
+      auto_init: false
+    status_code: [201, 409]
+  register: local_gitea_repository_create
+  changed_when: local_gitea_repository_create.status == 201
+  no_log: true
+
+- name: Register ephemeral Git client public key
+  ansible.builtin.uri:
+    url: http://127.0.0.1:3000/api/v1/user/keys
+    method: POST
+    force_basic_auth: true
+    url_username: "{{ local_gitea_admin_username }}"
+    url_password: "{{ local_gitea_admin_password }}"
+    body_format: json
+    body:
+      title: "qualification-{{ local_gitea_repository_name }}"
+      key: "{{ local_gitea_git_public_key }}"
+      read_only: false
+    status_code: [201, 422]
+  register: local_gitea_git_key_create
+  changed_when: local_gitea_git_key_create.status == 201
+  no_log: true
+
+- name: Remove staged Gitea RPM inputs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/tmp/ecommerce-gitea-rpms
+    - /var/tmp/ecommerce-gitea-rpm-keys

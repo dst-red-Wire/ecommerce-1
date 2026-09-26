@@ -20,6 +20,17 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertTrue(policy["publish"]["exact_evidence_required"])
         self.assertEqual("forbidden", policy["publish"]["force_push"])
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
+        self.assertEqual(
+            {
+                "provider": "github",
+                "transport": "gh-api-rest",
+                "endpoint": "repos/{owner}/{repo}/pulls/{number}",
+                "base_sha_selector": ".base.sha",
+                "head_sha_selector": ".head.sha",
+                "subcommand_json_sha_fields": "non-authoritative",
+            },
+            policy["pull_request"]["metadata_authority"],
+        )
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
         self.assertEqual("merge", policy["merge"]["method"])
         self.assertEqual("required", policy["merge"]["match_head_commit"])
@@ -38,6 +49,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             ("publish", "force_push", "allowed"),
             ("publish", "direct_default_branch_write", "allowed"),
             ("pull_request", "head_sha_binding", "floating"),
+            ("pull_request", "metadata_authority", {}),
             ("merge", "method", "squash"),
             ("merge", "match_head_commit", "optional"),
             ("merge", "branch_protection", "optional"),
@@ -67,6 +79,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             '_delete_branch_ref("local", branch, head)',
             "remote_branch.returncode not in {0, 2}",
             "cannot prove remote branch state",
+            "github_pull_request_metadata(gh, number)",
         ):
             self.assertIn(marker, source)
         for marker in (
@@ -79,6 +92,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         ):
             self.assertNotIn(marker, source)
         self.assertIn("no checks reported", source)
+        self.assertNotIn("headRefOid", source)
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")

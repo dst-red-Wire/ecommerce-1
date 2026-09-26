@@ -525,6 +525,77 @@ tooling:
   machine_images:
     builder: packer
     contract: architecture.lock.yaml#machine_contracts.machine_image_lock
+  local_vm_image_pipeline:
+    principle: one-responsibility-one-authority
+    profiles:
+      windows:
+        developer_environment: wsl2
+        boot_modes:
+          normal: hyper-v-wsl2
+          reference_image_build: virtualbox-native-vtx-one-shot
+          reference_image_return: normal-boot-required
+        image_builder:
+          authority: packer
+          execution_environment: windows-host
+        hypervisor:
+          authority: virtualbox
+          execution_environment: windows-host
+        vm_lifecycle_and_smoke_test:
+          authority: vagrant
+          execution_environment: windows-host
+        host_orchestration:
+          authority: powershell
+          native_boot_cycle: guarded-bcd-bootsequence-and-scheduled-task
+      linux:
+        developer_environment: ubuntu-24.04-native
+        image_builder:
+          authority: packer
+          execution_environment: native-linux-host
+        hypervisor:
+          authority: qemu-kvm
+          execution_environment: native-linux-host
+        vm_lifecycle_and_smoke_test:
+          authority: qemu-kvm
+          execution_environment: native-linux-host
+        host_orchestration:
+          authority: python-repoctl
+    guest_configuration:
+      authority: ansible
+      execution_environment: developer-environment-or-exact-sha-native-virtualbox-controller
+      native_controller_contract: config/contracts/local-services-qualification.yaml#runtime.native_controller
+    build_resources:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.resources
+      projection: generated-packer-variables
+      overrides: forbidden
+    build_storage:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.storage
+      projection: generated-packer-variables-and-kickstart-template
+      overrides: forbidden
+    build_timeouts:
+      authority: config/contracts/machine-image-lock.yaml#packer_image.build.timeouts
+      projection: generated-packer-variables
+      overrides: forbidden
+    repository_entrypoint:
+      authority: make
+      execution_environment: developer-environment
+    artifact_distribution:
+      authority: oras
+      execution_environment: developer-environment
+      registry: harbor
+      push_reference: exact-source-sha-tag
+      pull_reference: sha256-digest-only
+      cache:
+        environment: ORAS_CACHE
+        synchronization: rsync
+        integrity: sha256
+    rules:
+      duplicate_authority: forbidden
+      packer_in_wsl2: forbidden
+      virtualbox_in_wsl2: forbidden
+      vagrant_in_wsl2: forbidden
+      packer_may_replace_ansible: forbidden
+      vagrant_may_provision_guest: forbidden
+      mutable_artifact_pull_reference: forbidden
   iac:
     authority: opentofu
     command: tofu
@@ -596,6 +667,7 @@ machine_contracts:
   mgmt_wireguard_access: config/contracts/mgmt-wireguard-access.yaml
   mgmt_bootstrap: config/infrastructure/mgmt-bootstrap.yaml
   kratix_platform: config/infrastructure/kratix-platform.yaml
+  local_services_qualification: config/contracts/local-services-qualification.yaml
   machine_image_lock: config/contracts/machine-image-lock.yaml
   vm_lifecycle_policy: config/contracts/vm-lifecycle-policy.yaml
   observability_topology: config/contracts/observability-topology.yaml

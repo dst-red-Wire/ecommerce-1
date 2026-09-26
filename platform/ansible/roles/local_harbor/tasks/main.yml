@@ -1,0 +1,268 @@
+---
+- name: Validate local Harbor runtime inputs
+  ansible.builtin.assert:
+    that:
+      - local_harbor_version == '2.13.2'
+      - local_harbor_archive_sha256 is match('^[0-9a-f]{64}$')
+      - local_harbor_nested_archive_sha256 is match('^[0-9a-f]{64}$')
+      - local_harbor_docker_signing_key_sha256 is match('^[0-9a-f]{64}$')
+      - local_harbor_admin_password | length >= 24
+      - local_harbor_database_password | length >= 24
+      - local_harbor_external_port | int >= 1024
+      - local_harbor_external_port | int <= 65535
+      - local_harbor_images | length == 12
+    quiet: true
+  no_log: true
+
+- name: Query exact Docker runtime
+  ansible.builtin.command:
+    argv:
+      - rpm
+      - -q
+      - docker-ce-29.8.1-1.el10
+      - docker-ce-cli-29.8.1-1.el10
+      - containerd.io-2.3.5-1.el10
+      - docker-compose-plugin-2.40.3-1.el10
+  register: local_harbor_docker_query
+  changed_when: false
+  failed_when: false
+
+- name: Create Harbor staging and persistent directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /opt/harbor, mode: '0755'}
+    - {path: "/opt/harbor/{{ local_harbor_version }}", mode: '0750'}
+    - {path: /etc/docker, mode: '0755'}
+    - {path: /etc/harbor/tls, mode: '0700'}
+    - {path: /data, mode: '0750'}
+    - {path: /var/log/harbor, mode: '0750'}
+
+- name: Create Harbor RPM staging directory only when Docker is absent
+  ansible.builtin.file:
+    path: /var/tmp/ecommerce-harbor-rpms
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  when: local_harbor_docker_query.rc != 0
+
+- name: Stage locked Docker RPM closure
+  ansible.builtin.copy:
+    src: "{{ local_harbor_docker_rpm_root }}/"
+    dest: /var/tmp/ecommerce-harbor-rpms/
+    owner: root
+    group: root
+    mode: preserve
+  when: local_harbor_docker_query.rc != 0
+
+- name: Stage Docker RPM signing key
+  ansible.builtin.copy:
+    src: "{{ local_harbor_docker_signing_key }}"
+    dest: /var/tmp/ecommerce-docker-signing-key.asc
+    owner: root
+    group: root
+    mode: '0600'
+  when: local_harbor_docker_query.rc != 0
+
+- name: Verify staged Docker RPM signing key checksum
+  ansible.builtin.stat:
+    path: /var/tmp/ecommerce-docker-signing-key.asc
+    checksum_algorithm: sha256
+  register: local_harbor_docker_key_stat
+  failed_when: local_harbor_docker_key_stat.stat.checksum != local_harbor_docker_signing_key_sha256
+  when: local_harbor_docker_query.rc != 0
+
+- name: Import Docker RPM signing key
+  ansible.builtin.command:
+    argv: [rpm, --import, /var/tmp/ecommerce-docker-signing-key.asc]
+  changed_when: false
+  when: local_harbor_docker_query.rc != 0
+
+- name: Enumerate staged Docker RPM closure
+  ansible.builtin.find:
+    paths: /var/tmp/ecommerce-harbor-rpms
+    patterns: '*.rpm'
+    file_type: file
+  register: local_harbor_rpm_files
+  when: local_harbor_docker_query.rc != 0
+
+- name: Install Docker and Compose from locked offline RPMs
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['dnf', '-y', '--disablerepo=*', '--setopt=localpkg_gpgcheck=1',
+        '--setopt=install_weak_deps=False', 'install']
+        + (local_harbor_rpm_files.files | map(attribute='path') | list)
+      }}
+  when: local_harbor_docker_query.rc != 0
+  changed_when: true
+
+- name: Configure hardened Docker daemon
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Docker for local Harbor
+
+- name: Activate Docker handler before Harbor installation
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Detect existing prepared Harbor compose project
+  ansible.builtin.stat:
+    path: "/opt/harbor/{{ local_harbor_version }}/docker-compose.yml"
+  register: local_harbor_compose
+
+- name: Stage hash-locked Harbor offline installer
+  ansible.builtin.copy:
+    src: "{{ local_harbor_archive }}"
+    dest: "/var/tmp/harbor-offline-installer-v{{ local_harbor_version }}.tgz"
+    owner: root
+    group: root
+    mode: '0600'
+  when: not local_harbor_compose.stat.exists
+
+- name: Verify staged Harbor installer checksum
+  ansible.builtin.stat:
+    path: "/var/tmp/harbor-offline-installer-v{{ local_harbor_version }}.tgz"
+    checksum_algorithm: sha256
+  register: local_harbor_archive_stat
+  failed_when: local_harbor_archive_stat.stat.checksum != local_harbor_archive_sha256
+  when: not local_harbor_compose.stat.exists
+
+- name: Extract Harbor installer exactly once
+  ansible.builtin.unarchive:
+    src: "/var/tmp/harbor-offline-installer-v{{ local_harbor_version }}.tgz"
+    dest: "/opt/harbor/{{ local_harbor_version }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "/opt/harbor/{{ local_harbor_version }}/install.sh"
+  when: not local_harbor_compose.stat.exists
+
+- name: Verify nested Harbor image archive checksum
+  ansible.builtin.stat:
+    path: "/opt/harbor/{{ local_harbor_version }}/harbor.v{{ local_harbor_version }}.tar.gz"
+    checksum_algorithm: sha256
+  register: local_harbor_nested_stat
+  failed_when: local_harbor_nested_stat.stat.checksum != local_harbor_nested_archive_sha256
+
+- name: Install runtime Harbor TLS certificate
+  ansible.builtin.copy:
+    src: "{{ local_harbor_tls_certificate }}"
+    dest: /etc/harbor/tls/harbor.crt
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Trust only the runtime Harbor certificate authority
+  ansible.builtin.copy:
+    src: "{{ local_harbor_tls_ca }}"
+    dest: /etc/pki/ca-trust/source/anchors/ecommerce-local-harbor-ca.crt
+    owner: root
+    group: root
+    mode: '0644'
+  register: local_harbor_ca
+  notify: Refresh local Harbor certificate trust
+
+- name: Activate Harbor trust handler before TLS health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Install runtime Harbor TLS private key
+  ansible.builtin.copy:
+    src: "{{ local_harbor_tls_private_key }}"
+    dest: /etc/harbor/tls/harbor.key
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Render secret-bearing Harbor configuration
+  ansible.builtin.template:
+    src: harbor.yml.j2
+    dest: "/opt/harbor/{{ local_harbor_version }}/harbor.yml"
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+
+- name: Install Harbor from its verified offline bundle
+  ansible.builtin.command:
+    argv: ["/opt/harbor/{{ local_harbor_version }}/install.sh"]
+    chdir: "/opt/harbor/{{ local_harbor_version }}"
+  when: not local_harbor_compose.stat.exists
+  changed_when: true
+  no_log: true
+
+- name: Verify all offline Harbor image IDs
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "goharbor/{{ item.name }}:v{{ local_harbor_version }}", --format, "{{ '{{.Id}}' }}"]
+  loop: "{{ local_harbor_images }}"
+  register: local_harbor_image_inspect
+  changed_when: false
+  failed_when: local_harbor_image_inspect.stdout | trim != item.offline_config_digest
+
+- name: Install Harbor lifecycle systemd unit
+  ansible.builtin.template:
+    src: harbor-local.service.j2
+    dest: /etc/systemd/system/harbor-local.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable and start Harbor lifecycle service
+  ansible.builtin.systemd_service:
+    name: harbor-local
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for Harbor health
+  ansible.builtin.uri:
+    url: https://127.0.0.2/api/v2.0/health
+    method: GET
+    validate_certs: true
+    status_code: 200
+    return_content: true
+  register: local_harbor_health
+  retries: 60
+  delay: 5
+  until: local_harbor_health.status == 200 and local_harbor_health.json.status == 'healthy'
+
+- name: Create Harbor qualification project
+  ansible.builtin.uri:
+    url: https://127.0.0.2/api/v2.0/projects
+    method: POST
+    validate_certs: true
+    force_basic_auth: true
+    url_username: admin
+    url_password: "{{ local_harbor_admin_password }}"
+    body_format: json
+    body:
+      project_name: "{{ local_harbor_project }}"
+      public: false
+      storage_limit: -1
+    status_code: [201, 409]
+  register: local_harbor_project_create
+  changed_when: local_harbor_project_create.status == 201
+  no_log: true
+
+- name: Remove staged Docker and Harbor inputs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/tmp/ecommerce-harbor-rpms
+    - /var/tmp/ecommerce-docker-signing-key.asc
+    - "/var/tmp/harbor-offline-installer-v{{ local_harbor_version }}.tgz"

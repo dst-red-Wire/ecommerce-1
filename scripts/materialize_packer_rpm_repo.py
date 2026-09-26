@@ -16,6 +16,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+COPY_BUFFER_BYTES = 1024 * 1024
+COPY_SYNC_BYTES = 64 * 1024 * 1024
 
 
 class MaterializationError(ValueError):
@@ -39,6 +41,35 @@ def _verify(path: Path, *, artifact: str, version: str, expected: str) -> None:
         )
 
 
+def _copy_file(source: Path, destination: Path) -> None:
+    """Copy across filesystems without the platform-dependent sendfile fast path."""
+    with source.open("rb") as input_stream, destination.open("wb") as output_stream:
+        copied_since_sync = 0
+        copied_total = 0
+        while chunk := input_stream.read(COPY_BUFFER_BYTES):
+            output_stream.write(chunk)
+            copied_since_sync += len(chunk)
+            copied_total += len(chunk)
+            if copied_since_sync >= COPY_SYNC_BYTES:
+                output_stream.flush()
+                os.fsync(output_stream.fileno())
+                if hasattr(os, "posix_fadvise") and hasattr(
+                    os, "POSIX_FADV_DONTNEED"
+                ):
+                    try:
+                        os.posix_fadvise(
+                            input_stream.fileno(),
+                            copied_total - copied_since_sync,
+                            copied_since_sync,
+                            os.POSIX_FADV_DONTNEED,
+                        )
+                    except OSError:
+                        pass
+                copied_since_sync = 0
+        output_stream.flush()
+        os.fsync(output_stream.fileno())
+
+
 def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) -> None:
     artifact = entry["file"]
     version = entry.get("nevra", entry.get("version", "locked"))
@@ -46,7 +77,7 @@ def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) 
     cached = cache / expected / artifact if cache is not None else None
     if cached is not None and cached.is_file():
         _verify(cached, artifact=artifact, version=version, expected=expected)
-        shutil.copyfile(cached, destination)
+        _copy_file(cached, destination)
     elif offline:
         raise MaterializationError(
             f"artifact={artifact} expected_version={version} "
@@ -71,7 +102,7 @@ def _acquire(entry: dict, destination: Path, cache: Path | None, offline: bool) 
         _verify(destination, artifact=artifact, version=version, expected=expected)
         if cached is not None:
             cached.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(destination, cached)
+            _copy_file(destination, cached)
     _verify(destination, artifact=artifact, version=version, expected=expected)
 
 

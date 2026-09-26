@@ -70,6 +70,21 @@ runtime_orchestration:
     recapture_current_state: required
     restore_from_prior_session: forbidden
   capabilities:
+    local-virtualization-serialization:
+      handler: dependency
+      requires: []
+      mutation_class: local-virtualization
+      timeout_seconds: 1
+      privilege: none
+      global_lock: true
+      operations:
+        detector: dependency-closure
+        preflight: dependency-closure
+        prepare: none
+        verify: dependency-closure
+        restore: no-host-resource-created
+        verify_restore: no-host-resource-created
+      evidence_fields: [satisfied]
     docker-runtime:
       handler: docker-rootless
       requires: [ansible-runtime]
@@ -358,6 +373,7 @@ qualification_lifecycle:
     - evidence
   evidence:
     root: .context
+    machine_image_root: .artifacts/packer
     tracked: false
     exact_sha_binding_required: true
     source_mutation_for_evidence: forbidden
@@ -808,6 +824,64 @@ workflows:
     merge_authoritative: true
     runtime_capabilities:
       inherit_from_selected_gates: true
+  rocky_image_virtualbox:
+    owner: platform-image-engineering
+    purpose: build and qualify the exact Rocky Linux 10.2 VirtualBox box through the Windows-native local image pipeline
+    entrypoint: make image-rocky-windows-release
+    phase_entrypoints:
+      preflight: make image-rocky-windows-preflight
+      build: make image-rocky-windows-build
+      qualification: make image-rocky-windows-qualify
+      release: make image-rocky-windows-release
+      native_prepare: make image-rocky-windows-native-prepare
+      native_reboot: make image-rocky-windows-native-reboot
+      native_import: make image-rocky-windows-native-import
+      native_recover: make image-rocky-windows-native-recover
+    exit_criteria:
+      - exact-windows-tool-versions-pass
+      - virtualbox-native-vtx-runtime-backend-pass-and-nem-absent
+      - exact-sha-windows-staging-and-one-shot-normal-return-pass
+      - packer-init-fmt-validate-pass
+      - checksum-locked-offline-inputs-pass
+      - packer-build-pass
+      - exact-artifact-sha256-pass
+      - vagrant-boot-and-ssh-pass
+      - rocky-systemd-network-rke2-prerequisite-smoke-pass
+      - owned-vm-box-and-ephemeral-key-cleanup-pass
+      - exact-artifact-release-evidence-pass
+    evidence:
+      build: .context/evidence/rocky-image/rocky-10.2/windows/build.json
+      qualification: .context/evidence/rocky-image/rocky-10.2/windows/qualification.json
+      release: .context/evidence/rocky-image/rocky-10.2/windows/release.json
+    merge_authoritative: false
+    state_changing: true
+    mutation_class: local-virtualization
+  rocky_image_qemu_kvm:
+    owner: platform-image-engineering
+    purpose: build and qualify the exact Rocky Linux 10.2 qcow2 through the native-Linux QEMU/KVM image pipeline
+    entrypoint: make image-rocky-linux-release
+    phase_entrypoints:
+      preflight: make image-rocky-linux-preflight
+      build: make image-rocky-linux-build
+      qualification: make image-rocky-linux-qualify
+      release: make image-rocky-linux-release
+    exit_criteria:
+      - exact-native-linux-tool-versions-and-kvm-pass
+      - packer-init-fmt-validate-pass
+      - checksum-locked-offline-inputs-pass
+      - packer-qemu-build-pass
+      - exact-qcow2-sha256-pass
+      - bounded-qemu-boot-and-ssh-pass
+      - rocky-systemd-network-rke2-prerequisite-smoke-pass
+      - owned-overlay-process-and-ephemeral-key-cleanup-pass
+      - exact-artifact-release-evidence-pass
+    evidence:
+      build: .context/evidence/rocky-image/rocky-10.2/linux/build.json
+      qualification: .context/evidence/rocky-image/rocky-10.2/linux/qualification.json
+      release: .context/evidence/rocky-image/rocky-10.2/linux/release.json
+    merge_authoritative: false
+    state_changing: true
+    mutation_class: local-virtualization
   rke2_local_virtualbox:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary

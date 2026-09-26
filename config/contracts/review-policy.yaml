@@ -119,6 +119,13 @@ repository_delivery:
   pull_request:
     required: true
     head_sha_binding: exact
+    metadata_authority:
+      provider: github
+      transport: gh-api-rest
+      endpoint: repos/{owner}/{repo}/pulls/{number}
+      base_sha_selector: .base.sha
+      head_sha_selector: .head.sha
+      subcommand_json_sha_fields: non-authoritative
     draft_merge: forbidden
     record_after_merge: retained-by-forge
 

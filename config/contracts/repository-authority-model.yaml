@@ -17,6 +17,8 @@ domains:
     machine_contract: toolchain_lock
   machine_image:
     machine_contract: machine_image_lock
+  local_services_qualification:
+    machine_contract: local_services_qualification
   qualification_cache:
     machine_contract: cache_policy
   qualification_execution:
@@ -56,6 +58,15 @@ artifact_classes:
     may_define_component_schema: true
 
 native_projections:
+  - path: config/artifacts/local-services-rocky-10.2-packages.lock.json
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.local_services_qualification
+  - path: platform/ansible/tests/local_services_vm/Vagrantfile
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.local_services_qualification
+  - path: scripts/windows/local-services-seed-server.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.local_services_qualification
   - path: config/artifacts/rocky-10.2-base-packages.lock.json
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.machine_image_lock
@@ -63,6 +74,27 @@ native_projections:
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.machine_image_lock
   - path: platform/packer/rocky-10.2/http/rocky-10.2.ks
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: platform/vagrant/rocky-image-smoke/Vagrantfile
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/RockyImagePipeline.psm1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/packer-preflight.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/build-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/qualify-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/windows/release-rocky-image.ps1
+    class: native_projection
+    authority: architecture.lock.yaml#machine_contracts.machine_image_lock
+  - path: scripts/linux_image_pipeline.py
     class: native_projection
     authority: architecture.lock.yaml#machine_contracts.machine_image_lock
   - path: config/toolchain/versions.env
