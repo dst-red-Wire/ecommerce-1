@@ -31,3 +31,13 @@ Component-specific role tests live beside the role when introduced. Cross-role a
 ## CODEOWNERS status
 
 `config/contracts/service-ownership.yaml` records domain and data ownership, but does not identify a GitHub/Gitea user or team. `CODEOWNERS` is therefore intentionally not generated: inventing a mapping would create a second, unreliable source of truth. When real forge identities are available, add an `owners` mapping for each component (for example `owners.gitea` and `owners.github`, each containing verified forge handles) to the canonical ownership contract, then generate or validate `CODEOWNERS` from it.
+# WSL collection storage
+
+On a repository mounted through WSL `9p`, Ansible keeps the project-owned
+`.ansible/collections` path as a symlink to native Linux storage under
+`~/.cache/ecommerce-1/ansible-collections/`. The workstation role preserves any
+pre-existing `9p` directory as `.ansible/collections-9p-backup` before creating
+the link. Collection versions still come from the central toolchain lock and
+`platform/ansible/requirements.yml`; `repoctl` checks every installed manifest
+before using the collections. Once installed, the exact local collections remain
+available without Galaxy network access, including after a WSL restart.
