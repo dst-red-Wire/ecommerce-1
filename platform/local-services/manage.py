@@ -440,7 +440,7 @@ def gitea_request(
 
 
 def register_gpg() -> None:
-    expected = "1E017B8EA8721E5B7854D3F4AADEE6601021EBE8"
+    expected = yaml.safe_load((ROOT / "architecture.lock.yaml").read_text())["repository_governance"]["automation_signing"]["automation_key"]["fingerprint"]
     proof = json.loads((ROOT / ".context/reboot-proof/result.json").read_text())
     before = datetime.fromisoformat(
         proof["baseline_windows_boot_utc"].replace("Z", "+00:00")
@@ -528,7 +528,7 @@ def verify_running_images() -> None:
 
 def proof() -> None:
     creds = json.loads((STATE / "credentials.json").read_text())
-    expected = "1E017B8EA8721E5B7854D3F4AADEE6601021EBE8"
+    expected = yaml.safe_load((ROOT / "architecture.lock.yaml").read_text())["repository_governance"]["automation_signing"]["automation_key"]["fingerprint"]
     for hostname in ("gitea.ecommerce.local", "harbor.ecommerce.local"):
         if "127.0.0.1" not in {
             record[4][0]

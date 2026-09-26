@@ -6798,6 +6798,8 @@ def _remote_ref_sha(ref: str) -> str:
 def publish(base: str, message: str) -> int:
     if toolchain_closure():
         return 1
+    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+        return fail("publish requires the signing rotation delivery gate")
     if run([sys.executable, "scripts/check_automation_signing.py"], check=False).returncode:
         return fail("publish requires the repository automation signing gate")
     policy = repository_delivery_policy()
@@ -7278,6 +7280,8 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 def finish_pr(base: str) -> int:
     if toolchain_closure():
         return 1
+    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+        return fail("finish-pr requires the signing rotation delivery gate")
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
     default_branch = str(policy["default_branch"])
@@ -7287,6 +7291,8 @@ def finish_pr(base: str) -> int:
     branch = git("branch", "--show-current").strip()
     if not branch or branch in {default_branch, "master"}:
         return fail("finish-pr requires a checked-out feature branch")
+    if branch.startswith("security/rotate-automation-gpg-"):
+        return fail("finish-pr refuses automatic merge of a signing rotation PR; owner must merge manually")
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("finish-pr requires a clean worktree")
 

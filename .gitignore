@@ -52,6 +52,7 @@ Desktop.ini
 
 # Private keys / certificates generated locally
 *.key
+*.rev
 *.pem
 *.p12
 *.pfx

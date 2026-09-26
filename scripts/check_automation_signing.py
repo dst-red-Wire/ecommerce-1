@@ -111,11 +111,13 @@ def check() -> None:
         raise ValueError("personal key passphrase protection cannot be confirmed")
     gpg_home = Path(command("gpgconf", "--list-dirs", "homedir"))
     certificate = gpg_home / "revocation" / f"{automation}.rev"
+    if not certificate.is_file():
+        certificate = gpg_home / "openpgp-revocs.d" / f"{automation}.rev"
     if not certificate.is_file() or certificate.stat().st_mode & 0o077:
         raise ValueError("revocation certificate missing or permissions too broad")
     if certificate.parent.stat().st_mode & 0o077:
         raise ValueError("revocation directory permissions too broad")
-    public_file = Path("/tmp/ecommerce-1-automation-signing-public.asc")
+    public_file = Path(f"/tmp/ecommerce-1-automation-signing-{automation}.asc")
     if not public_file.exists():
         public_export = command("gpg", "--batch", "--armor", "--export", automation)
         descriptor = os.open(public_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

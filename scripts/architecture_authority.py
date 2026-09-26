@@ -80,13 +80,20 @@ V5_SECTION_KEYS = {
         {"status", "execution", "repository_filesystem", "windows_mounts", "scope"}
     ),
     "repository_governance.automation_signing": frozenset(
-        {"version", "kind", "status", "repository", "personal_signing", "automation_key"}
+        {"version", "kind", "status", "repository", "personal_signing", "automation_key", "rotation"}
     ),
     "repository_governance.automation_signing.personal_signing": frozenset(
         {"fingerprint", "passphrase_required", "automation_use"}
     ),
+    "repository_governance.automation_signing.rotation": frozenset(
+        {"enabled", "validity_days", "info_days_before_expiry", "warning_days_before_expiry",
+         "delivery_block_days_before_expiry", "expired_key_use", "overlapping_keys_allowed",
+         "overlap_max_days", "remote_verification_required_before_activation",
+         "revocation_certificate_required", "old_key_retirement_requires_replacement_proven"}
+    ),
     "repository_governance.automation_signing.automation_key": frozenset(
-        {"fingerprint", "uid", "algorithm", "signing_required", "passphrase",
+        {"fingerprint", "pending_fingerprint", "pending_expires_at", "rotation_status",
+         "previous_fingerprint", "uid", "algorithm", "signing_required", "passphrase",
          "expiration_days_max", "warning_days_before_expiration", "local_git_config_only",
          "revocation_certificate_required", "private_key_in_repository", "private_key_export",
          "global_git_configuration", "forge_identity"}
@@ -1350,7 +1357,7 @@ def validate(root):
                 "harbor_url": "https://harbor.ecommerce.local/",
             },
             "automation_signing_fingerprint":
-                "1E017B8EA8721E5B7854D3F4AADEE6601021EBE8",
+                lock["repository_governance"]["automation_signing"]["automation_key"]["fingerprint"],
             "gpg_registration_gate": "post-windows-reboot-proof-pass",
         }:
             errors.append("local_management_services must match the approved local contract")
