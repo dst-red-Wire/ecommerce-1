@@ -30,6 +30,19 @@ fi
 if [ -c /dev/ttyS0 ]; then
     printf 'ECOMMERCE_MILESTONE T4_NETWORK_READY\n' > /dev/ttyS0
     printf 'ECOMMERCE_MILESTONE T5_RPM_INSTALLATION_START\n' > /dev/ttyS0
+    (
+        while :; do
+            for name in anaconda storage program packaging; do
+                log="/tmp/${name}.log"
+                if [ -f "$log" ]; then
+                    printf 'ECOMMERCE_INSTALLER_LOG %s BEGIN\n' "$name"
+                    tail -n 8 "$log"
+                    printf 'ECOMMERCE_INSTALLER_LOG %s END\n' "$name"
+                fi
+            done
+            sleep 60
+        done
+    ) > /dev/ttyS0 2>&1 < /dev/null &
 fi
 %end
 

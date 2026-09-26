@@ -45,7 +45,7 @@ source "virtualbox-iso" "base" {
   }
   boot_command = [
     "c<wait5>",
-    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks console=tty0 console=ttyS0,115200n8<enter><wait>",
+    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.notmux inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks console=tty0 console=ttyS0,115200n8<enter><wait>",
     "initrd /images/pxeboot/initrd.img<enter><wait>",
     "boot<enter>",
   ]
