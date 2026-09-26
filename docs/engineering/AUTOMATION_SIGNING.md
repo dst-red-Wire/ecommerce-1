@@ -2,7 +2,7 @@
 
 The canonical contract is `architecture.lock.yaml#repository_governance.automation_signing`.
 The current workstation implementation uses the `dev` account in `Ubuntu-24.04` WSL.
-Run repository automation through that environment. The Git for Windows GPG installation has
+Run every repository operation from the native Linux checkout at `/home/dev/ecommerce-1`. The Git for Windows GPG installation has
 a separate empty keyring and is not qualified for this signing configuration.
 
 Before each automated commit, run `make signing-check` from this repository in WSL. It
@@ -15,7 +15,8 @@ it blocks. The automation account's private key is still sensitive despite havin
 no passphrase and must remain protected by the account's filesystem permissions.
 
 The public key is available outside the checkout at
-`/tmp/ecommerce-1-automation-signing-public.asc`. To display it, run
+`/tmp/ecommerce-1-automation-signing-public.asc`. `make signing-check` recreates
+this public-only export if WSL or Windows restart clears `/tmp`. To display it, run
 `cat /tmp/ecommerce-1-automation-signing-public.asc` in WSL. The export must contain
 only `BEGIN PGP PUBLIC KEY BLOCK`. Register this public key as a GPG signing key in
 GitHub **Settings → SSH and GPG keys → New GPG key** and in the Gitea account's

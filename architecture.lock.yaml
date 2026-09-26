@@ -4,6 +4,12 @@ project: ecommerce
 
 repository_governance:
   scope: entire-repository
+  windows_workspace:
+    status: enforced
+    execution: wsl2
+    repository_filesystem: native-linux
+    windows_mounts: forbidden
+    scope: all-repository-operations
   automation_signing:
     version: 1
     kind: AutomationSigningPolicy

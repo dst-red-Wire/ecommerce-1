@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import re
 import subprocess
 import sys
 
 import yaml
+
+from native_workspace import workspace_error
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,9 @@ def key_records(fingerprint: str) -> tuple[list[str], str, str]:
 
 
 def check() -> None:
+    workspace_failure = workspace_error(ROOT)
+    if workspace_failure:
+        raise ValueError(workspace_failure)
     policy = yaml.safe_load((ROOT / "architecture.lock.yaml").read_text(encoding="utf-8"))[
         "repository_governance"
     ]["automation_signing"]
@@ -110,6 +116,15 @@ def check() -> None:
     if certificate.parent.stat().st_mode & 0o077:
         raise ValueError("revocation directory permissions too broad")
     public_file = Path("/tmp/ecommerce-1-automation-signing-public.asc")
+    if not public_file.exists():
+        public_export = command("gpg", "--batch", "--armor", "--export", automation)
+        descriptor = os.open(public_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write((public_export + "\n").encode("ascii"))
+    if public_file.is_symlink() or public_file.stat().st_uid != os.getuid():
+        raise ValueError("public export has an unsafe owner or path")
+    if public_file.stat().st_mode & 0o077:
+        raise ValueError("public export permissions too broad")
     public_data = public_file.read_bytes()
     if b"BEGIN PGP PUBLIC KEY BLOCK" not in public_data or any(x in public_data for x in PRIVATE_ARMOR):
         raise ValueError("public export missing or contains private key armor")

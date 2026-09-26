@@ -181,6 +181,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             with (
                 mock.patch.object(sys, "argv", ["repoctl.py", "opentofu"]),
                 mock.patch.object(MOD, "ROOT", root),
+                mock.patch("native_workspace.workspace_error", return_value=None),
                 mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,
                 redirect_stdout(io.StringIO()) as output,
             ):

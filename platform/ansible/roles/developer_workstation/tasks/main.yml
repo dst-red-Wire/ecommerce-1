@@ -15,95 +15,11 @@
   become: true
   tags: [workstation, bootstrap]
 
-- name: Create project-owned Ansible state directory
-  ansible.builtin.file:
-    path: "{{ repo_root }}/.ansible"
-    state: directory
-    mode: '0755'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Determine repository filesystem for Ansible collections
-  ansible.builtin.command:
-    argv: [findmnt, -n, -o, FSTYPE, --target, "{{ repo_root }}"]
-  register: developer_repo_fstype
-  changed_when: false
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Set native WSL collection storage path
-  ansible.builtin.set_fact:
-    developer_native_collections: >-
-      {{ ansible_env.HOME }}/.cache/ecommerce-1/ansible-collections/{{ repo_root | hash('sha256') }}
-  when: developer_repo_fstype.stdout | trim == '9p'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Inspect project-owned Ansible collection path
-  ansible.builtin.stat:
-    path: "{{ repo_root }}/.ansible/collections"
-    follow: false
-  register: developer_collection_path
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Require a safe collection path type on WSL mounts
-  ansible.builtin.assert:
-    that:
-      - not developer_collection_path.stat.exists or developer_collection_path.stat.isdir or developer_collection_path.stat.islnk
-      - not developer_collection_path.stat.islnk or developer_collection_path.stat.lnk_source == developer_native_collections
-    fail_msg: Refusing to replace an unexpected project collection path.
-  when: developer_repo_fstype.stdout | trim == '9p'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Create native WSL collection storage
-  ansible.builtin.file:
-    path: "{{ developer_native_collections }}"
-    state: directory
-    mode: '0755'
-  when: developer_repo_fstype.stdout | trim == '9p'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Inspect bounded backup for pre-existing 9p collections
-  ansible.builtin.stat:
-    path: "{{ repo_root }}/.ansible/collections-9p-backup"
-    follow: false
-  register: developer_collection_backup
-  when: developer_repo_fstype.stdout | trim == '9p'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Require backup destination to be unused before migration
-  ansible.builtin.assert:
-    that: not developer_collection_backup.stat.exists
-    fail_msg: Refusing to overwrite an existing Ansible collection backup.
-  when:
-    - developer_repo_fstype.stdout | trim == '9p'
-    - developer_collection_path.stat.isdir | default(false)
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Preserve pre-existing 9p collections before using native storage
-  ansible.builtin.command:
-    argv:
-      - mv
-      - --
-      - "{{ repo_root }}/.ansible/collections"
-      - "{{ repo_root }}/.ansible/collections-9p-backup"
-  changed_when: true
-  when:
-    - developer_repo_fstype.stdout | trim == '9p'
-    - developer_collection_path.stat.isdir | default(false)
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Link project-owned collections to native WSL storage
-  ansible.builtin.file:
-    src: "{{ developer_native_collections }}"
-    dest: "{{ repo_root }}/.ansible/collections"
-    state: link
-  when: developer_repo_fstype.stdout | trim == '9p'
-  tags: [workstation, bootstrap, ansible_collections]
-
-- name: Create project-owned collections on native filesystems
+- name: Create project-owned Ansible collection directory
   ansible.builtin.file:
     path: "{{ repo_root }}/.ansible/collections"
     state: directory
     mode: '0755'
-  when: developer_repo_fstype.stdout | trim != '9p'
   tags: [workstation, bootstrap, ansible_collections]
 
 - name: Load pinned project Ansible collections

@@ -3779,6 +3779,12 @@ def _git_neutral_test_env() -> dict[str, str]:
     for name in output(["git", "rev-parse", "--local-env-vars"]).splitlines():
         if name:
             env.pop(name, None)
+    # Synthetic repositories in tests must not prompt for the workstation's
+    # passphrase-protected personal signing key.
+    index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env[f"GIT_CONFIG_KEY_{index}"] = "commit.gpgsign"
+    env[f"GIT_CONFIG_VALUE_{index}"] = "false"
+    env["GIT_CONFIG_COUNT"] = str(index + 1)
     return env
 
 
@@ -7708,6 +7714,11 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
+    from native_workspace import workspace_error
+
+    workspace_failure = workspace_error(ROOT)
+    if workspace_failure:
+        return fail(workspace_failure)
     try:
         if args.cmd == "vm":
             from vm_lifecycle import reconcile_cli

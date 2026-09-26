@@ -5,6 +5,10 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
+NATIVE_WORKSPACE := $(shell $(PYTHON) scripts/native_workspace.py --quiet >/dev/null 2>&1 && printf PASS)
+ifneq ($(NATIVE_WORKSPACE),PASS)
+$(error Repository operations require a WSL2 checkout on the native Linux filesystem, such as /home/dev/ecommerce-1)
+endif
 .PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry

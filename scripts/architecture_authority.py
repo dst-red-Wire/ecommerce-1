@@ -70,9 +70,13 @@ V5_SECTION_KEYS = {
         {
             "scope",
             "automation_signing",
+            "windows_workspace",
             "transverse_rule_contract",
             "owner_authorization",
         }
+    ),
+    "repository_governance.windows_workspace": frozenset(
+        {"status", "execution", "repository_filesystem", "windows_mounts", "scope"}
     ),
     "repository_governance.automation_signing": frozenset(
         {"version", "kind", "status", "repository", "personal_signing", "automation_key"}
