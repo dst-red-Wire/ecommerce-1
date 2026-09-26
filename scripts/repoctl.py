@@ -7291,6 +7291,8 @@ def finish_pr(base: str) -> int:
     branch = git("branch", "--show-current").strip()
     if not branch or branch in {default_branch, "master"}:
         return fail("finish-pr requires a checked-out feature branch")
+    if branch.startswith("security/rotate-automation-gpg-"):
+        return fail("finish-pr refuses automatic merge of a signing rotation PR; owner must merge manually")
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("finish-pr requires a clean worktree")
 
