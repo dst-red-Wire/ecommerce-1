@@ -206,6 +206,11 @@ def render(
         runtime_contract = {
             "schema": 1,
             "authority": "config/contracts/machine-image-lock.yaml",
+            "packer_plugins": {
+                "virtualbox": str(image["build"]["virtualbox"]["plugin"]["version"]),
+                "qemu": str(image["build"]["qemu_kvm"]["plugin"]["version"]),
+                "vagrant": str(image["build"]["vagrant_post_processor"]["plugin"]["version"]),
+            },
             "resources": {
                 "vcpus": vm_cpus,
                 "memory_mib": vm_memory_mib,

@@ -192,12 +192,15 @@ class PackerImageContractTest(unittest.TestCase):
                             "ssh_seconds": 5400,
                         },
                         "virtualbox": {
+                            "plugin": {"version": "1.1.5"},
                             "acceleration": {
                                 "required": "native-vtx",
                                 "forbidden": ["nem"],
                                 "hyper_v_present": False,
                             }
                         },
+                        "qemu_kvm": {"plugin": {"version": "1.1.6"}},
+                        "vagrant_post_processor": {"plugin": {"version": "1.1.7"}},
                     },
                     "hypervisors": {
                         "virtualbox": {"network_adapter": "virtio"}
@@ -226,6 +229,11 @@ class PackerImageContractTest(unittest.TestCase):
                 runtime_contract_output=runtime_output,
             )
             rendered = output.read_text(encoding="utf-8")
+            runtime = json.loads(runtime_output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {"virtualbox": "1.1.5", "qemu": "1.1.6", "vagrant": "1.1.7"},
+                runtime["packer_plugins"],
+            )
             self.assertIn("vm_cpus = 4\n", rendered)
             self.assertIn("vm_memory_mib = 8192\n", rendered)
             self.assertIn("vm_disk_mib = 65536\n", rendered)

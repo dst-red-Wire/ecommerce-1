@@ -164,8 +164,8 @@ python3 scripts/repoctl.py reconcile --tags image_pipeline
 ## Windows build, qualification and release
 
 The unattended boot design must pass `scripts/windows/native-startup-resume.ps1`
-with `-Action PrepareDryRun` from an elevated PowerShell session before it is
-connected to the real boot cycle. This creates two temporary `AtStartup` tasks
+with `-Action PrepareDryRun` from an elevated PowerShell session for the exact
+published SHA before the real boot cycle may change BCD. This creates two temporary `AtStartup` tasks
 under `SYSTEM`, runs them manually through Task Scheduler, checks explicit
 Packer, Vagrant and VirtualBox paths, validates the exact-SHA payload on the
 Windows disk, and exercises monotone state transitions, a second idempotent
@@ -174,17 +174,38 @@ boot time and VirtualBox inventory snapshots before and after the dry-run. The
 tasks are removed when the test ends; its JSON evidence remains under
 `C:\ecommerce-lab\startup-dry-run\<sha>\evidence`.
 
-Until that real `SYSTEM` task execution and the later native integration pass,
-the following existing cycle still uses interactive logon tasks and must not be
-used as an unattended cycle.
+The real native qualification task runs `AtStartup` under `SYSTEM`; the normal
+boot import task runs `AtStartup` under the administrator's passwordless S4U
+identity. The S4U preflight must prove an elevated token, a running WSL2
+kernel and repository access through `\\wsl.localhost` after WSL startup.
+Both task actions use the explicit Windows PowerShell executable. The real
+cycle persists monotone phase transitions under
+`C:\ecommerce-lab\startup-real\<sha>\state.json`. An inconsistent phase fails
+closed and cannot start another qualification attempt.
+An independent SYSTEM `AtStartup` watchdog returns to the original loader if
+the qualification task stops without rebooting. It waits at most 270 minutes
+for a result, or ten minutes after a result is written, then records failure
+evidence and triggers the normal boot. It never launches a second campaign.
 
 The reference workflow uses a guarded two-boot cycle:
 
 ```console
 make image-rocky-windows-native-self-test
-make image-rocky-windows-native-prepare
-make image-rocky-windows-native-reboot
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/windows/native-cycle-launch.ps1 -ExpectedSourceSha <published-40-character-pr-head>
 ```
+
+The launcher requires administrator PowerShell, checks the published PR head,
+runs the exact-SHA SYSTEM dry-run when needed, then invokes the cycle. Before
+BCD is changed, preparation also registers and manually triggers a temporary
+passwordless S4U startup task to prove WSL2, repository access, an elevated
+token and the same source SHA. A second temporary `AtStartup` task runs the
+staged controller under `SYSTEM` to validate the Packer plugins, VirtualBox,
+Vagrant and host-only network without starting a VM. The exact Packer plugins
+and their checksum files are copied into the hashed Windows staging directory;
+`PACKER_PLUGIN_PATH` points there during the native boot. Both probe tasks are
+removed after their evidence is checked.
+The `native-prepare` and `native-reboot` targets remain available for bounded
+diagnostics; neither bypasses the proof checks.
 
 `native-prepare` may request Windows UAC because BCD backup, the dedicated loader
 entry and the highest-privilege one-shot scheduled task require administrator
@@ -197,8 +218,8 @@ recorded as `PASS` or `UNSUPPORTED`; it is never treated as runtime proof.
 
 `native-reboot` is the explicit reboot authorization boundary. It verifies the
 staging and task, arms only `bcdedit /bootsequence` for the native entry, and
-reboots. It never changes the permanent default loader. After interactive Windows
-logon, the temporary task:
+reboots. It never changes the permanent default loader. At native Windows startup,
+without interactive logon, the temporary SYSTEM task:
 
 1. rejects a second attempt for the same SHA;
 2. verifies the staging manifest and exact tool versions;
@@ -212,7 +233,9 @@ logon, the temporary task:
 8. arms the exact normal loader in a `finally`, removes the task, writes evidence,
    and reboots even when qualification fails.
 
-After the normal boot and WSL2 return:
+At normal Windows startup, without interactive logon, the S4U task wakes WSL2,
+checks the repository and imports evidence. The manual import command remains
+available for diagnostics:
 
 ```console
 make image-rocky-windows-native-import
@@ -224,14 +247,15 @@ keys or incomplete cleanup. Only then does it place
 the `.box`, `SHA256SUMS`, and compatible build/qualification/release evidence in
 the repository's ignored artifact/evidence roots.
 
-Recovery does not restore the whole BCD or delete the reusable native entry:
+Recovery preserves the original loader and removes the owned native entry once
+the normal loader is active:
 
 ```console
 make image-rocky-windows-native-recover
 ```
 
 It arms the normal Windows loader for the next boot and removes the temporary
-task. Full BCD restoration remains a manual last resort using the verified backup
+tasks. Full BCD restoration remains a manual last resort using the verified backup
 under `C:\ecommerce-lab\bcd`.
 
 The legacy stage-specific commands remain available for bounded diagnostics:

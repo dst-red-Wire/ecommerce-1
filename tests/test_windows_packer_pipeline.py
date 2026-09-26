@@ -39,6 +39,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         cls.qualify = (WINDOWS / "qualify-rocky-image.ps1").read_text(encoding="utf-8")
         cls.release = (WINDOWS / "release-rocky-image.ps1").read_text(encoding="utf-8")
         cls.native = (WINDOWS / "native-vtx-cycle.ps1").read_text(encoding="utf-8")
+        cls.native_launcher = (WINDOWS / "native-cycle-launch.ps1").read_text(encoding="utf-8")
         cls.startup_resume = (WINDOWS / "native-startup-resume.ps1").read_text(encoding="utf-8")
         cls.module = (WINDOWS / "RockyImagePipeline.psm1").read_text(encoding="utf-8")
 
@@ -109,7 +110,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NEM", self.native)
 
     def test_native_boot_mutation_fails_early_without_administrator_token(self):
-        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import') -and -not (Test-Administrator))", self.native)
+        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator))", self.native)
         self.assertIn("BLOCKED_PRIVILEGE", self.native)
         self.assertNotIn("Invoke-ElevatedSelf", self.native)
 
@@ -133,6 +134,34 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertNotIn("Restart-Computer", source)
         self.assertNotIn("startvm", source.lower())
         self.assertNotIn("vagrant up", source.lower())
+
+    def test_real_native_cycle_requires_proven_passwordless_startup_resume(self):
+        source = self.native
+        for guard in (
+            "Assert-StartupDryRunProof", "Assert-S4UResumeProof",
+            "Invoke-SystemRuntimeProbeTask", "PACKER_PLUGIN_PATH",
+            "New-ScheduledTaskTrigger -AtStartup",
+            "-UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest",
+            "-LogonType S4U -RunLevel Highest",
+            "repo_manifest_accessible", "[IO.FileShare]::None",
+            "NATIVE_BOOT_PENDING", "QUALIFICATION_RUNNING", "RESTORE_PENDING",
+            "Move-NativePhase -SourceSha $sourceSha",
+            "Native startup state is inconsistent",
+            "Normal-boot import failed closed",
+            "Register-NativeWatchdogTask", "Invoke-NativeWatchdog",
+            "Native task exceeded the 270-minute watchdog deadline",
+            "Set-OneShotBootSequence -BootId $normalId",
+        ):
+            self.assertIn(guard, source)
+        self.assertNotIn("BOOT_RESUME_ARCHITECTURE_NOT_READY", source)
+        self.assertNotIn("-AtLogOn", source)
+        self.assertNotIn("-LogonType Password", source)
+
+        launcher = self.native_launcher
+        self.assertIn("BLOCKED_PRIVILEGE", launcher)
+        self.assertIn("GitHub PR #148 HEAD differs", launcher)
+        self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("-Action Cycle"))
+        self.assertIn("BCD remains unchanged", launcher)
 
     def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):
         self.assertIn("[IO.FileShare]::ReadWrite", self.native)

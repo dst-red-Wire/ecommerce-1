@@ -111,9 +111,13 @@ function Invoke-NativeLocalServices {
     [void](New-Item -ItemType Directory -Path $runtimeRoot -Force)
     $foreignRunning = Invoke-LocalTool -Tool $VBoxManage -Directory $runtimeRoot -Timeout 30 -Arguments @('list','runningvms')
     if (-not [string]::IsNullOrWhiteSpace($foreignRunning)) { throw 'Native service campaign requires no pre-existing running VirtualBox VM' }
-    $ssh = Resolve-WindowsTool -Name 'ssh.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'))
-    $scp = Resolve-WindowsTool -Name 'scp.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\scp.exe'))
-    $keygen = Resolve-WindowsTool -Name 'ssh-keygen.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'))
+    $ssh = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'
+    $scp = Join-Path $env:SystemRoot 'System32\OpenSSH\scp.exe'
+    $keygen = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh-keygen.exe'
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    foreach ($executable in @($ssh, $scp, $keygen, $powershell)) {
+        if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Required Windows OpenSSH executable is absent: $executable" }
+    }
     $identity = Join-Path $runtimeRoot 'controller-key'
     $serviceIdentity = Join-Path $runtimeRoot 'service-key'
     foreach ($key in @($identity, $serviceIdentity)) {
@@ -155,7 +159,7 @@ function Invoke-NativeLocalServices {
         foreach ($role in $roles) {
             $state = $owned[$role]
             $configuration = Read-JsonFile (Join-Path $state.Root 'runtime.json')
-            [void](Invoke-LocalTool -Tool 'powershell.exe' -Directory $state.Root -Timeout 30 -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Start','-SeedRoot',(Join-Path $state.Root 'seed'),'-Port',[string]$configuration.seed_port))
+            [void](Invoke-LocalTool -Tool $powershell -Directory $state.Root -Timeout 30 -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Start','-SeedRoot',(Join-Path $state.Root 'seed'),'-Port',[string]$configuration.seed_port))
             $active = $role
             try {
                 [void](Invoke-LocalTool -Tool $Vagrant -Directory $state.Root -Environment $environment -Timeout 900 -Arguments @('up','--provider','virtualbox','--no-provision'))
@@ -180,7 +184,7 @@ function Invoke-NativeLocalServices {
                 $known = if ($role -eq 'controller') { $controllerKnown } else { Join-Path $runtimeRoot "$role-known-hosts" }
                 Wait-LocalSsh -Ssh $ssh -Identity $key -KnownHosts $known -Address $state.Address -Directory $runtimeRoot
                 [void](Invoke-LocalTool -Tool $VBoxManage -Directory $state.Root -Timeout 60 -Arguments @('controlvm',$state.Name,'nic1','null'))
-                [void](Invoke-LocalTool -Tool 'powershell.exe' -Directory $state.Root -Timeout 30 -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Stop','-SeedRoot',(Join-Path $state.Root 'seed'),'-Port',[string]$configuration.seed_port))
+                [void](Invoke-LocalTool -Tool $powershell -Directory $state.Root -Timeout 30 -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Stop','-SeedRoot',(Join-Path $state.Root 'seed'),'-Port',[string]$configuration.seed_port))
                 if ($role -eq 'controller') {
                     $payload = Join-Path $Stage 'controller'
                     $remote = 'qualifier@192.168.22.241:'

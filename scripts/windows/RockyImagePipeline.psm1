@@ -242,7 +242,8 @@ function Convert-ToWslPath {
         [Parameter(Mandatory = $true)][string]$Distribution,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
-    $result = Invoke-BoundedProcess -FilePath 'wsl.exe' -Arguments @('-d', $Distribution, '--', 'wslpath', '-u', $WindowsPath) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory "$env:SystemRoot"
+    $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+    $result = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d', $Distribution, '--', 'wslpath', '-u', $WindowsPath) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory "$env:SystemRoot"
     Assert-ProcessSuccess -Result $result -Operation 'wslpath Windows-to-WSL conversion'
     $path = $result.StdOut.Trim()
     if (-not $path.StartsWith('/') -or $path -match "[\r\n]") {
@@ -260,7 +261,8 @@ function Invoke-WslProcess {
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds
     )
     $wslArguments = @('-d', $Distribution, '--cd', $WslWorkingDirectory, '--', $Command) + $Arguments
-    return Invoke-BoundedProcess -FilePath 'wsl.exe' -Arguments $wslArguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory "$env:SystemRoot"
+    $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+    return Invoke-BoundedProcess -FilePath $wsl -Arguments $wslArguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory "$env:SystemRoot"
 }
 
 function Get-GitState {
