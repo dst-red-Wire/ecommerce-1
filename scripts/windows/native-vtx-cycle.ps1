@@ -25,6 +25,7 @@ $env:PSModulePath = @(
 Import-Module (Join-Path $PSScriptRoot 'RockyImagePipeline.psm1') -Force
 Set-PipelineUtf8
 . (Join-Path $PSScriptRoot 'NativeLocalServices.ps1')
+. (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1')
 
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
@@ -906,6 +907,7 @@ function Invoke-NativeRun {
             fundamental_tools = 'NOT_EXECUTED'; rke2_prerequisites = 'NOT_EXECUTED'
             security = 'NOT_EXECUTED'
         }
+        ssh_smoke = $null
         observations = [ordered]@{}
         supply_chain = $null
         local_services = [ordered]@{
@@ -1128,21 +1130,27 @@ function Invoke-NativeRun {
         $boxAdd = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('box', 'add', '--name', $smokeBoxName, '--provider', 'virtualbox', '--checksum-type', 'sha256', '--checksum', $artifactSha256, $artifact) -TimeoutSeconds 600 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
         Assert-ProcessSuccess -Result $boxAdd -Operation 'native Vagrant box add'
         $result.vagrant_smoke.box_add = 'PASS'
-        $up = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up', '--provider', 'virtualbox', '--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
-        Assert-ProcessSuccess -Result $up -Operation 'native Vagrant smoke boot'
-        $result.vagrant_smoke.boot = 'PASS'
-        $sshReady = $false
-        for ($attempt = 1; $attempt -le 12; $attempt++) {
-            try {
-                $probe = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 60 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment
-                if ($probe.ExitCode -eq 0) { $sshReady = $true; break }
-            }
-            catch {
-                if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }
-            }
-            if ($attempt -lt 12) { Start-Sleep -Seconds 5 }
+        $sshExecutable = Resolve-WindowsTool -Name 'ssh.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'))
+        $sshEvidenceDirectory = Join-Path $preparedStage 'logs\ssh-smoke'
+        $sshSmoke = New-NativeSshSmokeEvidence -VmName $smokeVmName -User 'packer' -EvidenceDirectory $sshEvidenceDirectory
+        $result.ssh_smoke = $sshSmoke
+        $sshSmoke.vagrant_up_started_at = Get-UtcTimestamp
+        $up = $null
+        $upError = $null
+        try {
+            $up = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up', '--provider', 'virtualbox', '--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -OnPoll {
+                try {
+                    Update-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -VmName $smokeVmName -WorkingDirectory $smokeRoot -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable
+                }
+                catch { $sshSmoke.last_ssh_error = $_.Exception.Message }
+            } -PollIntervalSeconds 5
         }
-        if (-not $sshReady) { throw 'Native Vagrant SSH readiness failed' }
+        catch { $upError = $_.Exception.Message }
+        Complete-NativeSshSmokeEvidence -Evidence $sshSmoke -VBoxManage $vbox -Vagrant $vagrant -VmName $smokeVmName -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -PrivateKey (Join-Path $preparedStage 'qualification-key') -SshExecutable $sshExecutable -VagrantUpResult $up
+        if ($upError) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $upError; $($sshSmoke.failure_reason)" }
+        if ($up.ExitCode -ne 0) { throw "Native Vagrant boot failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
+        $result.vagrant_smoke.boot = 'PASS'
+        if ($sshSmoke.failure_stage) { throw "Native Vagrant SSH failed at $($sshSmoke.failure_stage): $($sshSmoke.failure_reason)" }
         $result.vagrant_smoke.ssh = 'PASS'
         $result.observations.rocky_version = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rocky-version' -Command 'grep -Fx ''Rocky Linux release 10.2 (Red Quartz)'' /etc/rocky-release'
         $result.vagrant_smoke.rocky_version = 'PASS'
@@ -1320,6 +1328,13 @@ function Invoke-Import {
     }
     foreach ($field in $result.vagrant_smoke.PSObject.Properties.Name) {
         if ($result.vagrant_smoke.$field -ne 'PASS') { throw "Native Vagrant smoke field is not PASS: $field" }
+    }
+    if ($null -eq $result.ssh_smoke) { throw 'Native SSH smoke evidence is absent' }
+    foreach ($field in @('vm_running','ip_ready','tcp_22_ready','ssh_auth_ready','vagrant_ready','vagrant_ssh_command')) {
+        if ($result.ssh_smoke.$field -ne 'PASS') { throw "Native SSH smoke field is not PASS: $field" }
+    }
+    if (-not $result.ssh_smoke.guest_ip -or -not $result.ssh_smoke.address -or -not $result.ssh_smoke.port) {
+        throw 'Native SSH smoke address evidence is incomplete'
     }
     $artifactSource = [string]$result.artifact
     $expectedArtifactSource = Join-Path $script:LabRootResolved "artifacts\$sourceSha\rocky-10.2-rke2-virtualbox.box"
@@ -1561,6 +1576,7 @@ function Invoke-Prepare {
         Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\RockyImagePipeline.psm1') -Destination (Join-Path $preparedStage 'runner\RockyImagePipeline.psm1')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeLocalServices.ps1') -Destination (Join-Path $preparedStage 'runner\NativeLocalServices.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1') -Destination (Join-Path $preparedStage 'runner\NativeVagrantSshSmoke.ps1')
 
         $preflightPath = Join-Path $preparedStage 'evidence\preflight-prepare.json'
         $preflight = Invoke-BoundedProcess -FilePath 'powershell.exe' -Arguments @(

@@ -303,12 +303,17 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             r"while\s*\(\s*\$true\s*\)|for\s*\(\s*;;",
         )
 
-    def test_vagrant_ssh_timeout_remains_a_bounded_readiness_retry(self):
-        for source in (self.native, self.qualify):
-            self.assertIn("$attempt -le 12", source)
-            self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", source)
-            self.assertIn('if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }', source)
-            self.assertIn('if ($attempt -lt 12)', source)
+    def test_native_vagrant_ssh_records_a_bounded_stage_specific_result(self):
+        self.assertIn("@('up', '--provider', 'virtualbox', '--no-provision') -TimeoutSeconds 900", self.native)
+        self.assertIn("Update-NativeSshSmokeEvidence", self.native)
+        self.assertIn("Complete-NativeSshSmokeEvidence", self.native)
+        self.assertIn("Native Vagrant SSH failed at $($sshSmoke.failure_stage)", self.native)
+        self.assertNotIn("Native Vagrant SSH readiness failed", self.native)
+        self.assertNotIn("for ($attempt = 1; $attempt -le 12; $attempt++)", self.native)
+
+    def test_standard_vagrant_ssh_retry_remains_bounded(self):
+        self.assertIn("$attempt -le 12", self.qualify)
+        self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", self.qualify)
 
     def test_vagrant_guest_probe_timeout_is_named_and_retried_only_once(self):
         for source in (self.native, self.qualify):
