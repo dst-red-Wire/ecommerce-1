@@ -149,15 +149,44 @@ class PublicationAuthorityTests(unittest.TestCase):
         for source, category in (
             ('def rogue():\n    run(["bash", "-c", "git push origin HEAD"])\n', "git_push"),
             ('def rogue():\n    run(["gh", "api", "--method", "POST", "repos/o/r/pulls"])\n', "github_pr_create"),
+            ('def rogue(owner, repo):\n    run(["gh", "api", "--method", "POST", f"repos/{owner}/{repo}/pulls"])\n', "github_pr_create"),
         ):
             with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "worker.py"
                 path.write_text(source, encoding="utf-8")
                 self.assertEqual({"worker.py#rogue"}, REPOCTL._publication_python_sites(path, "worker.py")[category])
+                with self.assertRaisesRegex(RuntimeError, "worker.py#rogue"):
+                    REPOCTL.publication_mutation_site_check(source_root=path.parent)
+
+    def test_go_exec_command_publication_is_rejected(self):
+        for command in (
+            'exec.Command("git", "push", "origin", "HEAD")',
+            'exec.Command(\n  "git",\n  "push",\n  "origin",\n  "HEAD",\n)',
+            'exec.CommandContext(ctx, "git", "push", "origin", "HEAD")',
+            'exec.Command("gh", "pr", "create", "--title", "release")',
+        ):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "services/product/rogue.go"
+                path.parent.mkdir(parents=True)
+                path.write_text('package product\nimport "os/exec"\nfunc rogue() { ' + command + ' }\n', encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "services/product/rogue.go"):
+                    REPOCTL.publication_mutation_site_check(source_root=root)
+        self.assertEqual({}, REPOCTL._publication_go_sites('exec.Command("git", "status")', "safe.go"))
+
+    def test_shell_line_continuation_publication_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "tools/rogue.sh"
+            path.parent.mkdir(parents=True)
+            path.write_text("#!/bin/sh\ngit " + "\\\n" + "  push origin HEAD\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "tools/rogue.sh"):
+                REPOCTL.publication_mutation_site_check(source_root=root)
 
     def test_publication_mutation_in_tekton_yaml_is_rejected(self):
         for step in (
             'script: |\n      git push origin HEAD\n',
+            'script: |\n      git \\\n        push origin HEAD\n',
             'command: [git]\n    args: [push, origin, HEAD]\n',
             'command: [gh]\n    args: [pr, create, --title, release]\n',
             'script: |\n      gh pr create --title release\n',

@@ -7982,6 +7982,7 @@ _PUBLICATION_AUTOMATION_SUFFIXES = {
     ".tmpl", ".toml", ".tpl", ".ts", ".zsh",
 }
 _PUBLICATION_AUTOMATION_FILENAMES = {"Dockerfile", "Jenkinsfile", "Justfile", "Makefile", "Taskfile", "Vagrantfile"}
+_PUBLICATION_GO_EXEC = re.compile(r"\bexec\.Command(?:Context)?\s*\(")
 
 
 def _publication_source_files(source_root: Path) -> list[Path]:
@@ -7997,21 +7998,103 @@ def _publication_source_files(source_root: Path) -> list[Path]:
     return sorted(path for path in source_root.rglob("*") if path.is_file())
 
 
-def _publication_command_categories(words: set[str], prefixes: set[str]) -> set[str]:
+def _publication_normalize_shell(text: str) -> str:
+    return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", text)
+
+
+def _publication_text_categories(text: str) -> set[str]:
+    normalized = _publication_normalize_shell(text)
+    return {category for category, pattern in _PUBLICATION_TEXT_COMMANDS.items() if pattern.search(normalized)}
+
+
+def _publication_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else "<dynamic>"
+            for part in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _publication_static_string(node.left)
+        right = _publication_static_string(node.right)
+        return (left if left is not None else "<dynamic>") + (right if right is not None else "<dynamic>")
+    return None
+
+
+def _publication_command_categories(words: set[str]) -> set[str]:
     categories: set[str] = set()
     if {"git", "push"} <= words:
-        delete = any(value.startswith("--force-with-lease=") for value in prefixes) and ":" in prefixes
-        force_options = any(value == "-f" or value.startswith(("--force", "+")) for value in words | prefixes)
+        delete = any(value.startswith("--force-with-lease=") for value in words) and any(
+            value.startswith(":") for value in words
+        )
+        force_options = any(value == "-f" or value.startswith(("--force", "+")) for value in words)
         if not delete and force_options:
             raise RuntimeError("force-push is forbidden")
         categories.add("git_push_delete" if delete else "git_push")
     if {"pr", "create"} <= words:
         categories.add("github_pr_create")
-    if "POST" in words and any("/pulls" in value for value in words | prefixes):
+    if "POST" in words and any("/pulls" in value for value in words):
         categories.add("github_pr_create")
     if {"pr", "edit"} <= words or {"api", "PATCH", "--raw-field"} <= words:
         categories.add("github_pr_update")
     return categories
+
+
+def _publication_go_call_args(source: str, start: int) -> list[str]:
+    """Split one Go call's top-level arguments without treating quoted commas as separators."""
+    args: list[str] = []
+    closing = [")"]
+    quote = ""
+    escaped = False
+    arg_start = start
+    for position in range(start, len(source)):
+        char = source[position]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "`":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char in "([{":
+            closing.append({"(": ")", "[": "]", "{": "}"}[char])
+        elif char in ")]}":
+            if char != closing.pop():
+                raise RuntimeError("cannot tokenize Go publication command")
+            if not closing:
+                args.append(source[arg_start:position].strip())
+                return args
+        elif char == "," and len(closing) == 1:
+            args.append(source[arg_start:position].strip())
+            arg_start = position + 1
+    raise RuntimeError("unterminated Go publication command")
+
+
+def _publication_go_sites(source: str, relative: str) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for match in _PUBLICATION_GO_EXEC.finditer(source):
+        arguments = _publication_go_call_args(source, match.end())
+        if source[match.start():match.end()].startswith("exec.CommandContext"):
+            arguments = arguments[1:]
+        words: set[str] = set()
+        for argument in arguments:
+            if argument.startswith('"') and argument.endswith('"'):
+                try:
+                    words.add(json.loads(argument))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"cannot decode Go publication command in {relative}") from exc
+            elif argument.startswith("`") and argument.endswith("`"):
+                words.add(argument[1:-1])
+        categories = _publication_command_categories(words)
+        for word in words:
+            categories.update(_publication_text_categories(word))
+        for category in categories:
+            found.setdefault(category, set()).add(f"{relative}:{source.count(chr(10), 0, match.start()) + 1}")
+    return found
 
 
 def _publication_python_sites(path: Path, relative: str) -> dict[str, set[str]]:
@@ -8078,34 +8161,21 @@ def _publication_python_sites(path: Path, relative: str) -> dict[str, set[str]]:
                 if isinstance(argv, ast.Name):
                     argv = next((scope[argv.id] for scope in reversed(self.bindings) if argv.id in scope), argv)
                 if isinstance(argv, (ast.List, ast.Tuple)) and not name.startswith("assert"):
-                    words = {item.value for item in argv.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)}
-                    prefixes = {
-                        item.values[0].value
-                        for item in argv.elts
-                        if isinstance(item, ast.JoinedStr)
-                        and item.values
-                        and isinstance(item.values[0], ast.Constant)
-                        and isinstance(item.values[0].value, str)
-                    }
+                    words = {value for item in argv.elts if (value := _publication_static_string(item)) is not None}
                     try:
-                        categories = _publication_command_categories(words, prefixes)
+                        categories = _publication_command_categories(words)
                     except RuntimeError as exc:
                         raise RuntimeError(f"{exc} at {self.site}:{node.lineno}") from exc
                     for word in words:
-                        categories.update(category for category, pattern in _PUBLICATION_TEXT_COMMANDS.items() if pattern.search(word))
+                        categories.update(_publication_text_categories(word))
                     for category in categories:
                         self.record(category)
-                elif isinstance(argv, (ast.Constant, ast.JoinedStr)):
+                else:
                     if name in {"run", "Popen", "call", "check_call", "check_output", "system", "exec", "execute"}:
-                        chunks = [argv.value] if isinstance(argv, ast.Constant) and isinstance(argv.value, str) else [
-                            item.value for item in argv.values if isinstance(item, ast.Constant) and isinstance(item.value, str)
-                        ] if isinstance(argv, ast.JoinedStr) else []
-                        categories = {
-                            category for chunk in chunks for category, pattern in _PUBLICATION_TEXT_COMMANDS.items()
-                            if pattern.search(chunk)
-                        }
-                        for category in categories:
-                            self.record(category)
+                        static = _publication_static_string(argv)
+                        if static is not None:
+                            for category in _publication_text_categories(static):
+                                self.record(category)
             self.generic_visit(node)
 
     Visitor().visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
@@ -8126,7 +8196,7 @@ def _publication_yaml_sites(path: Path, relative: str) -> dict[str, set[str]]:
             for candidate in (argv, command + args if isinstance(command, list) and isinstance(args, list) else command):
                 if isinstance(candidate, list):
                     words = {word for word in candidate if isinstance(word, str)}
-                    for category in _publication_command_categories(words, set()):
+                    for category in _publication_command_categories(words):
                         found.setdefault(category, set()).add(relative)
             for child in value.values():
                 visit(child)
@@ -8134,9 +8204,8 @@ def _publication_yaml_sites(path: Path, relative: str) -> dict[str, set[str]]:
             for child in value:
                 visit(child)
         elif isinstance(value, str):
-            for category, pattern in _PUBLICATION_TEXT_COMMANDS.items():
-                if pattern.search(value):
-                    found.setdefault(category, set()).add(relative)
+            for category in _publication_text_categories(value):
+                found.setdefault(category, set()).add(relative)
 
     try:
         for document in yaml.safe_load_all(content):
@@ -8147,9 +8216,8 @@ def _publication_yaml_sites(path: Path, relative: str) -> dict[str, set[str]]:
         if not (template or invalid_test_fixture):
             raise RuntimeError(f"cannot inspect publication mutations in {relative}: invalid YAML") from exc
         # Helm templates and intentional invalid-YAML fixtures cannot be parsed; scan their source conservatively.
-        for category, pattern in _PUBLICATION_TEXT_COMMANDS.items():
-            if pattern.search(content):
-                found.setdefault(category, set()).add(relative)
+        for category in _publication_text_categories(content):
+            found.setdefault(category, set()).add(relative)
         if re.search(r"(?s)\bcommand:\s*\[\s*git\s*\].{0,300}\bargs:\s*\[\s*push\b", content):
             found.setdefault("git_push", set()).add(relative)
         if re.search(r"(?s)\bcommand:\s*\[\s*gh\s*\].{0,300}\bargs:\s*\[\s*pr\s*,\s*create\b", content):
@@ -8172,10 +8240,14 @@ def publication_mutation_site_check(*, source_root: Path = ROOT, policy: dict | 
             content = path.read_text(encoding="utf-8")
             if path.name == "Makefile" and re.search(r"(?m)^\s*(?:publish|publish-change)\s*:", content):
                 raise RuntimeError("direct public publish Make targets are forbidden; use make deliver")
+            normalized = _publication_normalize_shell(content)
             discovered = {
-                category: {f"{relative}:{number}" for number, line in enumerate(content.splitlines(), 1) if pattern.search(line)}
+                category: {f"{relative}:{normalized.count(chr(10), 0, match.start()) + 1}" for match in pattern.finditer(normalized)}
                 for category, pattern in _PUBLICATION_TEXT_COMMANDS.items()
             }
+            if path.suffix == ".go":
+                for category, sites in _publication_go_sites(content, relative).items():
+                    discovered[category].update(sites)
         else:
             continue
         for category, sites in discovered.items():
