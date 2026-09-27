@@ -6426,7 +6426,7 @@ def _evaluate_github_cleanup_evidence(
                 reason = "source-repository-mismatch"
             elif source_state == "OPEN":
                 reason = "source-pr-still-open"
-            elif source_state == "MERGED" or source.get("merge_commit_sha"):
+            elif source_state == "MERGED":
                 reason = "source-pr-was-merged"
             elif source_state != "CLOSED":
                 reason = "source-pr-not-closed"
@@ -6604,7 +6604,7 @@ def _plan_branch_cleanup(
             if unsafe_heads:
                 if exact_merged_heads:
                     branch_keep_reason = "branch-advanced-after-merged-pr"
-                elif absorption_source_heads:
+                elif absorption_source_heads and any(head not in absorption_source_heads for head in unsafe_heads):
                     branch_keep_reason = "branch-advanced-after-absorption"
                 elif github_evidence.get("available") is not True:
                     branch_keep_reason = "github-evidence-unavailable"

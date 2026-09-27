@@ -255,6 +255,7 @@ class BranchCleanupTests(unittest.TestCase):
 
     def test_merge_commit_may_differ_from_absorbing_head_when_trees_match(self):
         pulls, _proof = self.one_source_fixture()
+        pulls[0]["merge_commit_sha"] = "6" * 40
         evidence = self.evaluate(pulls)
         detail = evidence["absorbed_pr_heads"]["feat/source"]["a" * 40]
         self.assertEqual("d" * 40, detail["absorbing_head"])
