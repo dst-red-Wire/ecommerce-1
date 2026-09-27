@@ -89,6 +89,22 @@ class RoadmapSyncTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "topological order"):
                 ROADMAP.policy()
 
+    def test_policy_rejects_unknown_resolved_capability_reference(self):
+        broken = json.loads(json.dumps(ROADMAP.policy()))
+        milestone = next(item for item in broken["milestones"] if item["id"] == "M4")
+        milestone["requirements"]["resolved_capabilities"][0]["tool"] = "typo-tool"
+        with mock.patch.object(
+            ROADMAP,
+            "load_yaml",
+            side_effect=[
+                {"machine_contracts": {"roadmap_policy": "config/contracts/roadmap-policy.yaml"}},
+                broken,
+                ROADMAP.load_yaml("config/contracts/qualification-execution-policy.yaml"),
+            ],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unknown resolved capability"):
+                ROADMAP.policy()
+
     def test_closed_not_planned_tracker_does_not_become_proven(self):
         policy = ROADMAP.policy()
         states = {}

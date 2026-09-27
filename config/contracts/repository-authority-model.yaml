@@ -21,6 +21,8 @@ domains:
     machine_contract: cache_policy
   qualification_execution:
     machine_contract: qualification_execution_policy
+  execution_properties:
+    machine_contract: execution_properties_policy
   roadmap:
     machine_contract: roadmap_policy
   engineering_metrics:
