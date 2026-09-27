@@ -84,7 +84,7 @@ except ModuleNotFoundError as exc:
     publish_remote_status = _missing_repository_delivery
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
-ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _raw_toolchain_lock() -> dict:
@@ -8302,6 +8302,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in [
+        "workspace-check",
         "governance",
         "toolchain-closure",
         "runtime-efficiency",
@@ -8527,6 +8528,16 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
+    from canonical_workspace import check as check_canonical_workspace
+
+    workspace_result = check_canonical_workspace()
+    if args.cmd == "workspace-check":
+        if workspace_result["status"] == "PASS":
+            print("PASS canonical-workspace")
+            return 0
+        return fail("canonical-workspace " + workspace_result["reason"], 1)
+    if workspace_result["status"] != "PASS":
+        return fail("canonical-workspace " + workspace_result["reason"], 1)
     from native_workspace import workspace_error
 
     workspace_failure = workspace_error(ROOT)

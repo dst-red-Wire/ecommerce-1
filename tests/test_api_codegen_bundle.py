@@ -230,7 +230,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bindir}:{env['PATH']}"
             result = subprocess.run(
-                ["python3", "scripts/repoctl.py", "api-generate", "--target", "go"],
+                ["python3", "-c", "import sys; sys.path.insert(0, 'scripts'); import repoctl; raise SystemExit(repoctl.api_generate('go'))"],
                 cwd=root,
                 env=env,
                 text=True,

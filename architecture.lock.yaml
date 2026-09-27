@@ -3,6 +3,18 @@ status: locked-for-build
 project: ecommerce
 
 repository_governance:
+  canonical_workspace:
+    version: 1
+    kind: CanonicalWorkspacePolicy
+    status: enforced
+    canonical_path: /home/dev/ecommerce-1
+    repository: dst-red-Wire/ecommerce-1
+    additional_clones: forbidden
+    additional_worktrees: forbidden
+    execution_outside_canonical_path: forbidden
+    fail_closed: true
+    required_before: [ci, qualification, governance, reconciliation, ansible, packer, vagrant, release, publication, pull_request_operations]
+    evidence: [canonical_root, git_head, git_branch, worktree_count]
   scope: entire-repository
   windows_workspace:
     status: enforced
