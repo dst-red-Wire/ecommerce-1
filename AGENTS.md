@@ -116,13 +116,56 @@ ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
 - Final ChatGPT review results are recorded on the PR with `chatgpt-exact-sha-review:v1` machine markers for `code` and `security`; both must bind the current full head SHA and be PASS with zero blocking findings.
 - `finish-pr` consumes only those ChatGPT markers. Codex comments, reactions, summaries, statuses, and completed reviews are ignored for merge readiness.
 - Codex may be used only as a narrowly scoped execution fallback when a required task cannot be performed with ChatGPT's available capabilities. The reason must be explicit, the scope must be minimal, and Codex output is evidence returned to ChatGPT.
-- Codex must never become CODE/SECURITY review authority, emit merge-readiness markers, decide merge readiness, or make merge decisions. ChatGPT performs the final exact-SHA CODE/SECURITY review; the repository owner retains merge decision authority.
+- Codex must never become CODE/SECURITY review authority, emit merge-readiness markers, decide merge readiness, or make merge decisions. ChatGPT performs the final exact-SHA CODE/SECURITY review. Deterministic repository policy authorizes automatic delivery only for `LOW_RISK`; the repository owner retains the explicit merge boundary for `SENSITIVE` changes.
 
 ## Automated delivery
 
 Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
 
-Use `make pr-loop PR=<number>` after publication to derive and perform only the next authorized exact-SHA delivery transition. Missing CODE or SECURITY emits `state=CHATGPT_REVIEW_REQUIRED`, an uppercase `review_kind`, the PR number, the exact head SHA, and the actual bounded payload returned by `scripts/pr_monitor.py#chatgpt_review_handoff` for the automatic external ChatGPT consumer. The event includes payload byte size and SHA-256 digest and fails closed rather than emitting a minimal handoff when canonical payload construction is unavailable. SECURITY may be emitted only after an exact-SHA CODE PASS marker exists. The consumer reruns `pr-loop` after each valid marker; only missing owner authorization interrupts a human, with the exact `scope=pr-<number>` command. After authorization, the caller reruns automatically, the loop exposes `MERGE_READY`, delegates exclusively to `finish-pr`, and reports canonical `branch-cleanup` separately. Any head change abandons the in-flight transition and restarts at qualification. The controller never fabricates CODE, SECURITY, or owner authority. Use `DRY_RUN=1` to inspect `CURRENT_STATE`, `NEXT_ACTION`, and valid evidence without qualification, comments, merge, or deletion.
+Use `make pr-loop PR=<number>` after publication to derive and perform only the next authorized exact-SHA delivery transition. Missing CODE or SECURITY emits `state=CHATGPT_REVIEW_REQUIRED`, an uppercase `review_kind`, the PR number, the exact head SHA, and the actual bounded payload returned by `scripts/pr_monitor.py#chatgpt_review_handoff` for the automatic external ChatGPT consumer. The event includes payload byte size and SHA-256 digest and fails closed rather than emitting a minimal handoff when canonical payload construction is unavailable. SECURITY may be emitted only after an exact-SHA CODE PASS marker exists. The consumer reruns `pr-loop` after each valid marker. After both reviews pass, repository-owned deterministic policy classifies the exact PR base/head and changed capabilities; ChatGPT and Codex never decide merge risk. `LOW_RISK` means qualification plus CODE plus SECURITY can proceed automatically through `MERGE_READY` to `finish-pr`. `SENSITIVE` means the same gates lead to `OWNER_AUTH_REQUIRED`, followed by exact-SHA owner authorization and then `finish-pr`. `NOT_REQUIRED_BY_POLICY` is a normative absence of the owner gate and is never `AUTO_AUTHORIZED` or a synthetic approval. Unknown, ambiguous, partial, unclassified, or failed analysis is never low risk. Any head change invalidates the classification and all exact-SHA evidence and restarts at qualification. The controller never fabricates CODE, SECURITY, or owner authority. Use `DRY_RUN=1` to inspect `CURRENT_STATE`, `NEXT_ACTION`, and valid evidence without qualification, comments, merge, or deletion.
+
+The normative delivery paths are:
+
+```text
+LOW_RISK: qualification PASS -> ChatGPT CODE PASS -> ChatGPT SECURITY PASS
+          -> owner authorization NOT_REQUIRED_BY_POLICY -> automatic finish-pr
+
+SENSITIVE: qualification PASS -> ChatGPT CODE PASS -> ChatGPT SECURITY PASS
+           -> OWNER_AUTH_REQUIRED -> explicit owner authorization -> finish-pr
+```
+
+Expected operator output for a low-risk change:
+
+```text
+PR #162
+HEAD abc...
+
+qualification   PASS
+CODE            PASS
+SECURITY        PASS
+RISK            LOW_RISK
+OWNER AUTH      NOT_REQUIRED_BY_POLICY
+MODE            AUTO
+
+STATE MERGE_READY
+```
+
+Expected operator output for a sensitive change:
+
+```text
+PR #163
+HEAD def...
+
+qualification   PASS
+CODE            PASS
+SECURITY        PASS
+RISK            SENSITIVE
+OWNER AUTH      MISSING
+MODE            OWNER_GATED
+
+STATE OWNER_AUTH_REQUIRED
+/owner-authorization approve scope=pr-163 sha=def...
+```
 
 PR comment authority is ordered only by immutable GitHub `created_at` plus comment ID; `updated_at` is non-authoritative. An owner authorization or revocation counts only when the trimmed comment body is exactly the command, never when embedded in prose, examples, or code fences. A non-zero `finish-pr` exit is not itself a merge verdict: `pr-loop` must re-read GitHub and accept a merge only when the current PR is merged at the initial exact head; if GitHub is unavailable the merge result remains unknown and the loop fails closed.
 

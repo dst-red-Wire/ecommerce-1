@@ -109,6 +109,7 @@ V5_SECTION_KEYS = {
     ),
     "repository_governance.owner_authorization": frozenset(
         {
+            "mode",
             "syntax",
             "decision_authority",
             "recording_agent",
@@ -117,6 +118,10 @@ V5_SECTION_KEYS = {
             "scope_binding",
             "head_change",
             "absence_or_mismatch",
+            "automatic_generation",
+            "required_for",
+            "low_risk",
+            "sensitive",
         }
     ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
@@ -1490,17 +1495,38 @@ def validate(root):
             )
 
         pr_loop = review_policy.get("repository_delivery", {}).get("pr_loop", {})
+        owner_boundary = pr_loop.get("owner_boundary", {})
+        risk_classification = pr_loop.get("risk_classification", {})
+        required_risk_capabilities = [
+            "governance",
+            "delivery-authority",
+            "branch-protection",
+            "infrastructure-apply",
+            "destructive-operation",
+            "state-migration",
+            "iam",
+            "secrets",
+            "network",
+            "dns",
+            "signing-or-provenance-policy",
+            "security-policy",
+            "artifact-publication-authority",
+        ]
         if (
-            pr_loop.get("schema_version") != 1
+            pr_loop.get("schema_version") != 2
             or pr_loop.get("controller") != "scripts/repoctl.py"
             or pr_loop.get("state_persistence") != "forbidden"
             or pr_loop.get("transition_order")
             != [
+                "exact-pr-head",
                 "qualification",
                 "chatgpt-code",
                 "chatgpt-security",
-                "owner-authorization",
+                "deterministic-risk-classification",
+                "owner-authorization-if-required",
+                "merge-requirements",
                 "finish-pr",
+                "merge-verification",
                 "post-merge-cleanup",
             ]
             or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
@@ -1548,12 +1574,33 @@ def validate(root):
                 "updated_at_authority": "forbidden",
                 "owner_authorization_match": "whole-trimmed-comment",
             }
-            or pr_loop.get("owner_boundary", {}).get("automatic_generation") != "forbidden"
-            or pr_loop.get("owner_boundary", {}).get("unique_human_interruption") is not True
-            or pr_loop.get("owner_boundary", {}).get("automatic_rerun_after_authorization")
+            or owner_boundary.get("mode") != "risk-based"
+            or owner_boundary.get("automatic_generation") != "forbidden"
+            or owner_boundary.get("unique_human_interruption") is not True
+            or owner_boundary.get("automatic_rerun_after_authorization")
             != "required"
-            or pr_loop.get("owner_boundary", {}).get("revocation")
+            or owner_boundary.get("revocation")
             != "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>"
+            or owner_boundary.get("required_for") != required_risk_capabilities
+            or owner_boundary.get("low_risk")
+            != {"authorization": "not-required-by-policy"}
+            or owner_boundary.get("sensitive")
+            != {"authorization": "explicit-repository-owner"}
+            or risk_classification.get("authority") != "repository-policy"
+            or risk_classification.get("implementation")
+            != "scripts/repoctl.py#classify_merge_risk"
+            or risk_classification.get("policy_source") != "exact-pr-base-sha"
+            or risk_classification.get("model") != "deterministic-capabilities-and-paths"
+            or risk_classification.get("llm_decision") != "forbidden"
+            or risk_classification.get("self_modification") != "sensitive"
+            or risk_classification.get("unknown_or_ambiguous") != "sensitive"
+            or risk_classification.get("partial_analysis") != "sensitive"
+            or risk_classification.get("git_error") != "sensitive"
+            or risk_classification.get("classifications") != ["LOW_RISK", "SENSITIVE"]
+            or set(
+                (risk_classification.get("sensitive", {}).get("capabilities") or {}).keys()
+            )
+            != set(required_risk_capabilities)
             or pr_loop.get("merge_delegation", {}).get("state") != "MERGE_READY"
             or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
             or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
@@ -1605,7 +1652,7 @@ def validate(root):
             "codex_output_role": "evidence-for-chatgpt",
             "code_security_review_authority": "ChatGPT-only",
             "merge_readiness_authority": "ChatGPT-only",
-            "merge_decision_authority": "repository-owner",
+            "merge_decision_authority": "repository-policy-with-sensitive-owner-boundary",
             "codex_review_markers": "forbidden",
             "codex_merge_decision": "forbidden",
         }:

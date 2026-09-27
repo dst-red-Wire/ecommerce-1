@@ -13,6 +13,7 @@ import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import fnmatch
 import functools
 import hashlib
 import json
@@ -7336,6 +7337,200 @@ def _validate_commit_provenance_policy(policy: object) -> dict:
     return copy.deepcopy(policy)
 
 
+MERGE_RISK_CAPABILITIES = (
+    "governance",
+    "delivery-authority",
+    "branch-protection",
+    "infrastructure-apply",
+    "destructive-operation",
+    "state-migration",
+    "iam",
+    "secrets",
+    "network",
+    "dns",
+    "signing-or-provenance-policy",
+    "security-policy",
+    "artifact-publication-authority",
+)
+
+
+def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
+    """Validate the fail-closed repository policy before it can classify any PR."""
+    if not isinstance(policy, dict) or not isinstance(owner_boundary, dict):
+        return False
+    if set(policy) != {
+        "authority",
+        "implementation",
+        "policy_source",
+        "model",
+        "llm_decision",
+        "exact_sha_binding",
+        "self_modification",
+        "unknown_or_ambiguous",
+        "partial_analysis",
+        "git_error",
+        "classifications",
+        "required_inputs",
+        "low_risk",
+        "sensitive",
+    }:
+        return False
+    if any(
+        (
+            policy.get("authority") != "repository-policy",
+            policy.get("implementation") != "scripts/repoctl.py#classify_merge_risk",
+            policy.get("policy_source") != "exact-pr-base-sha",
+            policy.get("model") != "deterministic-capabilities-and-paths",
+            policy.get("llm_decision") != "forbidden",
+            policy.get("exact_sha_binding") != "required",
+            policy.get("self_modification") != "sensitive",
+            policy.get("unknown_or_ambiguous") != "sensitive",
+            policy.get("partial_analysis") != "sensitive",
+            policy.get("git_error") != "sensitive",
+            policy.get("classifications") != ["LOW_RISK", "SENSITIVE"],
+            policy.get("required_inputs")
+            != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
+        )
+    ):
+        return False
+    required_for = list(MERGE_RISK_CAPABILITIES)
+    if owner_boundary.get("mode") != "risk-based":
+        return False
+    if owner_boundary.get("automatic_generation") != "forbidden":
+        return False
+    if owner_boundary.get("required_for") != required_for:
+        return False
+    if owner_boundary.get("low_risk") != {"authorization": "not-required-by-policy"}:
+        return False
+    if owner_boundary.get("sensitive") != {"authorization": "explicit-repository-owner"}:
+        return False
+    low_risk = policy.get("low_risk")
+    sensitive = policy.get("sensitive")
+    if not isinstance(low_risk, dict) or set(low_risk) != {
+        "authorization",
+        "merge_mode",
+        "eligible_paths",
+    }:
+        return False
+    if (
+        low_risk.get("authorization") != "not-required-by-policy"
+        or low_risk.get("merge_mode") != "AUTO"
+    ):
+        return False
+    eligible_paths = low_risk.get("eligible_paths")
+    if (
+        not isinstance(eligible_paths, list)
+        or not eligible_paths
+        or len(eligible_paths) != len(set(eligible_paths))
+        or any(
+            not isinstance(pattern, str)
+            or not pattern
+            or pattern in {"*", "**", "**/*"}
+            or pattern.startswith("/")
+            or ".." in Path(pattern).parts
+            for pattern in eligible_paths
+        )
+    ):
+        return False
+    if not isinstance(sensitive, dict) or set(sensitive) != {
+        "authorization",
+        "merge_mode",
+        "capabilities",
+    }:
+        return False
+    if (
+        sensitive.get("authorization") != "explicit-repository-owner"
+        or sensitive.get("merge_mode") != "OWNER_GATED"
+    ):
+        return False
+    capabilities = sensitive.get("capabilities")
+    if not isinstance(capabilities, dict) or set(capabilities) != set(required_for):
+        return False
+    required_anchors = {
+        "governance": {"architecture.lock.yaml", "config/contracts/review-policy.yaml"},
+        "delivery-authority": {"scripts/repoctl.py", "scripts/pr_monitor.py", "Makefile"},
+        "branch-protection": {".github/CODEOWNERS", ".github/rulesets/**"},
+        "infrastructure-apply": {"platform/terraform/**", "platform/ansible/**"},
+        "state-migration": {"**/migrations/**"},
+        "iam": {"config/contracts/identity-boundary-policy.yaml"},
+        "secrets": {"config/contracts/secret-delivery-policy.yaml"},
+        "network": {"config/infrastructure/network-plan.yaml"},
+        "dns": {"config/contracts/dns-authority-policy.yaml"},
+        "signing-or-provenance-policy": {"scripts/check_automation_signing.py"},
+        "security-policy": {"config/contracts/security-scan-policy.yaml"},
+        "artifact-publication-authority": {"platform/tekton/**"},
+    }
+    for capability, rule in capabilities.items():
+        if not isinstance(rule, dict) or set(rule) - {"paths", "content_paths", "content_patterns"}:
+            return False
+        paths = rule.get("paths", [])
+        content_paths = rule.get("content_paths", [])
+        content_patterns = rule.get("content_patterns", [])
+        if any(
+            not isinstance(values, list)
+            or len(values) != len(set(values))
+            or any(not isinstance(value, str) or not value for value in values)
+            for values in (paths, content_paths, content_patterns)
+        ):
+            return False
+        if not paths and not content_patterns:
+            return False
+        if content_patterns and not content_paths:
+            return False
+        if not required_anchors.get(capability, set()).issubset(paths):
+            return False
+        try:
+            for pattern in content_patterns:
+                re.compile(pattern)
+        except re.error:
+            return False
+    return True
+
+
+def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
+    """Keep the established exact contract check while validating the v2 risk extension."""
+    if not isinstance(policy, dict):
+        return {}
+    normalized = copy.deepcopy(policy)
+    owner_boundary = normalized.get("owner_boundary")
+    risk_policy = normalized.pop("risk_classification", None)
+    expected_transition = [
+        "exact-pr-head",
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "deterministic-risk-classification",
+        "owner-authorization-if-required",
+        "merge-requirements",
+        "finish-pr",
+        "merge-verification",
+        "post-merge-cleanup",
+    ]
+    if normalized.get("schema_version") != 2:
+        return {}
+    if normalized.get("transition_order") != expected_transition:
+        return {}
+    if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
+        return {}
+    if normalized.get("state_sources", []).count(
+        "exact-sha-deterministic-risk-classification"
+    ) != 1:
+        return {}
+    normalized["schema_version"] = 1
+    normalized["state_sources"].remove("exact-sha-deterministic-risk-classification")
+    normalized["transition_order"] = [
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "owner-authorization",
+        "finish-pr",
+        "post-merge-cleanup",
+    ]
+    for key in ("mode", "required_for", "low_risk", "sensitive"):
+        normalized["owner_boundary"].pop(key, None)
+    return normalized
+
+
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
@@ -7493,7 +7688,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "post-merge roadmap reconciliation contract must remain exact",
         ),
         (
-            pr_loop_policy
+            _normalized_pr_loop_for_legacy_validation(pr_loop_policy)
             == {
                 "schema_version": 1,
                 "controller": "scripts/repoctl.py",
@@ -8163,6 +8358,314 @@ def _review_result_is_pass(result: dict) -> bool:
     return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
 
 
+def _merge_risk_path_matches(path: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def _merge_risk_result(
+    classification: str,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str],
+    reasons: list[str],
+    matched_capabilities: list[str],
+    analysis_complete: bool,
+) -> dict:
+    return {
+        "classification": classification,
+        "authority": "repository-policy",
+        "policy_source": "exact-pr-base-sha",
+        "pr": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_files": sorted(changed_files),
+        "reasons": sorted(set(reasons)),
+        "matched_capabilities": sorted(set(matched_capabilities)),
+        "analysis_complete": analysis_complete,
+    }
+
+
+def _sensitive_merge_risk(
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str] | None,
+    reason: str,
+) -> dict:
+    return _merge_risk_result(
+        "SENSITIVE",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+        changed_files=changed_files or [],
+        reasons=[reason],
+        matched_capabilities=[],
+        analysis_complete=False,
+    )
+
+
+def _merge_risk_policy_at_base(base_sha: str) -> dict:
+    policy_file = "config/contracts/review-policy.yaml"
+    response = run(
+        ["git", "show", f"{base_sha}:{policy_file}"],
+        check=False,
+        capture=True,
+    )
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        raise RuntimeError(detail or "exact base review policy is unavailable")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-merge-risk-policy-") as directory:
+        materialized = Path(directory) / "review-policy.yaml"
+        materialized.write_text(response.stdout or "", encoding="utf-8")
+        document = qualification_cache.psych_load(materialized)
+    pr_loop_policy = (document.get("repository_delivery") or {}).get("pr_loop") or {}
+    risk_policy = pr_loop_policy.get("risk_classification")
+    owner_boundary = pr_loop_policy.get("owner_boundary")
+    if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
+        raise RuntimeError("exact base review policy has no valid merge-risk authority")
+    return copy.deepcopy(risk_policy)
+
+
+def _merge_risk_git_inputs(base_sha: str, head_sha: str) -> tuple[list[str], dict[str, str]]:
+    for label, sha in (("base", base_sha), ("head", head_sha)):
+        if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
+            raise RuntimeError(f"{label} SHA is not exact")
+        exists = run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            check=False,
+            capture=True,
+        )
+        if exists.returncode:
+            raise RuntimeError(f"{label} commit is unavailable")
+    lineage = run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        check=False,
+        capture=True,
+    )
+    if lineage.returncode:
+        raise RuntimeError("head is not descended from the exact PR base")
+    status = run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-renames",
+            base_sha,
+            head_sha,
+            "--",
+        ],
+        check=False,
+        capture=True,
+    )
+    if status.returncode:
+        detail = (status.stderr or status.stdout or "").strip()
+        raise RuntimeError(detail or "cannot read complete exact-SHA diff status")
+    fields = (status.stdout or "").split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        raise RuntimeError("partial exact-SHA diff status")
+    changed_files: list[str] = []
+    for index in range(0, len(fields), 2):
+        change_status, path = fields[index : index + 2]
+        if change_status not in set("ACDMRTUXB"):
+            raise RuntimeError(f"unknown diff status: {change_status!r}")
+        if (
+            not path
+            or path.startswith("/")
+            or "\\" in path
+            or "\x00" in path
+            or ".." in Path(path).parts
+        ):
+            raise RuntimeError("diff contains an invalid repository path")
+        changed_files.append(path)
+    if len(changed_files) != len(set(changed_files)):
+        raise RuntimeError("diff contains duplicate or ambiguous paths")
+    changes: dict[str, str] = {}
+    for path in sorted(changed_files):
+        diff = run(
+            [
+                "git",
+                "diff",
+                "--no-ext-diff",
+                "--no-renames",
+                "--no-color",
+                "--unified=0",
+                base_sha,
+                head_sha,
+                "--",
+                path,
+            ],
+            check=False,
+            capture=True,
+        )
+        if diff.returncode:
+            raise RuntimeError(f"partial exact-SHA diff for {path}")
+        if "Binary files " in (diff.stdout or "") or "GIT binary patch" in (diff.stdout or ""):
+            raise RuntimeError(f"unclassifiable binary diff for {path}")
+        changed_lines = [
+            line[1:]
+            for line in (diff.stdout or "").splitlines()
+            if (line.startswith("+") and not line.startswith("+++"))
+            or (line.startswith("-") and not line.startswith("---"))
+        ]
+        changes[path] = "\n".join(changed_lines)
+    if set(changes) != set(changed_files):
+        raise RuntimeError("partial exact-SHA changed-file analysis")
+    return sorted(changed_files), changes
+
+
+def _evaluate_merge_risk(
+    policy: dict,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str],
+    file_changes: dict[str, str],
+) -> dict:
+    """Pure deterministic capability/path classification over complete exact-SHA inputs."""
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reason="invalid-base-sha",
+        )
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha or "") is None:
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reason="invalid-head-sha",
+        )
+    owner_boundary = {
+        "mode": "risk-based",
+        "automatic_generation": "forbidden",
+        "required_for": list(MERGE_RISK_CAPABILITIES),
+        "low_risk": {"authorization": "not-required-by-policy"},
+        "sensitive": {"authorization": "explicit-repository-owner"},
+    }
+    if not _merge_risk_policy_is_valid(policy, owner_boundary):
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reason="unknown-or-invalid-policy",
+        )
+    if (
+        not isinstance(changed_files, list)
+        or not changed_files
+        or len(changed_files) != len(set(changed_files))
+        or sorted(changed_files) != changed_files
+        or not isinstance(file_changes, dict)
+        or set(file_changes) != set(changed_files)
+        or any(not isinstance(value, str) for value in file_changes.values())
+    ):
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files if isinstance(changed_files, list) else [],
+            reason="partial-or-ambiguous-diff",
+        )
+    capabilities = policy["sensitive"]["capabilities"]
+    matched: set[str] = set()
+    for capability, rule in capabilities.items():
+        direct_paths = rule.get("paths", [])
+        if any(_merge_risk_path_matches(path, direct_paths) for path in changed_files):
+            matched.add(capability)
+        candidates = [
+            path
+            for path in changed_files
+            if _merge_risk_path_matches(path, rule.get("content_paths", []))
+        ]
+        if candidates and any(
+            re.search(pattern, file_changes[path], flags=re.IGNORECASE | re.MULTILINE)
+            for pattern in rule.get("content_patterns", [])
+            for path in candidates
+        ):
+            matched.add(capability)
+    if matched:
+        return _merge_risk_result(
+            "SENSITIVE",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reasons=sorted(matched),
+            matched_capabilities=sorted(matched),
+            analysis_complete=True,
+        )
+    eligible_paths = policy["low_risk"]["eligible_paths"]
+    unclassified = [
+        path for path in changed_files if not _merge_risk_path_matches(path, eligible_paths)
+    ]
+    if unclassified:
+        return _merge_risk_result(
+            "SENSITIVE",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reasons=[f"unclassified-path:{path}" for path in unclassified],
+            matched_capabilities=[],
+            analysis_complete=True,
+        )
+    return _merge_risk_result(
+        "LOW_RISK",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+        changed_files=changed_files,
+        reasons=[],
+        matched_capabilities=[],
+        analysis_complete=True,
+    )
+
+
+def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = None) -> dict:
+    """Classify from base-owned policy; every unavailable or partial input is sensitive."""
+    changed_files: list[str] = []
+    try:
+        policy = _merge_risk_policy_at_base(base_sha)
+        changed_files, file_changes = _merge_risk_git_inputs(base_sha, head_sha)
+        return _evaluate_merge_risk(
+            policy,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            file_changes=file_changes,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        detail = re.sub(r"\s+", " ", str(exc)).strip()[:300] or type(exc).__name__
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reason=f"classification-error:{detail}",
+        )
+
+
+def _owner_authorization_for_risk(risk: dict, authorization: dict) -> dict:
+    if risk.get("classification") == "LOW_RISK":
+        return {
+            "status": "NOT_REQUIRED_BY_POLICY",
+            "head_sha": risk.get("head_sha", ""),
+            "source": "repository-policy",
+        }
+    return authorization
+
+
 _PR_LOOP_MERGE_REQUIREMENTS = {
     "current_main_lineage",
     "unresolved_blocking_findings",
@@ -8180,6 +8683,7 @@ def derive_pr_loop_state(
     security_review: dict,
     owner_authorization: dict,
     merge_requirements: dict | None = None,
+    risk: dict | None = None,
 ) -> tuple[str, str]:
     """Pure fail-closed derivation; no value returned here is persisted as authority."""
     if pr.get("merged") or pr.get("state") == "MERGED":
@@ -8202,8 +8706,35 @@ def derive_pr_loop_state(
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
     if not _review_result_is_pass(security_review):
         return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
-    if owner_authorization.get("status") != "PASS":
+    if (
+        not isinstance(risk, dict)
+        or risk.get("authority") != "repository-policy"
+        or risk.get("base_sha") != pr.get("base_sha")
+        or risk.get("head_sha") != pr.get("head_sha")
+        or risk.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or (
+            risk.get("pr") is not None
+            and risk.get("pr") != pr.get("number")
+        )
+        or not isinstance(risk.get("reasons"), list)
+        or not isinstance(risk.get("matched_capabilities"), list)
+        or not isinstance(risk.get("changed_files"), list)
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "LOW_RISK" and (
+        risk.get("analysis_complete") is not True
+        or not risk["changed_files"]
+        or risk["reasons"]
+        or risk["matched_capabilities"]
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
         return "OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"
+    if (
+        risk["classification"] == "LOW_RISK"
+        and owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
     if merge_requirements is None:
         return "BLOCKED", "REVALIDATE_MERGE_REQUIREMENTS"
     failed = sorted(
@@ -8799,20 +9330,40 @@ def finish_pr(base: str) -> int:
     print(f"PASS finish-pr: {review_reason}")
 
     try:
-        reviews, owner_authorization = pull_request_authority_evidence(gh, number, head)
+        reviews, raw_owner_authorization = pull_request_authority_evidence(gh, number, head)
         _owner_login, name_with_owner = _github_repository_identity(gh)
+        exact_pr = _github_pr_snapshot(gh, name_with_owner, number)
     except RuntimeError as exc:
         return fail(f"finish-pr cannot read PR authorities: {exc}")
+    if (
+        exact_pr.get("state") != "OPEN"
+        or exact_pr.get("draft")
+        or exact_pr.get("head_sha") != head
+        or exact_pr.get("base") != base_name
+        or exact_pr.get("base_sha") != _exact_commit_sha(base_ref)
+    ):
+        return fail("finish-pr exact PR/base/head authority changed during revalidation")
     for kind in ("code", "security"):
         if not _review_result_is_pass(reviews[kind]):
             return fail(f"finish-pr {kind} authority changed during revalidation")
 
-    if owner_authorization.get("status") != "PASS":
+    risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
+    print(
+        "PASS finish-pr: deterministic merge risk "
+        f"{risk['classification']} for exact head {head}"
+    )
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
         return fail(
             "finish-pr owner authorization missing for exact head; required command: "
             + str(owner_authorization.get("command") or "")
         )
-    print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
+    if risk["classification"] == "LOW_RISK":
+        if owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY":
+            return fail("finish-pr low-risk owner boundary is not repository-policy-derived")
+        print("PASS finish-pr: owner authorization NOT_REQUIRED_BY_POLICY")
+    else:
+        print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
 
     try:
         unresolved_threads = _github_unresolved_review_threads(gh, name_with_owner, number)
@@ -8839,28 +9390,23 @@ def finish_pr(base: str) -> int:
             "exact PASS evidence and branch protection remain mandatory"
         )
 
-    fresh_pr = json.loads(
-        output(
-            [
-                gh,
-                "pr",
-                "view",
-                str(number),
-                "--json",
-                "state,isDraft,headRefOid,baseRefName",
-            ]
-        )
-        or "{}"
-    )
+    final_fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=True)
+    if final_fetch.returncode:
+        return fail("finish-pr final revalidation cannot refresh origin")
+    try:
+        fresh_pr = _github_pr_snapshot(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr final PR revalidation failed: {exc}")
     if (
         fresh_pr.get("state") != "OPEN"
-        or fresh_pr.get("isDraft") is True
-        or fresh_pr.get("headRefOid") != head
-        or fresh_pr.get("baseRefName") != base_name
+        or fresh_pr.get("draft") is True
+        or fresh_pr.get("head_sha") != head
+        or fresh_pr.get("base") != base_name
+        or fresh_pr.get("base_sha") != _exact_commit_sha(base_ref)
     ):
         return fail("finish-pr PR state/head/base changed during final revalidation")
     try:
-        fresh_reviews, fresh_owner_authorization = pull_request_authority_evidence(
+        fresh_reviews, fresh_raw_owner_authorization = pull_request_authority_evidence(
             gh, number, head
         )
         fresh_unresolved_threads = _github_unresolved_review_threads(
@@ -8870,8 +9416,25 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr final authority revalidation failed: {exc}")
     if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
         return fail("finish-pr ChatGPT review authority changed during final revalidation")
-    if fresh_owner_authorization.get("status") != "PASS":
+    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    if risk["classification"] == "LOW_RISK" and fresh_risk["classification"] != "LOW_RISK":
+        return fail(
+            "finish-pr risk changed from LOW_RISK to SENSITIVE; "
+            + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
+        )
+    fresh_owner_authorization = _owner_authorization_for_risk(
+        fresh_risk, fresh_raw_owner_authorization
+    )
+    if (
+        fresh_risk["classification"] == "SENSITIVE"
+        and fresh_owner_authorization.get("status") != "PASS"
+    ):
         return fail("finish-pr owner authorization changed during final revalidation")
+    if (
+        fresh_risk["classification"] == "LOW_RISK"
+        and fresh_owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return fail("finish-pr low-risk owner boundary changed during final revalidation")
     if fresh_unresolved_threads:
         return fail(
             "finish-pr review conversations changed during final revalidation; "
@@ -8966,7 +9529,7 @@ def finish_pr(base: str) -> int:
 
 def _pr_loop_empty_result(pr_number: int) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pr": pr_number,
         "head_sha": "",
         "head_branch": "",
@@ -8977,7 +9540,20 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "qualification": {"status": "UNKNOWN", "source": "none"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
         "security_review": {"status": "UNKNOWN", "head_sha": ""},
+        "risk": {
+            "classification": "UNKNOWN",
+            "authority": "repository-policy",
+            "head_sha": "",
+            "base_sha": "",
+            "reasons": [],
+            "matched_capabilities": [],
+            "changed_files": [],
+            "analysis_complete": False,
+        },
+        "risk_classification": "UNKNOWN",
+        "owner_authorization_required": True,
         "owner_authorization": {"status": "UNKNOWN"},
+        "merge_mode": "OWNER_GATED",
         "merge_ready": False,
         "next_action": "RETRY",
         "merge_result": "NOT_ATTEMPTED",
@@ -9215,7 +9791,9 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
     print(f"qualification   {qualification_label}")
     print(f"CODE            {result['code_review'].get('status', 'UNKNOWN')}")
     print(f"SECURITY        {result['security_review'].get('status', 'UNKNOWN')}")
+    print(f"RISK            {result.get('risk_classification', 'UNKNOWN')}")
     print(f"OWNER AUTH      {result['owner_authorization'].get('status', 'UNKNOWN')}")
+    print(f"MODE            {result.get('merge_mode', 'OWNER_GATED')}")
     print()
     print(f"STATE {result['state']}")
     if result.get("merge_result") != "NOT_ATTEMPTED":
@@ -9398,7 +9976,20 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         )
         result["code_review"] = reviews["code"]
         result["security_review"] = reviews["security"]
-        result["owner_authorization"] = authorization
+        if all(_review_result_is_pass(reviews[kind]) for kind in ("code", "security")):
+            risk = classify_merge_risk(
+                snapshot["base_sha"], snapshot["head_sha"], snapshot["number"]
+            )
+            result["risk"] = risk
+            result["risk_classification"] = risk["classification"]
+            owner_required = risk["classification"] != "LOW_RISK"
+            result["owner_authorization_required"] = owner_required
+            result["merge_mode"] = "OWNER_GATED" if owner_required else "AUTO"
+            result["owner_authorization"] = _owner_authorization_for_risk(
+                risk, authorization
+            )
+        else:
+            result["owner_authorization"] = authorization
 
     try:
         result["qualification"] = _pr_loop_qualification(
@@ -9418,6 +10009,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["code_review"],
         result["security_review"],
         result["owner_authorization"],
+        risk=result["risk"],
     )
     if state == "QUALIFICATION_REQUIRED" and not dry_run:
         try:
@@ -9483,6 +10075,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             result["code_review"],
             result["security_review"],
             result["owner_authorization"],
+            risk=result["risk"],
         )
 
     if state in {
@@ -9548,7 +10141,10 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         _emit_pr_loop_result(result, json_output=json_output)
         return 0 if state.endswith("_REQUIRED") else 1
 
-    if dry_run and result["owner_authorization"].get("status") == "PASS":
+    if dry_run and result["owner_authorization"].get("status") in {
+        "PASS",
+        "NOT_REQUIRED_BY_POLICY",
+    }:
         try:
             merge_requirements, details = _pr_loop_merge_requirements(
                 gh,
@@ -9568,6 +10164,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             result["security_review"],
             result["owner_authorization"],
             merge_requirements,
+            risk=result["risk"],
         )
         result["state"] = state
         result["next_action"] = next_action
@@ -9576,6 +10173,14 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         return 0 if state == "MERGE_READY" else 1
 
     try:
+        if not dry_run:
+            final_fetch = run(
+                ["git", "fetch", "origin", "--prune"],
+                check=False,
+                capture=json_output,
+            )
+            if final_fetch.returncode:
+                raise RuntimeError("git fetch origin --prune failed during final revalidation")
         before_merge = _github_pr_snapshot(gh, name_with_owner, pr_number)
         if before_merge["head_sha"] != initial_head_sha:
             result["state"] = "HEAD_CHANGED"
@@ -9609,6 +10214,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["security_review"],
         result["owner_authorization"],
         merge_requirements,
+        risk=result["risk"],
     )
     result["state"] = state
     result["next_action"] = next_action

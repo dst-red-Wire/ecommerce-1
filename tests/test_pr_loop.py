@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -50,7 +51,29 @@ class PRLoopStateTests(unittest.TestCase):
     def owner(status="PASS"):
         return {"status": status}
 
-    def state(self, *, qualification="PASS", code="PASS", security="PASS", owner="PASS", merge=None):
+    def risk(self, classification="SENSITIVE", sha=None, base_sha=None):
+        return {
+            "classification": classification,
+            "authority": "repository-policy",
+            "pr": 161,
+            "base_sha": base_sha or "b" * 40,
+            "head_sha": sha or self.SHA,
+            "changed_files": ["services/product/query.go"],
+            "reasons": [] if classification == "LOW_RISK" else ["governance"],
+            "matched_capabilities": [] if classification == "LOW_RISK" else ["governance"],
+            "analysis_complete": True,
+        }
+
+    def state(
+        self,
+        *,
+        qualification="PASS",
+        code="PASS",
+        security="PASS",
+        owner="PASS",
+        risk="SENSITIVE",
+        merge=None,
+    ):
         code_result = {"status": "MISSING"} if code == "MISSING" else self.review(code, 0 if code == "PASS" else 1)
         security_result = (
             {"status": "MISSING"}
@@ -64,6 +87,7 @@ class PRLoopStateTests(unittest.TestCase):
             security_result,
             self.owner(owner),
             merge,
+            risk=self.risk(risk),
         )
 
     def test_transition_order_and_failure_states(self):
@@ -113,6 +137,21 @@ class PRLoopStateTests(unittest.TestCase):
                 state, _next = self.state(merge=incomplete)
                 self.assertEqual("BLOCKED", state)
 
+    def test_low_risk_requires_policy_absence_not_synthetic_authorization(self):
+        complete = {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS}
+        self.assertEqual(
+            ("MERGE_READY", "FINISH_PR"),
+            self.state(
+                risk="LOW_RISK",
+                owner="NOT_REQUIRED_BY_POLICY",
+                merge=complete,
+            ),
+        )
+        self.assertEqual(
+            ("BLOCKED", "RECLASSIFY_RISK"),
+            self.state(risk="LOW_RISK", owner="PASS", merge=complete),
+        )
+
     def test_merged_pr_routes_only_to_post_merge_cleanup(self):
         state = REPOCTL.derive_pr_loop_state(
             self.pr(state="MERGED", merged=True),
@@ -139,6 +178,141 @@ class PRLoopStateTests(unittest.TestCase):
                     self.owner(),
                 )
                 self.assertEqual("BLOCKED", state)
+
+
+class PRLoopRiskClassificationTests(unittest.TestCase):
+    BASE = "b" * 40
+    HEAD_A = "a" * 40
+    HEAD_B = "c" * 40
+
+    @classmethod
+    def setUpClass(cls):
+        cls.policy = REPOCTL.repository_delivery_policy()["pr_loop"]["risk_classification"]
+
+    def classify(self, paths, changes=None, head=None, policy=None):
+        ordered = sorted(paths)
+        payload = {path: "" for path in ordered}
+        payload.update(changes or {})
+        return REPOCTL._evaluate_merge_risk(
+            policy or self.policy,
+            base_sha=self.BASE,
+            head_sha=head or self.HEAD_A,
+            pr_number=162,
+            changed_files=ordered,
+            file_changes=payload,
+        )
+
+    def test_ordinary_application_change_is_low_risk(self):
+        result = self.classify(
+            ["services/product/internal/application/query.go", "tests/test_product_query.py"]
+        )
+        self.assertEqual("LOW_RISK", result["classification"])
+        self.assertEqual([], result["reasons"])
+        self.assertEqual([], result["matched_capabilities"])
+        self.assertEqual(self.HEAD_A, result["head_sha"])
+
+    def test_each_sensitive_capability_is_owner_gated(self):
+        cases = {
+            "governance": ("architecture.lock.yaml", ""),
+            "delivery-authority": ("scripts/repoctl.py", ""),
+            "branch-protection": (".github/CODEOWNERS", ""),
+            "infrastructure-apply": ("platform/terraform/main.tf", ""),
+            "destructive-operation": ("scripts/cleanup.py", "rm -rf /tmp/scoped"),
+            "state-migration": ("services/order/migrations/002_drop.sql", "DROP TABLE old"),
+            "iam": ("config/contracts/identity-boundary-policy.yaml", ""),
+            "secrets": ("config/contracts/secret-delivery-policy.yaml", ""),
+            "network": ("config/infrastructure/network-plan.yaml", ""),
+            "dns": ("config/contracts/dns-authority-policy.yaml", ""),
+            "signing-or-provenance-policy": ("scripts/check_automation_signing.py", ""),
+            "security-policy": ("config/contracts/security-scan-policy.yaml", ""),
+            "artifact-publication-authority": ("platform/tekton/publish.yaml", ""),
+        }
+        for capability, (path, content) in cases.items():
+            with self.subTest(capability=capability):
+                result = self.classify([path], {path: content})
+                self.assertEqual("SENSITIVE", result["classification"])
+                self.assertIn(capability, result["matched_capabilities"])
+
+    def test_unknown_capability_path_and_partial_inputs_never_become_low_risk(self):
+        unknown_policy = copy.deepcopy(self.policy)
+        unknown_policy["sensitive"]["capabilities"]["unknown-capability"] = {
+            "paths": ["services/**"]
+        }
+        cases = (
+            self.classify(["unknown/new.surface"]),
+            self.classify(["services/product/query.go"], policy=unknown_policy),
+            REPOCTL._evaluate_merge_risk(
+                self.policy,
+                base_sha=self.BASE,
+                head_sha=self.HEAD_A,
+                pr_number=162,
+                changed_files=["services/product/query.go"],
+                file_changes={},
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result):
+                self.assertEqual("SENSITIVE", result["classification"])
+
+    def test_git_or_policy_failure_is_sensitive(self):
+        with mock.patch.object(
+            REPOCTL, "_merge_risk_policy_at_base", side_effect=RuntimeError("Git unavailable")
+        ):
+            result = REPOCTL.classify_merge_risk(self.BASE, self.HEAD_A, 162)
+        self.assertEqual("SENSITIVE", result["classification"])
+        self.assertFalse(result["analysis_complete"])
+        self.assertIn("classification-error", result["reasons"][0])
+
+        with mock.patch.object(
+            REPOCTL, "_merge_risk_policy_at_base", return_value=self.policy
+        ), mock.patch.object(
+            REPOCTL,
+            "_merge_risk_git_inputs",
+            side_effect=RuntimeError("partial diff"),
+        ):
+            partial = REPOCTL.classify_merge_risk(self.BASE, self.HEAD_A, 162)
+        self.assertEqual("SENSITIVE", partial["classification"])
+        self.assertIn("partial diff", partial["reasons"][0])
+
+    def test_sha_change_invalidates_prior_classification_and_reviews(self):
+        prior = self.classify(["services/product/query.go"], head=self.HEAD_A)
+        prior["pr"] = 161
+        pr = PRLoopStateTests().pr(head_sha=self.HEAD_B)
+        state = REPOCTL.derive_pr_loop_state(
+            pr,
+            {"status": "PASS"},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+            {"status": "NOT_REQUIRED_BY_POLICY"},
+            {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
+            risk=prior,
+        )
+        self.assertEqual(("BLOCKED", "RECLASSIFY_RISK"), state)
+        current = self.classify(["architecture.lock.yaml"], head=self.HEAD_B)
+        self.assertEqual("SENSITIVE", current["classification"])
+
+    def test_policy_and_controller_cannot_self_declare_low_risk(self):
+        for path in ("config/contracts/review-policy.yaml", "scripts/repoctl.py"):
+            with self.subTest(path=path):
+                result = self.classify([path])
+                self.assertEqual("SENSITIVE", result["classification"])
+                self.assertTrue(result["matched_capabilities"])
+                state = REPOCTL.derive_pr_loop_state(
+                    {
+                        "number": 162,
+                        "state": "OPEN",
+                        "draft": False,
+                        "base": "main",
+                        "base_sha": self.BASE,
+                        "head_sha": self.HEAD_A,
+                    },
+                    {"status": "PASS"},
+                    {"status": "PASS", "blocking_findings": 0},
+                    {"status": "PASS", "blocking_findings": 0},
+                    {"status": "MISSING"},
+                    risk=result,
+                )
+                self.assertEqual(("OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"), state)
 
 
 class PRLoopAuthorityEvidenceTests(unittest.TestCase):
@@ -642,6 +816,68 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             rc, payload = self.run_json(dry_run=False)
         self.assertEqual(1, rc)
         self.assertEqual("GITHUB_UNAVAILABLE", payload["state"])
+
+    def test_low_risk_calls_finish_pr_without_owner_authorization(self):
+        reviews = {
+            "code": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+            "security": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+        }
+        missing_owner = {
+            "status": "MISSING",
+            "command": f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}",
+        }
+        low_risk = {
+            "classification": "LOW_RISK",
+            "authority": "repository-policy",
+            "policy_source": "exact-pr-base-sha",
+            "pr": 161,
+            "base_sha": "c" * 40,
+            "head_sha": self.SHA_A,
+            "changed_files": ["services/product/query.go"],
+            "reasons": [],
+            "matched_capabilities": [],
+            "analysis_complete": True,
+        }
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return self.completed(0)
+
+        patches = self.common()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL,
+            "_github_pr_snapshot",
+            side_effect=[self.snapshot(), self.snapshot(), merged],
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_qualification",
+            return_value={"status": "PASS", "source": "reused"},
+        ), mock.patch.object(
+            REPOCTL,
+            "pull_request_authority_evidence",
+            return_value=(reviews, missing_owner),
+        ), mock.patch.object(
+            REPOCTL, "classify_merge_risk", return_value=low_risk
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_merge_requirements",
+            return_value=(
+                {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
+                [],
+            ),
+        ), mock.patch.object(REPOCTL, "run", side_effect=run), mock.patch.object(
+            REPOCTL, "_pr_loop_post_merge", return_value=0
+        ) as post_merge:
+            rc = REPOCTL.pr_loop(161, json_output=False)
+        payload = post_merge.call_args.args[3]
+        self.assertEqual(0, rc)
+        self.assertEqual("LOW_RISK", payload["risk_classification"])
+        self.assertFalse(payload["owner_authorization_required"])
+        self.assertEqual("NOT_REQUIRED_BY_POLICY", payload["owner_authorization"]["status"])
+        self.assertEqual("AUTO", payload["merge_mode"])
+        self.assertTrue(any("finish-pr" in command for command in calls))
 
     def test_finish_pr_failure_is_not_reported_as_merge_success(self):
         pass_authorities = (

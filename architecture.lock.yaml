@@ -60,6 +60,7 @@ repository_governance:
     per_file_rule_propagation: forbidden
     consumer_changes: only-if-required-to-consume-contract
   owner_authorization:
+    mode: risk-based
     syntax: "/owner-authorization approve scope=<scope> sha=<exact-head-sha>"
     decision_authority: repository-owner
     recording_agent: ChatGPT
@@ -67,7 +68,26 @@ repository_governance:
     sha_binding: exact
     scope_binding: exact
     head_change: authorization-expired
-    absence_or_mismatch: block
+    absence_or_mismatch: block-when-required
+    automatic_generation: forbidden
+    required_for:
+      - governance
+      - delivery-authority
+      - branch-protection
+      - infrastructure-apply
+      - destructive-operation
+      - state-migration
+      - iam
+      - secrets
+      - network
+      - dns
+      - signing-or-provenance-policy
+      - security-policy
+      - artifact-publication-authority
+    low_risk:
+      authorization: not-required-by-policy
+    sensitive:
+      authorization: explicit-repository-owner
 
 business:
   services:

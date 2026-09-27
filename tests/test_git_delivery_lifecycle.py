@@ -22,6 +22,13 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
         self.assertEqual("forbidden", policy["pr_loop"]["state_persistence"])
+        self.assertEqual(
+            "repository-policy-with-sensitive-owner-boundary",
+            repoctl.pull_request_review_policy()["agent_execution_fallback"][
+                "merge_decision_authority"
+            ],
+        )
+        self.assertEqual(2, policy["pr_loop"]["schema_version"])
         handoff = policy["pr_loop"]["chatgpt_handoff"]
         self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
@@ -46,11 +53,19 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             policy["pr_loop"]["comment_evidence"],
         )
         self.assertEqual("forbidden", policy["pr_loop"]["owner_boundary"]["automatic_generation"])
+        self.assertEqual("risk-based", policy["pr_loop"]["owner_boundary"]["mode"])
         self.assertTrue(policy["pr_loop"]["owner_boundary"]["unique_human_interruption"])
         self.assertEqual(
             "required",
             policy["pr_loop"]["owner_boundary"]["automatic_rerun_after_authorization"],
         )
+        risk = policy["pr_loop"]["risk_classification"]
+        self.assertEqual("repository-policy", risk["authority"])
+        self.assertEqual("exact-pr-base-sha", risk["policy_source"])
+        self.assertEqual("forbidden", risk["llm_decision"])
+        self.assertEqual("sensitive", risk["unknown_or_ambiguous"])
+        self.assertEqual("sensitive", risk["partial_analysis"])
+        self.assertEqual("sensitive", risk["git_error"])
         self.assertEqual("MERGE_READY", policy["pr_loop"]["merge_delegation"]["state"])
         self.assertEqual("finish-pr", policy["pr_loop"]["merge_delegation"]["command"])
         self.assertEqual(
@@ -121,10 +136,22 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
 
     def test_pr_loop_policy_drift_is_rejected(self):
         policy = repoctl.repository_delivery_policy()
-        mutated = copy.deepcopy(policy)
-        mutated["pr_loop"]["merge_delegation"]["direct_merge"] = "allowed"
-        with self.assertRaisesRegex(RuntimeError, "pr-loop"):
-            repoctl._validate_repository_delivery_policy(mutated)
+        mutations = (
+            lambda value: value["pr_loop"]["merge_delegation"].__setitem__("direct_merge", "allowed"),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__("llm_decision", "allowed"),
+            lambda value: value["pr_loop"]["risk_classification"]["low_risk"].__setitem__(
+                "eligible_paths", ["**"]
+            ),
+            lambda value: value["pr_loop"]["risk_classification"]["sensitive"][
+                "capabilities"
+            ].pop("governance"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                mutated = copy.deepcopy(policy)
+                mutate(mutated)
+                with self.assertRaisesRegex(RuntimeError, "pr-loop"):
+                    repoctl._validate_repository_delivery_policy(mutated)
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
