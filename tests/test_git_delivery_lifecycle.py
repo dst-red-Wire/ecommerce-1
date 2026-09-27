@@ -28,6 +28,14 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual(["CODE", "SECURITY"], handoff["review_kinds"])
         self.assertEqual("exact-pr-and-head-sha", handoff["invocation_binding"])
         self.assertEqual("required", handoff["rerun_after_valid_marker"])
+        self.assertEqual(
+            {
+                "ordering": "immutable-created-at-then-id",
+                "updated_at_authority": "forbidden",
+                "owner_authorization_match": "whole-trimmed-comment",
+            },
+            policy["pr_loop"]["comment_evidence"],
+        )
         self.assertEqual("forbidden", policy["pr_loop"]["owner_boundary"]["automatic_generation"])
         self.assertTrue(policy["pr_loop"]["owner_boundary"]["unique_human_interruption"])
         self.assertEqual(
@@ -36,6 +44,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         )
         self.assertEqual("MERGE_READY", policy["pr_loop"]["merge_delegation"]["state"])
         self.assertEqual("finish-pr", policy["pr_loop"]["merge_delegation"]["command"])
+        self.assertEqual(
+            "reread-github-before-result",
+            policy["pr_loop"]["merge_delegation"]["nonzero_exit"],
+        )
         self.assertEqual("branch-cleanup", policy["pr_loop"]["post_merge_cleanup"]["command"])
         self.assertEqual("merge", policy["merge"]["method"])
         self.assertEqual("required", policy["merge"]["match_head_commit"])

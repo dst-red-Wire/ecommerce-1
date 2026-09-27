@@ -7544,6 +7544,11 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                         "exact_head_sha": "required",
                     },
                 },
+                "comment_evidence": {
+                    "ordering": "immutable-created-at-then-id",
+                    "updated_at_authority": "forbidden",
+                    "owner_authorization_match": "whole-trimmed-comment",
+                },
                 "owner_boundary": {
                     "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
                     "scope": "pr-<number>",
@@ -7559,6 +7564,8 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                     "command": "finish-pr",
                     "direct_merge": "forbidden",
                     "exact_head_match": "required",
+                    "nonzero_exit": "reread-github-before-result",
+                    "post_exit_merge_authority": "github-current-pr-exact-head",
                 },
                 "post_merge_cleanup": {
                     "command": "branch-cleanup",
@@ -7791,10 +7798,9 @@ _CHATGPT_REVIEW_KEYS = {
     "blocking_findings",
 }
 _OWNER_AUTHORIZATION_RE = re.compile(
-    r"^/owner-authorization (?P<action>approve|revoke) "
+    r"/owner-authorization (?P<action>approve|revoke) "
     r"scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
-    r"sha=(?P<sha>[0-9a-f]{40})$",
-    re.MULTILINE,
+    r"sha=(?P<sha>[0-9a-f]{40})",
 )
 
 
@@ -7842,13 +7848,21 @@ def _github_pr_comments(gh: str, name_with_owner: str, pr_number: int) -> list[d
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise RuntimeError("GitHub PR paginated comments payload is invalid")
     comments = [comment for page in pages for comment in page if isinstance(comment, dict)]
-    comments.sort(
-        key=lambda comment: (
-            str(comment.get("updated_at") or comment.get("created_at") or ""),
-            int(comment.get("id") or 0) if str(comment.get("id") or "").isdigit() else 0,
-        )
-    )
+    comments.sort(key=_immutable_comment_order_key)
     return comments
+
+
+def _immutable_comment_order_key(comment: dict) -> tuple[str, int]:
+    """Return immutable GitHub creation order; mutable updated_at is never authority."""
+    created_at = str(comment.get("created_at") or "")
+    identifier = str(comment.get("id") or "")
+    if not created_at or not identifier.isdigit() or int(identifier) < 1:
+        raise RuntimeError("GitHub PR comment lacks immutable created_at/id authority")
+    return created_at, int(identifier)
+
+
+def _comments_in_immutable_order(comments: list[dict]) -> list[dict]:
+    return sorted(comments, key=_immutable_comment_order_key)
 
 
 def _comment_author_login(comment: dict) -> str:
@@ -7863,7 +7877,7 @@ def _chatgpt_review_evidence(
     completed: dict[str, dict | None] = {
         kind: None for kind in evidence_contract["required_kinds"]
     }
-    for comment in comments:
+    for comment in _comments_in_immutable_order(comments):
         if _comment_author_login(comment) != owner_login:
             continue
         for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
@@ -7897,18 +7911,19 @@ def _owner_authorization_evidence(
 ) -> dict:
     scope = f"pr-{pr_number}"
     latest: dict | None = None
-    for comment in comments:
+    for comment in _comments_in_immutable_order(comments):
         if _comment_author_login(comment) != owner_login:
             continue
-        for match in _OWNER_AUTHORIZATION_RE.finditer(str(comment.get("body") or "")):
-            if match.group("scope") != scope:
-                continue
-            latest = {
-                "command": match.group(0),
-                "action": match.group("action"),
-                "sha": match.group("sha"),
-                "comment_id": comment.get("id"),
-            }
+        command = str(comment.get("body") or "").strip()
+        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
+        if match is None or match.group("scope") != scope:
+            continue
+        latest = {
+            "command": command,
+            "action": match.group("action"),
+            "sha": match.group("sha"),
+            "comment_id": comment.get("id"),
+        }
     expected_command = f"/owner-authorization approve scope={scope} sha={head_sha}"
     if latest is None:
         return {
@@ -9474,20 +9489,36 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         check=False,
         capture=json_output,
     )
+    try:
+        merged = _github_pr_snapshot(gh, name_with_owner, pr_number)
+    except RuntimeError as exc:
+        result["merge_result"] = "UNKNOWN"
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "VERIFY_MERGE_STATE"
+        if finish.returncode:
+            result["blockers"].append(
+                f"finish-pr exited {finish.returncode}; merge outcome requires GitHub re-read"
+            )
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if merged.get("merged") and merged.get("head_sha") == initial_head_sha:
+        result["merge_result"] = "PASS"
+        return _pr_loop_post_merge(
+            gh,
+            name_with_owner,
+            merged,
+            result,
+            dry_run=False,
+            json_output=json_output,
+        )
     if finish.returncode:
         result["merge_result"] = "FAIL"
         result["state"] = "BLOCKED"
         result["next_action"] = "FIX_FINISH_PR"
-        result["blockers"].append("canonical finish-pr failed")
-        _emit_pr_loop_result(result, json_output=json_output)
-        return 1
-    result["merge_result"] = "PASS"
-    try:
-        merged = _github_pr_snapshot(gh, name_with_owner, pr_number)
-    except RuntimeError as exc:
-        result["state"] = "GITHUB_UNAVAILABLE"
-        result["next_action"] = "RETRY_POST_MERGE"
-        result["blockers"].append(str(exc))
+        result["blockers"].append(
+            "finish-pr exited nonzero and GitHub confirms the exact-head PR is not merged"
+        )
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     if not merged.get("merged") or merged.get("head_sha") != initial_head_sha:
@@ -9497,14 +9528,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["blockers"].append("GitHub merge state does not bind the initial exact head")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    return _pr_loop_post_merge(
-        gh,
-        name_with_owner,
-        merged,
-        result,
-        dry_run=False,
-        json_output=json_output,
-    )
+    raise AssertionError("unreachable merge state")
 
 
 def precommit() -> int:

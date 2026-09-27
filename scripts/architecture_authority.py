@@ -1523,6 +1523,12 @@ def validate(root):
                 "blocking_findings": 0,
                 "exact_head_sha": "required",
             }
+            or pr_loop.get("comment_evidence")
+            != {
+                "ordering": "immutable-created-at-then-id",
+                "updated_at_authority": "forbidden",
+                "owner_authorization_match": "whole-trimmed-comment",
+            }
             or pr_loop.get("owner_boundary", {}).get("automatic_generation") != "forbidden"
             or pr_loop.get("owner_boundary", {}).get("unique_human_interruption") is not True
             or pr_loop.get("owner_boundary", {}).get("automatic_rerun_after_authorization")
@@ -1532,6 +1538,10 @@ def validate(root):
             or pr_loop.get("merge_delegation", {}).get("state") != "MERGE_READY"
             or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
             or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
+            or pr_loop.get("merge_delegation", {}).get("nonzero_exit")
+            != "reread-github-before-result"
+            or pr_loop.get("merge_delegation", {}).get("post_exit_merge_authority")
+            != "github-current-pr-exact-head"
             or pr_loop.get("post_merge_cleanup", {}).get("command") != "branch-cleanup"
             or pr_loop.get("post_merge_cleanup", {}).get("automatic_after_merge") != "required"
             or pr_loop.get("post_merge_cleanup", {}).get("separate_result") != "required"

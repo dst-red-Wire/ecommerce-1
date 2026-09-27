@@ -20,6 +20,8 @@ Use `make pr-loop PR=<number> DRY_RUN=1` for a read-only state/next-action repor
 
 The automatic consumer must treat GitHub or marker ambiguity as blocking. It must never infer a review from local state, trigger SECURITY before CODE, reuse a marker from another SHA, or synthesize owner authorization.
 
+Comment precedence uses immutable GitHub creation time and comment ID. Editing an older comment cannot make it the latest verdict because `updated_at` is ignored. Owner authorization and revocation require the entire trimmed comment to be the exact command, so documentation, quotations, and fenced examples carry no authority. After `finish-pr`, GitHub is always re-read before assigning the merge result; a non-zero process exit with an exact-head merged PR is a successful merge, while an unavailable re-read yields an unknown result and blocks cleanup until verification.
+
 ## The 10 enforced rules
 
 1. Polling is deterministic; elapsed time alone never triggers AI.

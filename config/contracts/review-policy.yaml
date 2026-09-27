@@ -167,6 +167,10 @@ repository_delivery:
         status: PASS
         blocking_findings: 0
         exact_head_sha: required
+    comment_evidence:
+      ordering: immutable-created-at-then-id
+      updated_at_authority: forbidden
+      owner_authorization_match: whole-trimmed-comment
     owner_boundary:
       authority_source: architecture.lock.yaml#repository_governance.owner_authorization
       scope: pr-<number>
@@ -181,6 +185,8 @@ repository_delivery:
       command: finish-pr
       direct_merge: forbidden
       exact_head_match: required
+      nonzero_exit: reread-github-before-result
+      post_exit_merge_authority: github-current-pr-exact-head
     post_merge_cleanup:
       command: branch-cleanup
       automatic_after_merge: required

@@ -146,11 +146,19 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
     SHA_B = "b" * 40
 
     @staticmethod
-    def comment(body, *, author="owner", identifier=1, timestamp="2026-09-27T10:00:00Z"):
+    def comment(
+        body,
+        *,
+        author="owner",
+        identifier=1,
+        timestamp="2026-09-27T10:00:00Z",
+        updated_at=None,
+    ):
         return {
             "id": identifier,
             "body": body,
-            "updated_at": timestamp,
+            "created_at": timestamp,
+            "updated_at": updated_at or timestamp,
             "user": {"login": author},
         }
 
@@ -208,6 +216,25 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         self.assertFalse(REPOCTL._review_result_is_pass(evidence["code"]))
         self.assertFalse(REPOCTL._review_result_is_pass(evidence["security"]))
 
+    def test_editing_old_comment_cannot_reorder_chatgpt_verdicts(self):
+        comments = [
+            self.comment(
+                self.marker("code", self.SHA_A, "BLOCKED", 1),
+                identifier=2,
+                timestamp="2026-09-27T10:01:00Z",
+            ),
+            self.comment(
+                self.marker("code", self.SHA_A),
+                identifier=1,
+                timestamp="2026-09-27T10:00:00Z",
+                updated_at="2026-09-27T10:02:00Z",
+            ),
+        ]
+        with mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()):
+            evidence = REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_A)
+        self.assertEqual("BLOCKED", evidence["code"]["status"])
+        self.assertEqual(2, evidence["code"]["comment_id"])
+
     def test_owner_authorization_requires_owner_exact_scope_and_exact_sha(self):
         command = f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}"
         cases = (
@@ -222,6 +249,24 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
                     comments, "owner", 161, self.SHA_A
                 )
                 self.assertEqual(expected, evidence["status"])
+
+    def test_owner_authorization_must_be_the_entire_comment(self):
+        command = f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}"
+        embedded = (
+            f"Example:\n{command}",
+            f"```text\n{command}\n```",
+            f"{command}\nApproved as described above.",
+        )
+        for body in embedded:
+            with self.subTest(body=body):
+                evidence = REPOCTL._owner_authorization_evidence(
+                    [self.comment(body)], "owner", 161, self.SHA_A
+                )
+                self.assertEqual("MISSING", evidence["status"])
+        exact = REPOCTL._owner_authorization_evidence(
+            [self.comment(f"  {command}\n")], "owner", 161, self.SHA_A
+        )
+        self.assertEqual("PASS", exact["status"])
 
     def test_later_scope_authorization_supersedes_prior_sha(self):
         comments = [
@@ -252,6 +297,26 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
             ),
         ]
         evidence = REPOCTL._owner_authorization_evidence(comments, "owner", 161, self.SHA_A)
+        self.assertEqual("MISSING", evidence["status"])
+        self.assertIn("revoked", evidence["reason"])
+
+    def test_editing_old_approval_cannot_supersede_newer_revocation(self):
+        comments = [
+            self.comment(
+                f"/owner-authorization revoke scope=pr-161 sha={self.SHA_A}",
+                identifier=2,
+                timestamp="2026-09-27T10:01:00Z",
+            ),
+            self.comment(
+                f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}",
+                identifier=1,
+                timestamp="2026-09-27T10:00:00Z",
+                updated_at="2026-09-27T10:02:00Z",
+            ),
+        ]
+        evidence = REPOCTL._owner_authorization_evidence(
+            comments, "owner", 161, self.SHA_A
+        )
         self.assertEqual("MISSING", evidence["status"])
         self.assertIn("revoked", evidence["reason"])
 
@@ -500,7 +565,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         patches = self.common()
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
-        ), mock.patch.object(
+        ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
             return_value={"status": "PASS", "source": "reused"},
@@ -526,6 +591,97 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL", payload["merge_result"])
         self.assertEqual("BLOCKED", payload["state"])
         self.assertTrue(any("finish-pr" in command for command in calls))
+        self.assertEqual(3, snapshot.call_count)
+        self.assertIn("GitHub confirms", payload["blockers"][0])
+
+    def test_finish_pr_nonzero_rechecks_github_and_accepts_exact_merge(self):
+        pass_authorities = (
+            {
+                "code": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+                "security": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+            },
+            {"status": "PASS", "head_sha": self.SHA_A},
+        )
+        merged = self.snapshot(
+            state="MERGED",
+            merged=True,
+            merge_commit_sha="d" * 40,
+        )
+
+        def run(command, **_kwargs):
+            if "finish-pr" in command:
+                return self.completed(1)
+            return self.completed(0)
+
+        patches = self.common()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL,
+            "_github_pr_snapshot",
+            side_effect=[self.snapshot(), self.snapshot(), merged],
+        ) as snapshot, mock.patch.object(
+            REPOCTL,
+            "_pr_loop_qualification",
+            return_value={"status": "PASS", "source": "reused"},
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_merge_requirements",
+            return_value=(
+                {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
+                [],
+            ),
+        ), mock.patch.object(REPOCTL, "run", side_effect=run), mock.patch.object(
+            REPOCTL, "_pr_loop_post_merge", return_value=0
+        ) as post_merge:
+            rc = REPOCTL.pr_loop(161, json_output=False)
+        self.assertEqual(0, rc)
+        self.assertEqual(3, snapshot.call_count)
+        post_merge.assert_called_once()
+        self.assertEqual("PASS", post_merge.call_args.args[3]["merge_result"])
+
+    def test_finish_pr_nonzero_and_github_unavailable_reports_unknown_merge(self):
+        pass_authorities = (
+            {
+                "code": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+                "security": {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A},
+            },
+            {"status": "PASS", "head_sha": self.SHA_A},
+        )
+
+        def run(command, **_kwargs):
+            if "finish-pr" in command:
+                return self.completed(1)
+            return self.completed(0)
+
+        patches = self.common()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL,
+            "_github_pr_snapshot",
+            side_effect=[
+                self.snapshot(),
+                self.snapshot(),
+                RuntimeError("GitHub unavailable after finish-pr"),
+            ],
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_qualification",
+            return_value={"status": "PASS", "source": "reused"},
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_merge_requirements",
+            return_value=(
+                {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
+                [],
+            ),
+        ), mock.patch.object(REPOCTL, "run", side_effect=run):
+            rc, payload = self.run_json(dry_run=False)
+        self.assertEqual(1, rc)
+        self.assertEqual("UNKNOWN", payload["merge_result"])
+        self.assertEqual("GITHUB_UNAVAILABLE", payload["state"])
+        self.assertEqual("VERIFY_MERGE_STATE", payload["next_action"])
 
     def test_cleanup_failure_remains_post_merge_cleanup(self):
         result = REPOCTL._pr_loop_empty_result(161)
