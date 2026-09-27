@@ -235,9 +235,14 @@ class ModernEngineeringTest(unittest.TestCase):
                     self.assertIn(expected, problem)
 
     def test_runtime_only_capability_requires_resolved_qce_proof(self):
+        resolved = {
+            "source_sha": "a" * 40,
+            "toolchain_digest": "sha256:" + "d" * 64,
+            "tools": {"qce": {"capabilities": {"verification": {"status": "configured"}}}},
+        }
         with mock.patch.object(
             MOD, "_runtime_capability_evidence", return_value=(True, None)
-        ):
+        ), mock.patch("capability_resolver.resolve", return_value=resolved):
             payload = MOD.qce_status(ROOT, sector="developer_hub", now=NOW)
         capability = payload["sectors"][0]["capabilities"][0]
         self.assertEqual("IMPLEMENTED", capability["status"])
