@@ -613,25 +613,29 @@ def git_qualification(runtime: Path, git_port: int, key: Path, repository: str) 
         run(["git", "init", "-b", "main"], cwd=source)
         run(["git", "config", "user.name", "Qualification"], cwd=source)
         run(["git", "config", "user.email", "qualification@localhost.invalid"], cwd=source)
-        (source / "integrity.txt").write_text("first\n", encoding="utf-8")
-        run(["git", "add", "integrity.txt"], cwd=source)
-        run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "test: first integrity commit"], cwd=source)
         run(["git", "remote", "add", "origin", remote], cwd=source)
-        run(["git", "push", "-u", "origin", "main"], cwd=source, env=environment)
-        first = run(["git", "rev-parse", "HEAD"], cwd=source).stdout.strip()
-        run(["git", "clone", remote, str(clone)], cwd=root, env=environment)
-        cloned = run(["git", "rev-parse", "HEAD"], cwd=clone).stdout.strip()
-        if cloned != first:
-            raise QualificationError("Gitea clone SHA differs from pushed SHA")
-        (source / "integrity.txt").write_text("first\nsecond\n", encoding="utf-8")
-        run(["git", "add", "integrity.txt"], cwd=source)
-        run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "test: fetched integrity commit"], cwd=source)
-        run(["git", "push", "origin", "main"], cwd=source, env=environment)
-        second = run(["git", "rev-parse", "HEAD"], cwd=source).stdout.strip()
-        run(["git", "fetch", "origin"], cwd=clone, env=environment)
-        fetched = run(["git", "rev-parse", "origin/main"], cwd=clone).stdout.strip()
-        if fetched != second:
-            raise QualificationError("Gitea fetched SHA differs from pushed SHA")
+        for index, (content, message) in enumerate((
+            ("first\n", "test: first integrity commit"),
+            ("first\nsecond\n", "test: fetched integrity commit"),
+        )):
+            (source / "integrity.txt").write_text(content, encoding="utf-8")
+            run(["git", "add", "integrity.txt"], cwd=source)
+            run(["git", "-c", "commit.gpgsign=false", "commit", "-m", message], cwd=source)
+            run(["git", "push", "-u", "origin", "main"] if index == 0 else
+                ["git", "push", "origin", "main"], cwd=source, env=environment)
+            pushed = run(["git", "rev-parse", "HEAD"], cwd=source).stdout.strip()
+            if index == 0:
+                first = pushed
+                run(["git", "clone", remote, str(clone)], cwd=root, env=environment)
+                cloned = run(["git", "rev-parse", "HEAD"], cwd=clone).stdout.strip()
+                if cloned != first:
+                    raise QualificationError("Gitea clone SHA differs from pushed SHA")
+            else:
+                second = pushed
+                run(["git", "fetch", "origin"], cwd=clone, env=environment)
+                fetched = run(["git", "rev-parse", "origin/main"], cwd=clone).stdout.strip()
+                if fetched != second:
+                    raise QualificationError("Gitea fetched SHA differs from pushed SHA")
     return {"push_sha": first, "clone_sha": cloned, "fetch_sha": fetched, "expected_fetch_sha": second}
 
 

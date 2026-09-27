@@ -12,6 +12,56 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RepoctlImportBoundaryTest(unittest.TestCase):
+    def test_trusted_controller_uses_invocation_checkout_as_operational_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp = Path(temp_name)
+            controller = temp / "controller"
+            checkout = temp / "checkout"
+            scripts = controller / "scripts"
+            contracts = checkout / "config" / "contracts"
+            scripts.mkdir(parents=True)
+            contracts.mkdir(parents=True)
+            shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
+            shutil.copy2(
+                ROOT / "scripts/qualification_cache.py",
+                scripts / "qualification_cache.py",
+            )
+            shutil.copy2(
+                ROOT / "config/contracts/toolchain-lock.json",
+                contracts / "toolchain-lock.json",
+            )
+            subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+            code = r"""
+import importlib.util
+from pathlib import Path
+import sys
+
+checkout = Path(sys.argv[1]).resolve()
+repoctl = Path(sys.argv[2]).resolve()
+spec = importlib.util.spec_from_file_location("trusted_repoctl_probe", repoctl)
+if spec is None or spec.loader is None:
+    raise SystemExit("unable to build repoctl module spec")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if module.ROOT != checkout:
+    raise SystemExit(f"operational root mismatch: {module.ROOT} != {checkout}")
+"""
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    code,
+                    str(checkout),
+                    str(scripts / "repoctl.py"),
+                ],
+                cwd=checkout,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_repoctl_copy_without_delivery_helper_keeps_legacy_commands_importable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             temp = Path(temp_name)

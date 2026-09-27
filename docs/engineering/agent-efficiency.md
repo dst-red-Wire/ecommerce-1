@@ -34,4 +34,4 @@ This split is intentional: starting Ansible for every lint/test would be slower.
 
 ## Hook/runtime optimization
 
-The pre-commit configuration has one affected-only worktree gate and one exact-SHA pre-push gate. Repository-owned `make publish` skips only the duplicate worktree hook because it immediately runs the stronger exact-SHA gate before push. Hot-path service/frontend checks first validate pinned local state and start Ansible only when reconciliation is actually required.
+The pre-commit configuration has one affected-only worktree gate and one exact-SHA pre-push gate. Canonical `make deliver` uses an internal publish primitive that skips only the duplicate worktree hook because it immediately runs the stronger exact-SHA gate before push, then verifies the remote head and open PR. Hot-path service/frontend checks first validate pinned local state and start Ansible only when reconciliation is actually required.

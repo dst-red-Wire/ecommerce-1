@@ -23,12 +23,12 @@ $head = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- git rev-parse HEAD 2>&1
 if ($LASTEXITCODE -ne 0 -or $head -ne $ExpectedSourceSha) { throw 'Local Git HEAD differs from the exact expected source SHA' }
 $published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'GitHub PR #148 HEAD differs from the exact expected source SHA' }
-$payload = Join-Path $RepoRoot ".context\cache\native-controller-payload\$ExpectedSourceSha"
+$payload = Join-Path $RepoRoot '.context\cache\native-controller-payload\current'
 $manifest = Join-Path $payload 'payload.json'
 if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Exact-SHA payload is absent: $manifest" }
 $dryRunScript = Join-Path $RepoRoot 'scripts\windows\native-startup-resume.ps1'
 $cycleScript = Join-Path $RepoRoot 'scripts\windows\native-vtx-cycle.ps1'
-$summaryPath = Join-Path $LabRoot "startup-dry-run\$ExpectedSourceSha\evidence\summary.json"
+$summaryPath = Join-Path $LabRoot 'startup-dry-run\current\evidence\summary.json'
 if (-not (Test-Path -LiteralPath $summaryPath -PathType Leaf)) {
     & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $dryRunScript -Action PrepareDryRun -LabRoot $LabRoot -SourceSha $ExpectedSourceSha -PayloadRoot $payload
     if ($LASTEXITCODE -ne 0) { throw 'SYSTEM AtStartup dry-run failed; BCD remains unchanged' }

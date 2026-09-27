@@ -139,13 +139,27 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
             0,
             json.dumps(
                 [
-                    [{"body": self.marker("code"), "user": {"login": "dst-red-Wire"}}],
                     [
                         {
+                            "id": 1,
+                            "created_at": "2026-09-21T08:00:00Z",
+                            "body": self.marker("code"),
+                            "user": {"login": "dst-red-Wire"},
+                        }
+                    ],
+                    [
+                        {
+                            "id": 2,
+                            "created_at": "2026-09-21T08:01:00Z",
                             "body": self.marker("code", status="BLOCKED", blockers=1),
                             "user": {"login": "dst-red-Wire"},
                         },
-                        {"body": self.marker("security"), "user": {"login": "dst-red-Wire"}},
+                        {
+                            "id": 3,
+                            "created_at": "2026-09-21T08:02:00Z",
+                            "body": self.marker("security"),
+                            "user": {"login": "dst-red-Wire"},
+                        },
                     ],
                 ]
             ),

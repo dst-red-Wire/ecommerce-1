@@ -9,9 +9,127 @@ repository_governance:
     status: enforced
     canonical_path: /home/dev/ecommerce-1
     repository: dst-red-Wire/ecommerce-1
-    additional_clones: forbidden
+    additional_clones: forbidden_for_local_scope
     additional_worktrees: forbidden
-    execution_outside_canonical_path: forbidden
+    execution_outside_canonical_path: forbidden_unless_explicit_scope
+    execution_scope_environment: ECOMMERCE_EXECUTION_SCOPE
+    noncanonical_execution_scopes: [ci, isolated-delivery]
+    publication_scopes: [local, isolated-delivery]
+    command_allowlist:
+      local:
+        - workspace-check
+        - image-rocky-build
+        - image-rocky-linux-build
+        - image-rocky-linux-preflight
+        - image-rocky-linux-qualify
+        - image-rocky-linux-release
+        - image-rocky-linux-static-validate
+        - image-rocky-oras-pull
+        - image-rocky-oras-push
+        - image-rocky-preflight
+        - image-rocky-qualify
+        - image-rocky-release
+        - image-rocky-windows-build
+        - image-rocky-windows-native-import
+        - image-rocky-windows-native-prepare
+        - image-rocky-windows-native-reboot
+        - image-rocky-windows-native-recover
+        - image-rocky-windows-native-self-test
+        - image-rocky-windows-preflight
+        - image-rocky-windows-qualify
+        - image-rocky-windows-release
+        - lab-clean
+        - lab-network-smoke
+        - lab-ssh-key
+        - local-services-assets
+        - local-services-capabilities
+        - local-services-qualify
+        - local-services-recover
+        - packer-box
+        - governance
+        - toolchain-closure
+        - runtime-efficiency
+        - automation-policy
+        - format-check
+        - lint
+        - test
+        - security
+        - qualification-tools-contract
+        - qualification-tools-smoke
+        - opentofu
+        - ansible
+        - system
+        - doctor
+        - git-sync
+        - precommit
+        - prepush
+        - site
+        - product-run
+        - product-migrate
+        - product-benchmark
+        - branch-cleanup
+        - roadmap-check
+        - roadmap-sync
+        - qce-status
+        - qce-trace
+        - qce-check
+        - execution-properties
+        - capabilities
+        - engineering-metrics
+        - security-datasets-sync
+        - govulncheck-scan
+        - vulnerability-evaluate
+        - cve-evaluate
+        - experiment
+        - contracts
+        - frontend
+        - service
+        - affected
+        - verify-change
+        - global-check
+        - qualification-proof
+        - rke2-local-virtualbox-qualification
+        - vm
+        - perf-campaign
+        - diff-context
+        - failure-context
+        - context
+        - api-generate
+        - nx-graph
+        - service-new
+        - reconcile
+        - bazel-verify
+        - resource-candidate
+        - tekton-proof
+        - deliver
+        - pr-loop
+        - finish-pr
+        - bundle-deliver
+        - tekton-trigger-readiness
+        - tekton-plan
+        - source-check
+        - ci-global
+        - ci-component
+        - ci-finalize
+        - evidence-publish
+        - evidence-fetch
+        - evidence-compare
+      ci:
+        - workspace-check
+        - tekton-plan
+        - ci-global
+        - ci-component
+        - ci-finalize
+        - frontend
+        - service
+        - source-check
+        - govulncheck-scan
+        - security-datasets-sync
+        - vulnerability-evaluate
+        - opentofu
+        - ansible
+        - system
+      isolated-delivery: [deliver]
     fail_closed: true
     required_before: [ci, qualification, governance, reconciliation, ansible, packer, vagrant, release, publication, pull_request_operations]
     evidence: [canonical_root, git_head, git_branch, worktree_count]
@@ -72,6 +190,7 @@ repository_governance:
     per_file_rule_propagation: forbidden
     consumer_changes: only-if-required-to-consume-contract
   owner_authorization:
+    mode: risk-based
     syntax: "/owner-authorization approve scope=<scope> sha=<exact-head-sha>"
     decision_authority: repository-owner
     recording_agent: ChatGPT
@@ -79,7 +198,26 @@ repository_governance:
     sha_binding: exact
     scope_binding: exact
     head_change: authorization-expired
-    absence_or_mismatch: block
+    absence_or_mismatch: block-when-required
+    automatic_generation: forbidden
+    required_for:
+      - governance
+      - delivery-authority
+      - branch-protection
+      - infrastructure-apply
+      - destructive-operation
+      - state-migration
+      - iam
+      - secrets
+      - network
+      - dns
+      - signing-or-provenance-policy
+      - security-policy
+      - artifact-publication-authority
+    low_risk:
+      authorization: not-required-by-policy
+    sensitive:
+      authorization: explicit-repository-owner
 
 business:
   services:
@@ -672,6 +810,10 @@ machine_contracts:
   egress_policy: config/contracts/egress-policy.yaml
   egress_runtime_policy: config/contracts/egress-runtime-policy.yaml
   engineering_metrics_policy: config/contracts/engineering-metrics-policy.yaml
+  execution_properties_policy: config/contracts/execution-properties-policy.yaml
+  execution_properties_implementations: config/contracts/execution-properties-implementations.yaml
+  tool_capabilities: config/contracts/tool-capabilities.yaml
+  composed_capabilities: config/contracts/composed-capabilities.yaml
   event_contracts: config/contracts/event-contracts.yaml
   identity_boundary_policy: config/contracts/identity-boundary-policy.yaml
   mesh_observability_policy: config/contracts/mesh-observability-policy.yaml

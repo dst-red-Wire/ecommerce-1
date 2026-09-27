@@ -337,6 +337,7 @@ graph LR
             contract["transverse_rule_contract"]["consumer_changes"],
         )
         authorization = contract["owner_authorization"]
+        self.assertEqual("risk-based", authorization["mode"])
         self.assertEqual(
             "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
             authorization["syntax"],
@@ -347,7 +348,32 @@ graph LR
         self.assertEqual("exact", authorization["sha_binding"])
         self.assertEqual("exact", authorization["scope_binding"])
         self.assertEqual("authorization-expired", authorization["head_change"])
-        self.assertEqual("block", authorization["absence_or_mismatch"])
+        self.assertEqual("block-when-required", authorization["absence_or_mismatch"])
+        self.assertEqual("forbidden", authorization["automatic_generation"])
+        self.assertEqual(
+            [
+                "governance",
+                "delivery-authority",
+                "branch-protection",
+                "infrastructure-apply",
+                "destructive-operation",
+                "state-migration",
+                "iam",
+                "secrets",
+                "network",
+                "dns",
+                "signing-or-provenance-policy",
+                "security-policy",
+                "artifact-publication-authority",
+            ],
+            authorization["required_for"],
+        )
+        self.assertEqual(
+            {"authorization": "not-required-by-policy"}, authorization["low_risk"]
+        )
+        self.assertEqual(
+            {"authorization": "explicit-repository-owner"}, authorization["sensitive"]
+        )
 
     def test_owner_authorization_is_exact_and_fail_closed(self):
         head = "a" * 40

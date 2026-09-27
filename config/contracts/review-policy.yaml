@@ -56,21 +56,32 @@ pull_request_review:
     codex_output_role: evidence-for-chatgpt
     code_security_review_authority: ChatGPT-only
     merge_readiness_authority: ChatGPT-only
-    merge_decision_authority: repository-owner
+    merge_decision_authority: repository-policy-with-sensitive-owner-boundary
     codex_review_markers: forbidden
     codex_merge_decision: forbidden
-
-  human_gate:
-    required_for:
-      - architecture_changes
-      - infrastructure_apply
-      - destructive_changes
-      - state_migrations
-      - dns_network_iam_secret_changes
 
 repository_delivery:
   forge: github
   default_branch: main
+
+  publication:
+    canonical_entrypoint: make deliver
+    repoctl_entrypoint: deliver
+    direct_git_push: {status: forbidden_for_repository_delivery}
+    direct_repoctl_publish: {status: internal_only}
+    direct_repoctl_publish_change: {status: forbidden}
+    pull_request_creation: {required: true}
+    push_without_pull_request: {status: forbidden_for_canonical_delivery}
+    default_branch_write: {forbidden: true}
+    force_push: {forbidden: true}
+    exact_sha: {required: true}
+    qualification_before_push: {required: true}
+    signed_commit: {required: true}
+    mutation_sites:
+      git_push: [scripts/repoctl.py#publish]
+      git_push_delete: [scripts/repoctl.py#_delete_branch_ref]
+      github_pr_create: [scripts/repoctl.py#deliver]
+      github_pr_update: [scripts/repoctl.py#deliver]
 
   commit_provenance:
     authority_source: architecture.lock.yaml#machine_contracts.review_policy
@@ -129,6 +140,290 @@ repository_delivery:
     draft_merge: forbidden
     record_after_merge: retained-by-forge
 
+  pr_loop:
+    schema_version: 2
+    controller: scripts/repository_delivery.py
+    controller_source: exact-pr-base-sha
+    command: trusted-pr-transition
+    target_worktree: exact-pr-head-clean-checkout
+    direct_head_controller: forbidden
+    bootstrap_without_controller: explicit-repository-owner
+    state_persistence: forbidden
+    state_sources:
+      - github-current-pull-request
+      - github-current-exact-head-sha
+      - exact-sha-qualification-evidence
+      - chatgpt-exact-sha-review-comments
+      - exact-sha-deterministic-risk-classification
+      - owner-authorization-comment
+      - github-merge-and-protection-state
+      - finish-pr-and-branch-cleanup-contracts
+    transition_order:
+      - exact-pr-head
+      - qualification
+      - chatgpt-code
+      - chatgpt-security
+      - deterministic-risk-classification
+      - owner-authorization-if-required
+      - merge-requirements
+      - finish-pr
+      - merge-verification
+      - post-merge-cleanup
+    exact_sha:
+      binding: required
+      prior_sha_evidence: historical-only
+      head_change: restart-at-qualification
+      in_flight_transition_on_head_change: abandon-and-restart
+      refetch_before_qualification: required
+      refetch_before_merge: required
+    chatgpt_handoff:
+      trigger: canonical-bounded-handoff
+      state: CHATGPT_REVIEW_REQUIRED
+      event: CHATGPT_REVIEW_REQUIRED
+      review_kinds: [CODE, SECURITY]
+      helper: scripts/pr_monitor.py#chatgpt_review_handoff
+      payload: required
+      payload_budget_bytes: 16384
+      payload_fields:
+        - pr
+        - review_kind
+        - previous_validated_verdict
+        - delta
+        - previous_head
+        - current_head
+        - changed_files
+        - exact_head_verified
+      payload_digest: sha256
+      fail_if_payload_unavailable: true
+      consumer: external-automatic
+      invocation_binding: exact-pr-and-head-sha
+      rerun_after_valid_marker: required
+      verdict_authority: ChatGPT-only
+      controller_may_emit_verdict: false
+      code_before_security: required
+      security_requires_code_marker:
+        provider: ChatGPT
+        kind: code
+        status: PASS
+        blocking_findings: 0
+        exact_head_sha: required
+    comment_evidence:
+      ordering: immutable-created-at-then-id
+      updated_at_authority: forbidden
+      owner_authorization_match: whole-trimmed-comment
+    owner_boundary:
+      authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+      mode: risk-based
+      scope: pr-<number>
+      source: github-pr-comment-by-repository-owner
+      latest_scope_authorization_wins: true
+      revocation: /owner-authorization revoke scope=<scope> sha=<exact-head-sha>
+      automatic_generation: forbidden
+      unique_human_interruption: true
+      automatic_rerun_after_authorization: required
+      required_for:
+        - governance
+        - delivery-authority
+        - branch-protection
+        - infrastructure-apply
+        - destructive-operation
+        - state-migration
+        - iam
+        - secrets
+        - network
+        - dns
+        - signing-or-provenance-policy
+        - security-policy
+        - artifact-publication-authority
+      low_risk:
+        authorization: not-required-by-policy
+      sensitive:
+        authorization: explicit-repository-owner
+    risk_classification:
+      authority: repository-policy
+      implementation: scripts/merge_risk.py#classify_merge_risk
+      controller_source: exact-pr-base-sha
+      bootstrap_without_controller: sensitive
+      head_controller_execution: forbidden
+      policy_source: exact-pr-base-sha
+      model: deterministic-capabilities-and-paths
+      llm_decision: forbidden
+      exact_sha_binding: required
+      self_modification: sensitive
+      unknown_or_ambiguous: sensitive
+      partial_analysis: sensitive
+      git_error: sensitive
+      classifications: [LOW_RISK, SENSITIVE]
+      required_inputs:
+        - pr
+        - base_sha
+        - head_sha
+        - changed_files
+        - resolved_capabilities
+      low_risk:
+        authorization: not-required-by-policy
+        merge_mode: AUTO
+        eligible_paths:
+          - services/**
+          - frontend/**
+          - contracts/openapi/**
+          - contracts/proto/**
+          - tests/**
+          - docs/**
+          - README.md
+          - CONTRIBUTING.md
+          - LICENSE
+          - .gitignore
+          - .gitattributes
+          - go.work
+          - '**/go.mod'
+          - '**/go.sum'
+          - MODULE.bazel
+          - MODULE.bazel.lock
+          - BUILD.bazel
+      sensitive:
+        authorization: explicit-repository-owner
+        merge_mode: OWNER_GATED
+        capabilities:
+          governance:
+            paths:
+              - architecture.lock.yaml
+              - AGENTS.md
+              - config/contracts/review-policy.yaml
+              - config/contracts/repository-authority-model.yaml
+              - scripts/architecture_authority.py
+              - docs/architecture/**
+          delivery-authority:
+            paths:
+              - scripts/merge_risk.py
+              - scripts/repoctl.py
+              - scripts/pr_monitor.py
+              - scripts/repository_delivery.py
+              - Makefile
+              - .github/workflows/**
+            content_paths: [scripts/**, Makefile, .github/**, config/**]
+            content_patterns:
+              - 'finish-pr|pr-loop|gh\s+pr\s+merge|merge[_ -]authority|review[_ -]authority'
+          branch-protection:
+            paths: [.github/CODEOWNERS, .github/rulesets/**]
+            content_paths: [.github/**, scripts/**, config/**]
+            content_patterns:
+              - 'branch[_ -]protection|required[_ -]checks|repository[_ -]rules|ruleset|github[_ -]permissions'
+          infrastructure-apply:
+            paths:
+              - platform/terraform/**
+              - platform/ansible/**
+              - platform/kubernetes/**
+              - platform/fleet/**
+              - platform/helm/**
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:tofu|terraform)\s+apply\b|\bansible-playbook\b|\bkubectl\s+(?:apply|delete|patch)\b|\bhelm\s+upgrade\b'
+          destructive-operation:
+            paths: [scripts/branch_cleanup.py, scripts/signing_rotation.py]
+            content_paths: [scripts/**, services/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\bgit\s+push\b[^\n]*--delete|\bgit\s+branch\b[^\n]*-[dD]\b|\brm\s+-rf\b|\bos\.RemoveAll\b|\b(?:drop|truncate)\s+(?:table|database)\b|\bdestroy\b'
+          state-migration:
+            paths: ['**/migrations/**', '**/migration/**']
+            content_paths: [services/**, platform/**, scripts/**]
+            content_patterns:
+              - '\b(?:drop|alter|truncate)\s+(?:table|column|database)\b|\bschema\s+migration\b'
+          iam:
+            paths:
+              - config/contracts/identity-boundary-policy.yaml
+              - config/contracts/service-authz-policy.yaml
+              - platform/**/keycloak/**
+              - platform/**/spire/**
+              - platform/**/rbac/**
+              - services/**/auth/**
+              - services/**/authentication/**
+              - services/**/authorization/**
+              - services/**/security/**
+              - services/**/oidc/**
+              - services/**/oauth/**
+              - services/**/jwt/**
+              - services/**/session/**
+              - services/**/*auth*
+              - services/**/*security*
+              - services/**/*oidc*
+              - services/**/*oauth*
+              - services/**/*jwt*
+              - services/**/*session*
+            content_paths: [services/**, frontend/**, platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:iam|rbac|rolebinding|clusterrole|permission|authorization)\b'
+          secrets:
+            paths:
+              - config/contracts/secret-delivery-policy.yaml
+              - '**/.sops.yaml'
+              - platform/**/openbao/**
+              - platform/**/external-secrets/**
+              - platform/**/*secret*
+            content_paths: [services/**, frontend/**, platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:openbao|external.?secrets|sops|credential|secret[_ -]authority)\b'
+          network:
+            paths:
+              - config/contracts/egress-policy.yaml
+              - config/contracts/traffic-class-policy.yaml
+              - config/contracts/mgmt-wireguard-access.yaml
+              - config/infrastructure/network-plan.yaml
+              - platform/**/cilium/**
+              - platform/**/*network*
+              - docs/architecture/NETWORK_*
+              - docs/architecture/MGMT_WIREGUARD_ACCESS.md
+            content_paths: [platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:firewall|routing|wireguard|cilium|networkpolicy)\b'
+          dns:
+            paths:
+              - config/contracts/dns-authority-policy.yaml
+              - platform/**/*dns*
+            content_paths: [platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:dns|dnsrecord|nameserver)\b'
+          signing-or-provenance-policy:
+            paths:
+              - scripts/check_automation_signing.py
+              - scripts/signing_rotation.py
+              - docs/engineering/AUTOMATION_SIGNING.md
+              - config/contracts/ci-evidence.yaml
+              - config/contracts/toolchain-lock.json
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:cosign|provenance|signature|signing|sbom|attestation)\b'
+          security-policy:
+            paths:
+              - SECURITY.md
+              - config/contracts/security-scan-policy.yaml
+              - config/contracts/security-trust-zones.yaml
+              - scripts/security_policy.py
+              - scripts/cve_policy.py
+            content_paths: [scripts/**, platform/**, config/**]
+            content_patterns:
+              - '\b(?:scanner.?bypass|cve.?policy|security.?exception|blocking.?policy)\b'
+          artifact-publication-authority:
+            paths:
+              - config/contracts/progressive-delivery-policy.yaml
+              - platform/tekton/**
+              - platform/fleet/**
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:publish|promotion|release.?authority|artifact.?publication|harbor)\b'
+    merge_delegation:
+      state: MERGE_READY
+      command: finish-pr
+      direct_merge: forbidden
+      exact_head_match: required
+      nonzero_exit: reread-github-before-result
+      post_exit_merge_authority: github-current-pr-exact-head
+    post_merge_cleanup:
+      command: branch-cleanup
+      automatic_after_merge: required
+      separate_result: required
+      merge_success_may_not_mask_cleanup_failure: true
+
   merge:
     method: merge
     match_head_commit: required
@@ -147,8 +442,49 @@ repository_delivery:
       delete_when:
         - head-is-ancestor-of-default-branch
         - merged-pr-head-matches-current-branch-head
+        - closed-pr-proven-absorbed-by-merged-pr
       merged_pr_base_must_match_default: true
       github_merge_proof: exact-head-sha
+      absorbed_pr_proof:
+        required: true
+        fail_closed: true
+        source: github-absorbing-pr-body
+        marker: pull-request-absorption-proof:v2
+        schema_version: 2
+        kind: PullRequestAbsorptionProof
+        active_status: ABSORBED
+        superseded_status: SUPERSEDED
+        proof_method: git-content-lineage-v1
+        proof_id: sha256-canonical-binding
+        repository_binding: exact-name-with-owner
+        temporal_fields_authoritative: false
+        content_lineage:
+          allowed_relations: [ancestor, same-tree]
+          maximum_edges: 16
+        required_fields:
+          - proof_id
+          - schema_version
+          - kind
+          - source_repository
+          - source_pr
+          - source_head_sha
+          - source_branch
+          - source_base
+          - absorbing_repository
+          - absorbing_pr
+          - absorbing_head_sha
+          - content_lineage
+          - proof_method
+          - status
+        merge_method_checks:
+          merge:
+            merge_commit_ancestor_of_default: true
+            absorbing_head_ancestor_of_merge_commit: true
+        destructive_revalidation:
+          required_immediately_before_each_delete: true
+          refresh_git_refs: true
+          refresh_github_prs: true
+          exact_evidence_match: true
       preserve:
         - default-branch
         - master
@@ -156,6 +492,12 @@ repository_delivery:
         - active-worktree
         - branch-with-unabsorbed-head
         - branch-advanced-after-merged-pr
+        - branch-advanced-after-absorption
+        - missing-absorption-proof
+        - ambiguous-absorption
+        - stale-or-invalid-absorption-proof
+        - github-evidence-unavailable
+        - authorization-revalidation-failed
       github_cli_optional_for_ancestor_cleanup: true
       remote_delete_requires_exact_lease: true
       local_delete_requires_compare_and_delete: true

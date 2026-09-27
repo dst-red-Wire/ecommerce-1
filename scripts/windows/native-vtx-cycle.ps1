@@ -43,7 +43,7 @@ $NativePhases = @('PREPARED','BOOT_RESUME_ARMED','NATIVE_BOOT_PENDING','NATIVE_B
 function Get-NativeStatePath {
     param([Parameter(Mandatory = $true)][string]$SourceSha)
     if ($SourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Native state requires a full exact source SHA' }
-    return Join-Path $script:LabRootResolved "startup-real\$SourceSha\state.json"
+    return Join-Path $script:LabRootResolved 'startup-real\state.json'
 }
 
 function Initialize-NativeState {
@@ -459,7 +459,7 @@ function Assert-ResultBinding {
 
 function Assert-StartupDryRunProof {
     param([Parameter(Mandatory = $true)][string]$SourceSha)
-    $path = Join-Path $script:LabRootResolved "startup-dry-run\$SourceSha\evidence\summary.json"
+    $path = Join-Path $script:LabRootResolved 'startup-dry-run\current\evidence\summary.json'
     $proof = Read-JsonFile $path
     if (
         $proof.status -ne 'PASS' -or $proof.source_sha -ne $SourceSha -or
@@ -562,7 +562,7 @@ function Invoke-S4UProbeTask {
 
 function Invoke-SystemRuntimeProbe {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $evidence = Join-Path $script:LabRootResolved "system-runtime-probe-$ExpectedSourceSha.json"
+    $evidence = Join-Path $script:LabRootResolved 'system-runtime-probe-current.json'
     try {
         if ($identity.User.Value -ne 'S-1-5-18' -or -not (Test-Administrator)) { throw 'System runtime probe requires SYSTEM Highest' }
         if ($ExpectedSourceSha -notmatch '^[0-9a-f]{40}$' -or $ExpectedManifestSha256 -notmatch '^[0-9a-f]{64}$') {
@@ -609,7 +609,7 @@ function Invoke-SystemRuntimeProbeTask {
     param([string]$Runner, [string]$Stage, [string]$SourceSha, [string]$ManifestSha256)
     $name = 'Ecommerce-VirtualBox-Native-System-Probe'
     if ($null -ne (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) { throw 'Existing SYSTEM runtime probe task requires inspection' }
-    $evidence = Join-Path $script:LabRootResolved "system-runtime-probe-$SourceSha.json"
+    $evidence = Join-Path $script:LabRootResolved 'system-runtime-probe-current.json'
     if (Test-Path -LiteralPath $evidence) { Remove-Item -LiteralPath $evidence -Force }
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Runner,
@@ -646,7 +646,7 @@ function Invoke-SystemRuntimeProbeTask {
 
 function Assert-SystemRuntimeProbeProof {
     param([string]$SourceSha, [string]$ManifestSha256)
-    $proof = Read-JsonFile (Join-Path $script:LabRootResolved "system-runtime-probe-$SourceSha.json")
+    $proof = Read-JsonFile (Join-Path $script:LabRootResolved 'system-runtime-probe-current.json')
     if ($proof.status -ne 'PASS' -or $proof.source_sha -ne $SourceSha -or
         $proof.manifest_sha256 -ne $ManifestSha256 -or $proof.sid -ne 'S-1-5-18' -or
         $proof.packer_plugins -ne 'PASS' -or $proof.packer_validate -ne 'PASS' -or
@@ -747,7 +747,7 @@ function Invoke-NativeWatchdog {
     if ($current -eq $normalId) { return }
     if ($current -ne $nativeId) { throw 'Native watchdog is outside the owned Windows loaders' }
     $statePath = Get-NativeStatePath -SourceSha $ExpectedSourceSha
-    $resultPath = Join-Path $script:LabRootResolved "evidence\$ExpectedSourceSha\result.json"
+    $resultPath = Join-Path $script:LabRootResolved 'evidence\current\result.json'
     $deadline = [DateTime]::UtcNow.AddMinutes(270)
     $resultObservedAt = $null
     do {
@@ -773,7 +773,7 @@ function Invoke-NativeWatchdog {
     Write-Utf8Json -InputObject ([ordered]@{
         schema=1;status='FAIL';source_sha=$ExpectedSourceSha;reason=$reason
         principal='SYSTEM';pid=$PID;normal_boot_id=$normalId;observed_at=Get-UtcTimestamp
-    }) -Path (Join-Path $script:LabRootResolved "evidence\$ExpectedSourceSha\watchdog.json")
+    }) -Path (Join-Path $script:LabRootResolved 'evidence\current\watchdog.json')
     Set-OneShotBootSequence -BootId $normalId
     Restart-Computer -Force
 }
@@ -821,7 +821,7 @@ function Invoke-EmergencyNativeReturn {
     catch { $failures += "normal boot sequence: $($_.Exception.Message)" }
     try { Remove-NativeTask } catch { $failures += "scheduled task cleanup: $($_.Exception.Message)" }
     try {
-        $emergencyRoot = Join-Path $script:LabRootResolved 'evidence'
+        $emergencyRoot = Join-Path $script:LabRootResolved 'evidence\current'
         [void](New-Item -ItemType Directory -Path $emergencyRoot -Force)
         Write-Utf8Json -InputObject ([ordered]@{
             schema = 1; status = 'FAIL'; failure = $Failure
@@ -910,11 +910,11 @@ function Invoke-NativeRun {
     if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw 'Prepared native runtime has invalid Git identities'
     }
-    $resultRoot = Join-Path $script:LabRootResolved "evidence\$sourceSha"
+    $resultRoot = Join-Path $script:LabRootResolved 'evidence\current'
     [void](New-Item -ItemType Directory -Path $resultRoot -Force)
     $resultPath = Join-Path $resultRoot 'result.json'
     $attemptPath = Join-Path $resultRoot 'attempt.json'
-    $artifactRoot = Join-Path $script:LabRootResolved "artifacts\$sourceSha"
+    $artifactRoot = Join-Path $script:LabRootResolved 'artifacts\current'
     [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
     $result = [ordered]@{
         schema = 1
@@ -1419,12 +1419,12 @@ function Invoke-Import {
     $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
     $before = Read-JsonFile (Join-Path $script:LabRootResolved 'normal-host-state.json')
     $after = Assert-NormalHostRestored -Before $before
-    Write-Utf8Json -InputObject $after -Path (Join-Path $script:LabRootResolved 'evidence\normal-host-restored.json')
-    Write-Utf8Json -InputObject ([ordered]@{schema=1;status='PASS';distribution=$WslDistribution;kernel=$wslKernel.StdOut.Trim();verified_at=Get-UtcTimestamp}) -Path (Join-Path $script:LabRootResolved 'evidence\wsl2-restored.json')
+    Write-Utf8Json -InputObject $after -Path (Join-Path $script:LabRootResolved 'evidence\current\normal-host-restored.json')
+    Write-Utf8Json -InputObject ([ordered]@{schema=1;status='PASS';distribution=$WslDistribution;kernel=$wslKernel.StdOut.Trim();verified_at=Get-UtcTimestamp}) -Path (Join-Path $script:LabRootResolved 'evidence\current\wsl2-restored.json')
     $sourceSha = [string]$prepared.source_git_sha
     $sourceTree = [string]$prepared.source_tree_sha
     $preparedStage = [string]$prepared.stage_root
-    $resultPath = Join-Path $script:LabRootResolved "evidence\$sourceSha\result.json"
+    $resultPath = Join-Path $script:LabRootResolved 'evidence\current\result.json'
     $result = Read-JsonFile $resultPath
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
     if (-not $gitState.Clean -or $gitState.Head -ne $sourceSha) {
@@ -1474,7 +1474,7 @@ function Invoke-Import {
         throw 'Native SSH smoke address evidence is incomplete'
     }
     $artifactSource = [string]$result.artifact
-    $expectedArtifactSource = if ($result.packer.build -eq 'REUSED') { [string]$prepared.reuse_box.path } else { Join-Path $script:LabRootResolved "artifacts\$sourceSha\rocky-10.2-rke2-virtualbox.box" }
+    $expectedArtifactSource = if ($result.packer.build -eq 'REUSED') { [string]$prepared.reuse_box.path } else { Join-Path $script:LabRootResolved 'artifacts\current\rocky-10.2-rke2-virtualbox.box' }
     if ([IO.Path]::GetFullPath($artifactSource) -ne [IO.Path]::GetFullPath($expectedArtifactSource)) {
         throw 'Native artifact path is outside the exact-source artifact location'
     }
@@ -1726,7 +1726,7 @@ function Invoke-Prepare {
     foreach ($directory in @('bcd', 'staging', 'evidence', 'logs', 'artifacts')) {
         [void](New-Item -ItemType Directory -Path (Join-Path $script:LabRootResolved $directory) -Force)
     }
-    $preparedStage = Join-Path $script:LabRootResolved "staging\$sourceSha"
+    $preparedStage = Join-Path $script:LabRootResolved 'staging\current'
     $preparedPath = Join-Path $preparedStage '.prepared.json'
     $manifestPath = Join-Path $preparedStage 'SHA256SUMS'
     $reused = $false
@@ -1841,7 +1841,7 @@ function Invoke-Prepare {
     Initialize-NativeState -SourceSha $sourceSha -SourceTree $sourceTree -ManifestSha256 $manifestSha256 -NormalBootId $normalBootId
     $nativeBootId = $null
     try {
-    $backupPath = Join-Path $script:LabRootResolved "bcd\bcd-$sourceSha.bak"
+    $backupPath = Join-Path $script:LabRootResolved 'bcd\current.bak'
     if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
         [void](Invoke-BcdEdit -Arguments @('/export', $backupPath))
     }
@@ -1918,7 +1918,7 @@ function Invoke-Prepare {
         reboot_required = $true
         completed_at = Get-UtcTimestamp
     }
-    Write-Utf8Json -InputObject $prepareEvidence -Path (Join-Path $script:LabRootResolved "evidence\prepare-$sourceSha.json")
+    Write-Utf8Json -InputObject $prepareEvidence -Path (Join-Path $script:LabRootResolved 'evidence\current\prepare.json')
     [Console]::WriteLine("PASS native-vtx-prepare sha=$sourceSha stage=$preparedStage reboot=EXPLICITLY_REQUIRED")
     }
     catch {
@@ -2027,7 +2027,7 @@ function Invoke-Recover {
         native_entry_removed = $nativeRemoved
         completed_at = Get-UtcTimestamp
     }
-    Write-Utf8Json -InputObject $evidence -Path (Join-Path $script:LabRootResolved 'evidence\recovery.json')
+    Write-Utf8Json -InputObject $evidence -Path (Join-Path $script:LabRootResolved 'evidence\current\recovery.json')
     [Console]::WriteLine("PASS native-vtx-recover normal boot armed; native entry removed=$nativeRemoved")
 }
 
@@ -2066,7 +2066,7 @@ function Invoke-CyclePreflight {
         normal_loader_id=$hostState.current_loader_id; hypervisorlaunchtype=$hostState.hypervisorlaunchtype
         hypervisor_present=$hostState.hypervisor_present; wsl_kernel=$kernel.StdOut.Trim()
         registered_virtualbox_vms=0; host_only_network='PASS'; completed_at=Get-UtcTimestamp
-    }) -Path (Join-Path $script:LabRootResolved 'evidence\cycle-preflight.json')
+    }) -Path (Join-Path $script:LabRootResolved 'evidence\current\cycle-preflight.json')
     [Console]::WriteLine("PASS native-vtx-cycle-preflight sha=$($gitState.Head) normal_loader=$($hostState.current_loader_id)")
 }
 
@@ -2088,7 +2088,7 @@ function Invoke-Resume {
         $startupState.phase -notin @('NATIVE_BOOT_PENDING','NATIVE_BOOTED','CONTROLLER_START','QUALIFICATION_RUNNING','RESTORE_PENDING','FAILED')) {
         throw 'Normal-boot startup state is inconsistent; refusing a new qualification'
     }
-    $resultPath = Join-Path $script:LabRootResolved "evidence\$($prepared.source_git_sha)\result.json"
+    $resultPath = Join-Path $script:LabRootResolved 'evidence\current\result.json'
     if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
         if ($startupState.phase -ne 'FAILED') { Move-NativePhase -SourceSha $sourceSha -Expected ([string]$startupState.phase) -Next 'FAILED' }
         Invoke-Recover

@@ -14,5 +14,8 @@ spec:
     - name: service-gates
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - name: ECOMMERCE_EXECUTION_SCOPE
+          value: ci
       command: [python3, scripts/repoctl.py]
       args: [service, $(params.service)]

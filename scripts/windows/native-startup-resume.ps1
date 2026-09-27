@@ -66,7 +66,7 @@ function Test-Administrator {
 function Assert-StateRoot {
     param([string]$Root, [string]$Lab, [string]$Sha)
     if ($Sha -notmatch '^[0-9a-f]{40}$') { throw 'Exact source SHA is invalid' }
-    $expected = [IO.Path]::GetFullPath((Join-Path $Lab "startup-dry-run\$Sha")).TrimEnd('\')
+    $expected = [IO.Path]::GetFullPath((Join-Path $Lab 'startup-dry-run\current')).TrimEnd('\')
     $actual = [IO.Path]::GetFullPath($Root).TrimEnd('\')
     if ($actual -ine $expected) { throw 'Startup state root is outside the exact-SHA dry-run location' }
     return $actual
@@ -271,7 +271,7 @@ function Wait-TaskResult {
 function Invoke-PrepareDryRun {
     if (-not (Test-Administrator)) { throw 'Startup dry-run preparation requires administrator PowerShell' }
     if ($SourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Exact source SHA is invalid' }
-    $root = Assert-StateRoot -Root (Join-Path $LabRoot "startup-dry-run\$SourceSha") -Lab $LabRoot -Sha $SourceSha
+    $root = Assert-StateRoot -Root (Join-Path $LabRoot 'startup-dry-run\current') -Lab $LabRoot -Sha $SourceSha
     if (Test-Path -LiteralPath (Join-Path $root 'state.json') -PathType Leaf) { throw 'Existing startup dry-run state requires explicit inspection' }
     if ($null -ne (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) { throw 'Existing startup dry-run task requires explicit inspection' }
     if ($null -ne (Get-ScheduledTask -TaskName $PrerequisiteTaskName -ErrorAction SilentlyContinue)) { throw 'Existing boot prerequisite task requires explicit inspection' }

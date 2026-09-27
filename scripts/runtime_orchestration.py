@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import sys
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -73,6 +74,74 @@ class RuntimeRunResult:
     exit_code: int
     evidence_path: Path | None
     environment: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class ExecutionEnvironment:
+    """Side-effect-free classification of the host visible to qualification."""
+
+    name: str
+    signals: tuple[str, ...]
+
+
+def detect_execution_environment(
+    *,
+    environ: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+    proc_version: str | None = None,
+    cgroup: str | None = None,
+    mountinfo: str | None = None,
+    docker_env: bool | None = None,
+    container_env: bool | None = None,
+) -> ExecutionEnvironment:
+    """Classify WSL2, Linux containers and native Linux without mutation."""
+
+    env = os.environ if environ is None else environ
+    platform_value = sys.platform if platform_name is None else platform_name
+    if proc_version is None:
+        try:
+            proc_version = Path("/proc/version").read_text(encoding="utf-8")
+        except OSError:
+            proc_version = ""
+    if cgroup is None:
+        try:
+            cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+        except OSError:
+            cgroup = ""
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/1/mountinfo").read_text(encoding="utf-8")
+        except OSError:
+            mountinfo = ""
+    docker_env = Path("/.dockerenv").exists() if docker_env is None else docker_env
+    container_env = Path("/run/.containerenv").exists() if container_env is None else container_env
+    version = proc_version.lower()
+    wsl_signals = tuple(
+        signal
+        for signal, present in (
+            ("WSL_INTEROP", bool(env.get("WSL_INTEROP"))),
+            ("WSL_DISTRO_NAME", bool(env.get("WSL_DISTRO_NAME"))),
+            ("proc-version-wsl", "microsoft" in version or "wsl" in version),
+        )
+        if present
+    )
+    if len(wsl_signals) >= 2 and "proc-version-wsl" in wsl_signals:
+        return ExecutionEnvironment("wsl2_developer", wsl_signals)
+    container_signals = tuple(
+        signal
+        for signal, present in (
+            ("dockerenv", docker_env),
+            ("containerenv", container_env),
+            ("cgroup-container", bool(re.search(r"(?:docker|containerd|kubepods|libpod)", cgroup, re.I))),
+            ("overlay-root", bool(re.search(r"^[^\n]+ / / [^\n]+ - overlay ", mountinfo, re.M))),
+        )
+        if present
+    )
+    if container_signals:
+        return ExecutionEnvironment("linux_container", container_signals)
+    if platform_value.startswith("linux"):
+        return ExecutionEnvironment("native_linux", ("linux-platform",))
+    return ExecutionEnvironment("unknown", ())
 
 
 class CapabilityDriver(Protocol):
