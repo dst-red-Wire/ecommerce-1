@@ -48,6 +48,14 @@ def require_command(name: str) -> str:
     return resolved
 
 
+def _trusted_runner_command(name: str, target_root: Path) -> str:
+    """Pin a credentialed tool before entering the untrusted checkout."""
+    path = Path(require_command(name)).resolve(strict=True)
+    if not path.is_file() or path.is_relative_to(target_root.resolve()):
+        raise RuntimeError(f"trusted {name} executable must be runner-owned")
+    return str(path)
+
+
 def evidence_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize execution, exact evidence reuse, and content-cache acceleration separately."""
 
@@ -385,7 +393,8 @@ def trusted_pr_transition(
     if not trusted_controller.is_file():
         raise RuntimeError("trusted exact-base repoctl.py is unavailable")
 
-    gh = require_command("gh")
+    gh = _trusted_runner_command("gh", target_root)
+    git = _trusted_runner_command("git", target_root)
     binding = _github_pr_binding(trusted_root, gh, pr_number)
     base_sha = str(binding["baseRefOid"])
     head_sha = str(binding["headRefOid"])
@@ -406,20 +415,13 @@ def trusted_pr_transition(
     ).returncode:
         raise RuntimeError("target PR head is not descended from its exact GitHub base")
 
-    environment = os.environ.copy()
-    for name in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-        "PYTHONHOME",
-        "PYTHONINSPECT",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-    ):
-        environment.pop(name, None)
+    # The wrapper is exact-base code, but its controller executes some commands
+    # against the untrusted head checkout. Never forward an arbitrary runner env.
+    allowed = {
+        "PATH", "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING",
+        "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY",
+    }
+    environment = {name: value for name, value in os.environ.items() if name in allowed}
     environment.update(
         {
             "REPOCTL_TRUSTED_WRAPPER": str(wrapper),
@@ -429,6 +431,8 @@ def trusted_pr_transition(
             "REPOCTL_TRUSTED_TARGET_ROOT": str(target_root),
             "REPOCTL_TRUSTED_HEAD_SHA": head_sha,
             "REPOCTL_TRUSTED_PR_NUMBER": str(pr_number),
+            "REPOCTL_TRUSTED_GH_PATH": gh,
+            "REPOCTL_TRUSTED_GIT_PATH": git,
         }
     )
     command = [

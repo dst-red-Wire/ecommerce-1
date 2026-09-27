@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -189,6 +191,16 @@ class BundleDeliveryTests(unittest.TestCase):
         subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
         subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, capture_output=True, text=True)
 
+    def test_trusted_runner_rejects_gh_resolved_inside_head(self):
+        with tempfile.TemporaryDirectory() as td:
+            head = Path(td) / "head"
+            head.mkdir()
+            fake_gh = head / "gh"
+            fake_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            with mock.patch.object(RD, "require_command", return_value=str(fake_gh)):
+                with self.assertRaisesRegex(RuntimeError, "runner-owned"):
+                    RD._trusted_runner_command("gh", head)
+
     def test_bundle_branch_requires_exact_unique_feature_head(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "repo"
@@ -329,8 +341,15 @@ class BundleDeliveryTests(unittest.TestCase):
                 return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
 
             with (
+                mock.patch.dict(RD.os.environ, {
+                    "GH_TOKEN": "merge-token",
+                    "TRUSTED_PR_WEBHOOK_SECRET": "webhook-secret",
+                    "CI_EVIDENCE_COSIGN_KEY": "signing-key",
+                    "REGISTRY_PASSWORD": "registry-secret",
+                    "SUPER_SECRET_NEW_VARIABLE": "should-not-leak",
+                }),
                 mock.patch.object(RD, "__file__", str(trusted_wrapper)),
-                mock.patch.object(RD, "require_command", return_value="gh"),
+                mock.patch.object(RD, "require_command", side_effect=lambda name: sys.executable if name == "gh" else shutil.which(name)),
                 mock.patch.object(RD, "_github_pr_binding", return_value=binding),
                 mock.patch.object(RD, "_github_repository", return_value="owner/repo"),
                 mock.patch.object(RD, "_run", side_effect=recording_run),
@@ -348,6 +367,14 @@ class BundleDeliveryTests(unittest.TestCase):
             self.assertEqual(str(trusted_controller), seen["cmd"][2])
             self.assertEqual(base_sha, seen["env"]["REPOCTL_TRUSTED_BASE_SHA"])
             self.assertEqual(head_sha, seen["env"]["REPOCTL_TRUSTED_HEAD_SHA"])
+            self.assertEqual("merge-token", seen["env"]["GH_TOKEN"])
+            self.assertEqual(str(Path(sys.executable).resolve()), seen["env"]["REPOCTL_TRUSTED_GH_PATH"])
+            self.assertEqual(str(Path(shutil.which("git")).resolve()), seen["env"]["REPOCTL_TRUSTED_GIT_PATH"])
+            for secret in (
+                "TRUSTED_PR_WEBHOOK_SECRET", "CI_EVIDENCE_COSIGN_KEY",
+                "REGISTRY_PASSWORD", "SUPER_SECRET_NEW_VARIABLE",
+            ):
+                self.assertNotIn(secret, seen["env"])
 
 
 class RemoteStatusTests(unittest.TestCase):

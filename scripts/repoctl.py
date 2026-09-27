@@ -129,7 +129,10 @@ def ansible_collections_root() -> Path:
     return ROOT / relative
 
 
-os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
+# In the exact-base trusted controller ROOT is the untrusted PR HEAD. Its
+# toolchain lock must never influence executable resolution for tokened work.
+if not os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+    os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
@@ -1007,6 +1010,22 @@ def require(name: str) -> str:
     return path
 
 
+def _trusted_executable(name: str) -> str:
+    raw = os.environ.get(f"REPOCTL_TRUSTED_{name.upper()}_PATH", "")
+    if not raw or not Path(raw).is_absolute():
+        raise RuntimeError(f"trusted {name} executable was not pinned by the base wrapper")
+    path = Path(raw).resolve(strict=True)
+    if not path.is_file() or path.is_relative_to(ROOT.resolve()):
+        raise RuntimeError(f"trusted {name} executable is inside the PR head")
+    return str(path)
+
+
+def _github_cli() -> str | None:
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        return _trusted_executable("gh")
+    return shutil.which("gh") or shutil.which("gh.exe")
+
+
 def run(
     cmd: list[str],
     *,
@@ -1015,6 +1034,50 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        # The controller is exact-base code, but cwd is the untrusted PR head.
+        # Default every child to a small, credential-free environment.
+        safe_keys = {"PATH", "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING"}
+        command = list(cmd)
+        trusted_gh = _trusted_executable("gh")
+        trusted_git = _trusted_executable("git")
+        if command and command[0] in {"gh", "gh.exe"}:
+            command[0] = trusted_gh
+        elif command and Path(command[0]).name in {"gh", "gh.exe"} and Path(command[0]).resolve() != Path(trusted_gh):
+            raise RuntimeError("untrusted GitHub CLI executable")
+        is_gh = bool(command and command[0] == trusted_gh)
+        is_push = len(command) >= 2 and command[0] in {"git", trusted_git} and command[1] == "push"
+        if is_push:
+            command[0] = trusted_git
+        source = env if env is not None else os.environ
+        allowed = set(safe_keys)
+        trusted_controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "")
+        is_trusted_controller = (
+            len(command) >= 2
+            and Path(command[0]).resolve() == Path(sys.executable).resolve()
+            and bool(trusted_controller)
+            and Path(command[1]).resolve() == Path(trusted_controller).resolve()
+        )
+        if is_gh or is_trusted_controller or is_push:
+            allowed.update({"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY"})
+        if is_trusted_controller:
+            allowed.update(name for name in os.environ if name.startswith("REPOCTL_TRUSTED_"))
+        env = {name: value for name, value in source.items() if name in allowed}
+        if is_gh or is_trusted_controller or is_push:
+            env["PATH"] = os.environ.get("PATH", "")
+        if is_push:
+            # Git is a trusted external tool here. Disable repository hooks and
+            # authenticate only this exact push via the pinned GitHub CLI.
+            env.update({
+                "GIT_CONFIG_COUNT": "3",
+                "GIT_CONFIG_KEY_0": "core.hooksPath",
+                "GIT_CONFIG_VALUE_0": "/dev/null",
+                "GIT_CONFIG_KEY_1": "credential.helper",
+                "GIT_CONFIG_VALUE_1": "",
+                "GIT_CONFIG_KEY_2": "credential.helper",
+                "GIT_CONFIG_VALUE_2": f"!{shlex.quote(trusted_gh)} auth git-credential",
+            })
+        cmd = command
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -6653,7 +6716,7 @@ def _evaluate_github_cleanup_evidence(
 def _github_cleanup_evidence(
     default_branch: str, base_ref: str, merge_method: str, proof_contract: dict
 ) -> dict:
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         print("INFO branch-cleanup: GitHub CLI unavailable; GitHub criteria unavailable")
         return _unavailable_github_cleanup_evidence()
@@ -6984,14 +7047,20 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
 
 
 def roadmap_check(*, quiet: bool = False) -> int:
-    command = [sys.executable, "scripts/roadmap_sync.py", "check"]
+    script = "scripts/roadmap_sync.py"
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        script = str(Path(os.environ["REPOCTL_TRUSTED_POLICY_ROOT"]) / script)
+    command = [sys.executable, script, "check"]
     if quiet:
         command.append("--quiet")
     return run(command, check=False).returncode
 
 
 def roadmap_sync() -> int:
-    return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
+    script = "scripts/roadmap_sync.py"
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        script = str(Path(os.environ["REPOCTL_TRUSTED_POLICY_ROOT"]) / script)
+    return run([sys.executable, script, "sync"], check=False).returncode
 
 
 def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bool = False) -> int:
@@ -7331,6 +7400,8 @@ def _roadmap_followup_after_merge() -> int:
         return 0
     if check_rc != 1:
         return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        return fail("roadmap drift requires a separate credential-free follow-up; no HEAD-owned delivery after merge")
 
     main_sha = git("rev-parse", "HEAD").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
@@ -8843,7 +8914,7 @@ def deliver(base: str, title: str, message: str) -> int:
         return fail(f"deliver base must match contract default branch {policy['default_branch']!r}")
     if publish(base_name, message or title):
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         return fail("GitHub CLI missing")
     branch = git("branch", "--show-current").strip()
@@ -9262,12 +9333,13 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 def finish_pr(base: str) -> int:
     try:
-        _require_trusted_pr_execution()
+        trusted_context = _require_trusted_pr_execution()
     except RuntimeError as exc:
         return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
-    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+    rotation = Path(trusted_context["trusted_root"]) / "scripts/signing_rotation.py"
+    if run([sys.executable, str(rotation), "rotation-check"], cwd=Path(trusted_context["trusted_root"]), check=False).returncode:
         return fail("finish-pr requires the signing rotation delivery gate")
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
@@ -9283,7 +9355,7 @@ def finish_pr(base: str) -> int:
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("finish-pr requires a clean worktree")
 
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         return fail("GitHub CLI missing")
 
@@ -9303,11 +9375,7 @@ def finish_pr(base: str) -> int:
 
     evidence = _valid_exact_evidence(base_ref, head)
     if evidence is None:
-        if verify_change(base_ref, head):
-            return 1
-        evidence = _valid_exact_evidence(base_ref, head)
-    if evidence is None:
-        return fail(f"finish-pr exact PASS evidence missing for {head}")
+        return fail(f"finish-pr exact PASS evidence missing for {head}; external Tekton qualification required")
 
     proof_workflow = qualification_workflow("qualification_proof")
     if proof_workflow.get("merge_authoritative") is not True:
@@ -9947,7 +10015,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         result["blockers"].append("GitHub CLI missing")
         _emit_pr_loop_result(result, json_output=json_output)
@@ -10053,6 +10121,12 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         risk=result["risk"],
     )
     if state == "QUALIFICATION_REQUIRED" and not dry_run:
+        if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+            result["state"] = "QUALIFICATION_REQUIRED"
+            result["next_action"] = "EXTERNAL_TEKTON_QUALIFICATION"
+            result["blockers"].append("trusted transition requires pre-existing exact-SHA Tekton evidence")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         try:
             before_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
         except RuntimeError as exc:
