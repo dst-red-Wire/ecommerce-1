@@ -111,9 +111,10 @@ class BranchCleanupTests(unittest.TestCase):
         absorbing_head: str = "d" * 40,
         repository: str = "dst-red-Wire/ecommerce-1",
         status: str = "ABSORBED",
+        content_lineage: list[dict] | None = None,
     ) -> dict:
         proof = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "PullRequestAbsorptionProof",
             "source_repository": repository,
             "source_pr": source_pr,
@@ -123,7 +124,16 @@ class BranchCleanupTests(unittest.TestCase):
             "absorbing_repository": repository,
             "absorbing_pr": absorbing_pr,
             "absorbing_head_sha": absorbing_head,
-            "proof_method": "qualified-integration-exact-sha",
+            "content_lineage": content_lineage
+            if content_lineage is not None
+            else [
+                {
+                    "from_sha": source_head,
+                    "to_sha": absorbing_head,
+                    "relation": "ancestor",
+                }
+            ],
+            "proof_method": "git-content-lineage-v1",
             "status": status,
         }
         proof["proof_id"] = REPOCTL._canonical_absorption_proof_id(proof)
@@ -131,20 +141,33 @@ class BranchCleanupTests(unittest.TestCase):
 
     def proof_body(self, *proofs: dict) -> str:
         return "\n".join(
-            f"<!-- pull-request-absorption-proof:v1\n{json.dumps(proof, sort_keys=True)}\n-->"
+            f"<!-- pull-request-absorption-proof:v2\n{json.dumps(proof, sort_keys=True)}\n-->"
             for proof in proofs
         )
 
-    def evaluate(self, pulls: list[dict], *, merge_in_main: bool = True, tree_matches: bool = True) -> dict:
+    def evaluate(
+        self,
+        pulls: list[dict],
+        *,
+        merge_in_main: bool = True,
+        head_in_merge: bool = True,
+        content_in_absorbing: bool = True,
+        tree_matches: bool = True,
+    ) -> dict:
         policy = self.cleanup_policy()
-        absorbing_tree = "7" * 40
-        merge_tree = absorbing_tree if tree_matches else "8" * 40
+
+        def ancestor(head: str, base: str) -> bool:
+            if base == "origin/main":
+                return merge_in_main
+            if head == "d" * 40 and base == "e" * 40:
+                return head_in_merge
+            return content_in_absorbing
 
         def tree(commit: str) -> str:
-            return merge_tree if commit == "e" * 40 else absorbing_tree
+            return "7" * 40 if tree_matches or commit == "a" * 40 else "8" * 40
 
         with (
-            mock.patch.object(REPOCTL, "_git_is_ancestor", return_value=merge_in_main),
+            mock.patch.object(REPOCTL, "_git_is_ancestor", side_effect=ancestor),
             mock.patch.object(REPOCTL, "_git_tree_sha", side_effect=tree),
         ):
             return REPOCTL._evaluate_github_cleanup_evidence(
@@ -201,8 +224,13 @@ class BranchCleanupTests(unittest.TestCase):
         proof = cleanup["absorbed_pr_proof"]
         self.assertIs(True, proof["required"])
         self.assertIs(True, proof["fail_closed"])
-        self.assertEqual("pull-request-absorption-proof:v1", proof["marker"])
+        self.assertEqual("pull-request-absorption-proof:v2", proof["marker"])
         self.assertEqual("sha256-canonical-binding", proof["proof_id"])
+        self.assertEqual("git-content-lineage-v1", proof["proof_method"])
+        self.assertEqual(["ancestor", "same-tree"], proof["content_lineage"]["allowed_relations"])
+        self.assertTrue(
+            proof["destructive_revalidation"]["required_immediately_before_each_delete"]
+        )
         self.assertEqual("exact-head-sha", cleanup["github_merge_proof"])
         self.assertIs(True, cleanup["remote_delete_requires_exact_lease"])
         self.assertIs(True, cleanup["local_delete_requires_compare_and_delete"])
@@ -212,13 +240,45 @@ class BranchCleanupTests(unittest.TestCase):
     def test_real_three_source_fixture_is_absorbed_by_exact_merged_pr(self):
         absorbing_head = "c8073533c6afc1ac2e471bf51580c11fcabf47f9"
         merge_commit = "542e3998f6c0fee1daba021467173badd1208a08"
+        replay_149 = "8a31633ade74a5396cb94e55207d0086533e66b1"
+        replay_150 = "b793b4630d9803b605f624a31cb8f40322256c6c"
+        replay_151 = "880b7cd8e149673779c7321f512b7f1c82367299"
         sources = [
             (149, "feat/execution-properties-policy", "a29ccf5c50f52a68bd0305278c49747038c6350b"),
             (150, "governance/capability-resolver", "57c431515ef839d099319919e1dd2abbf5622384"),
             (151, "fix/execution-profile-runtime-boundary", "8169361feff2a8429caaf1411ba88fe96a4c1a23"),
         ]
+        source_149 = sources[0][2]
+        source_150 = sources[1][2]
+        source_151 = sources[2][2]
+        lineages = {
+            149: [
+                {"from_sha": source_149, "to_sha": replay_149, "relation": "same-tree"},
+                {"from_sha": replay_149, "to_sha": source_150, "relation": "ancestor"},
+                {"from_sha": source_150, "to_sha": replay_150, "relation": "same-tree"},
+                {"from_sha": replay_150, "to_sha": source_151, "relation": "ancestor"},
+                {"from_sha": source_151, "to_sha": replay_151, "relation": "same-tree"},
+                {"from_sha": replay_151, "to_sha": absorbing_head, "relation": "ancestor"},
+            ],
+            150: [
+                {"from_sha": source_150, "to_sha": replay_150, "relation": "same-tree"},
+                {"from_sha": replay_150, "to_sha": source_151, "relation": "ancestor"},
+                {"from_sha": source_151, "to_sha": replay_151, "relation": "same-tree"},
+                {"from_sha": replay_151, "to_sha": absorbing_head, "relation": "ancestor"},
+            ],
+            151: [
+                {"from_sha": source_151, "to_sha": replay_151, "relation": "same-tree"},
+                {"from_sha": replay_151, "to_sha": absorbing_head, "relation": "ancestor"},
+            ],
+        }
         proofs = [
-            self.proof(number, head, branch, absorbing_head=absorbing_head)
+            self.proof(
+                number,
+                head,
+                branch,
+                absorbing_head=absorbing_head,
+                content_lineage=lineages[number],
+            )
             for number, branch, head in sources
         ]
         pulls = [self.pull(number, branch, head) for number, branch, head in sources]
@@ -253,9 +313,8 @@ class BranchCleanupTests(unittest.TestCase):
             self.assertEqual(absorbing_head, proof["absorbing_head"])
             self.assertEqual(merge_commit, proof["merge_commit"])
 
-    def test_merge_commit_may_differ_from_absorbing_head_when_trees_match(self):
+    def test_normal_merge_with_advanced_base_uses_lineage_not_tree_equality(self):
         pulls, _proof = self.one_source_fixture()
-        pulls[0]["merge_commit_sha"] = "6" * 40
         evidence = self.evaluate(pulls)
         detail = evidence["absorbed_pr_heads"]["feat/source"]["a" * 40]
         self.assertEqual("d" * 40, detail["absorbing_head"])
@@ -298,15 +357,75 @@ class BranchCleanupTests(unittest.TestCase):
                 self.assertEqual({}, evidence["absorbed_pr_heads"])
                 self.assertEqual(expected[name], evidence["diagnostics"]["feat/source"])
 
-    def test_absorption_evidence_requires_merge_commit_in_current_main_and_matching_tree(self):
+    def test_absorption_evidence_requires_merge_commit_and_absorbing_head_in_merge_lineage(self):
         pulls, _proof = self.one_source_fixture()
         absent = self.evaluate(pulls, merge_in_main=False)
         self.assertEqual("merge-commit-absent-from-default", absent["diagnostics"]["feat/source"])
         self.assertEqual({}, absent["absorbed_pr_heads"])
 
-        moved = self.evaluate(pulls, tree_matches=False)
-        self.assertEqual("absorbing-merge-tree-mismatch", moved["diagnostics"]["feat/source"])
+        moved = self.evaluate(pulls, head_in_merge=False)
+        self.assertEqual(
+            "absorbing-head-absent-from-merge-lineage", moved["diagnostics"]["feat/source"]
+        )
         self.assertEqual({}, moved["absorbed_pr_heads"])
+
+    def test_absorption_evidence_requires_verified_content_lineage(self):
+        pulls, _proof = self.one_source_fixture()
+        ancestry_mismatch = self.evaluate(pulls, content_in_absorbing=False)
+        self.assertEqual(
+            "content-lineage-ancestry-mismatch",
+            ancestry_mismatch["diagnostics"]["feat/source"],
+        )
+        self.assertEqual({}, ancestry_mismatch["absorbed_pr_heads"])
+
+        proof = self.proof(
+            149,
+            "a" * 40,
+            "feat/source",
+            content_lineage=[
+                {"from_sha": "a" * 40, "to_sha": "d" * 40, "relation": "same-tree"}
+            ],
+        )
+        pulls[1]["body"] = self.proof_body(proof)
+        tree_mismatch = self.evaluate(pulls, tree_matches=False)
+        self.assertEqual(
+            "content-lineage-tree-mismatch", tree_mismatch["diagnostics"]["feat/source"]
+        )
+        self.assertEqual({}, tree_mismatch["absorbed_pr_heads"])
+
+    def test_content_lineage_verifies_complete_tree_replay_followed_by_ancestry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _remote = self.init_repo(directory)
+            self.git(root, "switch", "-c", "source")
+            (root / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self.git(root, "add", "feature.txt")
+            self.git(root, "commit", "-m", "source implementation")
+            source = self.git(root, "rev-parse", "HEAD").stdout.strip()
+
+            self.git(root, "switch", "main")
+            self.git(root, "switch", "-c", "integration")
+            (root / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self.git(root, "add", "feature.txt")
+            self.git(root, "commit", "-m", "signed replay")
+            replay = self.git(root, "rev-parse", "HEAD").stdout.strip()
+            (root / "fix.txt").write_text("qualified fix\n", encoding="utf-8")
+            self.git(root, "add", "fix.txt")
+            self.git(root, "commit", "-m", "post-replay correction")
+            absorbing = self.git(root, "rev-parse", "HEAD").stdout.strip()
+
+            proof = {
+                "content_lineage": [
+                    {"from_sha": source, "to_sha": replay, "relation": "same-tree"},
+                    {"from_sha": replay, "to_sha": absorbing, "relation": "ancestor"},
+                ]
+            }
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                self.assertEqual("", REPOCTL._content_lineage_reason(proof))
+
+                proof["content_lineage"][0]["to_sha"] = absorbing
+                self.assertEqual(
+                    "content-lineage-tree-mismatch", REPOCTL._content_lineage_reason(proof)
+                )
 
     def test_missing_and_ambiguous_absorption_proofs_are_preserved(self):
         pulls, proof_159 = self.one_source_fixture()
@@ -349,6 +468,16 @@ class BranchCleanupTests(unittest.TestCase):
             ("bad-pr", lambda item: item.update(source_pr="149"), "malformed-pr-number"),
             ("bad-id", lambda item: item.update(proof_id="sha256:" + "0" * 64), "forged-absorption-proof"),
             ("bad-method", lambda item: item.update(proof_method="similar-diff"), "forged-absorption-proof"),
+            (
+                "disconnected-lineage",
+                lambda item: item["content_lineage"][0].update(from_sha="b" * 40),
+                "malformed-content-lineage",
+            ),
+            (
+                "lineage-does-not-reach-absorbing-head",
+                lambda item: item["content_lineage"][0].update(to_sha="c" * 40),
+                "malformed-content-lineage",
+            ),
         ):
             with self.subTest(name=name):
                 candidate = copy.deepcopy(proof)
@@ -357,7 +486,7 @@ class BranchCleanupTests(unittest.TestCase):
 
     def test_forged_marker_blocks_concurrent_valid_proof_for_same_branch(self):
         pulls, proof = self.one_source_fixture()
-        forged = {**proof, "absorbing_head_sha": "f" * 40}
+        forged = {**proof, "source_pr": 150}
         pulls[1]["body"] = self.proof_body(proof, forged)
         evidence = self.evaluate(pulls)
         self.assertEqual({}, evidence["absorbed_pr_heads"])
@@ -518,6 +647,117 @@ class BranchCleanupTests(unittest.TestCase):
         self.assertIn("not exact", detail)
         run.assert_not_called()
 
+    def test_absorption_authorization_is_refetched_and_must_match_exactly(self):
+        source_head = "a" * 40
+        detail = {
+            "criterion": "closed-pr-proven-absorbed-by-merged-pr",
+            "source_pr": 149,
+            "source_head": source_head,
+            "absorbing_pr": 159,
+            "absorbing_head": "d" * 40,
+            "absorbing_branch": "integration/sources",
+            "merge_commit": "e" * 40,
+            "proof_id": "sha256:" + "1" * 64,
+            "proof_method": "git-content-lineage-v1",
+            "content_lineage": [
+                {"from_sha": source_head, "to_sha": "d" * 40, "relation": "ancestor"}
+            ],
+            "default_branch": "main",
+        }
+        item = {
+            "branch": "feat/source",
+            "head_sha": source_head,
+            "evidence": detail,
+        }
+        fresh = self.github_evidence(
+            absorbed={"feat/source": {source_head: copy.deepcopy(detail)}},
+            source_heads={"feat/source": {source_head}},
+        )
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with (
+            mock.patch.object(REPOCTL, "run", return_value=completed) as run,
+            mock.patch.object(REPOCTL, "_github_cleanup_evidence", return_value=fresh) as github,
+        ):
+            authorized, reason = REPOCTL._revalidate_absorption_authorization(
+                item,
+                default_branch="main",
+                base_ref="origin/main",
+                merge_method="merge",
+                proof_contract=self.cleanup_policy()["cleanup"]["automatic_branch_cleanup"][
+                    "absorbed_pr_proof"
+                ],
+            )
+        self.assertTrue(authorized)
+        self.assertEqual("", reason)
+        self.assertEqual(["git", "fetch", "origin", "--prune"], run.call_args.args[0])
+        github.assert_called_once()
+
+        revoked = self.github_evidence(diagnostics={"feat/source": "source-pr-still-open"})
+        with (
+            mock.patch.object(REPOCTL, "run", return_value=completed),
+            mock.patch.object(REPOCTL, "_github_cleanup_evidence", return_value=revoked),
+        ):
+            authorized, reason = REPOCTL._revalidate_absorption_authorization(
+                item,
+                default_branch="main",
+                base_ref="origin/main",
+                merge_method="merge",
+                proof_contract=self.cleanup_policy()["cleanup"]["automatic_branch_cleanup"][
+                    "absorbed_pr_proof"
+                ],
+            )
+        self.assertFalse(authorized)
+        self.assertIn("source-pr-still-open", reason)
+
+    def test_cleanup_preserves_absorbed_branch_when_authorization_changes_after_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, _remote = self.init_repo(directory)
+            self.git(root, "switch", "-c", "absorbed-source")
+            (root / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self.git(root, "add", "feature.txt")
+            self.git(root, "commit", "-m", "feature")
+            source_head = self.git(root, "rev-parse", "HEAD").stdout.strip()
+            self.git(root, "push", "-u", "origin", "absorbed-source")
+            self.git(root, "switch", "main")
+            detail = {
+                "criterion": "closed-pr-proven-absorbed-by-merged-pr",
+                "source_pr": 149,
+                "source_head": source_head,
+                "absorbing_pr": 159,
+                "absorbing_head": "d" * 40,
+                "absorbing_branch": "integration/sources",
+                "merge_commit": "e" * 40,
+                "proof_id": "sha256:" + "1" * 64,
+                "proof_method": "git-content-lineage-v1",
+                "content_lineage": [
+                    {"from_sha": source_head, "to_sha": "d" * 40, "relation": "ancestor"}
+                ],
+                "default_branch": "main",
+            }
+            planned = self.github_evidence(
+                absorbed={"absorbed-source": {source_head: detail}},
+                source_heads={"absorbed-source": {source_head}},
+            )
+            revoked = self.github_evidence(
+                diagnostics={"absorbed-source": "source-pr-still-open"}
+            )
+            with (
+                mock.patch.object(REPOCTL, "ROOT", root),
+                mock.patch.object(
+                    REPOCTL, "repository_delivery_policy", return_value=self.cleanup_policy()
+                ),
+                mock.patch.object(
+                    REPOCTL, "_github_cleanup_evidence", side_effect=[planned, revoked]
+                ) as github,
+                mock.patch.object(REPOCTL, "_delete_branch_ref") as delete,
+            ):
+                self.assertEqual(1, REPOCTL.branch_cleanup())
+
+            self.assertEqual(2, github.call_count)
+            delete.assert_not_called()
+            self.assertTrue(self.branch_exists(root, "absorbed-source"))
+            self.assertTrue(self.remote_branch_exists(root, "absorbed-source"))
+
     def test_cleanup_deletes_branch_whose_head_is_already_in_main(self):
         with tempfile.TemporaryDirectory() as directory:
             root, _remote = self.init_repo(directory)
@@ -611,6 +851,9 @@ class BranchCleanupTests(unittest.TestCase):
                 "merge_commit": "e" * 40,
                 "default_branch": "main",
                 "proof_id": "sha256:" + "1" * 64,
+                "content_lineage": [
+                    {"from_sha": source_head, "to_sha": "d" * 40, "relation": "ancestor"}
+                ],
             }
             evidence = self.github_evidence(
                 absorbed={"absorbed-source": {source_head: detail}},
@@ -634,6 +877,7 @@ class BranchCleanupTests(unittest.TestCase):
             self.assertIn("criterion=closed-pr-proven-absorbed-by-merged-pr", report)
             self.assertIn("source_pr=149", report)
             self.assertIn("absorbing_pr=159", report)
+            self.assertIn("content_lineage=", report)
 
     def test_git_sync_automatically_runs_cleanup(self):
         with (

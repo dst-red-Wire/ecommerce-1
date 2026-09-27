@@ -6234,6 +6234,7 @@ def _canonical_absorption_proof_id(proof: dict) -> str:
         "absorbing_head_sha": proof.get("absorbing_head_sha"),
         "absorbing_pr": proof.get("absorbing_pr"),
         "absorbing_repository": proof.get("absorbing_repository"),
+        "content_lineage": proof.get("content_lineage"),
         "kind": proof.get("kind"),
         "proof_method": proof.get("proof_method"),
         "schema_version": proof.get("schema_version"),
@@ -6290,6 +6291,44 @@ def _absorption_proof_shape_reason(proof: dict, contract: dict) -> str:
     for field in ("source_branch", "source_base"):
         if not isinstance(proof.get(field), str) or not proof[field].strip():
             return "malformed-absorption-proof"
+    lineage_contract = contract.get("content_lineage")
+    lineage = proof.get("content_lineage")
+    if not isinstance(lineage_contract, dict) or not isinstance(lineage, list):
+        return "malformed-content-lineage"
+    maximum_edges = lineage_contract.get("maximum_edges")
+    if (
+        isinstance(maximum_edges, bool)
+        or not isinstance(maximum_edges, int)
+        or maximum_edges < 1
+        or not lineage
+        or len(lineage) > maximum_edges
+    ):
+        return "malformed-content-lineage"
+    allowed_relations = lineage_contract.get("allowed_relations")
+    if not isinstance(allowed_relations, list) or not all(
+        isinstance(value, str) and value for value in allowed_relations
+    ):
+        return "malformed-content-lineage"
+    expected_from = proof["source_head_sha"]
+    for edge in lineage:
+        if not isinstance(edge, dict) or set(edge) != {"from_sha", "to_sha", "relation"}:
+            return "malformed-content-lineage"
+        from_sha = edge.get("from_sha")
+        to_sha = edge.get("to_sha")
+        relation = edge.get("relation")
+        if (
+            not isinstance(from_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", from_sha)
+            or not isinstance(to_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", to_sha)
+            or from_sha == to_sha
+            or relation not in allowed_relations
+            or from_sha != expected_from
+        ):
+            return "malformed-content-lineage"
+        expected_from = to_sha
+    if expected_from != proof["absorbing_head_sha"]:
+        return "malformed-content-lineage"
     if proof.get("proof_id") != _canonical_absorption_proof_id(proof):
         return "forged-absorption-proof"
     return ""
@@ -6314,6 +6353,24 @@ def _git_tree_sha(commit_sha: str) -> str:
     result = run(["git", "rev-parse", "--verify", f"{commit_sha}^{{tree}}"], check=False, capture=True)
     value = (result.stdout or "").strip()
     return value if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def _content_lineage_reason(proof: dict) -> str:
+    for edge in proof["content_lineage"]:
+        from_sha = edge["from_sha"]
+        to_sha = edge["to_sha"]
+        if edge["relation"] == "ancestor":
+            if not _git_is_ancestor(from_sha, to_sha):
+                return "content-lineage-ancestry-mismatch"
+            continue
+        if edge["relation"] == "same-tree":
+            from_tree = _git_tree_sha(from_sha)
+            to_tree = _git_tree_sha(to_sha)
+            if not from_tree or from_tree != to_tree:
+                return "content-lineage-tree-mismatch"
+            continue
+        return "malformed-content-lineage"
+    return ""
 
 
 def _unavailable_github_cleanup_evidence() -> dict:
@@ -6462,11 +6519,12 @@ def _evaluate_github_cleanup_evidence(
                     merge_commit, base_ref
                 ):
                     reason = "merge-commit-absent-from-default"
-                elif merge_checks.get("absorbing_head_tree_equals_merge_commit_tree") is True and (
-                    not _git_tree_sha(absorbing_sha)
-                    or _git_tree_sha(absorbing_sha) != _git_tree_sha(merge_commit)
+                elif merge_checks.get("absorbing_head_ancestor_of_merge_commit") is True and not _git_is_ancestor(
+                    absorbing_sha, merge_commit
                 ):
-                    reason = "absorbing-merge-tree-mismatch"
+                    reason = "absorbing-head-absent-from-merge-lineage"
+                elif content_reason := _content_lineage_reason(proof):
+                    reason = content_reason
                 else:
                     absorbed_pr_heads.setdefault(source_branch, {})[source_head] = {
                         "criterion": "closed-pr-proven-absorbed-by-merged-pr",
@@ -6478,6 +6536,7 @@ def _evaluate_github_cleanup_evidence(
                         "merge_commit": merge_commit,
                         "proof_id": proof["proof_id"],
                         "proof_method": proof["proof_method"],
+                        "content_lineage": copy.deepcopy(proof["content_lineage"]),
                         "default_branch": default_branch,
                     }
         diagnostics[source_branch] = reason or "closed-pr-proven-absorbed-by-merged-pr"
@@ -6669,6 +6728,42 @@ def _delete_branch_ref(scope: str, branch: str, expected_sha: str) -> tuple[bool
     return result.returncode == 0, detail
 
 
+def _revalidate_absorption_authorization(
+    item: dict,
+    *,
+    default_branch: str,
+    base_ref: str,
+    merge_method: str,
+    proof_contract: dict,
+) -> tuple[bool, str]:
+    refresh = run(
+        ["git", "fetch", "origin", "--prune"],
+        check=False,
+        capture=True,
+    )
+    if refresh.returncode:
+        detail = (refresh.stderr or refresh.stdout or "").strip()
+        return False, f"cannot refresh Git refs before deletion: {detail or 'git fetch failed'}"
+
+    fresh = _github_cleanup_evidence(
+        default_branch,
+        base_ref,
+        merge_method,
+        proof_contract,
+    )
+    if fresh.get("available") is not True:
+        return False, "GitHub absorption authorization is unavailable"
+
+    branch = str(item.get("branch") or "")
+    head_sha = str(item.get("head_sha") or "")
+    current = fresh.get("absorbed_pr_heads", {}).get(branch, {}).get(head_sha)
+    expected = item.get("evidence")
+    if not isinstance(current, dict) or current != expected:
+        diagnostic = fresh.get("diagnostics", {}).get(branch, "absorption-authorization-changed")
+        return False, f"GitHub absorption authorization changed: {diagnostic}"
+    return True, ""
+
+
 def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     policy = repository_delivery_policy()
     cleanup = policy["cleanup"]["automatic_branch_cleanup"]
@@ -6719,9 +6814,27 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
                 print(f"PRESERVE {scope:6} {branch} | {item['reason']}")
             continue
 
+        evidence = item.get("evidence") or {}
+        if not dry_run and scope == "local" and branch in remote_failures:
+            failures.append(f"local {branch}: preserved because remote deletion failed")
+            continue
+        if not dry_run and item["reason"] == "closed-pr-proven-absorbed-by-merged-pr":
+            authorized, detail = _revalidate_absorption_authorization(
+                item,
+                default_branch=default_branch,
+                base_ref=base_ref,
+                merge_method=str(policy["merge"]["method"]),
+                proof_contract=cleanup["absorbed_pr_proof"],
+            )
+            if not authorized:
+                failures.append(f"{scope} {branch}: {detail}")
+                if scope == "remote":
+                    remote_failures.add(branch)
+                print(f"PRESERVE {scope:6} {branch} | authorization-revalidation-failed")
+                continue
+
         label = "WOULD_DELETE" if dry_run else "DELETE"
         print(f"{label} {scope:6} {branch} | {item['reason']} | {str(item['head_sha'])[:12]}")
-        evidence = item.get("evidence") or {}
         if evidence:
             print(f"  criterion={evidence['criterion']}")
             print(f"  source_pr={evidence['source_pr']}")
@@ -6731,6 +6844,10 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
             print(f"  merge_commit={evidence['merge_commit']}")
             print(f"  default_branch={evidence['default_branch']}")
             print(f"  proof_id={evidence['proof_id']}")
+            print(
+                "  content_lineage="
+                + json.dumps(evidence["content_lineage"], sort_keys=True, separators=(",", ":"))
+            )
         if dry_run:
             continue
 
@@ -6744,9 +6861,6 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
                 deleted += 1
             continue
 
-        if branch in remote_failures:
-            failures.append(f"local {branch}: preserved because remote deletion failed")
-            continue
         ok, detail = _delete_branch_ref(scope, branch, expected_sha)
         if not ok:
             failures.append(f"local {branch}: {detail or 'compare-and-delete failed'}")
@@ -6759,8 +6873,9 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
 
     candidates = sum(1 for item in plan if item["action"] == "delete")
     kept = sum(1 for item in plan if item["action"] == "keep")
+    cleanup_status = "DRY_RUN" if dry_run else ("FAIL" if failures else "PASS")
     print(
-        f"{'DRY_RUN' if dry_run else 'PASS'} branch-cleanup "
+        f"{cleanup_status} branch-cleanup "
         f"candidates={candidates} deleted={deleted} kept={kept} failures={len(failures)}"
     )
     for failure in failures:
@@ -7256,15 +7371,19 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "required": True,
             "fail_closed": True,
             "source": "github-absorbing-pr-body",
-            "marker": "pull-request-absorption-proof:v1",
-            "schema_version": 1,
+            "marker": "pull-request-absorption-proof:v2",
+            "schema_version": 2,
             "kind": "PullRequestAbsorptionProof",
             "active_status": "ABSORBED",
             "superseded_status": "SUPERSEDED",
-            "proof_method": "qualified-integration-exact-sha",
+            "proof_method": "git-content-lineage-v1",
             "proof_id": "sha256-canonical-binding",
             "repository_binding": "exact-name-with-owner",
             "temporal_fields_authoritative": False,
+            "content_lineage": {
+                "allowed_relations": ["ancestor", "same-tree"],
+                "maximum_edges": 16,
+            },
             "required_fields": [
                 "proof_id",
                 "schema_version",
@@ -7277,14 +7396,21 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                 "absorbing_repository",
                 "absorbing_pr",
                 "absorbing_head_sha",
+                "content_lineage",
                 "proof_method",
                 "status",
             ],
             "merge_method_checks": {
                 "merge": {
                     "merge_commit_ancestor_of_default": True,
-                    "absorbing_head_tree_equals_merge_commit_tree": True,
+                    "absorbing_head_ancestor_of_merge_commit": True,
                 }
+            },
+            "destructive_revalidation": {
+                "required_immediately_before_each_delete": True,
+                "refresh_git_refs": True,
+                "refresh_github_prs": True,
+                "exact_evidence_match": True,
             },
         },
         "preserve": [
@@ -7299,6 +7425,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "ambiguous-absorption",
             "stale-or-invalid-absorption-proof",
             "github-evidence-unavailable",
+            "authorization-revalidation-failed",
         ],
         "github_cli_optional_for_ancestor_cleanup": True,
         "remote_delete_requires_exact_lease": True,
