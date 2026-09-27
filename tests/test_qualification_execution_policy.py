@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -178,6 +179,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         for action, selector in (("ci-global", "--gate"), ("ci-component", "--component")):
             with self.subTest(action=action):
                 with (
+                    mock.patch.dict(os.environ, {"ECOMMERCE_RUNTIME_ORCHESTRATED": ""}),
                     mock.patch.object(
                         sys, "argv",
                         ["repoctl.py", action, selector, "platform:ansible", "--base", "origin/main",

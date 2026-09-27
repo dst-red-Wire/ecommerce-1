@@ -140,8 +140,49 @@ repository_delivery:
       delete_when:
         - head-is-ancestor-of-default-branch
         - merged-pr-head-matches-current-branch-head
+        - closed-pr-proven-absorbed-by-merged-pr
       merged_pr_base_must_match_default: true
       github_merge_proof: exact-head-sha
+      absorbed_pr_proof:
+        required: true
+        fail_closed: true
+        source: github-absorbing-pr-body
+        marker: pull-request-absorption-proof:v2
+        schema_version: 2
+        kind: PullRequestAbsorptionProof
+        active_status: ABSORBED
+        superseded_status: SUPERSEDED
+        proof_method: git-content-lineage-v1
+        proof_id: sha256-canonical-binding
+        repository_binding: exact-name-with-owner
+        temporal_fields_authoritative: false
+        content_lineage:
+          allowed_relations: [ancestor, same-tree]
+          maximum_edges: 16
+        required_fields:
+          - proof_id
+          - schema_version
+          - kind
+          - source_repository
+          - source_pr
+          - source_head_sha
+          - source_branch
+          - source_base
+          - absorbing_repository
+          - absorbing_pr
+          - absorbing_head_sha
+          - content_lineage
+          - proof_method
+          - status
+        merge_method_checks:
+          merge:
+            merge_commit_ancestor_of_default: true
+            absorbing_head_ancestor_of_merge_commit: true
+        destructive_revalidation:
+          required_immediately_before_each_delete: true
+          refresh_git_refs: true
+          refresh_github_prs: true
+          exact_evidence_match: true
       preserve:
         - default-branch
         - master
@@ -149,6 +190,12 @@ repository_delivery:
         - active-worktree
         - branch-with-unabsorbed-head
         - branch-advanced-after-merged-pr
+        - branch-advanced-after-absorption
+        - missing-absorption-proof
+        - ambiguous-absorption
+        - stale-or-invalid-absorption-proof
+        - github-evidence-unavailable
+        - authorization-revalidation-failed
       github_cli_optional_for_ancestor_cleanup: true
       remote_delete_requires_exact_lease: true
       local_delete_requires_compare_and_delete: true
