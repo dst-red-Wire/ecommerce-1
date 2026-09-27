@@ -20,6 +20,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -1045,6 +1046,105 @@ def ruby_yaml(path: str) -> dict:
     return qualification_cache.psych_load(source)
 
 
+_TRUSTED_PR_EXECUTION_CONTEXT: dict[str, object] | None = None
+
+
+def _trusted_pr_execution_context(*, required: bool = False) -> dict[str, object] | None:
+    """Validate the exact-base wrapper environment before trusting delivery policy."""
+    global _TRUSTED_PR_EXECUTION_CONTEXT
+    if _TRUSTED_PR_EXECUTION_CONTEXT is not None:
+        return _TRUSTED_PR_EXECUTION_CONTEXT
+    names = (
+        "REPOCTL_TRUSTED_WRAPPER",
+        "REPOCTL_TRUSTED_CONTROLLER",
+        "REPOCTL_TRUSTED_POLICY_ROOT",
+        "REPOCTL_TRUSTED_BASE_SHA",
+        "REPOCTL_TRUSTED_TARGET_ROOT",
+        "REPOCTL_TRUSTED_HEAD_SHA",
+        "REPOCTL_TRUSTED_PR_NUMBER",
+    )
+    values = {name: os.environ.get(name, "").strip() for name in names}
+    if not any(values.values()):
+        if required:
+            raise RuntimeError(
+                "delivery requires scripts/repository_delivery.py trusted-pr-transition "
+                "from a clean exact-base checkout"
+            )
+        return None
+    if not all(values.values()):
+        raise RuntimeError("trusted PR execution context is incomplete")
+
+    trusted_root = Path(values["REPOCTL_TRUSTED_POLICY_ROOT"]).resolve()
+    target_root = Path(values["REPOCTL_TRUSTED_TARGET_ROOT"]).resolve()
+    wrapper = Path(values["REPOCTL_TRUSTED_WRAPPER"]).resolve()
+    controller = Path(values["REPOCTL_TRUSTED_CONTROLLER"]).resolve()
+    base_sha = values["REPOCTL_TRUSTED_BASE_SHA"]
+    head_sha = values["REPOCTL_TRUSTED_HEAD_SHA"]
+    pr_number = values["REPOCTL_TRUSTED_PR_NUMBER"]
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise RuntimeError("trusted PR base SHA is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise RuntimeError("trusted PR head SHA is invalid")
+    if not pr_number.isdigit() or int(pr_number) < 1:
+        raise RuntimeError("trusted PR number is invalid")
+    if wrapper != trusted_root / "scripts/repository_delivery.py":
+        raise RuntimeError("trusted PR wrapper is outside the exact-base checkout")
+    if controller != trusted_root / "scripts/repoctl.py":
+        raise RuntimeError("trusted PR controller is outside the exact-base checkout")
+    if Path(__file__).resolve() != controller:
+        raise RuntimeError("delivery is not executing the exact-base trusted controller")
+    if target_root != ROOT.resolve():
+        raise RuntimeError("trusted PR target does not match the active worktree")
+    trusted_head = output(["git", "-C", str(trusted_root), "rev-parse", "HEAD"]).strip()
+    if trusted_head != base_sha:
+        raise RuntimeError("trusted controller checkout does not match the exact PR base")
+    if output(
+        ["git", "-C", str(trusted_root), "status", "--porcelain", "--untracked-files=all"]
+    ).strip():
+        raise RuntimeError("trusted exact-base controller checkout is dirty")
+    target_head = git("rev-parse", "HEAD").strip()
+    if target_head != head_sha:
+        raise RuntimeError("target worktree does not match the exact PR head")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        raise RuntimeError("target exact-head worktree is dirty")
+    _TRUSTED_PR_EXECUTION_CONTEXT = {
+        "trusted_root": trusted_root,
+        "target_root": target_root,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "pr_number": int(pr_number),
+    }
+    return _TRUSTED_PR_EXECUTION_CONTEXT
+
+
+def _require_trusted_pr_execution(
+    *,
+    pr_number: int | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> dict[str, object]:
+    context = _trusted_pr_execution_context(required=True)
+    assert context is not None
+    expected = {
+        "pr_number": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    }
+    for field, value in expected.items():
+        if value is not None and context[field] != value:
+            raise RuntimeError(
+                f"trusted PR {field.replace('_', ' ')} mismatch: "
+                f"expected {context[field]}, got {value}"
+            )
+    return context
+
+
+def _review_policy_document() -> dict:
+    context = _trusted_pr_execution_context()
+    policy_root = Path(context["trusted_root"]) if context else ROOT
+    return ruby_yaml(str(policy_root / "config/contracts/review-policy.yaml"))
+
+
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
 
 
@@ -1153,6 +1253,46 @@ def qualification_execution_policy() -> dict:
             raise RuntimeError("qualification execution policy must declare runtime_orchestration")
         _runtime_api().validate_runtime_policy(runtime_policy)
         capability_names = set(runtime_policy["capabilities"])
+        context = policy.get("execution_context")
+        profiles = policy.get("qualification_profiles")
+        if not isinstance(context, dict) or not isinstance(context.get("environments"), dict):
+            raise RuntimeError("qualification execution policy must declare execution environments")
+        wsl2_only_tags = context.get("wsl2_only_reconcile_tags")
+        if (
+            not isinstance(wsl2_only_tags, list)
+            or not wsl2_only_tags
+            or any(not isinstance(tag, str) or not tag for tag in wsl2_only_tags)
+            or len(wsl2_only_tags) != len(set(wsl2_only_tags))
+        ):
+            raise RuntimeError("qualification execution policy must declare unique WSL2-only reconcile tags")
+        if not isinstance(profiles, dict) or set(profiles) != {"static", "tekton", "developer-wsl2", "runtime", "full"}:
+            raise RuntimeError("qualification execution policy must declare the canonical qualification profiles")
+        for profile_name, profile in profiles.items():
+            if not isinstance(profile, dict) or not isinstance(profile.get("allowed_environments"), list):
+                raise RuntimeError(f"qualification profile {profile_name} is invalid")
+            if not isinstance(profile.get("merge_authoritative"), bool):
+                raise RuntimeError(f"qualification profile {profile_name} must declare merge authority")
+            if set(profile["allowed_environments"]) - set(context["environments"]):
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown environment")
+            dispositions = profile.get("runtime_capabilities", {})
+            if not isinstance(dispositions, dict) or set(dispositions) - capability_names:
+                raise RuntimeError(f"qualification profile {profile_name} references an unknown capability")
+            if set(dispositions.values()) - {"out_of_scope", "required_when_affected"}:
+                raise RuntimeError(f"qualification profile {profile_name} has an unknown capability disposition")
+        authoritative_profiles = {
+            name for name, profile in profiles.items() if profile["merge_authoritative"]
+        }
+        if authoritative_profiles != {"full"}:
+            raise RuntimeError("only the full qualification profile may be merge-authoritative")
+        tekton_profile = profiles["tekton"]
+        if (
+            tekton_profile.get("allowed_environments") != ["linux_container"]
+            or tekton_profile.get("mutation_classes") != ["none"]
+            or tekton_profile.get("runtime_capabilities", {}).get("testcontainers") != "out_of_scope"
+            or tekton_profile.get("runtime_capabilities", {}).get("ansible-runtime") != "required_when_affected"
+            or tekton_profile.get("runtime_capabilities", {}).get("opentofu-runtime") != "required_when_affected"
+        ):
+            raise RuntimeError("Tekton qualification profile must preserve container-safe runtime boundaries")
         for gate_name, gate in gates.items():
             if not isinstance(gate, dict):
                 continue
@@ -2047,7 +2187,382 @@ def repository_authority_check() -> int:
         ROOT,
     )
 
+    execution_policy, execution_registry = execution_properties_contracts()
+    execution_violations = execution_properties_violations(execution_policy, execution_registry)
+    if execution_violations:
+        raise RuntimeError("execution properties policy invalid: " + "; ".join(execution_violations))
+
     print("PASS repository maximal authority model")
+    return 0
+
+
+EXECUTION_PROPERTY_NAMES = {
+    "reproducibility",
+    "determinism",
+    "idempotency",
+    "convergence",
+    "immutability",
+    "hermeticity",
+    "integrity",
+    "provenance",
+    "verification",
+    "drift",
+    "recovery",
+    "execution",
+    "failure",
+}
+EXECUTION_RELATIONSHIPS = {
+    "implements",
+    "enforces",
+    "verifies",
+    "observes",
+    "produces_evidence",
+    "transports_evidence",
+}
+
+
+def execution_properties_contracts(root: Path = ROOT) -> tuple[dict, dict]:
+    """Load the semantic authority and its non-authoritative implementation registry."""
+    paths = (
+        root / "config/contracts/execution-properties-policy.yaml",
+        root / "config/contracts/execution-properties-implementations.yaml",
+    )
+    missing = [str(path.relative_to(root)) for path in paths if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"execution properties contract missing: {', '.join(missing)}")
+    return ruby_yaml(str(paths[0].relative_to(root))), ruby_yaml(str(paths[1].relative_to(root)))
+
+
+def _contains_forbidden_execution_claim(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key).lower() in {"proven", "completion_status"} and str(item).upper() == "PROVEN"
+            or _contains_forbidden_execution_claim(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_execution_claim(item) for item in value)
+    return False
+
+
+def _execution_authority_ref_exists(reference: str, documents: dict[str, dict]) -> bool:
+    source, separator, fragment = reference.partition("#")
+    if not separator or source not in documents or not fragment:
+        return False
+    value: object = documents[source]
+    for segment in fragment.split("."):
+        if not segment or not isinstance(value, dict) or segment not in value:
+            return False
+        value = value[segment]
+    return value is not None and value != ""
+
+
+def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
+    """Validate authority separation and fail-closed implementation/evidence declarations."""
+    violations: list[str] = []
+    if policy.get("version") != 1 or policy.get("kind") != "ExecutionPropertiesPolicy":
+        violations.append("canonical execution properties policy identity is invalid")
+    if policy.get("status") != "enforced":
+        violations.append("canonical execution properties policy status must be enforced")
+    properties = policy.get("properties")
+    if not isinstance(properties, dict):
+        return violations + ["canonical execution properties must be a mapping"]
+    missing = EXECUTION_PROPERTY_NAMES - set(properties)
+    if missing:
+        violations.append(f"canonical execution properties disappeared without migration: {sorted(missing)}")
+    expected = {
+        ("reproducibility", "mutable_versions"): "forbidden",
+        ("convergence", "second_apply_changes"): 0,
+        ("verification", "runtime_evidence"): "required",
+        ("verification", "declaration_only_proof"): "forbidden",
+        ("drift", "detection"): "required",
+        ("recovery", "capture_before_mutation"): "required",
+        ("recovery", "restore_on_failure"): "required",
+        ("recovery", "restore_verification"): "required",
+        ("execution", "bounded"): "required",
+        ("execution", "concurrency_locking"): "required",
+        ("failure", "unknown_state"): "fail_closed",
+        ("failure", "missing_evidence"): "fail_closed",
+    }
+    for (name, field), value in expected.items():
+        if not isinstance(properties.get(name), dict) or properties[name].get(field) != value:
+            violations.append(f"canonical property {name}.{field} must be {value!r}")
+    evidence_contract = policy.get("evidence_contract", {})
+    if evidence_contract.get("static_status_forbidden") is not True:
+        violations.append("static execution proof status must be forbidden")
+    if evidence_contract.get("unknown_or_missing") != "FAIL":
+        violations.append("unknown or missing execution evidence must fail closed")
+    if evidence_contract.get("digest_canonicalization") != "json-sort-keys-compact-excluding-evidence-digest":
+        violations.append("execution evidence digest canonicalization is invalid")
+
+    authority_documents = {
+        "architecture.lock.yaml": ruby_yaml("architecture.lock.yaml"),
+        "config/contracts/toolchain-lock.json": json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        ),
+    }
+
+    if registry.get("version") != 1 or registry.get("kind") != "ExecutionPropertiesImplementations":
+        violations.append("execution implementation registry identity is invalid")
+    if registry.get("status") != "enforced":
+        violations.append("execution implementation registry status must be enforced")
+    if registry.get("policy_ref") != "config/contracts/execution-properties-policy.yaml":
+        violations.append("implementation registry must reference the canonical execution policy")
+    if registry.get("semantics") != "references-only":
+        violations.append("implementation registry must not redefine property semantics")
+    if set(registry.get("relationship_values", [])) != EXECUTION_RELATIONSHIPS:
+        violations.append("execution relationship vocabulary drifted")
+    if _contains_forbidden_execution_claim(registry):
+        violations.append("implementation registry contains a static PROVEN claim")
+    implementations = registry.get("implementations")
+    if not isinstance(implementations, dict):
+        return violations + ["execution implementations must be a mapping"]
+    for required in registry.get("required_implementations", []):
+        if required not in implementations:
+            violations.append(f"required active implementation has no mapping: {required}")
+    for tool, entry in implementations.items():
+        if not isinstance(entry, dict):
+            violations.append(f"implementation {tool} must be a mapping")
+            continue
+        if "authority_ref" in entry and "authority_refs" in entry:
+            violations.append(f"implementation {tool} declares competing canonical authority references")
+        references = entry.get("authority_refs", entry.get("authority_ref"))
+        if isinstance(references, str):
+            references = [references]
+        if (
+            not isinstance(references, list)
+            or not references
+            or any(not isinstance(reference, str) for reference in references)
+            or len(references) != len(set(references))
+        ):
+            violations.append(f"implementation {tool} has invalid canonical authority references")
+        else:
+            for authority_ref in references:
+                if not isinstance(authority_ref, str) or not _execution_authority_ref_exists(
+                    authority_ref, authority_documents
+                ):
+                    violations.append(
+                        f"implementation {tool} has an unresolved canonical authority_ref: {authority_ref!r}"
+                    )
+        relationships = entry.get("relationships")
+        if not isinstance(relationships, dict) or not relationships:
+            violations.append(f"implementation {tool} has no property relationships")
+            continue
+        for property_name, roles in relationships.items():
+            if property_name not in properties:
+                violations.append(f"implementation {tool} references unknown property: {property_name}")
+            if not isinstance(roles, list) or not roles or set(roles) - EXECUTION_RELATIONSHIPS:
+                violations.append(f"implementation {tool} has invalid relationship for {property_name}")
+        mechanisms = entry.get("mechanisms")
+        if not isinstance(mechanisms, list) or not mechanisms or not all(isinstance(x, str) and x for x in mechanisms):
+            violations.append(f"implementation {tool} has no implementation mechanism")
+        if not isinstance(entry.get("gate"), str) or not entry["gate"]:
+            violations.append(f"implementation {tool} has no verifying gate")
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict) or evidence.get("runtime_required") is not True:
+            violations.append(f"implementation {tool} lacks required runtime evidence")
+            continue
+        required_fields = set(evidence.get("required_fields", []))
+        baseline = {"source_sha", "toolchain_digest", "artifact_digest"}
+        if not baseline.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks complete provenance evidence fields")
+        if not evidence.get("producer") or not evidence.get("artifact"):
+            violations.append(f"implementation {tool} has ambiguous evidence producer or artifact")
+        if "convergence" in relationships and "second_apply_changes" not in required_fields and tool in {"ansible", "opentofu"}:
+            violations.append(f"implementation {tool} lacks second-apply convergence evidence")
+        if "drift" in relationships and "drift_detected" not in required_fields:
+            violations.append(f"implementation {tool} lacks drift detection evidence")
+        if "recovery" in relationships and not {"capture_digest", "restore_verification"}.issubset(required_fields):
+            violations.append(f"implementation {tool} lacks capture/verified-restore evidence")
+        if "execution" in relationships and "timeout_seconds" not in required_fields:
+            violations.append(f"implementation {tool} lacks bounded execution timeout evidence")
+        if tool in {"opentofu", "tekton"} and "locking" not in required_fields:
+            violations.append(f"implementation {tool} lacks concurrency locking evidence")
+    return violations
+
+
+def execution_evidence_violations(
+    policy: dict, registry: dict, evidence: dict, *, root: Path = ROOT
+) -> list[str]:
+    """Validate one runtime proof record; absence and ambiguity are failures, never passes."""
+    violations: list[str] = []
+    if not isinstance(evidence, dict):
+        return ["runtime execution evidence must be a mapping"]
+    tool = evidence.get("implementation")
+    implementations = registry.get("implementations", {})
+    if tool not in implementations:
+        return [f"runtime evidence references unknown implementation: {tool}"]
+    entry = implementations[tool]
+    required = set(policy["evidence_contract"]["required_identity_fields"])
+    required.update(policy["evidence_contract"]["required_runtime_fields"])
+    required.update(entry["evidence"]["required_fields"])
+    for field in sorted(required):
+        if field not in evidence or evidence[field] in (None, "", "unknown"):
+            violations.append(f"runtime evidence missing or unknown: {field}")
+    if evidence.get("status") not in policy["evidence_contract"]["status_values"]:
+        violations.append("runtime evidence status is unknown")
+    digest_pattern = policy["evidence_contract"]["digest_pattern"]
+    for field in ("toolchain_digest", "artifact_digest", "evidence_digest"):
+        value = evidence.get(field, "")
+        if not isinstance(value, str) or re.fullmatch(digest_pattern, value) is None:
+            violations.append(f"runtime evidence {field} is not an exact sha256 digest")
+    if not isinstance(evidence.get("source_sha"), str) or re.fullmatch(r"[0-9a-f]{40}", evidence.get("source_sha", "")) is None:
+        violations.append("runtime evidence source_sha is not an exact full SHA")
+    else:
+        source_sha = evidence["source_sha"]
+        checkout = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=root,
+            text=True, capture_output=True, check=False,
+        )
+        lines = checkout.stdout.splitlines()
+        if (
+            checkout.returncode
+            or len(lines) != 2
+            or Path(lines[0]).resolve() != root.resolve()
+            or lines[1] != source_sha
+        ):
+            violations.append("runtime evidence source_sha does not match the exact checkout")
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
+            text=True, capture_output=True, check=False,
+        )
+        if dirty.returncode or dirty.stdout.strip():
+            violations.append("runtime evidence checkout contains uncommitted inputs")
+
+        toolchain = root / "config/contracts/toolchain-lock.json"
+        if not toolchain.is_file() or toolchain.is_symlink():
+            violations.append("runtime evidence canonical toolchain lock is missing or unsafe")
+        else:
+            actual_toolchain_digest = "sha256:" + hashlib.sha256(toolchain.read_bytes()).hexdigest()
+            if evidence.get("toolchain_digest") != actual_toolchain_digest:
+                violations.append("runtime evidence toolchain_digest does not match the canonical lock")
+
+        artifact_template = entry["evidence"].get("artifact")
+        if not isinstance(artifact_template, str) or artifact_template.count("<sha>") != 1:
+            violations.append("runtime evidence canonical artifact path is invalid")
+        else:
+            artifact_relative = Path(artifact_template.replace("<sha>", source_sha))
+            if (
+                artifact_relative.is_absolute()
+                or ".." in artifact_relative.parts
+                or artifact_relative.parts[:2] != (".context", "evidence")
+            ):
+                violations.append("runtime evidence canonical artifact path is unsafe")
+            else:
+                artifact = root / artifact_relative
+                if any(
+                    (root / Path(*artifact_relative.parts[:index])).is_symlink()
+                    for index in range(1, len(artifact_relative.parts) + 1)
+                ) or not artifact.is_file():
+                    violations.append("runtime evidence canonical artifact is missing or unsafe")
+                elif evidence.get("artifact_digest") != "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest():
+                    violations.append("runtime evidence artifact_digest does not match the canonical artifact")
+
+        digest_payload = {key: value for key, value in evidence.items() if key != "evidence_digest"}
+        try:
+            canonical = json.dumps(
+                digest_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            violations.append("runtime evidence payload cannot be canonicalized")
+        else:
+            actual_evidence_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+            if evidence.get("evidence_digest") != actual_evidence_digest:
+                violations.append("runtime evidence evidence_digest does not match its payload")
+    if any(str(value).lower() == "latest" for value in evidence.values()):
+        violations.append("runtime evidence contains a mutable latest version")
+    relationships = entry["relationships"]
+    if tool in {"ansible", "opentofu"} and evidence.get("second_apply_changes") != 0:
+        violations.append("required second apply did not converge with zero changes")
+    if tool == "ansible" and evidence.get("changed") != 0:
+        violations.append("Ansible idempotence evidence changed is not zero")
+    if "drift" in relationships and "drift_detected" not in evidence:
+        violations.append("required drift observation is missing")
+    if "recovery" in relationships:
+        if not evidence.get("capture_digest"):
+            violations.append("recovery evidence lacks pre-mutation capture")
+        if evidence.get("restore_verification") is not True:
+            violations.append("recovery restore was not verified")
+    if "execution" in relationships:
+        timeout = evidence.get("timeout_seconds")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            violations.append("bounded execution has no positive timeout")
+        retry_limit = evidence.get("retry_limit")
+        if not isinstance(retry_limit, int) or isinstance(retry_limit, bool) or retry_limit < 0:
+            violations.append("bounded execution retry limit must be a nonnegative integer")
+        if tool in {"opentofu", "tekton"} and evidence.get("locking") is not True:
+            violations.append("state-mutating concurrent execution lacks locking")
+    if _contains_forbidden_execution_claim(evidence):
+        violations.append("runtime evidence contains an unverified PROVEN claim")
+    return violations
+
+
+def execution_properties_matrix(registry: dict) -> str:
+    """Render the human view directly from the machine-readable implementation registry."""
+    rows = ["| Component | Implements | Enforces | Verifies | Observes / evidence |", "|---|---|---|---|---|"]
+    for tool, entry in registry["implementations"].items():
+        by_role = {role: [] for role in EXECUTION_RELATIONSHIPS}
+        for prop, roles in entry["relationships"].items():
+            for role in roles:
+                by_role[role].append(prop)
+        observed = sorted(set(by_role["observes"] + by_role["produces_evidence"] + by_role["transports_evidence"]))
+        values = [tool, ", ".join(sorted(by_role["implements"])) or "—", ", ".join(sorted(by_role["enforces"])) or "—", ", ".join(sorted(by_role["verifies"])) or "—", ", ".join(observed) or "—"]
+        rows.append("| " + " | ".join(values) + " |")
+    return "\n".join(rows) + "\n"
+
+
+def execution_properties_check(*, matrix: bool = False, evidence_path: str = "") -> int:
+    policy, registry = execution_properties_contracts()
+    violations = execution_properties_violations(policy, registry)
+    if evidence_path:
+        evidence = ruby_yaml(evidence_path)
+        violations.extend(execution_evidence_violations(policy, registry, evidence))
+    if violations:
+        for violation in violations:
+            print(f"FAIL execution-properties: {violation}", file=sys.stderr)
+        return 1
+    if matrix:
+        print(execution_properties_matrix(registry), end="")
+    else:
+        print(json.dumps({"gate": "execution-properties", "status": "PASS", "policy": registry["policy_ref"], "implementations": len(registry["implementations"])}))
+    return 0
+
+
+def capabilities_command(
+    *, evidence: str = "", output: str = ".context/evidence/effective-capabilities.yaml",
+    tool: str = "", property_name: str = "", status: str = "", scope: str = "",
+    output_format: str = "summary",
+) -> int:
+    """Resolve potential tool relationships into exact-SHA effective capabilities."""
+    import capability_resolver
+
+    evidence_path = Path(evidence) if evidence else None
+    payload = capability_resolver.resolve(ROOT, evidence_path=evidence_path)
+    requested_destination = Path(output)
+    destination = requested_destination if requested_destination.is_absolute() else ROOT / requested_destination
+    capability_resolver.write(payload, destination)
+    view = capability_resolver.filtered(
+        payload, tool=tool, property_name=property_name, status=status, scope=scope
+    )
+    if output_format in {"json", "yaml"}:
+        # JSON is valid YAML 1.2 and prevents serializer-specific ordering drift.
+        print(json.dumps(view, indent=2, sort_keys=True))
+    else:
+        count = sum(len(item["capabilities"]) for item in view["tools"].values())
+        print(
+            f"PASS capabilities resolved={count} source_sha={payload['source_sha']} "
+            f"output={destination if destination.is_absolute() and not destination.is_relative_to(ROOT) else destination.relative_to(ROOT)} "
+            f"gaps={len(payload['gaps'])}"
+        )
+    if payload["unknown_states"] or payload["stale_evidence"]:
+        for problem in payload["unknown_states"]:
+            print(f"FAIL capabilities: {problem}", file=sys.stderr)
+        for problem in payload["stale_evidence"]:
+            print(
+                f"FAIL capabilities: {problem['tool']}.{problem['capability']}:"
+                f"{','.join(problem['reasons'])}", file=sys.stderr
+            )
+        return 1
     return 0
 
 
@@ -3115,6 +3630,19 @@ def reconcile(tags: str, target_repo_root: str = "") -> int:
     selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
     if not selected:
         return fail("reconcile requires at least one Ansible tag")
+    selected_tags = set(selected.split(","))
+    wsl2_only_tags = set(
+        qualification_execution_policy()["execution_context"]["wsl2_only_reconcile_tags"]
+    )
+    if selected_tags & wsl2_only_tags:
+        detected = _runtime_api().detect_execution_environment()
+        if detected.name != "wsl2_developer":
+            return fail(
+                "BLOCKED_RUNTIME: selected reconciliation includes WSL2-only tasks "
+                "execution_environment=wsl2_developer "
+                f"detected={detected.name} no mutation performed",
+                2,
+            )
     require("ansible-playbook")
     repo_root = Path(target_repo_root).expanduser().resolve() if target_repo_root else ROOT
     run(
@@ -3388,11 +3916,14 @@ def service_check(service: str) -> int:
 
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        run(
-            ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
-            cwd=module,
-            env=env,
-        )
+        if os.environ.get("ECOMMERCE_EXECUTION_PROFILE") in {"static", "tekton"}:
+            print(f"OUT_OF_SCOPE {service} integration tests require testcontainers")
+        else:
+            run(
+                ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
+                cwd=module,
+                env=env,
+            )
     print(f"PASS {service} service checks completed")
     return 0
 
@@ -3988,6 +4519,21 @@ def worktree_tree_sha() -> str:
     return tree_sha
 
 
+def _merge_authoritative_verification(evidence: dict) -> bool:
+    verification = evidence.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    profile_name = verification.get("execution_profile")
+    profiles = qualification_execution_policy().get("qualification_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict) or profile.get("merge_authoritative") is not True:
+        return False
+    if "runtime_scope" not in verification:
+        return False
+    runtime_scope = verification["runtime_scope"]
+    return runtime_scope == []
+
+
 def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     path = CONTEXT / "evidence" / "worktree.json"
     if not path.is_file():
@@ -4012,6 +4558,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_tree_sha") != current_tree
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
@@ -4041,6 +4588,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or source.get("head_tree_sha") != source_tree
         or source.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(source)
+        or not _merge_authoritative_verification(source)
         or not _complete_gate_inventory(source, base_ref, "WORKTREE")
     ):
         return None
@@ -4072,6 +4620,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
             "gates": records,
             "metrics": evidence_metrics(records),
             "verification": {
+                **copy.deepcopy(source.get("verification", {})),
                 "mode": "promoted-worktree",
                 "source_head_sha": source_head,
                 "source_tree_sha": source_tree,
@@ -4288,6 +4837,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         or evidence.get("changed_paths") != changed_paths(base_ref, head)
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
@@ -4501,6 +5051,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
@@ -4780,6 +5331,8 @@ def _execute_with_runtime(
     capability_context: dict[str, object] | None = None,
     authoritative: bool = False,
     records: list[dict] | None = None,
+    execution_profile: str = "full",
+    scope_decisions: list[dict] | None = None,
 ) -> int:
     if environment.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1":
         return callback(environment)
@@ -4790,10 +5343,70 @@ def _execute_with_runtime(
         context=capability_context,
     )
     source_kind, source_sha = _runtime_source(head)
+    policy = qualification_execution_policy()
+    profile = policy["qualification_profiles"][execution_profile]
+    detected = runtime.detect_execution_environment(environ=environment)
+    dispositions = profile.get("runtime_capabilities", {})
+    excluded = sorted({request.name for request in requests if dispositions.get(request.name) == "out_of_scope"})
+    if excluded:
+        decisions = scope_decisions if scope_decisions is not None else []
+        for capability in excluded:
+            decisions.append(
+                {
+                    "capability": capability,
+                    "status": "OUT_OF_SCOPE",
+                    "executed": False,
+                    "execution_profile": execution_profile,
+                    "execution_environment": detected.name,
+                    "policy_reason": "capability explicitly excluded by qualification profile",
+                    "source_sha": source_sha,
+                }
+            )
+        requests = [request for request in requests if request.name not in excluded]
+    runtime_env = dict(environment)
+    runtime_env.update(
+        {
+            "ECOMMERCE_EXECUTION_PROFILE": execution_profile,
+            "ECOMMERCE_EXECUTION_ENVIRONMENT": detected.name,
+        }
+    )
+    if not requests:
+        runtime_env["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
+        return callback(runtime_env)
+    if detected.name not in profile["allowed_environments"]:
+        if records is not None:
+            records.append({
+                "gate": "runtime-orchestration",
+                "status": "FAIL",
+                "runtime_status": "BLOCKED_RUNTIME",
+                "exit_code": 2,
+                "duration_seconds": 0.0,
+                "execution": "fresh",
+                "reason": f"profile {execution_profile} requires runtime capabilities unavailable in {detected.name}; no mutation performed",
+            })
+        return 2
+    if execution_profile == "tekton":
+        planned = runtime.RuntimePlanner(policy["runtime_orchestration"]).resolve(requests)
+        disallowed = sorted({
+            item.spec.name for item in planned
+            if item.spec.mutation_class not in profile["mutation_classes"]
+        })
+        if disallowed:
+            if records is not None:
+                records.append({
+                    "gate": "runtime-orchestration",
+                    "status": "FAIL",
+                    "runtime_status": "BLOCKED_RUNTIME",
+                    "exit_code": 2,
+                    "duration_seconds": 0.0,
+                    "execution": "fresh",
+                    "reason": f"Tekton container cannot mutate runtime capabilities {disallowed}; no mutation performed",
+                })
+            return 2
     executor = runtime.RuntimeExecutor(
         ROOT,
         qualification_execution_policy()["runtime_orchestration"],
-        driver=runtime.BuiltinCapabilityDriver(environment),
+        driver=runtime.BuiltinCapabilityDriver(runtime_env),
     )
     result = executor.execute(
         requests,
@@ -4802,7 +5415,7 @@ def _execute_with_runtime(
         source_kind=source_kind,
         source_sha=source_sha,
         selected_gates=[str(entry["gate"]) for entry in plan],
-        base_environment=environment,
+        base_environment=runtime_env,
         authoritative=authoritative,
         gate_results=(lambda: copy.deepcopy(records or [])),
     )
@@ -4832,6 +5445,7 @@ def _execute_direct_gate_with_runtime(
     *,
     head: str = "WORKTREE",
     authoritative: bool = False,
+    execution_profile: str = "full",
 ) -> int:
     policy = _resolved_gate_policy(gate)
     records: list[dict] = []
@@ -4859,6 +5473,7 @@ def _execute_direct_gate_with_runtime(
         environment=env,
         authoritative=authoritative,
         records=records,
+        execution_profile=execution_profile,
     )
 
 
@@ -5402,7 +6017,7 @@ def write_evidence(
     return destination
 
 
-def verify_change(base: str, head: str) -> int:
+def verify_change(base: str, head: str, profile: str = "full") -> int:
     if toolchain_closure():
         return 1
     source_head_sha: str | None = None
@@ -5439,10 +6054,11 @@ def verify_change(base: str, head: str) -> int:
 
     parent_sha, parent_evidence = _incremental_parent_evidence(base, head)
     delta_components: set[str] = set()
-    verification: dict = {"mode": "full"}
+    verification: dict = {"mode": "full", "execution_profile": profile}
     if head == "WORKTREE":
         verification = {
             "mode": "worktree",
+            "execution_profile": profile,
             "source_head_sha": source_head_sha,
             "source_tree_sha": source_tree_sha,
         }
@@ -5451,6 +6067,7 @@ def verify_change(base: str, head: str) -> int:
         delta_components = set(affected(parent_sha, head, strict_unknown=True))
         verification = {
             "mode": "incremental",
+            "execution_profile": profile,
             "parent_sha": parent_sha,
             "delta_paths": delta_paths,
             "delta_components": sorted(delta_components),
@@ -5515,6 +6132,7 @@ def verify_change(base: str, head: str) -> int:
                 return fail("worktree changed during verification; evidence is not promotable", 1)
         return 0
 
+    scope_decisions: list[dict] = []
     runtime_rc = _execute_with_runtime(
         plan,
         execute_selected,
@@ -5523,7 +6141,10 @@ def verify_change(base: str, head: str) -> int:
         environment=env,
         authoritative=head != "WORKTREE",
         records=records,
+        execution_profile=profile,
+        scope_decisions=scope_decisions,
     )
+    verification["runtime_scope"] = scope_decisions
     if runtime_rc:
         write_evidence(base, head, paths, components, records, verification)
         return runtime_rc
@@ -5708,23 +6329,346 @@ def _git_is_ancestor(head_sha: str, base_ref: str) -> bool:
     ).returncode == 0
 
 
-def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
+def _canonical_absorption_proof_id(proof: dict) -> str:
+    identity = {
+        "absorbing_head_sha": proof.get("absorbing_head_sha"),
+        "absorbing_pr": proof.get("absorbing_pr"),
+        "absorbing_repository": proof.get("absorbing_repository"),
+        "content_lineage": proof.get("content_lineage"),
+        "kind": proof.get("kind"),
+        "proof_method": proof.get("proof_method"),
+        "schema_version": proof.get("schema_version"),
+        "source_base": proof.get("source_base"),
+        "source_branch": proof.get("source_branch"),
+        "source_head_sha": proof.get("source_head_sha"),
+        "source_pr": proof.get("source_pr"),
+        "source_repository": proof.get("source_repository"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _parse_absorption_proofs(body: object, contract: dict) -> list[dict]:
+    if not isinstance(body, str) or not body:
+        return []
+    marker = str(contract["marker"])
+    pattern = re.compile(rf"<!--\s*{re.escape(marker)}\s*(\{{.*?\}})\s*-->", re.DOTALL)
+    proofs: list[dict] = []
+    for match in pattern.finditer(body):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            proofs.append(candidate)
+    return proofs
+
+
+def _absorption_proof_shape_reason(proof: dict, contract: dict) -> str:
+    required_fields = set(contract["required_fields"])
+    if not required_fields.issubset(proof):
+        return "malformed-absorption-proof"
+    if proof.get("schema_version") != contract["schema_version"]:
+        return "malformed-absorption-proof"
+    if proof.get("kind") != contract["kind"]:
+        return "malformed-absorption-proof"
+    if proof.get("status") not in {contract["active_status"], contract["superseded_status"]}:
+        return "malformed-absorption-proof"
+    if proof.get("proof_method") != contract["proof_method"]:
+        return "forged-absorption-proof"
+    for field in ("source_pr", "absorbing_pr"):
+        value = proof.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return "malformed-pr-number"
+    for field in ("source_head_sha", "absorbing_head_sha"):
+        if not isinstance(proof.get(field), str) or not re.fullmatch(r"[0-9a-f]{40}", proof[field]):
+            return "malformed-sha"
+    for field in ("source_repository", "absorbing_repository"):
+        if not isinstance(proof.get(field), str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", proof[field]
+        ):
+            return "repository-mismatch"
+    for field in ("source_branch", "source_base"):
+        if not isinstance(proof.get(field), str) or not proof[field].strip():
+            return "malformed-absorption-proof"
+    lineage_contract = contract.get("content_lineage")
+    lineage = proof.get("content_lineage")
+    if not isinstance(lineage_contract, dict) or not isinstance(lineage, list):
+        return "malformed-content-lineage"
+    maximum_edges = lineage_contract.get("maximum_edges")
+    if (
+        isinstance(maximum_edges, bool)
+        or not isinstance(maximum_edges, int)
+        or maximum_edges < 1
+        or not lineage
+        or len(lineage) > maximum_edges
+    ):
+        return "malformed-content-lineage"
+    allowed_relations = lineage_contract.get("allowed_relations")
+    if not isinstance(allowed_relations, list) or not all(
+        isinstance(value, str) and value for value in allowed_relations
+    ):
+        return "malformed-content-lineage"
+    expected_from = proof["source_head_sha"]
+    for edge in lineage:
+        if not isinstance(edge, dict) or set(edge) != {"from_sha", "to_sha", "relation"}:
+            return "malformed-content-lineage"
+        from_sha = edge.get("from_sha")
+        to_sha = edge.get("to_sha")
+        relation = edge.get("relation")
+        if (
+            not isinstance(from_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", from_sha)
+            or not isinstance(to_sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", to_sha)
+            or from_sha == to_sha
+            or relation not in allowed_relations
+            or from_sha != expected_from
+        ):
+            return "malformed-content-lineage"
+        expected_from = to_sha
+    if expected_from != proof["absorbing_head_sha"]:
+        return "malformed-content-lineage"
+    if proof.get("proof_id") != _canonical_absorption_proof_id(proof):
+        return "forged-absorption-proof"
+    return ""
+
+
+def _pull_side(pull: dict, side: str) -> tuple[str, str, str]:
+    value = pull.get(side) or {}
+    if not isinstance(value, dict):
+        return "", "", ""
+    repository = value.get("repo") or {}
+    repository_name = repository.get("full_name") if isinstance(repository, dict) else ""
+    return str(value.get("ref") or ""), str(value.get("sha") or ""), str(repository_name or "")
+
+
+def _pull_state(pull: dict) -> str:
+    if pull.get("merged_at"):
+        return "MERGED"
+    return str(pull.get("state") or "").upper()
+
+
+def _git_tree_sha(commit_sha: str) -> str:
+    result = run(["git", "rev-parse", "--verify", f"{commit_sha}^{{tree}}"], check=False, capture=True)
+    value = (result.stdout or "").strip()
+    return value if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def _content_lineage_reason(proof: dict) -> str:
+    for edge in proof["content_lineage"]:
+        from_sha = edge["from_sha"]
+        to_sha = edge["to_sha"]
+        if edge["relation"] == "ancestor":
+            if not _git_is_ancestor(from_sha, to_sha):
+                return "content-lineage-ancestry-mismatch"
+            continue
+        if edge["relation"] == "same-tree":
+            from_tree = _git_tree_sha(from_sha)
+            to_tree = _git_tree_sha(to_sha)
+            if not from_tree or from_tree != to_tree:
+                return "content-lineage-tree-mismatch"
+            continue
+        return "malformed-content-lineage"
+    return ""
+
+
+def _unavailable_github_cleanup_evidence() -> dict:
+    return {
+        "available": False,
+        "merged_pr_heads": {},
+        "absorbed_pr_heads": {},
+        "absorption_source_heads": {},
+        "diagnostics": {},
+    }
+
+
+def _evaluate_github_cleanup_evidence(
+    pulls: list[dict],
+    *,
+    repository: str,
+    default_branch: str,
+    base_ref: str,
+    merge_method: str,
+    proof_contract: dict,
+) -> dict:
+    merged_pr_heads: dict[str, set[str]] = {}
+    absorbed_pr_heads: dict[str, dict[str, dict]] = {}
+    absorption_source_heads: dict[str, set[str]] = {}
+    diagnostics: dict[str, str] = {}
+    pulls_by_number: dict[int, dict] = {}
+
+    for pull in pulls:
+        if not isinstance(pull, dict):
+            continue
+        number = pull.get("number")
+        if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+            pulls_by_number[number] = pull
+        head_branch, head_sha, head_repository = _pull_side(pull, "head")
+        base_branch, _base_sha, base_repository = _pull_side(pull, "base")
+        if (
+            head_repository != repository
+            or base_repository != repository
+            or base_branch != default_branch
+            or not head_branch
+            or not re.fullmatch(r"[0-9a-f]{40}", head_sha)
+        ):
+            continue
+        state = _pull_state(pull)
+        if state == "MERGED":
+            merged_pr_heads.setdefault(head_branch, set()).add(head_sha)
+            diagnostics.setdefault(head_branch, "source-pr-was-merged")
+        elif state == "OPEN":
+            diagnostics.setdefault(head_branch, "source-pr-still-open")
+        elif state == "CLOSED":
+            diagnostics.setdefault(head_branch, "missing-absorption-proof")
+
+    active_by_id: dict[str, dict] = {}
+    superseded_ids: set[str] = set()
+    invalid_branches: dict[str, str] = {}
+    for containing_pull in pulls:
+        if not isinstance(containing_pull, dict):
+            continue
+        containing_number = containing_pull.get("number")
+        for proof in _parse_absorption_proofs(containing_pull.get("body"), proof_contract):
+            branch = proof.get("source_branch")
+            reason = _absorption_proof_shape_reason(proof, proof_contract)
+            if reason:
+                if isinstance(branch, str) and branch:
+                    diagnostics[branch] = reason
+                    invalid_branches[branch] = reason
+                continue
+            if proof["absorbing_pr"] != containing_number or proof["absorbing_repository"] != repository:
+                diagnostics[proof["source_branch"]] = "forged-absorption-proof"
+                invalid_branches[proof["source_branch"]] = "forged-absorption-proof"
+                continue
+            proof_id = proof["proof_id"]
+            if proof["status"] == proof_contract["superseded_status"]:
+                superseded_ids.add(proof_id)
+            else:
+                active_by_id[proof_id] = proof
+
+    active_proofs = [proof for proof_id, proof in active_by_id.items() if proof_id not in superseded_ids]
+    grouped: dict[tuple[str, int], list[dict]] = {}
+    for proof in active_proofs:
+        key = (proof["source_repository"], proof["source_pr"])
+        grouped.setdefault(key, []).append(proof)
+        absorption_source_heads.setdefault(proof["source_branch"], set()).add(proof["source_head_sha"])
+
+    merge_checks = proof_contract.get("merge_method_checks", {}).get(merge_method)
+    for proofs in grouped.values():
+        source_branches = {proof["source_branch"] for proof in proofs}
+        if len(proofs) != 1:
+            for branch in source_branches:
+                diagnostics[branch] = "ambiguous-absorption"
+            continue
+        proof = proofs[0]
+        source_head = proof["source_head_sha"]
+        source_branch = proof["source_branch"]
+        if source_branch in invalid_branches:
+            diagnostics[source_branch] = invalid_branches[source_branch]
+            continue
+        source = pulls_by_number.get(proof["source_pr"])
+        absorbing = pulls_by_number.get(proof["absorbing_pr"])
+        reason = ""
+        if proof["source_repository"] != repository:
+            reason = "source-repository-mismatch"
+        elif not source:
+            reason = "source-pr-not-found"
+        else:
+            source_ref, source_sha, source_repository = _pull_side(source, "head")
+            source_base, _source_base_sha, source_base_repository = _pull_side(source, "base")
+            source_state = _pull_state(source)
+            if source_repository != repository or source_base_repository != repository:
+                reason = "source-repository-mismatch"
+            elif source_state == "OPEN":
+                reason = "source-pr-still-open"
+            elif source_state == "MERGED":
+                reason = "source-pr-was-merged"
+            elif source_state != "CLOSED":
+                reason = "source-pr-not-closed"
+            elif source_base != default_branch or proof["source_base"] != default_branch:
+                reason = "source-pr-base-mismatch"
+            elif source_sha != source_head or source_sha != proof["source_head_sha"]:
+                reason = "source-head-sha-mismatch"
+            elif source_ref != source_branch:
+                reason = "source-branch-mismatch"
+
+        if not reason:
+            if proof["absorbing_repository"] != repository:
+                reason = "absorbing-repository-mismatch"
+            elif not absorbing:
+                reason = "absorbing-pr-not-found"
+            else:
+                absorbing_ref, absorbing_sha, absorbing_repository = _pull_side(absorbing, "head")
+                absorbing_base, _absorbing_base_sha, absorbing_base_repository = _pull_side(absorbing, "base")
+                merge_commit = str(absorbing.get("merge_commit_sha") or "")
+                if absorbing_repository != repository or absorbing_base_repository != repository:
+                    reason = "absorbing-repository-mismatch"
+                elif _pull_state(absorbing) != "MERGED" or not absorbing.get("merged_at"):
+                    reason = "absorbing-pr-not-merged"
+                elif absorbing_base != default_branch:
+                    reason = "absorbing-pr-base-mismatch"
+                elif absorbing_sha != proof["absorbing_head_sha"]:
+                    reason = "absorbing-head-sha-mismatch"
+                elif not re.fullmatch(r"[0-9a-f]{40}", merge_commit):
+                    reason = "merge-commit-missing"
+                elif not isinstance(merge_checks, dict):
+                    reason = "unsupported-merge-method"
+                elif merge_checks.get("merge_commit_ancestor_of_default") is True and not _git_is_ancestor(
+                    merge_commit, base_ref
+                ):
+                    reason = "merge-commit-absent-from-default"
+                elif merge_checks.get("absorbing_head_ancestor_of_merge_commit") is True and not _git_is_ancestor(
+                    absorbing_sha, merge_commit
+                ):
+                    reason = "absorbing-head-absent-from-merge-lineage"
+                elif content_reason := _content_lineage_reason(proof):
+                    reason = content_reason
+                else:
+                    absorbed_pr_heads.setdefault(source_branch, {})[source_head] = {
+                        "criterion": "closed-pr-proven-absorbed-by-merged-pr",
+                        "source_pr": proof["source_pr"],
+                        "source_head": source_head,
+                        "absorbing_pr": proof["absorbing_pr"],
+                        "absorbing_head": absorbing_sha,
+                        "absorbing_branch": absorbing_ref,
+                        "merge_commit": merge_commit,
+                        "proof_id": proof["proof_id"],
+                        "proof_method": proof["proof_method"],
+                        "content_lineage": copy.deepcopy(proof["content_lineage"]),
+                        "default_branch": default_branch,
+                    }
+        diagnostics[source_branch] = reason or "closed-pr-proven-absorbed-by-merged-pr"
+
+    return {
+        "available": True,
+        "merged_pr_heads": merged_pr_heads,
+        "absorbed_pr_heads": absorbed_pr_heads,
+        "absorption_source_heads": absorption_source_heads,
+        "diagnostics": diagnostics,
+    }
+
+
+def _github_cleanup_evidence(
+    default_branch: str, base_ref: str, merge_method: str, proof_contract: dict
+) -> dict:
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
-        print("INFO branch-cleanup: GitHub CLI unavailable; using ancestry proof only")
-        return {}
+        print("INFO branch-cleanup: GitHub CLI unavailable; GitHub criteria unavailable")
+        return _unavailable_github_cleanup_evidence()
 
     repository = run([gh, "repo", "view", "--json", "nameWithOwner"], check=False, capture=True)
     if repository.returncode:
-        print("ADVISORY branch-cleanup: cannot resolve GitHub repository; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: cannot resolve GitHub repository; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
     try:
         name_with_owner = str(json.loads(repository.stdout or "{}").get("nameWithOwner") or "")
     except json.JSONDecodeError:
         name_with_owner = ""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
-        print("ADVISORY branch-cleanup: invalid GitHub repository identity; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: invalid GitHub repository identity; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
 
     response = run(
         [
@@ -5736,7 +6680,7 @@ def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
             "--slurp",
             f"repos/{name_with_owner}/pulls",
             "-f",
-            "state=closed",
+            "state=all",
             "-f",
             f"base={default_branch}",
             "-f",
@@ -5749,36 +6693,29 @@ def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
         detail = (response.stderr or response.stdout or "").strip()
         suffix = f": {detail}" if detail else ""
         print(
-            "ADVISORY branch-cleanup: merged PR history unavailable; using ancestry proof only"
+            "ADVISORY branch-cleanup: PR history unavailable; GitHub criteria unavailable"
             + suffix,
             file=sys.stderr,
         )
-        return {}
+        return _unavailable_github_cleanup_evidence()
     try:
         pages = json.loads(response.stdout or "[]")
     except json.JSONDecodeError:
-        print("ADVISORY branch-cleanup: malformed merged PR history; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: malformed PR history; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-        print("ADVISORY branch-cleanup: invalid paginated PR payload; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: invalid paginated PR payload; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
 
-    merged: dict[str, set[str]] = {}
-    for page in pages:
-        for pull in page:
-            if not isinstance(pull, dict) or not pull.get("merged_at"):
-                continue
-            base = pull.get("base") or {}
-            head = pull.get("head") or {}
-            if not isinstance(base, dict) or not isinstance(head, dict):
-                continue
-            if str(base.get("ref") or "") != default_branch:
-                continue
-            branch_name = str(head.get("ref") or "")
-            head_sha = str(head.get("sha") or "")
-            if branch_name and re.fullmatch(r"[0-9a-f]{40}", head_sha):
-                merged.setdefault(branch_name, set()).add(head_sha)
-    return merged
+    pulls = [pull for page in pages for pull in page]
+    return _evaluate_github_cleanup_evidence(
+        pulls,
+        repository=name_with_owner,
+        default_branch=default_branch,
+        base_ref=base_ref,
+        merge_method=merge_method,
+        proof_contract=proof_contract,
+    )
 
 
 def _plan_branch_cleanup(
@@ -5789,7 +6726,7 @@ def _plan_branch_cleanup(
     default_branch: str,
     active_worktrees: set[str],
     ancestor_heads: dict[str, bool],
-    merged_pr_heads: dict[str, set[str]],
+    github_evidence: dict,
 ) -> list[dict]:
     actions: list[dict] = []
     protected = {default_branch, "master"}
@@ -5807,7 +6744,9 @@ def _plan_branch_cleanup(
             for scope, refs in (("remote", remote_refs), ("local", local_refs))
             if refs.get(branch)
         ]
-        exact_merged_heads = merged_pr_heads.get(branch, set())
+        exact_merged_heads = github_evidence.get("merged_pr_heads", {}).get(branch, set())
+        absorbed_heads = github_evidence.get("absorbed_pr_heads", {}).get(branch, {})
+        absorption_source_heads = github_evidence.get("absorption_source_heads", {}).get(branch, set())
 
         if branch_guard:
             branch_keep_reason = branch_guard
@@ -5815,14 +6754,23 @@ def _plan_branch_cleanup(
             unsafe_heads = [
                 head_sha
                 for _scope, head_sha in scoped_heads
-                if ancestor_heads.get(head_sha) is not True and head_sha not in exact_merged_heads
+                if (
+                    ancestor_heads.get(head_sha) is not True
+                    and head_sha not in exact_merged_heads
+                    and head_sha not in absorbed_heads
+                )
             ]
             if unsafe_heads:
-                branch_keep_reason = (
-                    "branch-advanced-after-merged-pr"
-                    if exact_merged_heads
-                    else "branch-with-unabsorbed-head"
-                )
+                if exact_merged_heads:
+                    branch_keep_reason = "branch-advanced-after-merged-pr"
+                elif absorption_source_heads and any(head not in absorption_source_heads for head in unsafe_heads):
+                    branch_keep_reason = "branch-advanced-after-absorption"
+                elif github_evidence.get("available") is not True:
+                    branch_keep_reason = "github-evidence-unavailable"
+                else:
+                    branch_keep_reason = github_evidence.get("diagnostics", {}).get(
+                        branch, "branch-with-unabsorbed-head"
+                    )
             else:
                 branch_keep_reason = ""
 
@@ -5831,8 +6779,13 @@ def _plan_branch_cleanup(
                 action, reason = "keep", branch_keep_reason
             elif ancestor_heads.get(head_sha) is True:
                 action, reason = "delete", "head-is-ancestor-of-default-branch"
-            else:
+                evidence = {}
+            elif head_sha in exact_merged_heads:
                 action, reason = "delete", "merged-pr-head-matches-current-branch-head"
+                evidence = {}
+            else:
+                action, reason = "delete", "closed-pr-proven-absorbed-by-merged-pr"
+                evidence = absorbed_heads[head_sha]
             actions.append(
                 {
                     "branch": branch,
@@ -5840,6 +6793,7 @@ def _plan_branch_cleanup(
                     "head_sha": head_sha,
                     "action": action,
                     "reason": reason,
+                    "evidence": evidence if not branch_keep_reason else {},
                 }
             )
     return actions
@@ -5874,6 +6828,42 @@ def _delete_branch_ref(scope: str, branch: str, expected_sha: str) -> tuple[bool
     return result.returncode == 0, detail
 
 
+def _revalidate_absorption_authorization(
+    item: dict,
+    *,
+    default_branch: str,
+    base_ref: str,
+    merge_method: str,
+    proof_contract: dict,
+) -> tuple[bool, str]:
+    refresh = run(
+        ["git", "fetch", "origin", "--prune"],
+        check=False,
+        capture=True,
+    )
+    if refresh.returncode:
+        detail = (refresh.stderr or refresh.stdout or "").strip()
+        return False, f"cannot refresh Git refs before deletion: {detail or 'git fetch failed'}"
+
+    fresh = _github_cleanup_evidence(
+        default_branch,
+        base_ref,
+        merge_method,
+        proof_contract,
+    )
+    if fresh.get("available") is not True:
+        return False, "GitHub absorption authorization is unavailable"
+
+    branch = str(item.get("branch") or "")
+    head_sha = str(item.get("head_sha") or "")
+    current = fresh.get("absorbed_pr_heads", {}).get(branch, {}).get(head_sha)
+    expected = item.get("evidence")
+    if not isinstance(current, dict) or current != expected:
+        diagnostic = fresh.get("diagnostics", {}).get(branch, "absorption-authorization-changed")
+        return False, f"GitHub absorption authorization changed: {diagnostic}"
+    return True, ""
+
+
 def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     policy = repository_delivery_policy()
     cleanup = policy["cleanup"]["automatic_branch_cleanup"]
@@ -5895,7 +6885,12 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     local_refs = _branch_ref_map("refs/heads")
     remote_refs = _branch_ref_map("refs/remotes/origin", remote="origin")
     active_worktrees = _active_worktree_branches()
-    merged_pr_heads = _merged_pr_exact_heads(default_branch)
+    github_evidence = _github_cleanup_evidence(
+        default_branch,
+        base_ref,
+        str(policy["merge"]["method"]),
+        cleanup["absorbed_pr_proof"],
+    )
     unique_heads = set(local_refs.values()) | set(remote_refs.values())
     ancestor_heads = {sha: _git_is_ancestor(sha, base_ref) for sha in unique_heads}
     plan = _plan_branch_cleanup(
@@ -5905,7 +6900,7 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         default_branch=default_branch,
         active_worktrees=active_worktrees,
         ancestor_heads=ancestor_heads,
-        merged_pr_heads=merged_pr_heads,
+        github_evidence=github_evidence,
     )
 
     failures: list[str] = []
@@ -5916,11 +6911,43 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         scope = str(item["scope"])
         if item["action"] != "delete":
             if dry_run and item["reason"] not in {"protected-branch", "current-branch"}:
-                print(f"KEEP {scope:6} {branch} | {item['reason']}")
+                print(f"PRESERVE {scope:6} {branch} | {item['reason']}")
             continue
+
+        evidence = item.get("evidence") or {}
+        if not dry_run and scope == "local" and branch in remote_failures:
+            failures.append(f"local {branch}: preserved because remote deletion failed")
+            continue
+        if not dry_run and item["reason"] == "closed-pr-proven-absorbed-by-merged-pr":
+            authorized, detail = _revalidate_absorption_authorization(
+                item,
+                default_branch=default_branch,
+                base_ref=base_ref,
+                merge_method=str(policy["merge"]["method"]),
+                proof_contract=cleanup["absorbed_pr_proof"],
+            )
+            if not authorized:
+                failures.append(f"{scope} {branch}: {detail}")
+                if scope == "remote":
+                    remote_failures.add(branch)
+                print(f"PRESERVE {scope:6} {branch} | authorization-revalidation-failed")
+                continue
 
         label = "WOULD_DELETE" if dry_run else "DELETE"
         print(f"{label} {scope:6} {branch} | {item['reason']} | {str(item['head_sha'])[:12]}")
+        if evidence:
+            print(f"  criterion={evidence['criterion']}")
+            print(f"  source_pr={evidence['source_pr']}")
+            print(f"  source_head={evidence['source_head']}")
+            print(f"  absorbing_pr={evidence['absorbing_pr']}")
+            print(f"  absorbing_head={evidence['absorbing_head']}")
+            print(f"  merge_commit={evidence['merge_commit']}")
+            print(f"  default_branch={evidence['default_branch']}")
+            print(f"  proof_id={evidence['proof_id']}")
+            print(
+                "  content_lineage="
+                + json.dumps(evidence["content_lineage"], sort_keys=True, separators=(",", ":"))
+            )
         if dry_run:
             continue
 
@@ -5934,9 +6961,6 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
                 deleted += 1
             continue
 
-        if branch in remote_failures:
-            failures.append(f"local {branch}: preserved because remote deletion failed")
-            continue
         ok, detail = _delete_branch_ref(scope, branch, expected_sha)
         if not ok:
             failures.append(f"local {branch}: {detail or 'compare-and-delete failed'}")
@@ -5949,8 +6973,9 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
 
     candidates = sum(1 for item in plan if item["action"] == "delete")
     kept = sum(1 for item in plan if item["action"] == "keep")
+    cleanup_status = "DRY_RUN" if dry_run else ("FAIL" if failures else "PASS")
     print(
-        f"{'DRY_RUN' if dry_run else 'PASS'} branch-cleanup "
+        f"{cleanup_status} branch-cleanup "
         f"candidates={candidates} deleted={deleted} kept={kept} failures={len(failures)}"
     )
     for failure in failures:
@@ -5982,9 +7007,33 @@ def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bo
 
 
 def qce_check_command() -> int:
-    lock, roadmap, qualification = _modern_engineering_api()._qce_contracts(ROOT)
-    _modern_engineering_api().validate_qce_traceability(lock, roadmap, qualification, ROOT)
-    _modern_engineering_api().qce_status(ROOT)
+    modern = _modern_engineering_api()
+    lock, roadmap, qualification = modern._qce_contracts(ROOT)
+    modern.validate_qce_traceability(lock, roadmap, qualification, ROOT)
+    payload = modern.qce_status(ROOT)
+    status_path = modern.write_qce_status(ROOT, payload)
+    import capability_resolver
+
+    try:
+        evidence_path = capability_resolver.write_gate_evidence(
+            ROOT,
+            tool="qce",
+            capability="verification",
+            requirement_results={"referenced_runtime_evidence": "PASS"},
+            observations={
+                "traceability_validated": True,
+                "qce_status_path": status_path.relative_to(ROOT).as_posix(),
+                "qce_status_digest": "sha256:" + hashlib.sha256(status_path.read_bytes()).hexdigest(),
+            },
+        )
+    except capability_resolver.ResolutionError as exc:
+        if "resolver inputs differ from the claimed exact commit" not in str(exc):
+            raise
+        print("SKIP QCE capability evidence requires committed resolver inputs")
+    else:
+        payload = modern.qce_status(ROOT)
+        modern.write_qce_status(ROOT, payload)
+        print(f"EVIDENCE {evidence_path.relative_to(ROOT)}")
     print("PASS QCE traceability derives exactly nine sectors from architecture.lock.yaml")
     return 0
 
@@ -6387,10 +7436,259 @@ def _validate_commit_provenance_policy(policy: object) -> dict:
     return copy.deepcopy(policy)
 
 
+MERGE_RISK_CAPABILITIES = (
+    "governance",
+    "delivery-authority",
+    "branch-protection",
+    "infrastructure-apply",
+    "destructive-operation",
+    "state-migration",
+    "iam",
+    "secrets",
+    "network",
+    "dns",
+    "signing-or-provenance-policy",
+    "security-policy",
+    "artifact-publication-authority",
+)
+MERGE_RISK_CONTROLLER_PATH = "scripts/merge_risk.py"
+
+
+def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
+    """Validate the fail-closed repository policy before it can classify any PR."""
+    if not isinstance(policy, dict) or not isinstance(owner_boundary, dict):
+        return False
+    if set(policy) != {
+        "authority",
+        "implementation",
+        "controller_source",
+        "bootstrap_without_controller",
+        "head_controller_execution",
+        "policy_source",
+        "model",
+        "llm_decision",
+        "exact_sha_binding",
+        "self_modification",
+        "unknown_or_ambiguous",
+        "partial_analysis",
+        "git_error",
+        "classifications",
+        "required_inputs",
+        "low_risk",
+        "sensitive",
+    }:
+        return False
+    if any(
+        (
+            policy.get("authority") != "repository-policy",
+            policy.get("implementation") != "scripts/merge_risk.py#classify_merge_risk",
+            policy.get("controller_source") != "exact-pr-base-sha",
+            policy.get("bootstrap_without_controller") != "sensitive",
+            policy.get("head_controller_execution") != "forbidden",
+            policy.get("policy_source") != "exact-pr-base-sha",
+            policy.get("model") != "deterministic-capabilities-and-paths",
+            policy.get("llm_decision") != "forbidden",
+            policy.get("exact_sha_binding") != "required",
+            policy.get("self_modification") != "sensitive",
+            policy.get("unknown_or_ambiguous") != "sensitive",
+            policy.get("partial_analysis") != "sensitive",
+            policy.get("git_error") != "sensitive",
+            policy.get("classifications") != ["LOW_RISK", "SENSITIVE"],
+            policy.get("required_inputs")
+            != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
+        )
+    ):
+        return False
+    required_for = list(MERGE_RISK_CAPABILITIES)
+    if owner_boundary.get("mode") != "risk-based":
+        return False
+    if owner_boundary.get("automatic_generation") != "forbidden":
+        return False
+    if owner_boundary.get("required_for") != required_for:
+        return False
+    if owner_boundary.get("low_risk") != {"authorization": "not-required-by-policy"}:
+        return False
+    if owner_boundary.get("sensitive") != {"authorization": "explicit-repository-owner"}:
+        return False
+    low_risk = policy.get("low_risk")
+    sensitive = policy.get("sensitive")
+    if not isinstance(low_risk, dict) or set(low_risk) != {
+        "authorization",
+        "merge_mode",
+        "eligible_paths",
+    }:
+        return False
+    if (
+        low_risk.get("authorization") != "not-required-by-policy"
+        or low_risk.get("merge_mode") != "AUTO"
+    ):
+        return False
+    eligible_paths = low_risk.get("eligible_paths")
+    if (
+        not isinstance(eligible_paths, list)
+        or not eligible_paths
+        or len(eligible_paths) != len(set(eligible_paths))
+        or any(
+            not isinstance(pattern, str)
+            or not pattern
+            or pattern in {"*", "**", "**/*"}
+            or pattern.startswith("/")
+            or ".." in Path(pattern).parts
+            for pattern in eligible_paths
+        )
+    ):
+        return False
+    if not isinstance(sensitive, dict) or set(sensitive) != {
+        "authorization",
+        "merge_mode",
+        "capabilities",
+    }:
+        return False
+    if (
+        sensitive.get("authorization") != "explicit-repository-owner"
+        or sensitive.get("merge_mode") != "OWNER_GATED"
+    ):
+        return False
+    capabilities = sensitive.get("capabilities")
+    if not isinstance(capabilities, dict) or set(capabilities) != set(required_for):
+        return False
+    required_anchors = {
+        "governance": {"architecture.lock.yaml", "config/contracts/review-policy.yaml"},
+        "delivery-authority": {
+            "scripts/merge_risk.py",
+            "scripts/repoctl.py",
+            "scripts/pr_monitor.py",
+            "Makefile",
+        },
+        "branch-protection": {".github/CODEOWNERS", ".github/rulesets/**"},
+        "infrastructure-apply": {"platform/terraform/**", "platform/ansible/**"},
+        "state-migration": {"**/migrations/**"},
+        "iam": {
+            "config/contracts/identity-boundary-policy.yaml",
+            "services/**/auth/**",
+            "services/**/authentication/**",
+            "services/**/authorization/**",
+            "services/**/security/**",
+            "services/**/oidc/**",
+            "services/**/oauth/**",
+            "services/**/jwt/**",
+            "services/**/session/**",
+            "services/**/*auth*",
+            "services/**/*security*",
+            "services/**/*oidc*",
+            "services/**/*oauth*",
+            "services/**/*jwt*",
+            "services/**/*session*",
+        },
+        "secrets": {"config/contracts/secret-delivery-policy.yaml"},
+        "network": {"config/infrastructure/network-plan.yaml"},
+        "dns": {"config/contracts/dns-authority-policy.yaml"},
+        "signing-or-provenance-policy": {"scripts/check_automation_signing.py"},
+        "security-policy": {"config/contracts/security-scan-policy.yaml"},
+        "artifact-publication-authority": {"platform/tekton/**"},
+    }
+    for capability, rule in capabilities.items():
+        if not isinstance(rule, dict) or set(rule) - {"paths", "content_paths", "content_patterns"}:
+            return False
+        paths = rule.get("paths", [])
+        content_paths = rule.get("content_paths", [])
+        content_patterns = rule.get("content_patterns", [])
+        if any(
+            not isinstance(values, list)
+            or len(values) != len(set(values))
+            or any(not isinstance(value, str) or not value for value in values)
+            for values in (paths, content_paths, content_patterns)
+        ):
+            return False
+        if not paths and not content_patterns:
+            return False
+        if content_patterns and not content_paths:
+            return False
+        if not required_anchors.get(capability, set()).issubset(paths):
+            return False
+        try:
+            for pattern in content_patterns:
+                re.compile(pattern)
+        except re.error:
+            return False
+    return True
+
+
+def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
+    """Keep the established exact contract check while validating the v2 risk extension."""
+    if not isinstance(policy, dict):
+        return {}
+    normalized = copy.deepcopy(policy)
+    owner_boundary = normalized.get("owner_boundary")
+    risk_policy = normalized.pop("risk_classification", None)
+    expected_transition = [
+        "exact-pr-head",
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "deterministic-risk-classification",
+        "owner-authorization-if-required",
+        "merge-requirements",
+        "finish-pr",
+        "merge-verification",
+        "post-merge-cleanup",
+    ]
+    if normalized.get("schema_version") != 2:
+        return {}
+    trusted_boundary = {
+        "controller": normalized.get("controller"),
+        "controller_source": normalized.pop("controller_source", None),
+        "command": normalized.get("command"),
+        "target_worktree": normalized.pop("target_worktree", None),
+        "direct_head_controller": normalized.pop("direct_head_controller", None),
+        "bootstrap_without_controller": normalized.pop("bootstrap_without_controller", None),
+    }
+    if trusted_boundary != {
+        "controller": "scripts/repository_delivery.py",
+        "controller_source": "exact-pr-base-sha",
+        "command": "trusted-pr-transition",
+        "target_worktree": "exact-pr-head-clean-checkout",
+        "direct_head_controller": "forbidden",
+        "bootstrap_without_controller": "explicit-repository-owner",
+    }:
+        return {}
+    if normalized.get("transition_order") != expected_transition:
+        return {}
+    if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
+        return {}
+    if normalized.get("state_sources", []).count(
+        "exact-sha-deterministic-risk-classification"
+    ) != 1:
+        return {}
+    normalized["schema_version"] = 1
+    normalized["controller"] = "scripts/repoctl.py"
+    normalized["command"] = "pr-loop"
+    normalized["state_sources"].remove("exact-sha-deterministic-risk-classification")
+    normalized["transition_order"] = [
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "owner-authorization",
+        "finish-pr",
+        "post-merge-cleanup",
+    ]
+    for key in ("mode", "required_for", "low_risk", "sensitive"):
+        normalized["owner_boundary"].pop(key, None)
+    return normalized
+
+
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
-    required_sections = {"commit_provenance", "publish", "pull_request", "merge", "cleanup", "post_merge"}
+    required_sections = {
+        "commit_provenance",
+        "publish",
+        "pull_request",
+        "pr_loop",
+        "merge",
+        "cleanup",
+        "post_merge",
+    }
     missing = sorted(required_sections - set(policy))
     if missing:
         raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
@@ -6403,6 +7701,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
     publish_policy = policy["publish"]
     pull_request_policy = policy["pull_request"]
+    pr_loop_policy = policy["pr_loop"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
     post_merge_policy = policy["post_merge"]
@@ -6414,9 +7713,56 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         "delete_when": [
             "head-is-ancestor-of-default-branch",
             "merged-pr-head-matches-current-branch-head",
+            "closed-pr-proven-absorbed-by-merged-pr",
         ],
         "merged_pr_base_must_match_default": True,
         "github_merge_proof": "exact-head-sha",
+        "absorbed_pr_proof": {
+            "required": True,
+            "fail_closed": True,
+            "source": "github-absorbing-pr-body",
+            "marker": "pull-request-absorption-proof:v2",
+            "schema_version": 2,
+            "kind": "PullRequestAbsorptionProof",
+            "active_status": "ABSORBED",
+            "superseded_status": "SUPERSEDED",
+            "proof_method": "git-content-lineage-v1",
+            "proof_id": "sha256-canonical-binding",
+            "repository_binding": "exact-name-with-owner",
+            "temporal_fields_authoritative": False,
+            "content_lineage": {
+                "allowed_relations": ["ancestor", "same-tree"],
+                "maximum_edges": 16,
+            },
+            "required_fields": [
+                "proof_id",
+                "schema_version",
+                "kind",
+                "source_repository",
+                "source_pr",
+                "source_head_sha",
+                "source_branch",
+                "source_base",
+                "absorbing_repository",
+                "absorbing_pr",
+                "absorbing_head_sha",
+                "content_lineage",
+                "proof_method",
+                "status",
+            ],
+            "merge_method_checks": {
+                "merge": {
+                    "merge_commit_ancestor_of_default": True,
+                    "absorbing_head_ancestor_of_merge_commit": True,
+                }
+            },
+            "destructive_revalidation": {
+                "required_immediately_before_each_delete": True,
+                "refresh_git_refs": True,
+                "refresh_github_prs": True,
+                "exact_evidence_match": True,
+            },
+        },
         "preserve": [
             "default-branch",
             "master",
@@ -6424,6 +7770,12 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "active-worktree",
             "branch-with-unabsorbed-head",
             "branch-advanced-after-merged-pr",
+            "branch-advanced-after-absorption",
+            "missing-absorption-proof",
+            "ambiguous-absorption",
+            "stale-or-invalid-absorption-proof",
+            "github-evidence-unavailable",
+            "authorization-revalidation-failed",
         ],
         "github_cli_optional_for_ancestor_cleanup": True,
         "remote_delete_requires_exact_lease": True,
@@ -6434,6 +7786,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     for section_name, section in (
         ("publish", publish_policy),
         ("pull_request", pull_request_policy),
+        ("pr_loop", pr_loop_policy),
         ("merge", merge_policy),
         ("cleanup", cleanup_policy),
         ("post_merge", post_merge_policy),
@@ -6480,6 +7833,104 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             },
             "post-merge roadmap reconciliation contract must remain exact",
         ),
+        (
+            _normalized_pr_loop_for_legacy_validation(pr_loop_policy)
+            == {
+                "schema_version": 1,
+                "controller": "scripts/repoctl.py",
+                "command": "pr-loop",
+                "state_persistence": "forbidden",
+                "state_sources": [
+                    "github-current-pull-request",
+                    "github-current-exact-head-sha",
+                    "exact-sha-qualification-evidence",
+                    "chatgpt-exact-sha-review-comments",
+                    "owner-authorization-comment",
+                    "github-merge-and-protection-state",
+                    "finish-pr-and-branch-cleanup-contracts",
+                ],
+                "transition_order": [
+                    "qualification",
+                    "chatgpt-code",
+                    "chatgpt-security",
+                    "owner-authorization",
+                    "finish-pr",
+                    "post-merge-cleanup",
+                ],
+                "exact_sha": {
+                    "binding": "required",
+                    "prior_sha_evidence": "historical-only",
+                    "head_change": "restart-at-qualification",
+                    "in_flight_transition_on_head_change": "abandon-and-restart",
+                    "refetch_before_qualification": "required",
+                    "refetch_before_merge": "required",
+                },
+                "chatgpt_handoff": {
+                    "trigger": "canonical-bounded-handoff",
+                    "state": "CHATGPT_REVIEW_REQUIRED",
+                    "event": "CHATGPT_REVIEW_REQUIRED",
+                    "review_kinds": ["CODE", "SECURITY"],
+                    "helper": "scripts/pr_monitor.py#chatgpt_review_handoff",
+                    "payload": "required",
+                    "payload_budget_bytes": 16384,
+                    "payload_fields": [
+                        "pr",
+                        "review_kind",
+                        "previous_validated_verdict",
+                        "delta",
+                        "previous_head",
+                        "current_head",
+                        "changed_files",
+                        "exact_head_verified",
+                    ],
+                    "payload_digest": "sha256",
+                    "fail_if_payload_unavailable": True,
+                    "consumer": "external-automatic",
+                    "invocation_binding": "exact-pr-and-head-sha",
+                    "rerun_after_valid_marker": "required",
+                    "verdict_authority": "ChatGPT-only",
+                    "controller_may_emit_verdict": False,
+                    "code_before_security": "required",
+                    "security_requires_code_marker": {
+                        "provider": "ChatGPT",
+                        "kind": "code",
+                        "status": "PASS",
+                        "blocking_findings": 0,
+                        "exact_head_sha": "required",
+                    },
+                },
+                "comment_evidence": {
+                    "ordering": "immutable-created-at-then-id",
+                    "updated_at_authority": "forbidden",
+                    "owner_authorization_match": "whole-trimmed-comment",
+                },
+                "owner_boundary": {
+                    "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
+                    "scope": "pr-<number>",
+                    "source": "github-pr-comment-by-repository-owner",
+                    "latest_scope_authorization_wins": True,
+                    "revocation": "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>",
+                    "automatic_generation": "forbidden",
+                    "unique_human_interruption": True,
+                    "automatic_rerun_after_authorization": "required",
+                },
+                "merge_delegation": {
+                    "state": "MERGE_READY",
+                    "command": "finish-pr",
+                    "direct_merge": "forbidden",
+                    "exact_head_match": "required",
+                    "nonzero_exit": "reread-github-before-result",
+                    "post_exit_merge_authority": "github-current-pr-exact-head",
+                },
+                "post_merge_cleanup": {
+                    "command": "branch-cleanup",
+                    "automatic_after_merge": "required",
+                    "separate_result": "required",
+                    "merge_success_may_not_mask_cleanup_failure": True,
+                },
+            },
+            "pr-loop state derivation and authority boundaries must remain exact",
+        ),
     )
     for valid, message in required_invariants:
         if not valid:
@@ -6488,7 +7939,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
 
 def repository_delivery_policy() -> dict:
-    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    review_policy = _review_policy_document()
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
 
 
@@ -6581,6 +8032,7 @@ def commit_provenance_check(
     *,
     include_local_identity: bool = False,
     policy: dict | None = None,
+    quiet: bool = False,
 ) -> int:
     provenance = policy or commit_provenance_policy()
     identity_policy = provenance["identity"]
@@ -6603,19 +8055,21 @@ def commit_provenance_check(
             if error:
                 failures.append(("WORKTREE", error))
     if failures:
-        for sha, error in failures:
-            print(f"FAIL commit provenance {sha}: {error}", file=sys.stderr)
+        if not quiet:
+            for sha, error in failures:
+                print(f"FAIL commit provenance {sha}: {error}", file=sys.stderr)
         return 1
-    for record in records:
-        print(f"PASS commit provenance {record['sha']}")
-    if include_local_identity:
-        print("PASS commit provenance WORKTREE")
-    if not records and not include_local_identity:
-        print(f"PASS commit provenance {base_sha}..{head_sha}: no introduced commits")
+    if not quiet:
+        for record in records:
+            print(f"PASS commit provenance {record['sha']}")
+        if include_local_identity:
+            print("PASS commit provenance WORKTREE")
+        if not records and not include_local_identity:
+            print(f"PASS commit provenance {base_sha}..{head_sha}: no introduced commits")
     return 0
 
 
-def remote_commit_provenance_check(gh: str, base: str, head: str) -> int:
+def remote_commit_provenance_check(gh: str, base: str, head: str, *, quiet: bool = False) -> int:
     provenance = commit_provenance_policy()
     remote_policy = provenance["remote_verification"]
     _base_sha, _head_sha, records = _commit_identity_records(base, head)
@@ -6644,12 +8098,13 @@ def remote_commit_provenance_check(gh: str, base: str, head: str) -> int:
         reason = str(verification.get("reason") or "missing")
         if verification.get("verified") is not True or reason not in accepted_reasons:
             return fail(f"remote commit provenance: {sha} is not verified reason={reason}")
-        print(f"PASS remote commit provenance {sha}: verified reason={reason}")
+        if not quiet:
+            print(f"PASS remote commit provenance {sha}: verified reason={reason}")
     return 0
 
 
 def pull_request_review_policy() -> dict:
-    policy = ruby_yaml("config/contracts/review-policy.yaml").get("pull_request_review") or {}
+    policy = _review_policy_document().get("pull_request_review") or {}
     ai = policy.get("ai_reviewer") or {}
     evidence = ai.get("evidence") or {}
     codex = ai.get("codex") or {}
@@ -6690,33 +8145,43 @@ def _chatgpt_review_payloads(body: str) -> list[dict]:
     return payloads
 
 
-def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bool, str]:
-    review_policy = pull_request_review_policy()
-    ai = review_policy["ai_reviewer"]
-    evidence_contract = ai["evidence"]
-    completed: dict[str, dict | None] = {
-        kind: None for kind in evidence_contract["required_kinds"]
-    }
+_CHATGPT_REVIEW_KEYS = {
+    "provider",
+    "kind",
+    "head_sha",
+    "status",
+    "blocking_findings",
+}
+_OWNER_AUTHORIZATION_RE = re.compile(
+    r"/owner-authorization (?P<action>approve|revoke) "
+    r"scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
+    r"sha=(?P<sha>[0-9a-f]{40})",
+)
 
-    owner_response = run(
+
+def _github_repository_identity(gh: str) -> tuple[str, str]:
+    response = run(
         [gh, "repo", "view", "--json", "owner,nameWithOwner"],
         check=False,
         capture=True,
     )
-    if owner_response.returncode:
-        detail = (owner_response.stderr or owner_response.stdout or "").strip()
-        return False, detail or "unable to resolve repository owner"
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        raise RuntimeError(detail or "unable to resolve GitHub repository identity")
     try:
-        owner_payload = json.loads(owner_response.stdout or "{}")
-    except json.JSONDecodeError:
-        return False, "invalid GitHub repository owner JSON"
-    owner_login = str((owner_payload.get("owner") or {}).get("login") or "")
-    name_with_owner = str(owner_payload.get("nameWithOwner") or "")
+        payload = json.loads(response.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("invalid GitHub repository identity JSON") from exc
+    owner_login = str((payload.get("owner") or {}).get("login") or "")
+    name_with_owner = str(payload.get("nameWithOwner") or "")
     if not owner_login:
-        return False, "repository owner login is missing"
+        raise RuntimeError("repository owner login is missing")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
-        return False, "repository nameWithOwner is missing or invalid"
+        raise RuntimeError("repository nameWithOwner is missing or invalid")
+    return owner_login, name_with_owner
 
+
+def _github_pr_comments(gh: str, name_with_owner: str, pr_number: int) -> list[dict]:
     response = run(
         [
             gh,
@@ -6730,64 +8195,582 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     )
     if response.returncode:
         detail = (response.stderr or response.stdout or "").strip()
-        return False, detail or "unable to read complete PR comment history"
-
+        raise RuntimeError(detail or "unable to read complete PR comment history")
     try:
         pages = json.loads(response.stdout or "[]")
-    except json.JSONDecodeError:
-        return False, "invalid GitHub PR comments JSON"
-
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("invalid GitHub PR comments JSON") from exc
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-        return False, "GitHub PR paginated comments payload is invalid"
-    comments = [comment for page in pages for comment in page]
-    comments.sort(
-        key=lambda comment: (
-            str(comment.get("created_at") or "") if isinstance(comment, dict) else "",
-            int(comment.get("id") or 0)
-            if isinstance(comment, dict) and str(comment.get("id") or "").isdigit()
-            else 0,
-        )
-    )
+        raise RuntimeError("GitHub PR paginated comments payload is invalid")
+    comments = [comment for page in pages for comment in page if isinstance(comment, dict)]
+    comments.sort(key=_immutable_comment_order_key)
+    return comments
 
-    for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        author = comment.get("user") or comment.get("author") or {}
-        if not isinstance(author, dict) or str(author.get("login") or "") != owner_login:
+
+def _immutable_comment_order_key(comment: dict) -> tuple[str, int]:
+    """Return immutable GitHub creation order; mutable updated_at is never authority."""
+    created_at = str(comment.get("created_at") or "")
+    identifier = str(comment.get("id") or "")
+    if not created_at or not identifier.isdigit() or int(identifier) < 1:
+        raise RuntimeError("GitHub PR comment lacks immutable created_at/id authority")
+    return created_at, int(identifier)
+
+
+def _comments_in_immutable_order(comments: list[dict]) -> list[dict]:
+    return sorted(comments, key=_immutable_comment_order_key)
+
+
+def _comment_author_login(comment: dict) -> str:
+    author = comment.get("user") or comment.get("author") or {}
+    return str(author.get("login") or "") if isinstance(author, dict) else ""
+
+
+def _chatgpt_review_evidence(
+    comments: list[dict], owner_login: str, head_sha: str
+) -> dict[str, dict]:
+    evidence_contract = pull_request_review_policy()["ai_reviewer"]["evidence"]
+    completed: dict[str, dict | None] = {
+        kind: None for kind in evidence_contract["required_kinds"]
+    }
+    for comment in _comments_in_immutable_order(comments):
+        if _comment_author_login(comment) != owner_login:
             continue
         for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
             kind = str(proof.get("kind") or "")
             if (
-                proof.get("provider") != "ChatGPT"
+                set(proof) != _CHATGPT_REVIEW_KEYS
+                or proof.get("provider") != "ChatGPT"
                 or proof.get("head_sha") != head_sha
-                or kind not in evidence_contract["required_kinds"]
+                or kind not in completed
+                or not isinstance(proof.get("status"), str)
+                or not proof.get("status")
             ):
                 continue
-            # GitHub issue comments are returned oldest-to-newest. A later
-            # exact-SHA ChatGPT verdict supersedes an earlier verdict of the same kind
-            # after findings are corrected and re-reviewed.
-            completed[kind] = proof
+            completed[kind] = {
+                **proof,
+                "comment_id": comment.get("id"),
+                "source": "github-pr-comment",
+            }
+    result: dict[str, dict] = {}
+    for kind, proof in completed.items():
+        result[kind] = proof or {
+            "status": "MISSING",
+            "head_sha": head_sha,
+            "source": "github-pr-comment",
+        }
+    return result
 
-    missing = [kind for kind in evidence_contract["required_kinds"] if completed[kind] is None]
-    if missing:
-        return False, "missing ChatGPT exact-SHA review proof: " + ", ".join(missing)
 
-    required_status = evidence_contract["required_status"]
-    for kind in evidence_contract["required_kinds"]:
-        proof = completed[kind]
-        assert proof is not None
-        blockers = proof.get("blocking_findings")
+def _owner_authorization_evidence(
+    comments: list[dict], owner_login: str, pr_number: int, head_sha: str
+) -> dict:
+    scope = f"pr-{pr_number}"
+    latest: dict | None = None
+    for comment in _comments_in_immutable_order(comments):
+        if _comment_author_login(comment) != owner_login:
+            continue
+        command = str(comment.get("body") or "").strip()
+        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
+        if match is None or match.group("scope") != scope:
+            continue
+        latest = {
+            "command": command,
+            "action": match.group("action"),
+            "sha": match.group("sha"),
+            "comment_id": comment.get("id"),
+        }
+    expected_command = f"/owner-authorization approve scope={scope} sha={head_sha}"
+    if latest is None:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+        }
+    if latest["sha"] != head_sha:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "latest owner authorization for scope belongs to another SHA",
+            "superseded_comment_id": latest["comment_id"],
+        }
+    if latest["action"] == "revoke":
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "owner authorization was explicitly revoked",
+            "revocation_comment_id": latest["comment_id"],
+        }
+    import architecture_authority
+
+    errors = architecture_authority.owner_authorization_errors(
+        latest["command"],
+        expected_scope=scope,
+        head_sha=head_sha,
+        decision_authority="repository-owner",
+        recording_agent="ChatGPT",
+        explicit_owner_instruction=True,
+    )
+    if errors:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "; ".join(errors),
+        }
+    return {
+        "status": "PASS",
+        "scope": scope,
+        "head_sha": head_sha,
+        "command": latest["command"],
+        "comment_id": latest["comment_id"],
+        "source": "github-pr-comment",
+    }
+
+
+def pull_request_authority_evidence(
+    gh: str, pr_number: int, head_sha: str
+) -> tuple[dict[str, dict], dict]:
+    owner_login, name_with_owner = _github_repository_identity(gh)
+    comments = _github_pr_comments(gh, name_with_owner, pr_number)
+    return (
+        _chatgpt_review_evidence(comments, owner_login, head_sha),
+        _owner_authorization_evidence(comments, owner_login, pr_number, head_sha),
+    )
+
+
+def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bool, str]:
+    try:
+        reviews, _authorization = pull_request_authority_evidence(gh, pr_number, head_sha)
+    except RuntimeError as exc:
+        return False, str(exc)
+    for kind in pull_request_review_policy()["ai_reviewer"]["evidence"]["required_kinds"]:
+        proof = reviews[kind]
+        if proof.get("status") == "MISSING":
+            return False, f"missing ChatGPT exact-SHA review proof: {kind}"
         if (
-            proof.get("status") != required_status
-            or type(blockers) is not int
-            or blockers != 0
+            proof.get("status") != "PASS"
+            or type(proof.get("blocking_findings")) is not int
+            or proof.get("blocking_findings") != 0
         ):
             return False, (
                 f"ChatGPT {kind} review is not PASS for exact head {head_sha}: "
-                f"status={proof.get('status')!r} blocking_findings={blockers!r}"
+                f"status={proof.get('status')!r} "
+                f"blocking_findings={proof.get('blocking_findings')!r}"
             )
-
     return True, "ChatGPT CODE and SECURITY reviews PASS for exact head"
+
+
+def _github_pr_snapshot(gh: str, name_with_owner: str, pr_number: int) -> dict:
+    response = run(
+        [gh, "api", f"repos/{name_with_owner}/pulls/{pr_number}"],
+        check=False,
+        capture=True,
+    )
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        raise RuntimeError(detail or f"unable to read pull request #{pr_number}")
+    try:
+        payload = json.loads(response.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid GitHub pull request JSON for #{pr_number}") from exc
+    head = payload.get("head") or {}
+    base = payload.get("base") or {}
+    head_repo = head.get("repo") or {}
+    head_sha = str(head.get("sha") or "")
+    base_sha = str(base.get("sha") or "")
+    merged = bool(payload.get("merged_at"))
+    return {
+        "number": int(payload.get("number") or pr_number),
+        "state": "MERGED" if merged else str(payload.get("state") or "").upper(),
+        "draft": bool(payload.get("draft")),
+        "head_sha": head_sha,
+        "head_branch": str(head.get("ref") or ""),
+        "head_repository": str(head_repo.get("full_name") or ""),
+        "base": str(base.get("ref") or ""),
+        "base_sha": base_sha,
+        "merged": merged,
+        "merged_at": payload.get("merged_at"),
+        "merge_commit_sha": str(payload.get("merge_commit_sha") or ""),
+        "url": str(payload.get("html_url") or ""),
+    }
+
+
+_REVIEW_THREADS_QUERY = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved}}}}}"""
+
+
+def _github_unresolved_review_threads(gh: str, name_with_owner: str, pr_number: int) -> int:
+    owner, name = name_with_owner.split("/", 1)
+    cursor = ""
+    unresolved = 0
+    while True:
+        command = [
+            gh,
+            "api",
+            "graphql",
+            "-f",
+            f"query={_REVIEW_THREADS_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={pr_number}",
+        ]
+        if cursor:
+            command.extend(["-f", f"cursor={cursor}"])
+        response = run(command, check=False, capture=True)
+        if response.returncode:
+            detail = (response.stderr or response.stdout or "").strip()
+            raise RuntimeError(detail or "unable to read GitHub review conversations")
+        try:
+            payload = json.loads(response.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("invalid GitHub review conversations JSON") from exc
+        if payload.get("errors"):
+            raise RuntimeError(f"GitHub review conversations query failed: {payload['errors']}")
+        repository = (payload.get("data") or {}).get("repository") or {}
+        pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+        if not isinstance(pull_request, dict):
+            raise RuntimeError(f"GitHub pull request #{pr_number} is unavailable")
+        connection = pull_request.get("reviewThreads") or {}
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise RuntimeError("GitHub review conversations payload is incomplete")
+        unresolved += sum(
+            1 for node in nodes if isinstance(node, dict) and node.get("isResolved") is not True
+        )
+        if not page_info.get("hasNextPage"):
+            return unresolved
+        cursor = str(page_info.get("endCursor") or "")
+        if not cursor:
+            raise RuntimeError("GitHub review conversations pagination omitted endCursor")
+
+
+def _github_branch_protection_status(gh: str, base_name: str) -> tuple[bool, str]:
+    protection = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
+        check=False,
+        capture=True,
+    )
+    if protection.returncode == 0:
+        return True, "branch protection configured"
+    active_rules = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
+        check=False,
+        capture=True,
+    )
+    if active_rules.returncode == 0 and (active_rules.stdout or "").strip():
+        try:
+            rules_payload = json.loads(active_rules.stdout or "[]")
+        except json.JSONDecodeError:
+            rules_payload = None
+        if isinstance(rules_payload, list) and bool(rules_payload):
+            return True, "branch ruleset configured"
+    detail = (
+        active_rules.stderr
+        or active_rules.stdout
+        or protection.stderr
+        or protection.stdout
+        or ""
+    ).strip()
+    return False, detail or f"cannot prove branch protection/ruleset for {base_name}"
+
+
+def _github_required_checks_status(gh: str, pr_number: int) -> tuple[bool, str]:
+    checks = run([gh, "pr", "checks", str(pr_number), "--required"], check=False, capture=True)
+    if checks.returncode == 0:
+        return True, "required checks PASS"
+    detail = "\n".join(
+        filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()])
+    )
+    if "no checks reported" in detail.lower():
+        return True, "no required checks configured"
+    return False, detail or f"required checks are not PASS for PR #{pr_number}"
+
+
+def _review_result_is_pass(result: dict) -> bool:
+    blockers = result.get("blocking_findings")
+    return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
+
+
+def _merge_risk_result(
+    classification: str,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str],
+    reasons: list[str],
+    matched_capabilities: list[str],
+    analysis_complete: bool,
+) -> dict:
+    return {
+        "classification": classification,
+        "authority": "repository-policy",
+        "controller_source": "exact-pr-base-sha",
+        "controller_path": MERGE_RISK_CONTROLLER_PATH,
+        "policy_source": "exact-pr-base-sha",
+        "pr": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_files": sorted(changed_files),
+        "reasons": sorted(set(reasons)),
+        "matched_capabilities": sorted(set(matched_capabilities)),
+        "analysis_complete": analysis_complete,
+    }
+
+
+def _sensitive_merge_risk(
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str] | None,
+    reason: str,
+) -> dict:
+    return _merge_risk_result(
+        "SENSITIVE",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+        changed_files=changed_files or [],
+        reasons=[reason],
+        matched_capabilities=[],
+        analysis_complete=False,
+    )
+
+
+def _validated_trusted_merge_risk_result(
+    result: object,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+) -> dict:
+    required = {
+        "classification",
+        "authority",
+        "controller_source",
+        "controller_path",
+        "policy_source",
+        "pr",
+        "base_sha",
+        "head_sha",
+        "changed_files",
+        "reasons",
+        "matched_capabilities",
+        "analysis_complete",
+    }
+    if not isinstance(result, dict) or set(result) != required:
+        raise RuntimeError("exact-base merge-risk controller returned an invalid envelope")
+    if (
+        result.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or result.get("authority") != "repository-policy"
+        or result.get("controller_source") != "exact-pr-base-sha"
+        or result.get("controller_path") != MERGE_RISK_CONTROLLER_PATH
+        or result.get("policy_source") != "exact-pr-base-sha"
+        or result.get("pr") != pr_number
+        or result.get("base_sha") != base_sha
+        or result.get("head_sha") != head_sha
+        or not isinstance(result.get("changed_files"), list)
+        or not isinstance(result.get("reasons"), list)
+        or not isinstance(result.get("matched_capabilities"), list)
+        or type(result.get("analysis_complete")) is not bool
+    ):
+        raise RuntimeError("exact-base merge-risk controller result is not exact-SHA bound")
+    if result["classification"] == "LOW_RISK" and (
+        result["analysis_complete"] is not True
+        or result["reasons"]
+        or result["matched_capabilities"]
+        or not result["changed_files"]
+    ):
+        raise RuntimeError("exact-base merge-risk controller returned an incomplete low-risk result")
+    return result
+
+
+def _run_exact_base_merge_risk_controller(
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+) -> dict:
+    """Execute only the classifier blob owned by the exact PR base commit."""
+    for label, sha in (("base", base_sha), ("head", head_sha)):
+        if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
+            raise RuntimeError(f"{label} SHA is not exact")
+        if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], check=False, capture=True).returncode:
+            raise RuntimeError(f"{label} commit is unavailable")
+    if run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError("head is not descended from the exact PR base")
+    controller = run(
+        ["git", "show", f"{base_sha}:{MERGE_RISK_CONTROLLER_PATH}"],
+        check=False,
+        capture=True,
+    )
+    if controller.returncode:
+        raise RuntimeError("exact-base merge-risk controller is unavailable")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-exact-base-risk-") as directory:
+        controller_path = Path(directory) / "merge_risk.py"
+        controller_path.write_text(controller.stdout or "", encoding="utf-8")
+        environment = os.environ.copy()
+        for name in (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_WORK_TREE",
+            "PYTHONHOME",
+            "PYTHONINSPECT",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+        ):
+            environment.pop(name, None)
+        command = [
+            sys.executable,
+            "-I",
+            str(controller_path),
+            "--base-sha",
+            base_sha,
+            "--head-sha",
+            head_sha,
+        ]
+        if pr_number is not None:
+            command.extend(["--pr", str(pr_number)])
+        executed = run(command, env=environment, check=False, capture=True)
+    if executed.returncode:
+        detail = (executed.stderr or executed.stdout or "").strip()
+        raise RuntimeError(detail or "exact-base merge-risk controller failed")
+    try:
+        result = json.loads((executed.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exact-base merge-risk controller returned invalid JSON") from exc
+    return _validated_trusted_merge_risk_result(
+        result,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+    )
+
+
+def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = None) -> dict:
+    """Classify only with exact-base executable authority; bootstrap/errors are sensitive."""
+    try:
+        return _run_exact_base_merge_risk_controller(base_sha, head_sha, pr_number)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        detail = re.sub(r"\s+", " ", str(exc)).strip()[:300] or type(exc).__name__
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=[],
+            reason=f"trusted-base-classification-error:{detail}",
+        )
+
+
+def _owner_authorization_for_risk(risk: dict, authorization: dict) -> dict:
+    if risk.get("classification") == "LOW_RISK":
+        return {
+            "status": "NOT_REQUIRED_BY_POLICY",
+            "head_sha": risk.get("head_sha", ""),
+            "source": "repository-policy",
+        }
+    return authorization
+
+
+_PR_LOOP_MERGE_REQUIREMENTS = {
+    "current_main_lineage",
+    "unresolved_blocking_findings",
+    "required_conversations",
+    "branch_protection",
+    "required_checks",
+    "commit_provenance",
+}
+
+
+def derive_pr_loop_state(
+    pr: dict,
+    qualification: dict,
+    code_review: dict,
+    security_review: dict,
+    owner_authorization: dict,
+    merge_requirements: dict | None = None,
+    risk: dict | None = None,
+) -> tuple[str, str]:
+    """Pure fail-closed derivation; no value returned here is persisted as authority."""
+    if pr.get("merged") or pr.get("state") == "MERGED":
+        return "MERGED", "POST_MERGE_CLEANUP"
+    if pr.get("state") != "OPEN":
+        return "BLOCKED", "NONE"
+    if pr.get("draft"):
+        return "BLOCKED", "MARK_READY_FOR_REVIEW"
+    if pr.get("base") != "main":
+        return "BLOCKED", "RETARGET_MAIN"
+    if qualification.get("status") == "FAIL":
+        return "QUALIFICATION_FAILED", "FIX_QUALIFICATION"
+    if qualification.get("status") != "PASS":
+        return "QUALIFICATION_REQUIRED", "QUALIFICATION"
+    if code_review.get("status") == "MISSING":
+        return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"
+    if not _review_result_is_pass(code_review):
+        return "CODE_FAILED", "FIX_CODE_FINDINGS"
+    if security_review.get("status") == "MISSING":
+        return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
+    if not _review_result_is_pass(security_review):
+        return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
+    if (
+        not isinstance(risk, dict)
+        or risk.get("authority") != "repository-policy"
+        or risk.get("base_sha") != pr.get("base_sha")
+        or risk.get("head_sha") != pr.get("head_sha")
+        or risk.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or (
+            risk.get("pr") is not None
+            and risk.get("pr") != pr.get("number")
+        )
+        or not isinstance(risk.get("reasons"), list)
+        or not isinstance(risk.get("matched_capabilities"), list)
+        or not isinstance(risk.get("changed_files"), list)
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "LOW_RISK" and (
+        risk.get("analysis_complete") is not True
+        or not risk["changed_files"]
+        or risk["reasons"]
+        or risk["matched_capabilities"]
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
+        return "OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"
+    if (
+        risk["classification"] == "LOW_RISK"
+        and owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if merge_requirements is None:
+        return "BLOCKED", "REVALIDATE_MERGE_REQUIREMENTS"
+    failed = sorted(
+        name
+        for name in _PR_LOOP_MERGE_REQUIREMENTS
+        if merge_requirements.get(name) is not True
+    )
+    if failed:
+        return "BLOCKED", "RESOLVE_" + failed[0].upper()
+    return "MERGE_READY", "FINISH_PR"
 
 
 def _remote_ref_sha(ref: str) -> str:
@@ -7278,6 +9261,10 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 
 def finish_pr(base: str) -> int:
+    try:
+        _require_trusted_pr_execution()
+    except RuntimeError as exc:
+        return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
     if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
@@ -7372,41 +9359,123 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr ChatGPT CODE/SECURITY review gate not satisfied: {review_reason}")
     print(f"PASS finish-pr: {review_reason}")
 
-    protection = run(
-        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
-        check=False,
-        capture=True,
-    )
-    if protection.returncode:
-        active_rules = run(
-            [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
-            check=False,
-            capture=True,
-        )
-        if active_rules.returncode or not (active_rules.stdout or "").strip():
-            detail = (
-                active_rules.stderr
-                or active_rules.stdout
-                or protection.stderr
-                or protection.stdout
-                or ""
-            ).strip()
-            return fail(
-                f"finish-pr cannot prove branch protection/ruleset for {base_name}: "
-                f"{detail or 'GitHub API rejected protection queries'}"
-            )
+    try:
+        reviews, raw_owner_authorization = pull_request_authority_evidence(gh, number, head)
+        _owner_login, name_with_owner = _github_repository_identity(gh)
+        exact_pr = _github_pr_snapshot(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr cannot read PR authorities: {exc}")
+    if (
+        exact_pr.get("state") != "OPEN"
+        or exact_pr.get("draft")
+        or exact_pr.get("head_sha") != head
+        or exact_pr.get("base") != base_name
+        or exact_pr.get("base_sha") != _exact_commit_sha(base_ref)
+    ):
+        return fail("finish-pr exact PR/base/head authority changed during revalidation")
+    for kind in ("code", "security"):
+        if not _review_result_is_pass(reviews[kind]):
+            return fail(f"finish-pr {kind} authority changed during revalidation")
 
-    checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
-    if checks.returncode:
-        detail = "\n".join(filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()]))
-        if "no checks reported" not in detail.lower():
-            if detail:
-                print(detail, file=sys.stderr)
-            return fail(f"finish-pr required checks are not PASS for PR #{number}")
+    risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
+    print(
+        "PASS finish-pr: deterministic merge risk "
+        f"{risk['classification']} for exact head {head}"
+    )
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
+        return fail(
+            "finish-pr owner authorization missing for exact head; required command: "
+            + str(owner_authorization.get("command") or "")
+        )
+    if risk["classification"] == "LOW_RISK":
+        if owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY":
+            return fail("finish-pr low-risk owner boundary is not repository-policy-derived")
+        print("PASS finish-pr: owner authorization NOT_REQUIRED_BY_POLICY")
+    else:
+        print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
+
+    try:
+        unresolved_threads = _github_unresolved_review_threads(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr cannot prove review conversations resolved: {exc}")
+    if unresolved_threads:
+        return fail(
+            f"finish-pr requires all review conversations resolved; unresolved={unresolved_threads}"
+        )
+
+    # The helpers below retain the canonical GitHub `/protection`,
+    # `/rules/branches/`, and `gh pr checks --required` fail-closed behavior,
+    # including the explicit `no checks reported` exception.
+    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
+    if not protection_ok:
+        return fail(f"finish-pr {protection_reason}")
+
+    checks_ok, checks_reason = _github_required_checks_status(gh, number)
+    if not checks_ok:
+        return fail(f"finish-pr {checks_reason}")
+    if checks_reason == "no required checks configured":
         print(
             f"INFO finish-pr: no required GitHub checks configured for PR #{number}; "
             "exact PASS evidence and branch protection remain mandatory"
         )
+
+    final_fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=True)
+    if final_fetch.returncode:
+        return fail("finish-pr final revalidation cannot refresh origin")
+    try:
+        fresh_pr = _github_pr_snapshot(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr final PR revalidation failed: {exc}")
+    if (
+        fresh_pr.get("state") != "OPEN"
+        or fresh_pr.get("draft") is True
+        or fresh_pr.get("head_sha") != head
+        or fresh_pr.get("base") != base_name
+        or fresh_pr.get("base_sha") != _exact_commit_sha(base_ref)
+    ):
+        return fail("finish-pr PR state/head/base changed during final revalidation")
+    try:
+        fresh_reviews, fresh_raw_owner_authorization = pull_request_authority_evidence(
+            gh, number, head
+        )
+        fresh_unresolved_threads = _github_unresolved_review_threads(
+            gh, name_with_owner, number
+        )
+    except RuntimeError as exc:
+        return fail(f"finish-pr final authority revalidation failed: {exc}")
+    if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
+        return fail("finish-pr ChatGPT review authority changed during final revalidation")
+    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    if risk["classification"] == "LOW_RISK" and fresh_risk["classification"] != "LOW_RISK":
+        return fail(
+            "finish-pr risk changed from LOW_RISK to SENSITIVE; "
+            + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
+        )
+    fresh_owner_authorization = _owner_authorization_for_risk(
+        fresh_risk, fresh_raw_owner_authorization
+    )
+    if (
+        fresh_risk["classification"] == "SENSITIVE"
+        and fresh_owner_authorization.get("status") != "PASS"
+    ):
+        return fail("finish-pr owner authorization changed during final revalidation")
+    if (
+        fresh_risk["classification"] == "LOW_RISK"
+        and fresh_owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return fail("finish-pr low-risk owner boundary changed during final revalidation")
+    if fresh_unresolved_threads:
+        return fail(
+            "finish-pr review conversations changed during final revalidation; "
+            f"unresolved={fresh_unresolved_threads}"
+        )
+    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
+    if not protection_ok:
+        return fail(f"finish-pr final revalidation: {protection_reason}")
+    checks_ok, checks_reason = _github_required_checks_status(gh, number)
+    if not checks_ok:
+        return fail(f"finish-pr final revalidation: {checks_reason}")
 
     merge_method = str(policy["merge"]["method"])
     merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
@@ -7486,6 +9555,774 @@ def finish_pr(base: str) -> int:
         f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
     )
     return 0
+
+
+def _pr_loop_empty_result(pr_number: int) -> dict:
+    return {
+        "schema_version": 2,
+        "pr": pr_number,
+        "head_sha": "",
+        "head_branch": "",
+        "base": "",
+        "state": "GITHUB_UNAVAILABLE",
+        "review_kind": "",
+        "draft": False,
+        "qualification": {"status": "UNKNOWN", "source": "none"},
+        "code_review": {"status": "UNKNOWN", "head_sha": ""},
+        "security_review": {"status": "UNKNOWN", "head_sha": ""},
+        "risk": {
+            "classification": "UNKNOWN",
+            "authority": "repository-policy",
+            "head_sha": "",
+            "base_sha": "",
+            "reasons": [],
+            "matched_capabilities": [],
+            "changed_files": [],
+            "analysis_complete": False,
+        },
+        "risk_classification": "UNKNOWN",
+        "owner_authorization_required": True,
+        "owner_authorization": {"status": "UNKNOWN"},
+        "merge_mode": "OWNER_GATED",
+        "merge_ready": False,
+        "next_action": "RETRY",
+        "merge_result": "NOT_ATTEMPTED",
+        "cleanup_result": "NOT_ATTEMPTED",
+        "merge_commit_sha": "",
+        "blockers": [],
+    }
+
+
+def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
+    evidence = _valid_exact_evidence(base_ref, head_sha)
+    audit = _valid_performance_audit(base_ref, head_sha) if evidence is not None else None
+    if evidence is None or audit is None:
+        return {
+            "status": "MISSING",
+            "source": "none",
+            "head_sha": head_sha,
+        }
+    return {
+        "status": "PASS",
+        "source": "reused",
+        "head_sha": head_sha,
+        "evidence": str(evidence.relative_to(ROOT)),
+        "performance_audit": str(audit.relative_to(ROOT)),
+    }
+
+
+def _pr_loop_chatgpt_handoff(
+    snapshot: dict,
+    qualification: dict,
+    code_review: dict,
+    security_review: dict,
+    review_kind: str,
+) -> str:
+    """Build the canonical bounded handoff without creating review authority."""
+    import pr_monitor
+
+    base_sha = str(snapshot.get("base_sha") or "")
+    head_sha = str(snapshot.get("head_sha") or "")
+    if review_kind not in {"CODE", "SECURITY"}:
+        raise RuntimeError(f"unsupported pr-loop review kind: {review_kind!r}")
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError("cannot build ChatGPT handoff without an exact base SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError("cannot build ChatGPT handoff without an exact head SHA")
+    changed = run(
+        ["git", "diff", "--name-only", "-z", f"{base_sha}..{head_sha}"],
+        check=False,
+        capture=True,
+    )
+    if changed.returncode:
+        detail = (changed.stderr or changed.stdout or "").strip()
+        raise RuntimeError(detail or "cannot derive exact-SHA changed files for ChatGPT handoff")
+    files = sorted({path for path in (changed.stdout or "").split("\0") if path})
+
+    empty_state = {
+        "checks": {},
+        "review_decision": None,
+        "reviews": {},
+        "open_findings_count": 0,
+        "open_findings": {},
+        "chatgpt_review": {},
+        "mergeable": None,
+        "merge_state_status": None,
+        "is_draft": False,
+        "state": "OPEN",
+        "merged": False,
+    }
+    previous = {**empty_state, "head_sha": base_sha, "validated_verdict": ""}
+    if review_kind == "SECURITY":
+        previous.update(
+            {
+                "head_sha": head_sha,
+                "reviews": {"chatgpt-code": code_review},
+                "chatgpt_review": {"code": code_review},
+                "validated_verdict": "CODE_PASS",
+            }
+        )
+    reviews = {
+        "chatgpt-code": code_review,
+        "chatgpt-security": security_review,
+    }
+    blocking_findings = sum(
+        value
+        for value in (
+            code_review.get("blocking_findings"),
+            security_review.get("blocking_findings"),
+        )
+        if type(value) is int and value > 0
+    )
+    current = {
+        **empty_state,
+        "head_sha": head_sha,
+        "checks": {"qualification": qualification},
+        "reviews": reviews,
+        "open_findings_count": blocking_findings,
+        "chatgpt_review": {
+            "code": code_review,
+            "security": security_review,
+        },
+        "is_draft": bool(snapshot.get("draft")),
+        "state": str(snapshot.get("state") or ""),
+        "merged": bool(snapshot.get("merged")),
+        "exact_head_verified": True,
+    }
+    changes = pr_monitor.delta(previous, current)
+    handoff = pr_monitor.chatgpt_review_handoff(
+        int(snapshot["number"]),
+        previous,
+        current,
+        changes,
+        files,
+        review_kind=review_kind,
+    )
+    if not isinstance(handoff, str) or not handoff.strip():
+        raise RuntimeError("canonical ChatGPT handoff is empty")
+    if len(handoff.encode()) > pr_monitor.PROMPT_BUDGET_BYTES:
+        raise RuntimeError("canonical ChatGPT handoff exceeds its prompt budget")
+    if f'"current_head":"{head_sha}"' not in handoff:
+        raise RuntimeError("canonical ChatGPT handoff lost the exact head SHA")
+    if f'"review_kind":"{review_kind}"' not in handoff:
+        raise RuntimeError("canonical ChatGPT handoff lost the requested review kind")
+    return handoff
+
+
+def _pr_loop_open_pr_errors(pr: dict, name_with_owner: str) -> list[str]:
+    errors: list[str] = []
+    if pr.get("state") != "OPEN":
+        errors.append(f"PR state must be OPEN, got {pr.get('state')!r}")
+    if pr.get("draft"):
+        errors.append("draft PR is not eligible")
+    if pr.get("base") != "main":
+        errors.append(f"PR base must be main, got {pr.get('base')!r}")
+    if pr.get("head_repository") != name_with_owner:
+        errors.append(
+            f"PR head repository must be {name_with_owner}, got {pr.get('head_repository')!r}"
+        )
+    if re.fullmatch(r"[0-9a-f]{40}", str(pr.get("head_sha") or "")) is None:
+        errors.append("PR head SHA must be a full lowercase 40-character SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", str(pr.get("base_sha") or "")) is None:
+        errors.append("PR base SHA must be a full lowercase 40-character SHA")
+    if not str(pr.get("head_branch") or ""):
+        errors.append("PR head branch is missing")
+    return errors
+
+
+def _pr_loop_checkout_errors(pr: dict) -> list[str]:
+    errors: list[str] = []
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        errors.append("current implementation worktree must be clean")
+    current_head = git("rev-parse", "HEAD").strip()
+    if current_head != pr["head_sha"]:
+        errors.append(
+            f"checked-out HEAD {current_head} does not match PR head {pr['head_sha']}"
+        )
+    current_branch = git("branch", "--show-current").strip()
+    if current_branch != pr["head_branch"]:
+        errors.append(
+            f"checked-out branch {current_branch!r} does not match PR branch {pr['head_branch']!r}"
+        )
+    return errors
+
+
+def _pr_loop_merge_requirements(
+    gh: str,
+    name_with_owner: str,
+    pr: dict,
+    code_review: dict,
+    security_review: dict,
+) -> tuple[dict[str, bool], list[str]]:
+    requirements: dict[str, bool] = {
+        "unresolved_blocking_findings": (
+            _review_result_is_pass(code_review) and _review_result_is_pass(security_review)
+        ),
+    }
+    details: list[str] = []
+    current_main = _remote_ref_sha("origin/main")
+    base_lineage = bool(
+        current_main == pr["base_sha"]
+        and run(
+            ["git", "merge-base", "--is-ancestor", current_main, pr["head_sha"]],
+            check=False,
+            capture=True,
+        ).returncode
+        == 0
+    )
+    requirements["current_main_lineage"] = base_lineage
+    if not base_lineage:
+        details.append("PR head is not based on the current exact origin/main")
+    try:
+        unresolved = _github_unresolved_review_threads(gh, name_with_owner, pr["number"])
+    except RuntimeError as exc:
+        unresolved = -1
+        details.append(str(exc))
+    requirements["required_conversations"] = unresolved == 0
+    if unresolved > 0:
+        details.append(f"unresolved review conversations={unresolved}")
+
+    protection_ok, protection_reason = _github_branch_protection_status(gh, pr["base"])
+    requirements["branch_protection"] = protection_ok
+    if not protection_ok:
+        details.append(protection_reason)
+
+    checks_ok, checks_reason = _github_required_checks_status(gh, pr["number"])
+    requirements["required_checks"] = checks_ok
+    if not checks_ok:
+        details.append(checks_reason)
+
+    local_provenance = (
+        commit_provenance_check(pr["base_sha"], pr["head_sha"], quiet=True) == 0
+    )
+    remote_provenance = (
+        remote_commit_provenance_check(
+            gh, pr["base_sha"], pr["head_sha"], quiet=True
+        )
+        == 0
+    )
+    requirements["commit_provenance"] = local_provenance and remote_provenance
+    if not requirements["commit_provenance"]:
+        details.append("commit provenance is invalid or unavailable")
+    return requirements, details
+
+
+def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result, sort_keys=True))
+        return
+    print(f"PR #{result['pr']}")
+    print(f"HEAD {result.get('head_sha') or 'unknown'}")
+    print()
+    qualification = result["qualification"]
+    qualification_label = qualification.get("status", "UNKNOWN")
+    if qualification.get("source") in {"reused", "executed"}:
+        qualification_label += f" ({qualification['source']})"
+    print(f"qualification   {qualification_label}")
+    print(f"CODE            {result['code_review'].get('status', 'UNKNOWN')}")
+    print(f"SECURITY        {result['security_review'].get('status', 'UNKNOWN')}")
+    print(f"RISK            {result.get('risk_classification', 'UNKNOWN')}")
+    print(f"OWNER AUTH      {result['owner_authorization'].get('status', 'UNKNOWN')}")
+    print(f"MODE            {result.get('merge_mode', 'OWNER_GATED')}")
+    print()
+    print(f"STATE {result['state']}")
+    if result.get("merge_result") != "NOT_ATTEMPTED":
+        print(f"MERGE_RESULT {result['merge_result']}")
+    if result.get("cleanup_result") != "NOT_ATTEMPTED":
+        print(f"CLEANUP_RESULT {result['cleanup_result']}")
+    if result.get("blockers"):
+        for blocker in result["blockers"]:
+            print(f"BLOCKER {blocker}")
+    review_request = result.get("review_request")
+    if isinstance(review_request, dict):
+        print(
+            f"CHATGPT_REVIEW_REQUIRED review_kind={review_request['review_kind']} "
+            f"pr={review_request['pr']} head_sha={review_request['head_sha']}"
+        )
+        handoff = str(review_request.get("handoff") or "")
+        if handoff:
+            print("CHATGPT_REVIEW_HANDOFF " + handoff)
+    next_action = str(result.get("next_action") or "NONE")
+    if next_action == "OWNER_AUTHORIZATION":
+        print()
+        print(str(result["owner_authorization"].get("command") or ""))
+    elif next_action != "NONE":
+        print()
+        print(f"NEXT_ACTION={next_action}")
+        print(f"PR={result['pr']}")
+        if result.get("head_sha"):
+            print(f"SHA={result['head_sha']}")
+
+
+def _pr_loop_post_merge(
+    gh: str,
+    name_with_owner: str,
+    snapshot: dict,
+    result: dict,
+    *,
+    dry_run: bool,
+    json_output: bool,
+) -> int:
+    del gh, name_with_owner
+    result["state"] = "POST_MERGE_CLEANUP"
+    result["next_action"] = "POST_MERGE_CLEANUP"
+    result["merge_commit_sha"] = snapshot.get("merge_commit_sha", "")
+    if result["merge_result"] == "NOT_ATTEMPTED":
+        result["merge_result"] = "PASS" if snapshot.get("merged") else "NOT_ATTEMPTED"
+    merge_commit = str(snapshot.get("merge_commit_sha") or "")
+    if re.fullmatch(r"[0-9a-f]{40}", merge_commit) is None:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("GitHub merged PR has no valid merge commit SHA")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if dry_run:
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("post-merge cleanup requires a clean worktree")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
+    if fetch.returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("post-merge fetch failed")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if run(
+        ["git", "merge-base", "--is-ancestor", merge_commit, "origin/main"],
+        check=False,
+        capture=True,
+    ).returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("merge commit is not contained in current origin/main")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if git("branch", "--show-current").strip() != "main":
+        switch = run(["git", "switch", "main"], check=False, capture=json_output)
+        if switch.returncode:
+            result["cleanup_result"] = "FAIL"
+            result["blockers"].append("cannot switch to main for post-merge cleanup")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+    fast_forward = run(
+        ["git", "merge", "--ff-only", "origin/main"],
+        check=False,
+        capture=json_output,
+    )
+    if fast_forward.returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("main cannot fast-forward to origin/main")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    # This function is already executing from the exact-base repoctl module. Keep
+    # post-merge cleanup in-process so the target's switch to main does not create
+    # a fresh trusted context that is still bound to the former PR-head checkout.
+    if branch_cleanup(dry_run=False, fetch_remote=False):
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("canonical branch-cleanup failed")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["cleanup_result"] = "PASS"
+    result["state"] = "DONE"
+    result["next_action"] = "NONE"
+    _emit_pr_loop_result(result, json_output=json_output)
+    return 0
+
+
+def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False) -> int:
+    """Derive current PR delivery state and execute only its next authorized transition."""
+    result = _pr_loop_empty_result(pr_number)
+    if pr_number < 1:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "USE_VALID_PR_NUMBER"
+        result["blockers"].append("PR number must be a positive integer")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    try:
+        trusted_context = _require_trusted_pr_execution(pr_number=pr_number)
+    except RuntimeError as exc:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "USE_EXACT_BASE_CONTROLLER"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        result["blockers"].append("GitHub CLI missing")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    try:
+        policy = repository_delivery_policy()
+        if policy["pr_loop"]["state_persistence"] != "forbidden":
+            raise RuntimeError("pr-loop state persistence must remain forbidden")
+        owner_login, name_with_owner = _github_repository_identity(gh)
+        del owner_login
+        if not dry_run:
+            fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
+            if fetch.returncode:
+                raise RuntimeError("git fetch origin --prune failed")
+        initial = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        _require_trusted_pr_execution(
+            pr_number=initial["number"],
+            base_sha=initial["base_sha"],
+            head_sha=initial["head_sha"],
+        )
+    except RuntimeError as exc:
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    result.update(
+        {
+            "pr": initial["number"],
+            "head_sha": initial["head_sha"],
+            "head_branch": initial["head_branch"],
+            "base": initial["base"],
+            "draft": initial["draft"],
+            "merge_commit_sha": initial["merge_commit_sha"],
+        }
+    )
+    initial_head_sha = initial["head_sha"]
+    result["initial_head_sha"] = initial_head_sha
+
+    if initial.get("merged"):
+        return _pr_loop_post_merge(
+            gh,
+            name_with_owner,
+            initial,
+            result,
+            dry_run=dry_run,
+            json_output=json_output,
+        )
+
+    eligibility_errors = _pr_loop_open_pr_errors(initial, name_with_owner)
+    if eligibility_errors:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FIX_PR_ELIGIBILITY"
+        result["blockers"].extend(eligibility_errors)
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    checkout_errors = _pr_loop_checkout_errors(initial)
+    if checkout_errors:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "CHECKOUT_EXACT_PR_HEAD"
+        result["blockers"].extend(checkout_errors)
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    def refresh_authorities(snapshot: dict) -> None:
+        reviews, authorization = pull_request_authority_evidence(
+            gh, snapshot["number"], snapshot["head_sha"]
+        )
+        result["code_review"] = reviews["code"]
+        result["security_review"] = reviews["security"]
+        if all(_review_result_is_pass(reviews[kind]) for kind in ("code", "security")):
+            risk = classify_merge_risk(
+                snapshot["base_sha"], snapshot["head_sha"], snapshot["number"]
+            )
+            result["risk"] = risk
+            result["risk_classification"] = risk["classification"]
+            owner_required = risk["classification"] != "LOW_RISK"
+            result["owner_authorization_required"] = owner_required
+            result["merge_mode"] = "OWNER_GATED" if owner_required else "AUTO"
+            result["owner_authorization"] = _owner_authorization_for_risk(
+                risk, authorization
+            )
+        else:
+            result["owner_authorization"] = authorization
+
+    try:
+        result["qualification"] = _pr_loop_qualification(
+            initial["base_sha"], initial_head_sha
+        )
+        refresh_authorities(initial)
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    state, next_action = derive_pr_loop_state(
+        initial,
+        result["qualification"],
+        result["code_review"],
+        result["security_review"],
+        result["owner_authorization"],
+        risk=result["risk"],
+    )
+    if state == "QUALIFICATION_REQUIRED" and not dry_run:
+        try:
+            before_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        if before_qualification["head_sha"] != initial_head_sha:
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["current_head_sha"] = before_qualification["head_sha"]
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        qualification = run(
+            _controller_command(
+                "qualification-proof", "--base", before_qualification["base_sha"]
+            ),
+            check=False,
+            capture=json_output,
+        )
+        if qualification.returncode:
+            result["qualification"] = {
+                "status": "FAIL",
+                "source": "executed",
+                "head_sha": initial_head_sha,
+            }
+            result["state"] = "QUALIFICATION_FAILED"
+            result["next_action"] = "FIX_QUALIFICATION"
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"] = _pr_loop_qualification(
+            before_qualification["base_sha"], initial_head_sha
+        )
+        if result["qualification"]["status"] != "PASS":
+            result["state"] = "QUALIFICATION_FAILED"
+            result["next_action"] = "FIX_QUALIFICATION"
+            result["blockers"].append("qualification command did not produce valid exact-SHA proof")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"]["source"] = "executed"
+        try:
+            after_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+            if after_qualification["head_sha"] != initial_head_sha:
+                result["state"] = "HEAD_CHANGED"
+                result["next_action"] = "QUALIFICATION"
+                result["current_head_sha"] = after_qualification["head_sha"]
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
+            refresh_authorities(after_qualification)
+            initial = after_qualification
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        state, next_action = derive_pr_loop_state(
+            initial,
+            result["qualification"],
+            result["code_review"],
+            result["security_review"],
+            result["owner_authorization"],
+            risk=result["risk"],
+        )
+
+    if state in {
+        "QUALIFICATION_REQUIRED",
+        "CHATGPT_REVIEW_REQUIRED",
+        "CODE_FAILED",
+        "SECURITY_FAILED",
+        "OWNER_AUTH_REQUIRED",
+    }:
+        result["state"] = state
+        result["next_action"] = next_action
+        result["review_trigger"] = (
+            "scripts/pr_monitor.py:chatgpt_review_handoff"
+            if state == "CHATGPT_REVIEW_REQUIRED"
+            else "none"
+        )
+        if state == "CHATGPT_REVIEW_REQUIRED":
+            review_kind = (
+                "CODE"
+                if next_action == "CHATGPT_CODE_REVIEW"
+                else "SECURITY"
+            )
+            marker_kind = review_kind.lower()
+            result["review_kind"] = review_kind
+            try:
+                handoff = _pr_loop_chatgpt_handoff(
+                    initial,
+                    result["qualification"],
+                    result["code_review"],
+                    result["security_review"],
+                    review_kind,
+                )
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                result["state"] = "BLOCKED"
+                result["next_action"] = "FIX_CHATGPT_REVIEW_HANDOFF"
+                result["review_trigger"] = "unavailable"
+                result["blockers"].append(str(exc))
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
+            rerun_argv = [
+                sys.executable,
+                str(
+                    Path(trusted_context["trusted_root"])
+                    / "scripts/repository_delivery.py"
+                ),
+                "trusted-pr-transition",
+                "--target-root",
+                str(trusted_context["target_root"]),
+                "--pr",
+                str(result["pr"]),
+            ]
+            result["review_request"] = {
+                "event": "CHATGPT_REVIEW_REQUIRED",
+                "state": "CHATGPT_REVIEW_REQUIRED",
+                "provider": "ChatGPT",
+                "review_kind": review_kind,
+                "pr": result["pr"],
+                "head_sha": result["head_sha"],
+                "handoff": handoff,
+                "handoff_bytes": len(handoff.encode()),
+                "handoff_sha256": hashlib.sha256(handoff.encode()).hexdigest(),
+                "expected_marker": {
+                    "provider": "ChatGPT",
+                    "kind": marker_kind,
+                    "head_sha": result["head_sha"],
+                    "status": "PASS",
+                    "blocking_findings": 0,
+                },
+                "rerun": {
+                    "argv": rerun_argv,
+                    "command": shlex.join(rerun_argv),
+                    "controller_source": "exact-pr-base-sha",
+                    "after_valid_marker": True,
+                },
+                "verdict_authority": False,
+            }
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0 if state.endswith("_REQUIRED") else 1
+
+    if dry_run and result["owner_authorization"].get("status") in {
+        "PASS",
+        "NOT_REQUIRED_BY_POLICY",
+    }:
+        try:
+            merge_requirements, details = _pr_loop_merge_requirements(
+                gh,
+                name_with_owner,
+                initial,
+                result["code_review"],
+                result["security_review"],
+            )
+        except RuntimeError as exc:
+            merge_requirements, details = {}, [str(exc)]
+        result["merge_requirements"] = merge_requirements
+        result["blockers"].extend(details)
+        state, next_action = derive_pr_loop_state(
+            initial,
+            result["qualification"],
+            result["code_review"],
+            result["security_review"],
+            result["owner_authorization"],
+            merge_requirements,
+            risk=result["risk"],
+        )
+        result["state"] = state
+        result["next_action"] = next_action
+        result["merge_ready"] = state == "MERGE_READY"
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0 if state == "MERGE_READY" else 1
+
+    try:
+        if not dry_run:
+            final_fetch = run(
+                ["git", "fetch", "origin", "--prune"],
+                check=False,
+                capture=json_output,
+            )
+            if final_fetch.returncode:
+                raise RuntimeError("git fetch origin --prune failed during final revalidation")
+        before_merge = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        if before_merge["head_sha"] != initial_head_sha:
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["current_head_sha"] = before_merge["head_sha"]
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"] = _pr_loop_qualification(
+            before_merge["base_sha"], initial_head_sha
+        )
+        refresh_authorities(before_merge)
+        merge_requirements, details = _pr_loop_merge_requirements(
+            gh,
+            name_with_owner,
+            before_merge,
+            result["code_review"],
+            result["security_review"],
+        )
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["merge_requirements"] = merge_requirements
+    result["blockers"].extend(details)
+    state, next_action = derive_pr_loop_state(
+        before_merge,
+        result["qualification"],
+        result["code_review"],
+        result["security_review"],
+        result["owner_authorization"],
+        merge_requirements,
+        risk=result["risk"],
+    )
+    result["state"] = state
+    result["next_action"] = next_action
+    result["merge_ready"] = state == "MERGE_READY"
+    if state != "MERGE_READY":
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    finish = run(
+        _controller_command("finish-pr", "--base", "main"),
+        check=False,
+        capture=json_output,
+    )
+    try:
+        merged = _github_pr_snapshot(gh, name_with_owner, pr_number)
+    except RuntimeError as exc:
+        result["merge_result"] = "UNKNOWN"
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "VERIFY_MERGE_STATE"
+        if finish.returncode:
+            result["blockers"].append(
+                f"finish-pr exited {finish.returncode}; merge outcome requires GitHub re-read"
+            )
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if merged.get("merged") and merged.get("head_sha") == initial_head_sha:
+        result["merge_result"] = "PASS"
+        return _pr_loop_post_merge(
+            gh,
+            name_with_owner,
+            merged,
+            result,
+            dry_run=False,
+            json_output=json_output,
+        )
+    if finish.returncode:
+        result["merge_result"] = "FAIL"
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FIX_FINISH_PR"
+        result["blockers"].append(
+            "finish-pr exited nonzero and GitHub confirms the exact-head PR is not merged"
+        )
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if not merged.get("merged") or merged.get("head_sha") != initial_head_sha:
+        result["merge_result"] = "FAIL"
+        result["state"] = "BLOCKED"
+        result["next_action"] = "VERIFY_MERGE"
+        result["blockers"].append("GitHub merge state does not bind the initial exact head")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    raise AssertionError("unreachable merge state")
 
 
 def precommit() -> int:
@@ -7581,6 +10418,19 @@ def main() -> int:
     qtrace = sub.add_parser("qce-trace")
     qtrace.add_argument("--sector", default="")
     sub.add_parser("qce-check")
+    execution_properties = sub.add_parser("execution-properties")
+    execution_properties.add_argument("--matrix", action="store_true")
+    execution_properties.add_argument("--evidence", default="")
+    capabilities = sub.add_parser("capabilities")
+    capabilities.add_argument("--evidence", default="")
+    capabilities.add_argument("--output", default=".context/evidence/effective-capabilities.yaml")
+    capabilities.add_argument("--tool", default="")
+    capabilities.add_argument("--property", dest="property_name", default="")
+    capabilities.add_argument(
+        "--status", choices=["unsupported", "available", "configured", "verified", "proven", "not-proven"], default=""
+    )
+    capabilities.add_argument("--scope", default="")
+    capabilities.add_argument("--format", choices=["summary", "json", "yaml"], default="summary")
     metrics = sub.add_parser("engineering-metrics")
     metrics.add_argument("--input", required=True)
     metrics.add_argument("--output", default="")
@@ -7624,6 +10474,7 @@ def main() -> int:
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
+    v.add_argument("--profile", choices=("static", "tekton", "developer-wsl2", "runtime", "full"), default="full")
     gl = sub.add_parser("global-check")
     gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -7678,6 +10529,10 @@ def main() -> int:
     dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
+    loop = sub.add_parser("pr-loop")
+    loop.add_argument("--pr", required=True, type=int)
+    loop.add_argument("--dry-run", action="store_true")
+    loop.add_argument("--json", action="store_true")
     fin = sub.add_parser("finish-pr")
     fin.add_argument("--base", default=os.environ.get("BASE", "main"))
     bdlv = sub.add_parser("bundle-deliver")
@@ -7831,7 +10686,7 @@ def main() -> int:
             print(json.dumps(comps) if args.json else "\n".join(comps))
             return 0
         if args.cmd == "verify-change":
-            return verify_change(args.base, args.head)
+            return verify_change(args.base, args.head, args.profile)
         if args.cmd == "global-check":
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
@@ -7921,6 +10776,14 @@ def main() -> int:
             return qce_status_command(json_output=True, sector=args.sector, trace=True)
         if args.cmd == "qce-check":
             return qce_check_command()
+        if args.cmd == "execution-properties":
+            return execution_properties_check(matrix=args.matrix, evidence_path=args.evidence)
+        if args.cmd == "capabilities":
+            return capabilities_command(
+                evidence=args.evidence, output=args.output, tool=args.tool,
+                property_name=args.property_name, status=args.status, scope=args.scope,
+                output_format=args.format,
+            )
         if args.cmd == "engineering-metrics":
             return engineering_metrics_command(args.input, args.output)
         if args.cmd == "security-datasets-sync":
@@ -7950,6 +10813,8 @@ def main() -> int:
             return publish(args.base, args.message)
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
+        if args.cmd == "pr-loop":
+            return pr_loop(args.pr, dry_run=args.dry_run, json_output=args.json)
         if args.cmd == "finish-pr":
             return finish_pr(args.base)
         if args.cmd == "bundle-deliver":
@@ -7979,6 +10844,7 @@ def main() -> int:
                     ],
                     head=args.head,
                     authoritative=True,
+                    execution_profile="tekton",
                 )
             return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":
@@ -8002,6 +10868,7 @@ def main() -> int:
                     ],
                     head=args.head,
                     authoritative=True,
+                    execution_profile="tekton",
                 )
             return ci_component(args.component, args.base, args.head, args.record_dir)
         if args.cmd == "ci-finalize":

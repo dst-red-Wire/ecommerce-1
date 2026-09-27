@@ -23,6 +23,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=root, check=True)
         (root / ".gitignore").write_text(".context/\n", encoding="utf-8")
         (root / "README.md").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
@@ -31,11 +32,11 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
-            'ci: workspace-check signing-rotation-check ## Run global + affected repository CI and cache promotable worktree evidence\n\t@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE',
+            'ci: workspace-check signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates\n\t@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE',
             MAKEFILE,
         )
         self.assertIn(
-            "ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks",
+            'ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required when affected)\n\t@$(PYTHON) scripts/repoctl.py verify-change --profile full --base "$${BASE:-origin/main}" --head WORKTREE',
             MAKEFILE,
         )
         expected_ci_global = (
@@ -151,6 +152,16 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+                mock.patch.object(
+                    REPOCTL,
+                    "qualification_execution_policy",
+                    return_value={
+                        "qualification_profiles": {
+                            "full": {"merge_authoritative": True},
+                            "static": {"merge_authoritative": False},
+                        }
+                    },
+                ),
             ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
@@ -172,6 +183,8 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 2.0}],
                     "verification": {
                         "mode": "worktree",
+                        "execution_profile": "full",
+                        "runtime_scope": [],
                         "source_head_sha": base,
                         "source_tree_sha": tree,
                         "tree_stable": True,
@@ -179,6 +192,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 }
                 (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 self.assertIsNotNone(REPOCTL._load_promotable_worktree_evidence(base))
+                evidence["verification"]["execution_profile"] = "static"
+                (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
+                self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                evidence["verification"]["execution_profile"] = "full"
+                evidence["verification"].pop("runtime_scope")
+                (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
+                self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
+                evidence["verification"]["runtime_scope"] = []
+                (evidence_dir / "worktree.json").write_text(json.dumps(evidence), encoding="utf-8")
                 (root / "README.md").write_text("changed after validation\n", encoding="utf-8")
                 self.assertIsNone(REPOCTL._load_promotable_worktree_evidence(base))
 
@@ -195,6 +217,15 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 mock.patch.object(REPOCTL, "CONTEXT", context),
                 mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
                 mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+                mock.patch.object(
+                    REPOCTL,
+                    "qualification_execution_policy",
+                    return_value={
+                        "qualification_profiles": {
+                            "full": {"merge_authoritative": True}
+                        }
+                    },
+                ),
             ):
                 tree = REPOCTL.worktree_tree_sha()
                 evidence = {
@@ -224,6 +255,8 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     ],
                     "verification": {
                         "mode": "worktree",
+                        "execution_profile": "full",
+                        "runtime_scope": [],
                         "source_head_sha": base,
                         "source_tree_sha": tree,
                         "tree_stable": True,
@@ -235,6 +268,9 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
                 subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+                candidate["verification"]["execution_profile"] = "static"
+                self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, candidate))
+                candidate["verification"]["execution_profile"] = "full"
                 promoted_path = REPOCTL._promote_worktree_evidence(base, head, candidate)
                 self.assertIsNotNone(promoted_path)
                 promoted = json.loads(promoted_path.read_text(encoding="utf-8"))
@@ -243,6 +279,8 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 self.assertEqual(head, promoted["head_sha"])
                 self.assertEqual(base, promoted["base_sha"])
                 self.assertEqual("promoted-worktree", promoted["verification"]["mode"])
+                self.assertEqual("full", promoted["verification"]["execution_profile"])
+                self.assertEqual([], promoted["verification"]["runtime_scope"])
                 self.assertEqual(tree, promoted["verification"]["commit_tree_sha"])
                 self.assertEqual(0, promoted["metrics"]["executed_gates"])
                 self.assertEqual(1, promoted["metrics"]["reused_gates"])

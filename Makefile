@@ -13,7 +13,7 @@ endif
 workspace-check:
 	@$(PYTHON) scripts/repoctl.py workspace-check
 
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix capabilities security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -39,10 +39,11 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: workspace-check signing-rotation-check ## Run global + affected repository CI and cache promotable worktree evidence
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+ci: workspace-check signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates
+	@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
+ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required when affected)
+	@$(PYTHON) scripts/repoctl.py verify-change --profile full --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-global: ## Run canonical global gates through the central execution planner
 	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
@@ -110,6 +111,15 @@ qce-status: ## Render the derived nine-sector QCE status projection
 qce-check: ## Validate QCE traceability, closed statuses and derived labels
 	@$(PYTHON) scripts/repoctl.py qce-check
 
+execution-properties: ## Validate the canonical execution-properties authority and implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties
+
+execution-properties-matrix: ## Render the execution-properties matrix from the implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties --matrix
+
+capabilities: ## Resolve scoped effective tool capabilities from exact-SHA evidence
+	@$(PYTHON) scripts/repoctl.py capabilities
+
 security-datasets-sync: ## Explicitly refresh verified KEV/EPSS snapshots outside qualification
 	@$(PYTHON) scripts/repoctl.py security-datasets-sync --output "$${OUTPUT:-.context/security-datasets}"
 
@@ -170,7 +180,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver pr-loop finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -214,8 +224,13 @@ publish-change: ## Canonical alias: qualify, commit and push the current feature
 deliver: signing-rotation-check ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-finish-pr: signing-rotation-check ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
-	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
+pr-loop: ## Run from TRUSTED_ROOT checked out cleanly at the PR BASE_SHA; PR required
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@$(PYTHON) "$(TRUSTED_ROOT)/scripts/repository_delivery.py" trusted-pr-transition --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+
+finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
+	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2
+	@exit 1
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
 	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"

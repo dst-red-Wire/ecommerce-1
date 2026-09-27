@@ -184,6 +184,7 @@ class BundleDeliveryTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, check=True)
         (path / "README.md").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
         subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, capture_output=True, text=True)
@@ -247,6 +248,106 @@ class BundleDeliveryTests(unittest.TestCase):
             self.assertNotEqual(source, seen["cwd"])
             self.assertIn(str(trusted), seen["cmd"])
             self.assertEqual(str(trusted), seen["env"]["REPOCTL_TRUSTED_CONTROLLER"])
+
+    def test_trusted_pr_transition_ignores_head_wrapper_and_controller(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            trusted = td / "trusted"
+            self.init_repo(trusted)
+            (trusted / "scripts").mkdir()
+            trusted_wrapper = trusted / "scripts/repository_delivery.py"
+            trusted_controller = trusted / "scripts/repoctl.py"
+            trusted_wrapper.write_text("# trusted wrapper\n", encoding="utf-8")
+            trusted_controller.write_text(
+                "print('OWNER_AUTH_REQUIRED')\nraise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "scripts"], cwd=trusted, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "trusted delivery boundary"],
+                cwd=trusted,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            base_sha = self.git(trusted, "rev-parse", "HEAD")
+
+            target = td / "target"
+            subprocess.run(
+                ["git", "clone", str(trusted), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"], cwd=target, check=True
+            )
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "switch", "-c", "feat/tamper"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            marker = target / "head-controller-ran"
+            (target / "scripts/repository_delivery.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('wrapper')\n",
+                encoding="utf-8",
+            )
+            (target / "scripts/repoctl.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('controller')\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "scripts"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "tamper with head delivery"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            head_sha = self.git(target, "rev-parse", "HEAD")
+            binding = {
+                "number": 162,
+                "state": "OPEN",
+                "isDraft": False,
+                "baseRefName": "main",
+                "baseRefOid": base_sha,
+                "headRefName": "feat/tamper",
+                "headRefOid": head_sha,
+            }
+            seen = {}
+            real_run = RD._run
+
+            def recording_run(cmd, *, cwd, check=True, capture=False, env=None):
+                if str(trusted_controller) in cmd:
+                    seen["cmd"] = list(cmd)
+                    seen["cwd"] = Path(cwd)
+                    seen["env"] = dict(env or {})
+                return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
+
+            with (
+                mock.patch.object(RD, "__file__", str(trusted_wrapper)),
+                mock.patch.object(RD, "require_command", return_value="gh"),
+                mock.patch.object(RD, "_github_pr_binding", return_value=binding),
+                mock.patch.object(RD, "_github_repository", return_value="owner/repo"),
+                mock.patch.object(RD, "_run", side_effect=recording_run),
+            ):
+                rc = RD.trusted_pr_transition(
+                    trusted,
+                    target,
+                    162,
+                    "python3",
+                )
+
+            self.assertEqual(1, rc)
+            self.assertFalse(marker.exists(), "the PR-head delivery code must never execute")
+            self.assertEqual(target, seen["cwd"])
+            self.assertEqual(str(trusted_controller), seen["cmd"][2])
+            self.assertEqual(base_sha, seen["env"]["REPOCTL_TRUSTED_BASE_SHA"])
+            self.assertEqual(head_sha, seen["env"]["REPOCTL_TRUSTED_HEAD_SHA"])
 
 
 class RemoteStatusTests(unittest.TestCase):
