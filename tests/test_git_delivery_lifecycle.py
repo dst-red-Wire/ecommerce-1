@@ -22,6 +22,17 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
         self.assertEqual("forbidden", policy["pr_loop"]["state_persistence"])
+        self.assertEqual(
+            "repository-policy-with-sensitive-owner-boundary",
+            repoctl.pull_request_review_policy()["agent_execution_fallback"][
+                "merge_decision_authority"
+            ],
+        )
+        self.assertEqual(2, policy["pr_loop"]["schema_version"])
+        self.assertEqual("scripts/repository_delivery.py", policy["pr_loop"]["controller"])
+        self.assertEqual("exact-pr-base-sha", policy["pr_loop"]["controller_source"])
+        self.assertEqual("trusted-pr-transition", policy["pr_loop"]["command"])
+        self.assertEqual("forbidden", policy["pr_loop"]["direct_head_controller"])
         handoff = policy["pr_loop"]["chatgpt_handoff"]
         self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
@@ -46,11 +57,23 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             policy["pr_loop"]["comment_evidence"],
         )
         self.assertEqual("forbidden", policy["pr_loop"]["owner_boundary"]["automatic_generation"])
+        self.assertEqual("risk-based", policy["pr_loop"]["owner_boundary"]["mode"])
         self.assertTrue(policy["pr_loop"]["owner_boundary"]["unique_human_interruption"])
         self.assertEqual(
             "required",
             policy["pr_loop"]["owner_boundary"]["automatic_rerun_after_authorization"],
         )
+        risk = policy["pr_loop"]["risk_classification"]
+        self.assertEqual("repository-policy", risk["authority"])
+        self.assertEqual("scripts/merge_risk.py#classify_merge_risk", risk["implementation"])
+        self.assertEqual("exact-pr-base-sha", risk["controller_source"])
+        self.assertEqual("sensitive", risk["bootstrap_without_controller"])
+        self.assertEqual("forbidden", risk["head_controller_execution"])
+        self.assertEqual("exact-pr-base-sha", risk["policy_source"])
+        self.assertEqual("forbidden", risk["llm_decision"])
+        self.assertEqual("sensitive", risk["unknown_or_ambiguous"])
+        self.assertEqual("sensitive", risk["partial_analysis"])
+        self.assertEqual("sensitive", risk["git_error"])
         self.assertEqual("MERGE_READY", policy["pr_loop"]["merge_delegation"]["state"])
         self.assertEqual("finish-pr", policy["pr_loop"]["merge_delegation"]["command"])
         self.assertEqual(
@@ -121,17 +144,42 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
 
     def test_pr_loop_policy_drift_is_rejected(self):
         policy = repoctl.repository_delivery_policy()
-        mutated = copy.deepcopy(policy)
-        mutated["pr_loop"]["merge_delegation"]["direct_merge"] = "allowed"
-        with self.assertRaisesRegex(RuntimeError, "pr-loop"):
-            repoctl._validate_repository_delivery_policy(mutated)
+        mutations = (
+            lambda value: value["pr_loop"]["merge_delegation"].__setitem__("direct_merge", "allowed"),
+            lambda value: value["pr_loop"].__setitem__("controller_source", "pull-request-head"),
+            lambda value: value["pr_loop"].__setitem__("direct_head_controller", "allowed"),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__("llm_decision", "allowed"),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__(
+                "controller_source", "pull-request-head"
+            ),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__(
+                "head_controller_execution", "allowed"
+            ),
+            lambda value: value["pr_loop"]["risk_classification"]["low_risk"].__setitem__(
+                "eligible_paths", ["**"]
+            ),
+            lambda value: value["pr_loop"]["risk_classification"]["sensitive"][
+                "capabilities"
+            ]["iam"]["paths"].remove("services/**/oauth/**"),
+            lambda value: value["pr_loop"]["risk_classification"]["sensitive"][
+                "capabilities"
+            ].pop("governance"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                mutated = copy.deepcopy(policy)
+                mutate(mutated)
+                with self.assertRaisesRegex(RuntimeError, "pr-loop"):
+                    repoctl._validate_repository_delivery_policy(mutated)
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("publish-change:", makefile)
         self.assertIn("scripts/repoctl.py publish-change", makefile)
+        self.assertIn("trusted-pr-transition", makefile)
+        self.assertIn("TRUSTED_ROOT", makefile)
         self.assertIn("finish-pr:", makefile)
-        self.assertIn("scripts/repoctl.py finish-pr", makefile)
+        self.assertIn("finish-pr is internal", makefile)
 
 
 if __name__ == "__main__":

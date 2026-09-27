@@ -56,17 +56,9 @@ pull_request_review:
     codex_output_role: evidence-for-chatgpt
     code_security_review_authority: ChatGPT-only
     merge_readiness_authority: ChatGPT-only
-    merge_decision_authority: repository-owner
+    merge_decision_authority: repository-policy-with-sensitive-owner-boundary
     codex_review_markers: forbidden
     codex_merge_decision: forbidden
-
-  human_gate:
-    required_for:
-      - architecture_changes
-      - infrastructure_apply
-      - destructive_changes
-      - state_migrations
-      - dns_network_iam_secret_changes
 
 repository_delivery:
   forge: github
@@ -123,24 +115,33 @@ repository_delivery:
     record_after_merge: retained-by-forge
 
   pr_loop:
-    schema_version: 1
-    controller: scripts/repoctl.py
-    command: pr-loop
+    schema_version: 2
+    controller: scripts/repository_delivery.py
+    controller_source: exact-pr-base-sha
+    command: trusted-pr-transition
+    target_worktree: exact-pr-head-clean-checkout
+    direct_head_controller: forbidden
+    bootstrap_without_controller: explicit-repository-owner
     state_persistence: forbidden
     state_sources:
       - github-current-pull-request
       - github-current-exact-head-sha
       - exact-sha-qualification-evidence
       - chatgpt-exact-sha-review-comments
+      - exact-sha-deterministic-risk-classification
       - owner-authorization-comment
       - github-merge-and-protection-state
       - finish-pr-and-branch-cleanup-contracts
     transition_order:
+      - exact-pr-head
       - qualification
       - chatgpt-code
       - chatgpt-security
-      - owner-authorization
+      - deterministic-risk-classification
+      - owner-authorization-if-required
+      - merge-requirements
       - finish-pr
+      - merge-verification
       - post-merge-cleanup
     exact_sha:
       binding: required
@@ -186,6 +187,7 @@ repository_delivery:
       owner_authorization_match: whole-trimmed-comment
     owner_boundary:
       authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+      mode: risk-based
       scope: pr-<number>
       source: github-pr-comment-by-repository-owner
       latest_scope_authorization_wins: true
@@ -193,6 +195,196 @@ repository_delivery:
       automatic_generation: forbidden
       unique_human_interruption: true
       automatic_rerun_after_authorization: required
+      required_for:
+        - governance
+        - delivery-authority
+        - branch-protection
+        - infrastructure-apply
+        - destructive-operation
+        - state-migration
+        - iam
+        - secrets
+        - network
+        - dns
+        - signing-or-provenance-policy
+        - security-policy
+        - artifact-publication-authority
+      low_risk:
+        authorization: not-required-by-policy
+      sensitive:
+        authorization: explicit-repository-owner
+    risk_classification:
+      authority: repository-policy
+      implementation: scripts/merge_risk.py#classify_merge_risk
+      controller_source: exact-pr-base-sha
+      bootstrap_without_controller: sensitive
+      head_controller_execution: forbidden
+      policy_source: exact-pr-base-sha
+      model: deterministic-capabilities-and-paths
+      llm_decision: forbidden
+      exact_sha_binding: required
+      self_modification: sensitive
+      unknown_or_ambiguous: sensitive
+      partial_analysis: sensitive
+      git_error: sensitive
+      classifications: [LOW_RISK, SENSITIVE]
+      required_inputs:
+        - pr
+        - base_sha
+        - head_sha
+        - changed_files
+        - resolved_capabilities
+      low_risk:
+        authorization: not-required-by-policy
+        merge_mode: AUTO
+        eligible_paths:
+          - services/**
+          - frontend/**
+          - contracts/openapi/**
+          - contracts/proto/**
+          - tests/**
+          - docs/**
+          - README.md
+          - CONTRIBUTING.md
+          - LICENSE
+          - .gitignore
+          - .gitattributes
+          - go.work
+          - '**/go.mod'
+          - '**/go.sum'
+          - MODULE.bazel
+          - MODULE.bazel.lock
+          - BUILD.bazel
+      sensitive:
+        authorization: explicit-repository-owner
+        merge_mode: OWNER_GATED
+        capabilities:
+          governance:
+            paths:
+              - architecture.lock.yaml
+              - AGENTS.md
+              - config/contracts/review-policy.yaml
+              - config/contracts/repository-authority-model.yaml
+              - scripts/architecture_authority.py
+              - docs/architecture/**
+          delivery-authority:
+            paths:
+              - scripts/merge_risk.py
+              - scripts/repoctl.py
+              - scripts/pr_monitor.py
+              - scripts/repository_delivery.py
+              - Makefile
+              - .github/workflows/**
+            content_paths: [scripts/**, Makefile, .github/**, config/**]
+            content_patterns:
+              - 'finish-pr|pr-loop|gh\s+pr\s+merge|merge[_ -]authority|review[_ -]authority'
+          branch-protection:
+            paths: [.github/CODEOWNERS, .github/rulesets/**]
+            content_paths: [.github/**, scripts/**, config/**]
+            content_patterns:
+              - 'branch[_ -]protection|required[_ -]checks|repository[_ -]rules|ruleset|github[_ -]permissions'
+          infrastructure-apply:
+            paths:
+              - platform/terraform/**
+              - platform/ansible/**
+              - platform/kubernetes/**
+              - platform/fleet/**
+              - platform/helm/**
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:tofu|terraform)\s+apply\b|\bansible-playbook\b|\bkubectl\s+(?:apply|delete|patch)\b|\bhelm\s+upgrade\b'
+          destructive-operation:
+            paths: [scripts/branch_cleanup.py, scripts/signing_rotation.py]
+            content_paths: [scripts/**, services/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\bgit\s+push\b[^\n]*--delete|\bgit\s+branch\b[^\n]*-[dD]\b|\brm\s+-rf\b|\bos\.RemoveAll\b|\b(?:drop|truncate)\s+(?:table|database)\b|\bdestroy\b'
+          state-migration:
+            paths: ['**/migrations/**', '**/migration/**']
+            content_paths: [services/**, platform/**, scripts/**]
+            content_patterns:
+              - '\b(?:drop|alter|truncate)\s+(?:table|column|database)\b|\bschema\s+migration\b'
+          iam:
+            paths:
+              - config/contracts/identity-boundary-policy.yaml
+              - config/contracts/service-authz-policy.yaml
+              - platform/**/keycloak/**
+              - platform/**/spire/**
+              - platform/**/rbac/**
+              - services/**/auth/**
+              - services/**/authentication/**
+              - services/**/authorization/**
+              - services/**/security/**
+              - services/**/oidc/**
+              - services/**/oauth/**
+              - services/**/jwt/**
+              - services/**/session/**
+              - services/**/*auth*
+              - services/**/*security*
+              - services/**/*oidc*
+              - services/**/*oauth*
+              - services/**/*jwt*
+              - services/**/*session*
+            content_paths: [services/**, frontend/**, platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:iam|rbac|rolebinding|clusterrole|permission|authorization)\b'
+          secrets:
+            paths:
+              - config/contracts/secret-delivery-policy.yaml
+              - '**/.sops.yaml'
+              - platform/**/openbao/**
+              - platform/**/external-secrets/**
+              - platform/**/*secret*
+            content_paths: [services/**, frontend/**, platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:openbao|external.?secrets|sops|credential|secret[_ -]authority)\b'
+          network:
+            paths:
+              - config/contracts/egress-policy.yaml
+              - config/contracts/traffic-class-policy.yaml
+              - config/contracts/mgmt-wireguard-access.yaml
+              - config/infrastructure/network-plan.yaml
+              - platform/**/cilium/**
+              - platform/**/*network*
+              - docs/architecture/NETWORK_*
+              - docs/architecture/MGMT_WIREGUARD_ACCESS.md
+            content_paths: [platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:firewall|routing|wireguard|cilium|networkpolicy)\b'
+          dns:
+            paths:
+              - config/contracts/dns-authority-policy.yaml
+              - platform/**/*dns*
+            content_paths: [platform/**, config/**, scripts/**]
+            content_patterns:
+              - '\b(?:dns|dnsrecord|nameserver)\b'
+          signing-or-provenance-policy:
+            paths:
+              - scripts/check_automation_signing.py
+              - scripts/signing_rotation.py
+              - docs/engineering/AUTOMATION_SIGNING.md
+              - config/contracts/ci-evidence.yaml
+              - config/contracts/toolchain-lock.json
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:cosign|provenance|signature|signing|sbom|attestation)\b'
+          security-policy:
+            paths:
+              - SECURITY.md
+              - config/contracts/security-scan-policy.yaml
+              - config/contracts/security-trust-zones.yaml
+              - scripts/security_policy.py
+              - scripts/cve_policy.py
+            content_paths: [scripts/**, platform/**, config/**]
+            content_patterns:
+              - '\b(?:scanner.?bypass|cve.?policy|security.?exception|blocking.?policy)\b'
+          artifact-publication-authority:
+            paths:
+              - config/contracts/progressive-delivery-policy.yaml
+              - platform/tekton/**
+              - platform/fleet/**
+            content_paths: [scripts/**, platform/**, config/**, Makefile]
+            content_patterns:
+              - '\b(?:publish|promotion|release.?authority|artifact.?publication|harbor)\b'
     merge_delegation:
       state: MERGE_READY
       command: finish-pr

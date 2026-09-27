@@ -20,6 +20,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -1043,6 +1044,105 @@ def ruby_yaml(path: str) -> dict:
     if not source.is_absolute():
         source = ROOT / source
     return qualification_cache.psych_load(source)
+
+
+_TRUSTED_PR_EXECUTION_CONTEXT: dict[str, object] | None = None
+
+
+def _trusted_pr_execution_context(*, required: bool = False) -> dict[str, object] | None:
+    """Validate the exact-base wrapper environment before trusting delivery policy."""
+    global _TRUSTED_PR_EXECUTION_CONTEXT
+    if _TRUSTED_PR_EXECUTION_CONTEXT is not None:
+        return _TRUSTED_PR_EXECUTION_CONTEXT
+    names = (
+        "REPOCTL_TRUSTED_WRAPPER",
+        "REPOCTL_TRUSTED_CONTROLLER",
+        "REPOCTL_TRUSTED_POLICY_ROOT",
+        "REPOCTL_TRUSTED_BASE_SHA",
+        "REPOCTL_TRUSTED_TARGET_ROOT",
+        "REPOCTL_TRUSTED_HEAD_SHA",
+        "REPOCTL_TRUSTED_PR_NUMBER",
+    )
+    values = {name: os.environ.get(name, "").strip() for name in names}
+    if not any(values.values()):
+        if required:
+            raise RuntimeError(
+                "delivery requires scripts/repository_delivery.py trusted-pr-transition "
+                "from a clean exact-base checkout"
+            )
+        return None
+    if not all(values.values()):
+        raise RuntimeError("trusted PR execution context is incomplete")
+
+    trusted_root = Path(values["REPOCTL_TRUSTED_POLICY_ROOT"]).resolve()
+    target_root = Path(values["REPOCTL_TRUSTED_TARGET_ROOT"]).resolve()
+    wrapper = Path(values["REPOCTL_TRUSTED_WRAPPER"]).resolve()
+    controller = Path(values["REPOCTL_TRUSTED_CONTROLLER"]).resolve()
+    base_sha = values["REPOCTL_TRUSTED_BASE_SHA"]
+    head_sha = values["REPOCTL_TRUSTED_HEAD_SHA"]
+    pr_number = values["REPOCTL_TRUSTED_PR_NUMBER"]
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise RuntimeError("trusted PR base SHA is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise RuntimeError("trusted PR head SHA is invalid")
+    if not pr_number.isdigit() or int(pr_number) < 1:
+        raise RuntimeError("trusted PR number is invalid")
+    if wrapper != trusted_root / "scripts/repository_delivery.py":
+        raise RuntimeError("trusted PR wrapper is outside the exact-base checkout")
+    if controller != trusted_root / "scripts/repoctl.py":
+        raise RuntimeError("trusted PR controller is outside the exact-base checkout")
+    if Path(__file__).resolve() != controller:
+        raise RuntimeError("delivery is not executing the exact-base trusted controller")
+    if target_root != ROOT.resolve():
+        raise RuntimeError("trusted PR target does not match the active worktree")
+    trusted_head = output(["git", "-C", str(trusted_root), "rev-parse", "HEAD"]).strip()
+    if trusted_head != base_sha:
+        raise RuntimeError("trusted controller checkout does not match the exact PR base")
+    if output(
+        ["git", "-C", str(trusted_root), "status", "--porcelain", "--untracked-files=all"]
+    ).strip():
+        raise RuntimeError("trusted exact-base controller checkout is dirty")
+    target_head = git("rev-parse", "HEAD").strip()
+    if target_head != head_sha:
+        raise RuntimeError("target worktree does not match the exact PR head")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        raise RuntimeError("target exact-head worktree is dirty")
+    _TRUSTED_PR_EXECUTION_CONTEXT = {
+        "trusted_root": trusted_root,
+        "target_root": target_root,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "pr_number": int(pr_number),
+    }
+    return _TRUSTED_PR_EXECUTION_CONTEXT
+
+
+def _require_trusted_pr_execution(
+    *,
+    pr_number: int | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> dict[str, object]:
+    context = _trusted_pr_execution_context(required=True)
+    assert context is not None
+    expected = {
+        "pr_number": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    }
+    for field, value in expected.items():
+        if value is not None and context[field] != value:
+            raise RuntimeError(
+                f"trusted PR {field.replace('_', ' ')} mismatch: "
+                f"expected {context[field]}, got {value}"
+            )
+    return context
+
+
+def _review_policy_document() -> dict:
+    context = _trusted_pr_execution_context()
+    policy_root = Path(context["trusted_root"]) if context else ROOT
+    return ruby_yaml(str(policy_root / "config/contracts/review-policy.yaml"))
 
 
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
@@ -7336,6 +7436,247 @@ def _validate_commit_provenance_policy(policy: object) -> dict:
     return copy.deepcopy(policy)
 
 
+MERGE_RISK_CAPABILITIES = (
+    "governance",
+    "delivery-authority",
+    "branch-protection",
+    "infrastructure-apply",
+    "destructive-operation",
+    "state-migration",
+    "iam",
+    "secrets",
+    "network",
+    "dns",
+    "signing-or-provenance-policy",
+    "security-policy",
+    "artifact-publication-authority",
+)
+MERGE_RISK_CONTROLLER_PATH = "scripts/merge_risk.py"
+
+
+def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
+    """Validate the fail-closed repository policy before it can classify any PR."""
+    if not isinstance(policy, dict) or not isinstance(owner_boundary, dict):
+        return False
+    if set(policy) != {
+        "authority",
+        "implementation",
+        "controller_source",
+        "bootstrap_without_controller",
+        "head_controller_execution",
+        "policy_source",
+        "model",
+        "llm_decision",
+        "exact_sha_binding",
+        "self_modification",
+        "unknown_or_ambiguous",
+        "partial_analysis",
+        "git_error",
+        "classifications",
+        "required_inputs",
+        "low_risk",
+        "sensitive",
+    }:
+        return False
+    if any(
+        (
+            policy.get("authority") != "repository-policy",
+            policy.get("implementation") != "scripts/merge_risk.py#classify_merge_risk",
+            policy.get("controller_source") != "exact-pr-base-sha",
+            policy.get("bootstrap_without_controller") != "sensitive",
+            policy.get("head_controller_execution") != "forbidden",
+            policy.get("policy_source") != "exact-pr-base-sha",
+            policy.get("model") != "deterministic-capabilities-and-paths",
+            policy.get("llm_decision") != "forbidden",
+            policy.get("exact_sha_binding") != "required",
+            policy.get("self_modification") != "sensitive",
+            policy.get("unknown_or_ambiguous") != "sensitive",
+            policy.get("partial_analysis") != "sensitive",
+            policy.get("git_error") != "sensitive",
+            policy.get("classifications") != ["LOW_RISK", "SENSITIVE"],
+            policy.get("required_inputs")
+            != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
+        )
+    ):
+        return False
+    required_for = list(MERGE_RISK_CAPABILITIES)
+    if owner_boundary.get("mode") != "risk-based":
+        return False
+    if owner_boundary.get("automatic_generation") != "forbidden":
+        return False
+    if owner_boundary.get("required_for") != required_for:
+        return False
+    if owner_boundary.get("low_risk") != {"authorization": "not-required-by-policy"}:
+        return False
+    if owner_boundary.get("sensitive") != {"authorization": "explicit-repository-owner"}:
+        return False
+    low_risk = policy.get("low_risk")
+    sensitive = policy.get("sensitive")
+    if not isinstance(low_risk, dict) or set(low_risk) != {
+        "authorization",
+        "merge_mode",
+        "eligible_paths",
+    }:
+        return False
+    if (
+        low_risk.get("authorization") != "not-required-by-policy"
+        or low_risk.get("merge_mode") != "AUTO"
+    ):
+        return False
+    eligible_paths = low_risk.get("eligible_paths")
+    if (
+        not isinstance(eligible_paths, list)
+        or not eligible_paths
+        or len(eligible_paths) != len(set(eligible_paths))
+        or any(
+            not isinstance(pattern, str)
+            or not pattern
+            or pattern in {"*", "**", "**/*"}
+            or pattern.startswith("/")
+            or ".." in Path(pattern).parts
+            for pattern in eligible_paths
+        )
+    ):
+        return False
+    if not isinstance(sensitive, dict) or set(sensitive) != {
+        "authorization",
+        "merge_mode",
+        "capabilities",
+    }:
+        return False
+    if (
+        sensitive.get("authorization") != "explicit-repository-owner"
+        or sensitive.get("merge_mode") != "OWNER_GATED"
+    ):
+        return False
+    capabilities = sensitive.get("capabilities")
+    if not isinstance(capabilities, dict) or set(capabilities) != set(required_for):
+        return False
+    required_anchors = {
+        "governance": {"architecture.lock.yaml", "config/contracts/review-policy.yaml"},
+        "delivery-authority": {
+            "scripts/merge_risk.py",
+            "scripts/repoctl.py",
+            "scripts/pr_monitor.py",
+            "Makefile",
+        },
+        "branch-protection": {".github/CODEOWNERS", ".github/rulesets/**"},
+        "infrastructure-apply": {"platform/terraform/**", "platform/ansible/**"},
+        "state-migration": {"**/migrations/**"},
+        "iam": {
+            "config/contracts/identity-boundary-policy.yaml",
+            "services/**/auth/**",
+            "services/**/authentication/**",
+            "services/**/authorization/**",
+            "services/**/security/**",
+            "services/**/oidc/**",
+            "services/**/oauth/**",
+            "services/**/jwt/**",
+            "services/**/session/**",
+            "services/**/*auth*",
+            "services/**/*security*",
+            "services/**/*oidc*",
+            "services/**/*oauth*",
+            "services/**/*jwt*",
+            "services/**/*session*",
+        },
+        "secrets": {"config/contracts/secret-delivery-policy.yaml"},
+        "network": {"config/infrastructure/network-plan.yaml"},
+        "dns": {"config/contracts/dns-authority-policy.yaml"},
+        "signing-or-provenance-policy": {"scripts/check_automation_signing.py"},
+        "security-policy": {"config/contracts/security-scan-policy.yaml"},
+        "artifact-publication-authority": {"platform/tekton/**"},
+    }
+    for capability, rule in capabilities.items():
+        if not isinstance(rule, dict) or set(rule) - {"paths", "content_paths", "content_patterns"}:
+            return False
+        paths = rule.get("paths", [])
+        content_paths = rule.get("content_paths", [])
+        content_patterns = rule.get("content_patterns", [])
+        if any(
+            not isinstance(values, list)
+            or len(values) != len(set(values))
+            or any(not isinstance(value, str) or not value for value in values)
+            for values in (paths, content_paths, content_patterns)
+        ):
+            return False
+        if not paths and not content_patterns:
+            return False
+        if content_patterns and not content_paths:
+            return False
+        if not required_anchors.get(capability, set()).issubset(paths):
+            return False
+        try:
+            for pattern in content_patterns:
+                re.compile(pattern)
+        except re.error:
+            return False
+    return True
+
+
+def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
+    """Keep the established exact contract check while validating the v2 risk extension."""
+    if not isinstance(policy, dict):
+        return {}
+    normalized = copy.deepcopy(policy)
+    owner_boundary = normalized.get("owner_boundary")
+    risk_policy = normalized.pop("risk_classification", None)
+    expected_transition = [
+        "exact-pr-head",
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "deterministic-risk-classification",
+        "owner-authorization-if-required",
+        "merge-requirements",
+        "finish-pr",
+        "merge-verification",
+        "post-merge-cleanup",
+    ]
+    if normalized.get("schema_version") != 2:
+        return {}
+    trusted_boundary = {
+        "controller": normalized.get("controller"),
+        "controller_source": normalized.pop("controller_source", None),
+        "command": normalized.get("command"),
+        "target_worktree": normalized.pop("target_worktree", None),
+        "direct_head_controller": normalized.pop("direct_head_controller", None),
+        "bootstrap_without_controller": normalized.pop("bootstrap_without_controller", None),
+    }
+    if trusted_boundary != {
+        "controller": "scripts/repository_delivery.py",
+        "controller_source": "exact-pr-base-sha",
+        "command": "trusted-pr-transition",
+        "target_worktree": "exact-pr-head-clean-checkout",
+        "direct_head_controller": "forbidden",
+        "bootstrap_without_controller": "explicit-repository-owner",
+    }:
+        return {}
+    if normalized.get("transition_order") != expected_transition:
+        return {}
+    if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
+        return {}
+    if normalized.get("state_sources", []).count(
+        "exact-sha-deterministic-risk-classification"
+    ) != 1:
+        return {}
+    normalized["schema_version"] = 1
+    normalized["controller"] = "scripts/repoctl.py"
+    normalized["command"] = "pr-loop"
+    normalized["state_sources"].remove("exact-sha-deterministic-risk-classification")
+    normalized["transition_order"] = [
+        "qualification",
+        "chatgpt-code",
+        "chatgpt-security",
+        "owner-authorization",
+        "finish-pr",
+        "post-merge-cleanup",
+    ]
+    for key in ("mode", "required_for", "low_risk", "sensitive"):
+        normalized["owner_boundary"].pop(key, None)
+    return normalized
+
+
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
@@ -7493,7 +7834,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "post-merge roadmap reconciliation contract must remain exact",
         ),
         (
-            pr_loop_policy
+            _normalized_pr_loop_for_legacy_validation(pr_loop_policy)
             == {
                 "schema_version": 1,
                 "controller": "scripts/repoctl.py",
@@ -7598,7 +7939,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
 
 def repository_delivery_policy() -> dict:
-    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    review_policy = _review_policy_document()
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
 
 
@@ -7763,7 +8104,7 @@ def remote_commit_provenance_check(gh: str, base: str, head: str, *, quiet: bool
 
 
 def pull_request_review_policy() -> dict:
-    policy = ruby_yaml("config/contracts/review-policy.yaml").get("pull_request_review") or {}
+    policy = _review_policy_document().get("pull_request_review") or {}
     ai = policy.get("ai_reviewer") or {}
     evidence = ai.get("evidence") or {}
     codex = ai.get("codex") or {}
@@ -8163,6 +8504,194 @@ def _review_result_is_pass(result: dict) -> bool:
     return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
 
 
+def _merge_risk_result(
+    classification: str,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str],
+    reasons: list[str],
+    matched_capabilities: list[str],
+    analysis_complete: bool,
+) -> dict:
+    return {
+        "classification": classification,
+        "authority": "repository-policy",
+        "controller_source": "exact-pr-base-sha",
+        "controller_path": MERGE_RISK_CONTROLLER_PATH,
+        "policy_source": "exact-pr-base-sha",
+        "pr": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "changed_files": sorted(changed_files),
+        "reasons": sorted(set(reasons)),
+        "matched_capabilities": sorted(set(matched_capabilities)),
+        "analysis_complete": analysis_complete,
+    }
+
+
+def _sensitive_merge_risk(
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    changed_files: list[str] | None,
+    reason: str,
+) -> dict:
+    return _merge_risk_result(
+        "SENSITIVE",
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+        changed_files=changed_files or [],
+        reasons=[reason],
+        matched_capabilities=[],
+        analysis_complete=False,
+    )
+
+
+def _validated_trusted_merge_risk_result(
+    result: object,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+) -> dict:
+    required = {
+        "classification",
+        "authority",
+        "controller_source",
+        "controller_path",
+        "policy_source",
+        "pr",
+        "base_sha",
+        "head_sha",
+        "changed_files",
+        "reasons",
+        "matched_capabilities",
+        "analysis_complete",
+    }
+    if not isinstance(result, dict) or set(result) != required:
+        raise RuntimeError("exact-base merge-risk controller returned an invalid envelope")
+    if (
+        result.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or result.get("authority") != "repository-policy"
+        or result.get("controller_source") != "exact-pr-base-sha"
+        or result.get("controller_path") != MERGE_RISK_CONTROLLER_PATH
+        or result.get("policy_source") != "exact-pr-base-sha"
+        or result.get("pr") != pr_number
+        or result.get("base_sha") != base_sha
+        or result.get("head_sha") != head_sha
+        or not isinstance(result.get("changed_files"), list)
+        or not isinstance(result.get("reasons"), list)
+        or not isinstance(result.get("matched_capabilities"), list)
+        or type(result.get("analysis_complete")) is not bool
+    ):
+        raise RuntimeError("exact-base merge-risk controller result is not exact-SHA bound")
+    if result["classification"] == "LOW_RISK" and (
+        result["analysis_complete"] is not True
+        or result["reasons"]
+        or result["matched_capabilities"]
+        or not result["changed_files"]
+    ):
+        raise RuntimeError("exact-base merge-risk controller returned an incomplete low-risk result")
+    return result
+
+
+def _run_exact_base_merge_risk_controller(
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+) -> dict:
+    """Execute only the classifier blob owned by the exact PR base commit."""
+    for label, sha in (("base", base_sha), ("head", head_sha)):
+        if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
+            raise RuntimeError(f"{label} SHA is not exact")
+        if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], check=False, capture=True).returncode:
+            raise RuntimeError(f"{label} commit is unavailable")
+    if run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError("head is not descended from the exact PR base")
+    controller = run(
+        ["git", "show", f"{base_sha}:{MERGE_RISK_CONTROLLER_PATH}"],
+        check=False,
+        capture=True,
+    )
+    if controller.returncode:
+        raise RuntimeError("exact-base merge-risk controller is unavailable")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-exact-base-risk-") as directory:
+        controller_path = Path(directory) / "merge_risk.py"
+        controller_path.write_text(controller.stdout or "", encoding="utf-8")
+        environment = os.environ.copy()
+        for name in (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_WORK_TREE",
+            "PYTHONHOME",
+            "PYTHONINSPECT",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+        ):
+            environment.pop(name, None)
+        command = [
+            sys.executable,
+            "-I",
+            str(controller_path),
+            "--base-sha",
+            base_sha,
+            "--head-sha",
+            head_sha,
+        ]
+        if pr_number is not None:
+            command.extend(["--pr", str(pr_number)])
+        executed = run(command, env=environment, check=False, capture=True)
+    if executed.returncode:
+        detail = (executed.stderr or executed.stdout or "").strip()
+        raise RuntimeError(detail or "exact-base merge-risk controller failed")
+    try:
+        result = json.loads((executed.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exact-base merge-risk controller returned invalid JSON") from exc
+    return _validated_trusted_merge_risk_result(
+        result,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        pr_number=pr_number,
+    )
+
+
+def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = None) -> dict:
+    """Classify only with exact-base executable authority; bootstrap/errors are sensitive."""
+    try:
+        return _run_exact_base_merge_risk_controller(base_sha, head_sha, pr_number)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        detail = re.sub(r"\s+", " ", str(exc)).strip()[:300] or type(exc).__name__
+        return _sensitive_merge_risk(
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=[],
+            reason=f"trusted-base-classification-error:{detail}",
+        )
+
+
+def _owner_authorization_for_risk(risk: dict, authorization: dict) -> dict:
+    if risk.get("classification") == "LOW_RISK":
+        return {
+            "status": "NOT_REQUIRED_BY_POLICY",
+            "head_sha": risk.get("head_sha", ""),
+            "source": "repository-policy",
+        }
+    return authorization
+
+
 _PR_LOOP_MERGE_REQUIREMENTS = {
     "current_main_lineage",
     "unresolved_blocking_findings",
@@ -8180,6 +8709,7 @@ def derive_pr_loop_state(
     security_review: dict,
     owner_authorization: dict,
     merge_requirements: dict | None = None,
+    risk: dict | None = None,
 ) -> tuple[str, str]:
     """Pure fail-closed derivation; no value returned here is persisted as authority."""
     if pr.get("merged") or pr.get("state") == "MERGED":
@@ -8202,8 +8732,35 @@ def derive_pr_loop_state(
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
     if not _review_result_is_pass(security_review):
         return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
-    if owner_authorization.get("status") != "PASS":
+    if (
+        not isinstance(risk, dict)
+        or risk.get("authority") != "repository-policy"
+        or risk.get("base_sha") != pr.get("base_sha")
+        or risk.get("head_sha") != pr.get("head_sha")
+        or risk.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or (
+            risk.get("pr") is not None
+            and risk.get("pr") != pr.get("number")
+        )
+        or not isinstance(risk.get("reasons"), list)
+        or not isinstance(risk.get("matched_capabilities"), list)
+        or not isinstance(risk.get("changed_files"), list)
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "LOW_RISK" and (
+        risk.get("analysis_complete") is not True
+        or not risk["changed_files"]
+        or risk["reasons"]
+        or risk["matched_capabilities"]
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
         return "OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"
+    if (
+        risk["classification"] == "LOW_RISK"
+        and owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return "BLOCKED", "RECLASSIFY_RISK"
     if merge_requirements is None:
         return "BLOCKED", "REVALIDATE_MERGE_REQUIREMENTS"
     failed = sorted(
@@ -8704,6 +9261,10 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 
 def finish_pr(base: str) -> int:
+    try:
+        _require_trusted_pr_execution()
+    except RuntimeError as exc:
+        return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
     if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
@@ -8799,20 +9360,40 @@ def finish_pr(base: str) -> int:
     print(f"PASS finish-pr: {review_reason}")
 
     try:
-        reviews, owner_authorization = pull_request_authority_evidence(gh, number, head)
+        reviews, raw_owner_authorization = pull_request_authority_evidence(gh, number, head)
         _owner_login, name_with_owner = _github_repository_identity(gh)
+        exact_pr = _github_pr_snapshot(gh, name_with_owner, number)
     except RuntimeError as exc:
         return fail(f"finish-pr cannot read PR authorities: {exc}")
+    if (
+        exact_pr.get("state") != "OPEN"
+        or exact_pr.get("draft")
+        or exact_pr.get("head_sha") != head
+        or exact_pr.get("base") != base_name
+        or exact_pr.get("base_sha") != _exact_commit_sha(base_ref)
+    ):
+        return fail("finish-pr exact PR/base/head authority changed during revalidation")
     for kind in ("code", "security"):
         if not _review_result_is_pass(reviews[kind]):
             return fail(f"finish-pr {kind} authority changed during revalidation")
 
-    if owner_authorization.get("status") != "PASS":
+    risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
+    print(
+        "PASS finish-pr: deterministic merge risk "
+        f"{risk['classification']} for exact head {head}"
+    )
+    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
         return fail(
             "finish-pr owner authorization missing for exact head; required command: "
             + str(owner_authorization.get("command") or "")
         )
-    print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
+    if risk["classification"] == "LOW_RISK":
+        if owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY":
+            return fail("finish-pr low-risk owner boundary is not repository-policy-derived")
+        print("PASS finish-pr: owner authorization NOT_REQUIRED_BY_POLICY")
+    else:
+        print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
 
     try:
         unresolved_threads = _github_unresolved_review_threads(gh, name_with_owner, number)
@@ -8839,28 +9420,23 @@ def finish_pr(base: str) -> int:
             "exact PASS evidence and branch protection remain mandatory"
         )
 
-    fresh_pr = json.loads(
-        output(
-            [
-                gh,
-                "pr",
-                "view",
-                str(number),
-                "--json",
-                "state,isDraft,headRefOid,baseRefName",
-            ]
-        )
-        or "{}"
-    )
+    final_fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=True)
+    if final_fetch.returncode:
+        return fail("finish-pr final revalidation cannot refresh origin")
+    try:
+        fresh_pr = _github_pr_snapshot(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr final PR revalidation failed: {exc}")
     if (
         fresh_pr.get("state") != "OPEN"
-        or fresh_pr.get("isDraft") is True
-        or fresh_pr.get("headRefOid") != head
-        or fresh_pr.get("baseRefName") != base_name
+        or fresh_pr.get("draft") is True
+        or fresh_pr.get("head_sha") != head
+        or fresh_pr.get("base") != base_name
+        or fresh_pr.get("base_sha") != _exact_commit_sha(base_ref)
     ):
         return fail("finish-pr PR state/head/base changed during final revalidation")
     try:
-        fresh_reviews, fresh_owner_authorization = pull_request_authority_evidence(
+        fresh_reviews, fresh_raw_owner_authorization = pull_request_authority_evidence(
             gh, number, head
         )
         fresh_unresolved_threads = _github_unresolved_review_threads(
@@ -8870,8 +9446,25 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr final authority revalidation failed: {exc}")
     if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
         return fail("finish-pr ChatGPT review authority changed during final revalidation")
-    if fresh_owner_authorization.get("status") != "PASS":
+    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    if risk["classification"] == "LOW_RISK" and fresh_risk["classification"] != "LOW_RISK":
+        return fail(
+            "finish-pr risk changed from LOW_RISK to SENSITIVE; "
+            + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
+        )
+    fresh_owner_authorization = _owner_authorization_for_risk(
+        fresh_risk, fresh_raw_owner_authorization
+    )
+    if (
+        fresh_risk["classification"] == "SENSITIVE"
+        and fresh_owner_authorization.get("status") != "PASS"
+    ):
         return fail("finish-pr owner authorization changed during final revalidation")
+    if (
+        fresh_risk["classification"] == "LOW_RISK"
+        and fresh_owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return fail("finish-pr low-risk owner boundary changed during final revalidation")
     if fresh_unresolved_threads:
         return fail(
             "finish-pr review conversations changed during final revalidation; "
@@ -8966,7 +9559,7 @@ def finish_pr(base: str) -> int:
 
 def _pr_loop_empty_result(pr_number: int) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pr": pr_number,
         "head_sha": "",
         "head_branch": "",
@@ -8977,7 +9570,20 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "qualification": {"status": "UNKNOWN", "source": "none"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
         "security_review": {"status": "UNKNOWN", "head_sha": ""},
+        "risk": {
+            "classification": "UNKNOWN",
+            "authority": "repository-policy",
+            "head_sha": "",
+            "base_sha": "",
+            "reasons": [],
+            "matched_capabilities": [],
+            "changed_files": [],
+            "analysis_complete": False,
+        },
+        "risk_classification": "UNKNOWN",
+        "owner_authorization_required": True,
         "owner_authorization": {"status": "UNKNOWN"},
+        "merge_mode": "OWNER_GATED",
         "merge_ready": False,
         "next_action": "RETRY",
         "merge_result": "NOT_ATTEMPTED",
@@ -9215,7 +9821,9 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
     print(f"qualification   {qualification_label}")
     print(f"CODE            {result['code_review'].get('status', 'UNKNOWN')}")
     print(f"SECURITY        {result['security_review'].get('status', 'UNKNOWN')}")
+    print(f"RISK            {result.get('risk_classification', 'UNKNOWN')}")
     print(f"OWNER AUTH      {result['owner_authorization'].get('status', 'UNKNOWN')}")
+    print(f"MODE            {result.get('merge_mode', 'OWNER_GATED')}")
     print()
     print(f"STATE {result['state']}")
     if result.get("merge_result") != "NOT_ATTEMPTED":
@@ -9307,12 +9915,10 @@ def _pr_loop_post_merge(
         result["blockers"].append("main cannot fast-forward to origin/main")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    cleanup = run(
-        _controller_command("branch-cleanup"),
-        check=False,
-        capture=json_output,
-    )
-    if cleanup.returncode:
+    # This function is already executing from the exact-base repoctl module. Keep
+    # post-merge cleanup in-process so the target's switch to main does not create
+    # a fresh trusted context that is still bound to the former PR-head checkout.
+    if branch_cleanup(dry_run=False, fetch_remote=False):
         result["cleanup_result"] = "FAIL"
         result["blockers"].append("canonical branch-cleanup failed")
         _emit_pr_loop_result(result, json_output=json_output)
@@ -9333,6 +9939,14 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["blockers"].append("PR number must be a positive integer")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
+    try:
+        trusted_context = _require_trusted_pr_execution(pr_number=pr_number)
+    except RuntimeError as exc:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "USE_EXACT_BASE_CONTROLLER"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
         result["blockers"].append("GitHub CLI missing")
@@ -9349,6 +9963,11 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             if fetch.returncode:
                 raise RuntimeError("git fetch origin --prune failed")
         initial = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        _require_trusted_pr_execution(
+            pr_number=initial["number"],
+            base_sha=initial["base_sha"],
+            head_sha=initial["head_sha"],
+        )
     except RuntimeError as exc:
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
@@ -9398,7 +10017,20 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         )
         result["code_review"] = reviews["code"]
         result["security_review"] = reviews["security"]
-        result["owner_authorization"] = authorization
+        if all(_review_result_is_pass(reviews[kind]) for kind in ("code", "security")):
+            risk = classify_merge_risk(
+                snapshot["base_sha"], snapshot["head_sha"], snapshot["number"]
+            )
+            result["risk"] = risk
+            result["risk_classification"] = risk["classification"]
+            owner_required = risk["classification"] != "LOW_RISK"
+            result["owner_authorization_required"] = owner_required
+            result["merge_mode"] = "OWNER_GATED" if owner_required else "AUTO"
+            result["owner_authorization"] = _owner_authorization_for_risk(
+                risk, authorization
+            )
+        else:
+            result["owner_authorization"] = authorization
 
     try:
         result["qualification"] = _pr_loop_qualification(
@@ -9418,6 +10050,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["code_review"],
         result["security_review"],
         result["owner_authorization"],
+        risk=result["risk"],
     )
     if state == "QUALIFICATION_REQUIRED" and not dry_run:
         try:
@@ -9483,6 +10116,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             result["code_review"],
             result["security_review"],
             result["owner_authorization"],
+            risk=result["risk"],
         )
 
     if state in {
@@ -9522,6 +10156,18 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
                 result["blockers"].append(str(exc))
                 _emit_pr_loop_result(result, json_output=json_output)
                 return 1
+            rerun_argv = [
+                sys.executable,
+                str(
+                    Path(trusted_context["trusted_root"])
+                    / "scripts/repository_delivery.py"
+                ),
+                "trusted-pr-transition",
+                "--target-root",
+                str(trusted_context["target_root"]),
+                "--pr",
+                str(result["pr"]),
+            ]
             result["review_request"] = {
                 "event": "CHATGPT_REVIEW_REQUIRED",
                 "state": "CHATGPT_REVIEW_REQUIRED",
@@ -9540,7 +10186,9 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
                     "blocking_findings": 0,
                 },
                 "rerun": {
-                    "command": f"make pr-loop PR={result['pr']}",
+                    "argv": rerun_argv,
+                    "command": shlex.join(rerun_argv),
+                    "controller_source": "exact-pr-base-sha",
                     "after_valid_marker": True,
                 },
                 "verdict_authority": False,
@@ -9548,7 +10196,10 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         _emit_pr_loop_result(result, json_output=json_output)
         return 0 if state.endswith("_REQUIRED") else 1
 
-    if dry_run and result["owner_authorization"].get("status") == "PASS":
+    if dry_run and result["owner_authorization"].get("status") in {
+        "PASS",
+        "NOT_REQUIRED_BY_POLICY",
+    }:
         try:
             merge_requirements, details = _pr_loop_merge_requirements(
                 gh,
@@ -9568,6 +10219,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             result["security_review"],
             result["owner_authorization"],
             merge_requirements,
+            risk=result["risk"],
         )
         result["state"] = state
         result["next_action"] = next_action
@@ -9576,6 +10228,14 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         return 0 if state == "MERGE_READY" else 1
 
     try:
+        if not dry_run:
+            final_fetch = run(
+                ["git", "fetch", "origin", "--prune"],
+                check=False,
+                capture=json_output,
+            )
+            if final_fetch.returncode:
+                raise RuntimeError("git fetch origin --prune failed during final revalidation")
         before_merge = _github_pr_snapshot(gh, name_with_owner, pr_number)
         if before_merge["head_sha"] != initial_head_sha:
             result["state"] = "HEAD_CHANGED"
@@ -9609,6 +10269,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["security_review"],
         result["owner_authorization"],
         merge_requirements,
+        risk=result["risk"],
     )
     result["state"] = state
     result["next_action"] = next_action
