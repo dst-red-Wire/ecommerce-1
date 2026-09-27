@@ -105,6 +105,35 @@ class M1ReviewClosureTests(unittest.TestCase):
                 self.assertEqual(0, REPOCTL.service_check(service))
                 ensure.assert_called_once_with(expected)
 
+    def test_product_static_profile_skips_testcontainers_integration_suite(self):
+        commands = []
+
+        def successful_run(command, **_kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with (
+            mock.patch.dict(
+                REPOCTL.os.environ,
+                {"ECOMMERCE_EXECUTION_PROFILE": "static"},
+                clear=False,
+            ),
+            mock.patch.object(REPOCTL, "canonical_services", return_value=["product"]),
+            mock.patch.object(REPOCTL, "ensure_developer"),
+            mock.patch.object(
+                REPOCTL, "_run_cached_gate", side_effect=lambda _name, _options, producer: producer()
+            ),
+            mock.patch.object(REPOCTL, "protobuf_generate", return_value=0),
+            mock.patch.object(REPOCTL, "require"),
+            mock.patch.object(REPOCTL, "run", side_effect=successful_run),
+        ):
+            self.assertEqual(0, REPOCTL.service_check("product"))
+
+        self.assertFalse(
+            any("-tags=integration" in command for command in commands),
+            commands,
+        )
+
     def test_site_builds_and_terminates_exact_binaries(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         site = source[source.index("def site(") : source.index("def forbidden_frontend_artifacts(")]

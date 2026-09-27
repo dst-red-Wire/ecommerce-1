@@ -1,0 +1,1045 @@
+version: 1
+kind: ExecutionPropertiesImplementations
+status: enforced
+policy_ref: config/contracts/execution-properties-policy.yaml
+architecture_authority: architecture.lock.yaml
+semantics: references-only
+relationship_values:
+- implements
+- enforces
+- verifies
+- observes
+- produces_evidence
+- transports_evidence
+evidence_model:
+  declaration: policy-requirement
+  implementation: mechanism-reference
+  proof: runtime-record
+  gate: fail-closed-proof-validation
+  aggregation: qce-consumes-verified-proof
+  status: roadmap-derives-from-gates
+required_implementations:
+- packer
+- opentofu
+- ansible
+- packer_ansible_chain
+- buildkit
+- cosign
+- fleet
+- tekton
+- harbor
+- rke2
+- cilium
+- qce
+implementations:
+  packer:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      hermeticity:
+      - enforces
+      immutability:
+      - implements
+      integrity:
+      - verifies
+      provenance:
+      - produces_evidence
+      verification:
+      - produces_evidence
+    mechanisms:
+    - pinned-sources
+    - checksum-verification
+    - offline-input-bundle
+    - immutable-image-digest
+    gate: machine-image
+    evidence:
+      runtime_required: true
+      producer: packer-build
+      artifact: .context/evidence/<sha>/machine-image.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - build_result
+    not_guaranteed:
+    - runtime-image-convergence
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.packer
+  opentofu:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      convergence:
+      - implements
+      - verifies
+      drift:
+      - observes
+      - produces_evidence
+      provenance:
+      - produces_evidence
+      recovery:
+      - implements
+      - verifies
+      execution:
+      - enforces
+    mechanisms:
+    - exact-provider-lock
+    - readonly-lockfile
+    - state-lock
+    - second-plan
+    - pre-mutation-capture
+    - bounded-plan-apply
+    gate: opentofu
+    evidence:
+      runtime_required: true
+      producer: repoctl-opentofu
+      artifact: .context/evidence/<sha>/opentofu.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - second_apply_changes
+      - drift_detected
+      - capture_digest
+      - restore_verification
+      - timeout_seconds
+      - locking
+    not_guaranteed:
+    - provider-runtime-availability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.opentofu
+  ansible:
+    lifecycle: active
+    relationships:
+      idempotency:
+      - implements
+      - verifies
+      convergence:
+      - implements
+      - verifies
+      determinism:
+      - implements
+      reproducibility:
+      - implements
+      verification:
+      - produces_evidence
+      recovery:
+      - implements
+      - verifies
+      execution:
+      - enforces
+    mechanisms:
+    - pinned-collections
+    - no-state-latest
+    - bounded-retries
+    - task-timeouts
+    - second-apply
+    - capture-restore-verify
+    gate: ansible
+    evidence:
+      runtime_required: true
+      producer: repoctl-ansible
+      artifact: .context/evidence/<sha>/ansible.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - second_apply_changes
+      - changed
+      - timeout_seconds
+      - retry_limit
+      - capture_digest
+      - restore_verification
+    not_guaranteed:
+    - external-host-stability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.ansible
+  packer_ansible_chain:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      idempotency:
+      - verifies
+      convergence:
+      - verifies
+      hermeticity:
+      - enforces
+      immutability:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - packer-pinned-build-environment
+    - ansible-machine-convergence
+    - digest-addressed-image
+    gate: machine-image
+    evidence:
+      runtime_required: true
+      producer: packer-and-ansible
+      artifact: .context/evidence/<sha>/machine-image.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - second_apply_changes
+      - input_digest
+    not_guaranteed:
+    - availability
+    authority_ref: architecture.lock.yaml#machine_contracts.machine_image_lock
+  buildkit:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      hermeticity:
+      - enforces
+      immutability:
+      - implements
+      integrity:
+      - verifies
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - explicit-context
+    - digest-pinned-base
+    - cache-semantics-check
+    - output-digest
+    gate: container-build
+    evidence:
+      runtime_required: true
+      producer: buildctl
+      artifact: .context/evidence/<sha>/container-build.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - context_digest
+      - cache_result
+    not_guaranteed: registry-retention
+    authority_ref: architecture.lock.yaml#tooling.oci_build
+  cosign:
+    lifecycle: active
+    relationships:
+      integrity:
+      - verifies
+      - produces_evidence
+      provenance:
+      - verifies
+      - produces_evidence
+      verification:
+      - implements
+      immutability:
+      - verifies
+    mechanisms:
+    - exact-digest-signature
+    - signature-verification
+    - attestation-binding
+    gate: supply-chain
+    evidence:
+      runtime_required: true
+      producer: cosign
+      artifact: .context/evidence/<sha>/supply-chain.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - signature_digest
+      - verification_result
+    not_guaranteed: provenance-creation
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.cosign
+  sops_age:
+    lifecycle: deferred
+    relationships:
+      reproducibility:
+      - implements
+      integrity:
+      - verifies
+    mechanisms:
+    - versioned-encrypted-declaration
+    - explicit-key-identity
+    - content-integrity-check
+    gate: secrets
+    evidence:
+      runtime_required: true
+      producer: sops-age
+      artifact: .context/evidence/<sha>/secrets.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - encrypted_state_digest
+      - decrypt_result
+    not_guaranteed:
+    - confidentiality-runtime
+    - key-availability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.deferred.sops+age
+  fleet:
+    lifecycle: active
+    relationships:
+      convergence:
+      - implements
+      - verifies
+      drift:
+      - observes
+      - produces_evidence
+      reproducibility:
+      - implements
+      verification:
+      - produces_evidence
+      execution:
+      - enforces
+    mechanisms:
+    - git-desired-state
+    - reconciliation
+    - desired-observed-comparison
+    - bounded-rollout
+    gate: gitops
+    evidence:
+      runtime_required: true
+      producer: fleet-controller
+      artifact: .context/evidence/<sha>/gitops.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - desired_digest
+      - observed_digest
+      - drift_detected
+      - timeout_seconds
+    not_guaranteed:
+    - declaration-as-runtime-proof
+    authority_ref: architecture.lock.yaml#platform.gitops
+  tekton:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      provenance:
+      - produces_evidence
+      determinism:
+      - implements
+      execution:
+      - enforces
+      verification:
+      - produces_evidence
+    mechanisms:
+    - versioned-pipeline
+    - digest-pinned-task-images
+    - explicit-workspaces
+    - bounded-retries
+    - timeouts
+    - concurrency-control
+    gate: qualification
+    evidence:
+      runtime_required: true
+      producer: tekton
+      artifact: .context/evidence/<sha>/qualification.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - timeout_seconds
+      - retry_limit
+      - locking
+      - gate_results
+    not_guaranteed:
+    - property-semantics-authority
+    authority_ref: architecture.lock.yaml#platform.ci
+  harbor:
+    lifecycle: active
+    relationships:
+      immutability:
+      - enforces
+      - verifies
+      integrity:
+      - verifies
+      provenance:
+      - transports_evidence
+      verification:
+      - produces_evidence
+    mechanisms:
+    - digest-identity
+    - immutable-artifact-policy
+    - signature-and-provenance-retention
+    gate: supply-chain
+    evidence:
+      runtime_required: true
+      producer: harbor
+      artifact: .context/evidence/<sha>/supply-chain.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - registry_digest
+      - retention_result
+    not_guaranteed:
+    - provenance-creation
+    authority_ref: architecture.lock.yaml#platform.harbor
+  rke2:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      convergence:
+      - implements
+      - verifies
+      recovery:
+      - implements
+      - verifies
+      verification:
+      - produces_evidence
+      drift:
+      - observes
+      execution:
+      - enforces
+    mechanisms:
+    - exact-version
+    - offline-artifact-checksums
+    - observed-cluster-state
+    - etcd-snapshot-restore
+    - bounded-bootstrap
+    gate: rke2-runtime
+    evidence:
+      runtime_required: true
+      producer: rke2
+      artifact: .context/evidence/<sha>/rke2-runtime.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - observed_digest
+      - drift_detected
+      - capture_digest
+      - restore_verification
+      - timeout_seconds
+    not_guaranteed:
+    - declared-state-as-runtime-proof
+    authority_ref: architecture.lock.yaml#platform.rke2
+  cilium:
+    lifecycle: active
+    relationships:
+      convergence:
+      - verifies
+      verification:
+      - produces_evidence
+      drift:
+      - observes
+      reproducibility:
+      - implements
+    mechanisms:
+    - pinned-release
+    - agent-status
+    - desired-observed-policy-comparison
+    gate: network-runtime
+    evidence:
+      runtime_required: true
+      producer: cilium
+      artifact: .context/evidence/<sha>/network-runtime.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - observed_digest
+      - drift_detected
+    not_guaranteed: contract-authority
+    authority_ref: architecture.lock.yaml#platform.cilium
+  qce:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - transports_evidence
+    mechanisms:
+    - exact-sha-proof-graph
+    - gate-evidence-aggregation
+    - derived-status-only
+    gate: qce-check
+    evidence:
+      runtime_required: true
+      producer: qce
+      artifact: .context/evidence/<sha>/qce-check.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - gate_results
+      - evidence_digest
+    not_guaranteed: property-satisfaction-without-upstream-proof
+    authority_ref: architecture.lock.yaml#developer_platform.quality_cloud_engineering
+  trivy:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: trivy
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - scan_result
+      - scanned_artifact_digest
+    not_guaranteed:
+    - reproducibility
+    - immutability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.trivy
+  govulncheck:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: govulncheck
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - scan_result
+      - go_build_digest
+    not_guaranteed:
+    - immutability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.govulncheck
+  gitleaks:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: gitleaks
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - scan_result
+      - revision_range
+    not_guaranteed:
+    - confidentiality
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.gitleaks
+  gosec:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: gosec
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - scan_result
+      - source_digest
+    not_guaranteed:
+    - runtime-security
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.gosec
+  openscap:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      drift:
+      - observes
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: openscap
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - profile_digest
+      - observed_compliance_state
+      - drift_detected
+    not_guaranteed:
+    - declared-profile-as-compliance
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.openscap
+  scap_security_guide:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: scap-security-guide
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - profile_digest
+      - content_digest
+    not_guaranteed:
+    - runtime-compliance
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.scap-security-guide
+  kube_bench:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      drift:
+      - observes
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: kube-bench
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - benchmark_version
+      - observed_compliance_state
+      - drift_detected
+    not_guaranteed:
+    - declared-state-as-compliance
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.kube-bench
+  conftest_opa:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      determinism:
+      - implements
+      failure:
+      - enforces
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: qualification
+    evidence:
+      runtime_required: true
+      producer: conftest-opa
+      artifact: .context/evidence/<sha>/qualification.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - policy_digest
+      - decision
+    not_guaranteed:
+    - property-semantics-authority
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.conftest+opa
+  k6:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      execution:
+      - enforces
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: qualification
+    evidence:
+      runtime_required: true
+      producer: k6
+      artifact: .context/evidence/<sha>/qualification.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - scenario_digest
+      - runtime_result
+      - timeout_seconds
+    not_guaranteed:
+    - reproducibility
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.k6
+  nuclei:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      execution:
+      - enforces
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: security
+    evidence:
+      runtime_required: true
+      producer: nuclei
+      artifact: .context/evidence/<sha>/security.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - template_digest
+      - scan_result
+      - timeout_seconds
+    not_guaranteed:
+    - reproducibility-with-uncontrolled-target
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.nuclei
+  hubble:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+      drift:
+      - observes
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: qualification
+    evidence:
+      runtime_required: true
+      producer: hubble
+      artifact: .context/evidence/<sha>/qualification.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - observed_flows_digest
+      - runtime_result
+      - drift_detected
+    not_guaranteed:
+    - declarative-authority
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.hubble
+  pint:
+    lifecycle: active
+    relationships:
+      verification:
+      - verifies
+      - produces_evidence
+    mechanisms:
+    - pinned-tool-inputs
+    - machine-readable-result
+    gate: qualification
+    evidence:
+      runtime_required: true
+      producer: pint
+      artifact: .context/evidence/<sha>/qualification.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - configuration_digest
+      - lint_result
+    not_guaranteed:
+    - runtime-correctness
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.pint
+  skopeo:
+    lifecycle: active
+    relationships:
+      immutability:
+      - implements
+      - verifies
+      verification:
+      - verifies
+      integrity:
+      - verifies
+      reproducibility:
+      - implements
+    mechanisms:
+    - digest-preserving-copy
+    - source-and-destination-digest-check
+    gate: supply-chain
+    evidence:
+      runtime_required: true
+      producer: skopeo
+      artifact: .context/evidence/<sha>/supply-chain.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - source_digest
+      - destination_digest
+    not_guaranteed:
+    - signature-creation
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.skopeo
+  oras:
+    lifecycle: active
+    relationships:
+      immutability:
+      - implements
+      integrity:
+      - verifies
+      verification:
+      - verifies
+      provenance:
+      - transports_evidence
+    mechanisms:
+    - digest-addressed-oci-artifact
+    - manifest-digest-verification
+    gate: evidence-publish
+    evidence:
+      runtime_required: true
+      producer: oras
+      artifact: .context/evidence/<sha>/evidence-publish.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - manifest_digest
+    not_guaranteed: provenance-creation
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.oras
+  oapi_codegen:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - openapi-input-digest
+    - exact-generator-version
+    - exact-generation-config
+    gate: generation
+    evidence:
+      runtime_required: true
+      producer: oapi-codegen
+      artifact: .context/evidence/<sha>/generation.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - configuration_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-service-correctness
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.oapi-codegen
+  sqlc:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - schema-query-digest
+    - exact-generator-version
+    - exact-generation-config
+    gate: generation
+    evidence:
+      runtime_required: true
+      producer: sqlc
+      artifact: .context/evidence/<sha>/generation.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - schema_digest
+      - query_digest
+      - configuration_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-service-correctness
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.sqlc
+  templ:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - template-input-digest
+    - exact-generator-version
+    gate: generation
+    evidence:
+      runtime_required: true
+      producer: templ
+      artifact: .context/evidence/<sha>/generation.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-service-correctness
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.templ
+  syft:
+    lifecycle: platform-provided
+    relationships:
+      verification:
+      - produces_evidence
+      integrity:
+      - observes
+    mechanisms:
+    - sbom-generation
+    - artifact-digest-binding
+    gate: supply-chain
+    evidence:
+      runtime_required: true
+      producer: syft
+      artifact: .context/evidence/<sha>/supply-chain.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - sbom_digest
+    not_guaranteed:
+    - vulnerability-status
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.platform-provided.syft
+  buf:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+      verification:
+      - verifies
+    mechanisms:
+    - exact-module-input
+    - pinned-plugins
+    - breaking-change-check
+    gate: contracts
+    evidence:
+      runtime_required: true
+      producer: buf
+      artifact: .context/evidence/<sha>/contracts.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-api-compatibility
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.buf
+  bazel:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      hermeticity:
+      - enforces
+      verification:
+      - produces_evidence
+    mechanisms:
+    - declared-action-inputs
+    - sandboxed-actions
+    - locked-modules
+    gate: bazel-verify
+    evidence:
+      runtime_required: true
+      producer: bazel
+      artifact: .context/evidence/<sha>/bazel-verify.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - action_graph_digest
+    not_guaranteed:
+    - external-service-stability
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.bazel
+  kustomize:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - pinned-resources
+    - stable-render
+    gate: contracts
+    evidence:
+      runtime_required: true
+      producer: kustomize
+      artifact: .context/evidence/<sha>/contracts.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-convergence
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.kustomize
+  helm:
+    lifecycle: active
+    relationships:
+      reproducibility:
+      - implements
+      determinism:
+      - implements
+      provenance:
+      - produces_evidence
+    mechanisms:
+    - pinned-chart-inputs
+    - stable-render
+    gate: contracts
+    evidence:
+      runtime_required: true
+      producer: helm
+      artifact: .context/evidence/<sha>/contracts.json
+      required_fields:
+      - source_sha
+      - toolchain_digest
+      - artifact_digest
+      - input_digest
+      - output_digest
+    not_guaranteed:
+    - runtime-convergence
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.helm

@@ -9,7 +9,7 @@ NATIVE_WORKSPACE := $(shell $(PYTHON) scripts/native_workspace.py --quiet >/dev/
 ifneq ($(NATIVE_WORKSPACE),PASS)
 $(error Repository operations require a WSL2 checkout on the native Linux filesystem, such as /home/dev/ecommerce-1)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix capabilities security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -35,10 +35,11 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: signing-rotation-check ## Run global + affected repository CI and cache promotable worktree evidence
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+ci: signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates
+	@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
+ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required when affected)
+	@$(PYTHON) scripts/repoctl.py verify-change --profile full --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-global: ## Run canonical global gates through the central execution planner
 	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
@@ -105,6 +106,15 @@ qce-status: ## Render the derived nine-sector QCE status projection
 
 qce-check: ## Validate QCE traceability, closed statuses and derived labels
 	@$(PYTHON) scripts/repoctl.py qce-check
+
+execution-properties: ## Validate the canonical execution-properties authority and implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties
+
+execution-properties-matrix: ## Render the execution-properties matrix from the implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties --matrix
+
+capabilities: ## Resolve scoped effective tool capabilities from exact-SHA evidence
+	@$(PYTHON) scripts/repoctl.py capabilities
 
 security-datasets-sync: ## Explicitly refresh verified KEV/EPSS snapshots outside qualification
 	@$(PYTHON) scripts/repoctl.py security-datasets-sync --output "$${OUTPUT:-.context/security-datasets}"
