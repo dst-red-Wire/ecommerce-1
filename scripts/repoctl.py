@@ -20,6 +20,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import shutil
 import subprocess
@@ -9939,7 +9940,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     try:
-        _require_trusted_pr_execution(pr_number=pr_number)
+        trusted_context = _require_trusted_pr_execution(pr_number=pr_number)
     except RuntimeError as exc:
         result["state"] = "BLOCKED"
         result["next_action"] = "USE_EXACT_BASE_CONTROLLER"
@@ -10155,6 +10156,18 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
                 result["blockers"].append(str(exc))
                 _emit_pr_loop_result(result, json_output=json_output)
                 return 1
+            rerun_argv = [
+                sys.executable,
+                str(
+                    Path(trusted_context["trusted_root"])
+                    / "scripts/repository_delivery.py"
+                ),
+                "trusted-pr-transition",
+                "--target-root",
+                str(trusted_context["target_root"]),
+                "--pr",
+                str(result["pr"]),
+            ]
             result["review_request"] = {
                 "event": "CHATGPT_REVIEW_REQUIRED",
                 "state": "CHATGPT_REVIEW_REQUIRED",
@@ -10173,7 +10186,9 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
                     "blocking_findings": 0,
                 },
                 "rerun": {
-                    "command": f"make pr-loop PR={result['pr']}",
+                    "argv": rerun_argv,
+                    "command": shlex.join(rerun_argv),
+                    "controller_source": "exact-pr-base-sha",
                     "after_valid_marker": True,
                 },
                 "verdict_authority": False,

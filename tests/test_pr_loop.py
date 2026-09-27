@@ -760,7 +760,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             mock.patch.multiple(
                 REPOCTL,
                 _pr_loop_checkout_errors=mock.Mock(return_value=[]),
-                _require_trusted_pr_execution=mock.Mock(return_value={}),
+                _require_trusted_pr_execution=mock.Mock(
+                    return_value={"trusted_root": Path("/trusted/base"), "target_root": ROOT}
+                ),
             ),
         )
 
@@ -788,6 +790,15 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual(161, payload["review_request"]["pr"])
         self.assertEqual(self.SHA_A, payload["review_request"]["head_sha"])
         self.assertEqual("bounded-code-handoff", payload["review_request"]["handoff"])
+        self.assertEqual(
+            "exact-pr-base-sha",
+            payload["review_request"]["rerun"]["controller_source"],
+        )
+        self.assertIn(
+            "/trusted/base/scripts/repository_delivery.py",
+            payload["review_request"]["rerun"]["argv"],
+        )
+        self.assertNotIn("make pr-loop", payload["review_request"]["rerun"]["command"])
         self.assertEqual(len("bounded-code-handoff"), payload["review_request"]["handoff_bytes"])
         self.assertEqual(
             {
