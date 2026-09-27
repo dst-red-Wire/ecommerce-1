@@ -2984,6 +2984,7 @@ def runtime_efficiency_check() -> int:
 
 def _governance_authority() -> int:
     repository_authority_check()
+    publication_mutation_site_check()
     run([sys.executable, "scripts/architecture_authority.py"])
     return 0
 
@@ -7682,6 +7683,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         raise RuntimeError("review-policy repository_delivery must be a mapping")
     required_sections = {
         "commit_provenance",
+        "publication",
         "publish",
         "pull_request",
         "pr_loop",
@@ -7699,6 +7701,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
     _validate_commit_provenance_policy(policy["commit_provenance"])
 
+    publication_policy = policy["publication"]
     publish_policy = policy["publish"]
     pull_request_policy = policy["pull_request"]
     pr_loop_policy = policy["pr_loop"]
@@ -7784,6 +7787,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     if automatic_cleanup != expected_automatic_cleanup:
         raise RuntimeError("invalid repository_delivery contract: automatic branch cleanup policy drift")
     for section_name, section in (
+        ("publication", publication_policy),
         ("publish", publish_policy),
         ("pull_request", pull_request_policy),
         ("pr_loop", pr_loop_policy),
@@ -7793,6 +7797,28 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     ):
         if not isinstance(section, dict):
             raise RuntimeError(f"review-policy repository_delivery.{section_name} must be a mapping")
+    expected_publication = {
+        "canonical_entrypoint": "make deliver",
+        "repoctl_entrypoint": "deliver",
+        "direct_git_push": {"status": "forbidden_for_repository_delivery"},
+        "direct_repoctl_publish": {"status": "internal_only"},
+        "direct_repoctl_publish_change": {"status": "forbidden"},
+        "pull_request_creation": {"required": True},
+        "push_without_pull_request": {"status": "forbidden_for_canonical_delivery"},
+        "default_branch_write": {"forbidden": True},
+        "force_push": {"forbidden": True},
+        "exact_sha": {"required": True},
+        "qualification_before_push": {"required": True},
+        "signed_commit": {"required": True},
+        "mutation_sites": {
+            "git_push": ["scripts/repoctl.py#publish"],
+            "git_push_delete": ["scripts/repoctl.py#_delete_branch_ref"],
+            "github_pr_create": ["scripts/repoctl.py#deliver"],
+            "github_pr_update": ["scripts/repoctl.py#deliver"],
+        },
+    }
+    if publication_policy != expected_publication:
+        raise RuntimeError("invalid repository_delivery contract: canonical publication policy drift")
     required_invariants = (
         (publish_policy.get("qualification") == "exact-sha", "publish qualification must be exact-sha"),
         (publish_policy.get("exact_evidence_required") is True, "publish exact evidence must be required"),
@@ -7941,6 +7967,293 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 def repository_delivery_policy() -> dict:
     review_policy = _review_policy_document()
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
+
+
+_PUBLICATION_TEXT_COMMANDS = {
+    "git_push": re.compile(r"(?<![\w.-])git\s+push\b"),
+    "github_pr_create": re.compile(
+        r"(?<![\w.-])gh\s+pr\s+create\b|\b(?:gh\s+api|curl\b)[^\n]{0,300}(?:-X|--method)\s+POST[^\n]{0,300}/pulls\b"
+    ),
+    "github_pr_update": re.compile(r"(?<![\w.-])gh\s+pr\s+edit\b"),
+}
+_PUBLICATION_AUTOMATION_SUFFIXES = {
+    ".bash", ".go", ".gradle", ".groovy", ".j2", ".js", ".json",
+    ".kts", ".lua", ".mk", ".ps1", ".rb", ".sh", ".tf",
+    ".tmpl", ".toml", ".tpl", ".ts", ".zsh",
+}
+_PUBLICATION_AUTOMATION_FILENAMES = {"Dockerfile", "Jenkinsfile", "Justfile", "Makefile", "Taskfile", "Vagrantfile"}
+_PUBLICATION_GO_EXEC = re.compile(r"\bexec\.Command(?:Context)?\s*\(")
+
+
+def _publication_source_files(source_root: Path) -> list[Path]:
+    """Inventory deliverable files, including untracked additions before a commit."""
+    result = subprocess.run(
+        ["git", "-C", str(source_root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return sorted({source_root / os.fsdecode(name) for name in result.stdout.split(b"\0") if name})
+    # Synthetic policy fixtures are not Git repositories.
+    return sorted(path for path in source_root.rglob("*") if path.is_file())
+
+
+def _publication_normalize_shell(text: str) -> str:
+    return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", text)
+
+
+def _publication_text_categories(text: str) -> set[str]:
+    normalized = _publication_normalize_shell(text)
+    return {category for category, pattern in _PUBLICATION_TEXT_COMMANDS.items() if pattern.search(normalized)}
+
+
+def _publication_static_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) and isinstance(part.value, str) else "<dynamic>"
+            for part in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _publication_static_string(node.left)
+        right = _publication_static_string(node.right)
+        return (left if left is not None else "<dynamic>") + (right if right is not None else "<dynamic>")
+    return None
+
+
+def _publication_command_categories(words: set[str]) -> set[str]:
+    categories: set[str] = set()
+    if {"git", "push"} <= words:
+        delete = any(value.startswith("--force-with-lease=") for value in words) and any(
+            value.startswith(":") for value in words
+        )
+        force_options = any(value == "-f" or value.startswith(("--force", "+")) for value in words)
+        if not delete and force_options:
+            raise RuntimeError("force-push is forbidden")
+        categories.add("git_push_delete" if delete else "git_push")
+    if {"pr", "create"} <= words:
+        categories.add("github_pr_create")
+    if "POST" in words and any("/pulls" in value for value in words):
+        categories.add("github_pr_create")
+    if {"pr", "edit"} <= words or {"api", "PATCH", "--raw-field"} <= words:
+        categories.add("github_pr_update")
+    return categories
+
+
+def _publication_go_call_args(source: str, start: int) -> list[str]:
+    """Split one Go call's top-level arguments without treating quoted commas as separators."""
+    args: list[str] = []
+    closing = [")"]
+    quote = ""
+    escaped = False
+    arg_start = start
+    for position in range(start, len(source)):
+        char = source[position]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "`":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char in "([{":
+            closing.append({"(": ")", "[": "]", "{": "}"}[char])
+        elif char in ")]}":
+            if char != closing.pop():
+                raise RuntimeError("cannot tokenize Go publication command")
+            if not closing:
+                args.append(source[arg_start:position].strip())
+                return args
+        elif char == "," and len(closing) == 1:
+            args.append(source[arg_start:position].strip())
+            arg_start = position + 1
+    raise RuntimeError("unterminated Go publication command")
+
+
+def _publication_go_sites(source: str, relative: str) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    for match in _PUBLICATION_GO_EXEC.finditer(source):
+        arguments = _publication_go_call_args(source, match.end())
+        if source[match.start():match.end()].startswith("exec.CommandContext"):
+            arguments = arguments[1:]
+        words: set[str] = set()
+        for argument in arguments:
+            if argument.startswith('"') and argument.endswith('"'):
+                try:
+                    words.add(json.loads(argument))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"cannot decode Go publication command in {relative}") from exc
+            elif argument.startswith("`") and argument.endswith("`"):
+                words.add(argument[1:-1])
+        categories = _publication_command_categories(words)
+        for word in words:
+            categories.update(_publication_text_categories(word))
+        for category in categories:
+            found.setdefault(category, set()).add(f"{relative}:{source.count(chr(10), 0, match.start()) + 1}")
+    return found
+
+
+def _publication_python_sites(path: Path, relative: str) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    occurrences: dict[tuple[str, str], int] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scopes: list[str] = []
+            self.bindings: list[dict[str, ast.AST]] = [{}]
+
+        @property
+        def site(self) -> str:
+            return f"{relative}#{'.'.join(self.scopes) if self.scopes else '<module>'}"
+
+        def record(self, category: str) -> None:
+            found.setdefault(category, set()).add(self.site)
+            key = category, self.site
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if occurrences[key] > 1:
+                raise RuntimeError(f"multiple {category} mutations at {self.site}")
+
+        def _visit_scope(self, body: list[ast.stmt], name: str) -> None:
+            self.scopes.append(name)
+            self.bindings.append({})
+            for statement in body:
+                self.visit(statement)
+            self.bindings.pop()
+            self.scopes.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            for expression in [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]:
+                self.visit(expression)
+            self._visit_scope(node.body, node.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            for expression in [*node.decorator_list, *node.args.defaults, *(value for value in node.args.kw_defaults if value)]:
+                self.visit(expression)
+            if node.returns:
+                self.visit(node.returns)
+            self._visit_scope(node.body, node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.visit_FunctionDef(node)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            for expression in [*node.args.defaults, *(value for value in node.args.kw_defaults if value)]:
+                self.visit(expression)
+            self.scopes.append("<lambda>")
+            self.bindings.append({})
+            self.visit(node.body)
+            self.bindings.pop()
+            self.scopes.pop()
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                self.bindings[-1][node.targets[0].id] = node.value
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if node.args:
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                argv = node.args[0]
+                if isinstance(argv, ast.Name):
+                    argv = next((scope[argv.id] for scope in reversed(self.bindings) if argv.id in scope), argv)
+                if isinstance(argv, (ast.List, ast.Tuple)) and not name.startswith("assert"):
+                    words = {value for item in argv.elts if (value := _publication_static_string(item)) is not None}
+                    try:
+                        categories = _publication_command_categories(words)
+                    except RuntimeError as exc:
+                        raise RuntimeError(f"{exc} at {self.site}:{node.lineno}") from exc
+                    for word in words:
+                        categories.update(_publication_text_categories(word))
+                    for category in categories:
+                        self.record(category)
+                else:
+                    if name in {"run", "Popen", "call", "check_call", "check_output", "system", "exec", "execute"}:
+                        static = _publication_static_string(argv)
+                        if static is not None:
+                            for category in _publication_text_categories(static):
+                                self.record(category)
+            self.generic_visit(node)
+
+    Visitor().visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+    return found
+
+
+def _publication_yaml_sites(path: Path, relative: str) -> dict[str, set[str]]:
+    import yaml
+
+    found: dict[str, set[str]] = {}
+    content = path.read_text(encoding="utf-8")
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            command = value.get("command")
+            args = value.get("args")
+            argv = value.get("argv")
+            for candidate in (argv, command + args if isinstance(command, list) and isinstance(args, list) else command):
+                if isinstance(candidate, list):
+                    words = {word for word in candidate if isinstance(word, str)}
+                    for category in _publication_command_categories(words):
+                        found.setdefault(category, set()).add(relative)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str):
+            for category in _publication_text_categories(value):
+                found.setdefault(category, set()).add(relative)
+
+    try:
+        for document in yaml.safe_load_all(content):
+            visit(document)
+    except yaml.YAMLError as exc:
+        template = "/templates/" in f"/{relative}" and "{{" in content
+        invalid_test_fixture = relative.startswith("tests/fixtures/")
+        if not (template or invalid_test_fixture):
+            raise RuntimeError(f"cannot inspect publication mutations in {relative}: invalid YAML") from exc
+        # Helm templates and intentional invalid-YAML fixtures cannot be parsed; scan their source conservatively.
+        for category in _publication_text_categories(content):
+            found.setdefault(category, set()).add(relative)
+        if re.search(r"(?s)\bcommand:\s*\[\s*git\s*\].{0,300}\bargs:\s*\[\s*push\b", content):
+            found.setdefault("git_push", set()).add(relative)
+        if re.search(r"(?s)\bcommand:\s*\[\s*gh\s*\].{0,300}\bargs:\s*\[\s*pr\s*,\s*create\b", content):
+            found.setdefault("github_pr_create", set()).add(relative)
+    return found
+
+
+def publication_mutation_site_check(*, source_root: Path = ROOT, policy: dict | None = None) -> None:
+    """Fail closed on publication mutations in deliverable code and automation files."""
+    publication = (policy or repository_delivery_policy())["publication"]
+    expected = {kind: set(sites) for kind, sites in publication["mutation_sites"].items()}
+    found: dict[str, set[str]] = {kind: set() for kind in expected}
+    for path in _publication_source_files(source_root):
+        relative = path.relative_to(source_root).as_posix()
+        if path.suffix == ".py":
+            discovered = _publication_python_sites(path, relative)
+        elif path.suffix in {".yaml", ".yml"}:
+            discovered = _publication_yaml_sites(path, relative)
+        elif path.name in _PUBLICATION_AUTOMATION_FILENAMES or path.suffix in _PUBLICATION_AUTOMATION_SUFFIXES:
+            content = path.read_text(encoding="utf-8")
+            if path.name == "Makefile" and re.search(r"(?m)^\s*(?:publish|publish-change)\s*:", content):
+                raise RuntimeError("direct public publish Make targets are forbidden; use make deliver")
+            normalized = _publication_normalize_shell(content)
+            discovered = {
+                category: {f"{relative}:{normalized.count(chr(10), 0, match.start()) + 1}" for match in pattern.finditer(normalized)}
+                for category, pattern in _PUBLICATION_TEXT_COMMANDS.items()
+            }
+            if path.suffix == ".go":
+                for category, sites in _publication_go_sites(content, relative).items():
+                    discovered[category].update(sites)
+        else:
+            continue
+        for category, sites in discovered.items():
+            found[category].update(sites)
+    if found != expected:
+        raise RuntimeError(f"publication mutation sites differ from review-policy allowlist: {found!r}")
 
 
 def commit_provenance_policy() -> dict:
@@ -8778,6 +9091,40 @@ def _remote_ref_sha(ref: str) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _remote_branch_head(branch: str) -> str:
+    ref = f"refs/heads/{branch}"
+    result = run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
+        check=False,
+        capture=True,
+    )
+    if result.returncode == 2:
+        return ""
+    if result.returncode:
+        raise RuntimeError(f"cannot read remote branch {ref}: {(result.stderr or '').strip()}")
+    lines = (result.stdout or "").splitlines()
+    if len(lines) != 1:
+        raise RuntimeError(f"remote branch {ref} returned an ambiguous head")
+    fields = lines[0].split()
+    if len(fields) != 2 or fields[1] != ref or re.fullmatch(r"[0-9a-f]{40}", fields[0]) is None:
+        raise RuntimeError(f"remote branch {ref} returned an invalid head")
+    return fields[0]
+
+
+def _verify_local_delivery_signatures(base_ref: str, head: str) -> int:
+    introduced = git("rev-list", f"{base_ref}..{head}").splitlines()
+    if not introduced:
+        return fail("delivery requires at least one signed feature-branch commit")
+    for sha in introduced:
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            return fail("delivery encountered an invalid introduced commit SHA")
+        verified = run(["git", "verify-commit", "--raw", sha], check=False, capture=True)
+        if verified.returncode:
+            return fail(f"delivery commit {sha} has no locally valid signature")
+    print(f"PASS delivery signatures: {len(introduced)} introduced commit(s)")
+    return 0
+
+
 def publish(base: str, message: str) -> int:
     if toolchain_closure():
         return 1
@@ -8826,42 +9173,113 @@ def publish(base: str, message: str) -> int:
             print(f"PASS publish: reusing existing exact evidence {exact_evidence.relative_to(ROOT)}")
     if exact_evidence is None and verify_change(base_ref, head):
         return 1
+    if _verify_local_delivery_signatures(base_ref, head):
+        return 1
 
-    run(["git", "push", "-u", "origin", "HEAD"])
-    print(f"PASS publish: pushed {branch} at {head} without force")
+    remote_head = _remote_branch_head(branch)
+    if remote_head != head:
+        run(["git", "push", "-u", "origin", f"HEAD:refs/heads/{branch}"])
+        print(f"PASS publish: pushed {branch} at {head} without force")
+    else:
+        print(f"PASS publish: {branch} already at {head}; no push needed")
+    if _remote_branch_head(branch) != head:
+        return fail(f"publish remote head mismatch for {branch}: expected {head}")
+    print(f"REMOTE_HEAD_MATCH=PASS sha={head}")
     return 0
 
 
 def deliver(base: str, title: str, message: str) -> int:
     deliver_started = time.monotonic()
     policy = repository_delivery_policy()
-    review_forge = policy.get("forge")
-    if review_forge != "github":
-        return fail(f"repository_delivery forge must be github; got {review_forge!r}")
+    if policy["publication"]["canonical_entrypoint"] != "make deliver":
+        return fail("canonical publication authority is unavailable")
     base_name = base.removeprefix("origin/")
     if base_name != policy["default_branch"]:
         return fail(f"deliver base must match contract default branch {policy['default_branch']!r}")
     if publish(base_name, message or title):
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
-    if not gh:
-        return fail("GitHub CLI missing")
-    branch = git("branch", "--show-current").strip()
-    head = git("rev-parse", "HEAD").strip()
-    if remote_commit_provenance_check(gh, f"origin/{base_name}", head):
-        return 1
-    evidence = CONTEXT / "evidence" / f"{head}.json"
-    if not evidence.is_file():
-        return fail(f"exact evidence missing for {head}")
-    if not title:
-        title = git("log", "-1", "--pretty=%s").strip()
-    changed = (
-        git("diff", "--name-only", f"origin/{base_name}...HEAD")
-    )
-    stat = (
-        git("diff", "--stat", f"origin/{base_name}...HEAD")
-    )
-    ev = json.loads(evidence.read_text(encoding="utf-8"))
+    print("PUSH_RESULT=PASS")
+    head = "unknown"
+    try:
+        branch = git("branch", "--show-current").strip()
+        head = git("rev-parse", "HEAD").strip()
+        gh = shutil.which("gh") or shutil.which("gh.exe")
+        if not gh:
+            raise RuntimeError("GitHub CLI missing")
+        if remote_commit_provenance_check(gh, f"origin/{base_name}", head):
+            raise RuntimeError("remote commit provenance failed")
+        evidence = CONTEXT / "evidence" / f"{head}.json"
+        if not evidence.is_file():
+            raise RuntimeError(f"exact evidence missing for {head}")
+        if not title:
+            title = git("log", "-1", "--pretty=%s").strip()
+        ev = json.loads(evidence.read_text(encoding="utf-8"))
+        body = _delivery_pr_body(gh, base_name, branch, head, title, ev)
+        candidates = _delivery_open_prs(gh, branch, base_name, head)
+        created = not candidates
+        if created:
+            run(
+                [gh, "pr", "create", "--base", base_name, "--head", branch,
+                 "--title", title, "--body-file", str(body)],
+                capture=True,
+            )
+        else:
+            number = int(candidates[0]["number"])
+            run(
+                [gh, "api", "--method", "PATCH", f"repos/{{owner}}/{{repo}}/pulls/{number}",
+                 "--raw-field", f"title={title}", "--raw-field", f"body={body.read_text(encoding='utf-8')}"],
+                capture=True,
+            )
+        verified = _delivery_open_prs(gh, branch, base_name, head)
+        if len(verified) != 1:
+            raise RuntimeError("delivery must resolve exactly one open PR after create/update")
+        number = int(verified[0]["number"])
+        pr = json.loads(output([gh, "pr", "view", str(number), "--json",
+                                "number,url,state,baseRefName,headRefName,headRefOid"]))
+        if (
+            pr.get("number") != number
+            or pr.get("state") != "OPEN"
+            or pr.get("baseRefName") != base_name
+            or pr.get("headRefName") != branch
+            or pr.get("headRefOid") != head
+            or git("rev-parse", "HEAD").strip() != head
+            or _remote_branch_head(branch) != head
+        ):
+            raise RuntimeError("delivery local, remote and open PR head/base verification failed")
+        _record_delivery_wall(evidence, ev, deliver_started)
+    except (OSError, RuntimeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print("PR_RESULT=FAIL")
+        print("FINAL_STATUS=PARTIAL_DELIVERY")
+        return fail(f"deliver pushed {head} but PR completion failed: {exc}", 1)
+    print(f"PR_RESULT=PASS number={number}")
+    print(f"PR_HEAD_MATCH=PASS sha={head}")
+    print("FINAL_STATUS=PASS")
+    print(f"PASS deliver: {'created' if created else 'refreshed'} PR {pr['url']} at {head}")
+    return 0
+
+
+def _delivery_open_prs(gh: str, branch: str, base_name: str, head: str) -> list[dict]:
+    raw = output([gh, "pr", "list", "--head", branch, "--base", base_name,
+                  "--state", "open", "--limit", "2", "--json",
+                  "number,url,state,baseRefName,headRefName,headRefOid"])
+    prs = json.loads(raw)
+    if not isinstance(prs, list) or any(not isinstance(pr, dict) for pr in prs):
+        raise RuntimeError("GitHub returned an invalid open PR list")
+    if len(prs) > 1:
+        raise RuntimeError(f"multiple open PRs for {branch} -> {base_name}; refusing ambiguous delivery")
+    if prs and (
+        prs[0].get("state") != "OPEN"
+        or prs[0].get("baseRefName") != base_name
+        or prs[0].get("headRefName") != branch
+        or prs[0].get("headRefOid") != head
+    ):
+        raise RuntimeError("open PR does not bind the exact branch, base and head before update")
+    return prs
+
+
+def _delivery_pr_body(gh: str, base_name: str, branch: str, head: str, title: str, ev: dict) -> Path:
+    changed = git("diff", "--name-only", f"origin/{base_name}...HEAD")
+    stat = git("diff", "--stat", f"origin/{base_name}...HEAD")
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
     body = CONTEXT / "pr-body.md"
@@ -8892,63 +9310,7 @@ def deliver(base: str, title: str, message: str) -> int:
         f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
-    existing = output(
-        [
-            gh,
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--base",
-            base_name,
-            "--state",
-            "open",
-            "--json",
-            "number,url",
-            "--jq",
-            '.[0] | select(.) | "\\(.number) \\(.url)"',
-        ]
-    ).strip()
-    if existing:
-        num, url = existing.split(" ", 1)
-        run(
-            [
-                gh,
-                "api",
-                "--method",
-                "PATCH",
-                f"repos/{{owner}}/{{repo}}/pulls/{num}",
-                "--raw-field",
-                f"title={title}",
-                "--raw-field",
-                f"body={body.read_text(encoding='utf-8')}",
-            ]
-        )
-        actual = output([gh, "api", f"repos/{{owner}}/{{repo}}/pulls/{num}", "--jq", ".head.sha"]).strip()
-        if actual != head:
-            return fail(f"PR head mismatch: expected {head}, got {actual}")
-        _record_delivery_wall(evidence, ev, deliver_started)
-        print(f"PASS deliver: refreshed PR {url} at {head}")
-        return 0
-    p = run(
-        [
-            gh,
-            "pr",
-            "create",
-            "--base",
-            base_name,
-            "--head",
-            branch,
-            "--title",
-            title,
-            "--body-file",
-            str(body),
-        ],
-        capture=True,
-    )
-    _record_delivery_wall(evidence, ev, deliver_started)
-    print(f"PASS deliver: created PR {p.stdout.strip()} at {head}")
-    return 0
+    return body
 
 
 def qualification_workflow(name: str) -> dict:
@@ -10519,12 +10881,6 @@ def main() -> int:
     tkp.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
     tkp.add_argument("--parent-sha", default=os.environ.get("PARENT_SHA", ""))
     tkp.add_argument("--head-sha", default=os.environ.get("HEAD_SHA", ""))
-    pub = sub.add_parser("publish")
-    pub.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
-    pub.add_argument("--message", default=os.environ.get("MSG", ""))
-    pubc = sub.add_parser("publish-change")
-    pubc.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
-    pubc.add_argument("--message", default=os.environ.get("MSG", ""))
     dlv = sub.add_parser("deliver")
     dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
@@ -10812,10 +11168,6 @@ def main() -> int:
             )
         if args.cmd == "experiment":
             return experiment_command(args.action, args.input, args.output)
-        if args.cmd == "publish":
-            return publish(args.base, args.message)
-        if args.cmd == "publish-change":
-            return publish(args.base, args.message)
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
         if args.cmd == "pr-loop":

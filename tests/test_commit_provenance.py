@@ -72,7 +72,7 @@ class CommitProvenanceTests(unittest.TestCase):
         )
         self.assertLess(
             deliver_source.index("remote_commit_provenance_check"),
-            deliver_source.index('"pr",\n            "list"'),
+            deliver_source.index("_delivery_open_prs"),
         )
 
     def test_finish_pr_blocks_unverified_required_commit(self):

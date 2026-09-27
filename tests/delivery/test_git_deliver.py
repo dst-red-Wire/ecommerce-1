@@ -25,10 +25,10 @@ class DeliverContractTests(unittest.TestCase):
     def test_delivery_binds_exact_evidence_and_verifies_pr_head(self):
         self.assertIn("exact_commit_evidence", CONTROLLER)
         self.assertIn(".context", CONTROLLER)
-        self.assertIn("PR head mismatch", CONTROLLER)
+        self.assertIn("delivery local, remote and open PR head/base verification failed", CONTROLLER)
 
         module = ast.parse(CONTROLLER)
-        deliver = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "deliver")
+        deliver = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_delivery_open_prs")
         pr_list_calls = []
         for call in ast.walk(deliver):
             if (
@@ -54,7 +54,7 @@ class DeliverContractTests(unittest.TestCase):
         literal_args = [
             item.value for item in pr_list_calls[0] if isinstance(item, ast.Constant) and isinstance(item.value, str)
         ]
-        for required in ("--head", "--base", "--state", "open", "--json", "number,url"):
+        for required in ("--head", "--base", "--state", "open", "--json", "number,url,state,baseRefName,headRefName,headRefOid"):
             self.assertIn(required, literal_args)
 
     def test_delivery_enforces_canonical_github_forge(self):

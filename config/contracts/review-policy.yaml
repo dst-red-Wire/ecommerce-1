@@ -64,6 +64,25 @@ repository_delivery:
   forge: github
   default_branch: main
 
+  publication:
+    canonical_entrypoint: make deliver
+    repoctl_entrypoint: deliver
+    direct_git_push: {status: forbidden_for_repository_delivery}
+    direct_repoctl_publish: {status: internal_only}
+    direct_repoctl_publish_change: {status: forbidden}
+    pull_request_creation: {required: true}
+    push_without_pull_request: {status: forbidden_for_canonical_delivery}
+    default_branch_write: {forbidden: true}
+    force_push: {forbidden: true}
+    exact_sha: {required: true}
+    qualification_before_push: {required: true}
+    signed_commit: {required: true}
+    mutation_sites:
+      git_push: [scripts/repoctl.py#publish]
+      git_push_delete: [scripts/repoctl.py#_delete_branch_ref]
+      github_pr_create: [scripts/repoctl.py#deliver]
+      github_pr_update: [scripts/repoctl.py#deliver]
+
   commit_provenance:
     authority_source: architecture.lock.yaml#machine_contracts.review_policy
     required_for_default_branch_delivery: true

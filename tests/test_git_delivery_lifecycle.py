@@ -174,8 +174,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-        self.assertIn("publish-change:", makefile)
-        self.assertIn("scripts/repoctl.py publish-change", makefile)
+        self.assertIn("deliver: signing-rotation-check", makefile)
+        self.assertIn("scripts/repoctl.py deliver", makefile)
+        self.assertNotIn("publish-change:", makefile)
+        self.assertNotIn("scripts/repoctl.py publish", makefile)
         self.assertIn("trusted-pr-transition", makefile)
         self.assertIn("TRUSTED_ROOT", makefile)
         self.assertIn("finish-pr:", makefile)
