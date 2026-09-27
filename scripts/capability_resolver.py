@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +125,23 @@ def validate_registry(registry: dict[str, Any], composed: dict[str, Any]) -> Non
     if set(registry.get("relationships", [])) != RELATIONSHIPS:
         raise ResolutionError("relationship taxonomy is incomplete or unknown")
     allowed_requirements = set(registry.get("requirement_vocabulary", []))
+    freshness = registry.get("evidence_freshness")
+    if not isinstance(freshness, dict):
+        raise ResolutionError("capability evidence freshness policy is missing")
+    dynamic_requirements = freshness.get("dynamic_requirements")
+    if (
+        not isinstance(dynamic_requirements, list)
+        or not dynamic_requirements
+        or any(not isinstance(name, str) or not name for name in dynamic_requirements)
+        or len(dynamic_requirements) != len(set(dynamic_requirements))
+        or set(dynamic_requirements) - allowed_requirements
+    ):
+        raise ResolutionError("dynamic capability requirements are missing or unknown")
+    max_age_seconds = freshness.get("max_age_seconds")
+    if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds <= 0:
+        raise ResolutionError("capability evidence max age must be a positive integer")
+    if freshness.get("observed_at_field") != "observed_at_epoch":
+        raise ResolutionError("capability evidence observation timestamp field is invalid")
     scopes = set(registry.get("scopes", []))
     tools = registry.get("tools")
     if not isinstance(tools, dict) or not tools:
@@ -215,6 +236,7 @@ def resolve(
     source_sha: str | None = None,
     registry_path: Path | None = None,
     composed_path: Path | None = None,
+    now_epoch: float | None = None,
 ) -> dict[str, Any]:
     registry = _load(registry_path or root / "config/contracts/tool-capabilities.yaml")
     composed = _load(composed_path or root / "config/contracts/composed-capabilities.yaml")
@@ -225,6 +247,13 @@ def resolve(
         raise ResolutionError("source SHA must be an exact full SHA")
     _assert_commit_bound(root, exact_sha, registry)
     digest = toolchain_digest(root)
+    if isinstance(now_epoch, bool):
+        raise ResolutionError("capability resolution time is invalid")
+    resolved_at = time.time() if now_epoch is None else float(now_epoch)
+    if not math.isfinite(resolved_at):
+        raise ResolutionError("capability resolution time is invalid")
+    freshness = registry["evidence_freshness"]
+    dynamic_requirements = set(freshness["dynamic_requirements"])
     active = lock.get("tool_lifecycle", {}).get("active", {})
     versions = lock.get("versions", {})
     evidence, evidence_errors = _read_evidence(evidence_path)
@@ -284,6 +313,7 @@ def resolve(
             declaration = entry["capabilities"][capability]
             record = evidence.get((tool, capability))
             names = sorted(_requirement_names(declaration["requires"]))
+            dynamic = bool(set(names) & dynamic_requirements)
             producer: dict[str, Any] = {}
             values: dict[str, str] = {}
             state = "unsupported" if not detected else "available"
@@ -358,6 +388,16 @@ def resolve(
                     identity_errors.append("signature_not_verified")
                 if values.get("provenance_attestation") == "PASS" and observations.get("attestation_verified") is not True:
                     identity_errors.append("attestation_not_verified")
+                if dynamic:
+                    observed_at = producer.get(freshness["observed_at_field"])
+                    if (
+                        isinstance(observed_at, bool)
+                        or not isinstance(observed_at, (int, float))
+                        or not math.isfinite(float(observed_at))
+                    ):
+                        identity_errors.append("dynamic_evidence_timestamp_missing_or_invalid")
+                    elif not 0 <= resolved_at - float(observed_at) <= freshness["max_age_seconds"]:
+                        identity_errors.append("dynamic_evidence_stale_or_future")
                 if identity_errors:
                     output["stale_evidence"].append(
                         {"tool": tool, "capability": capability, "reasons": identity_errors}
@@ -429,3 +469,92 @@ def filtered(payload: dict[str, Any], *, tool: str = "", property_name: str = ""
 def write(payload: dict[str, Any], destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _atomic_json(destination: Path, payload: dict[str, Any]) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.parent.is_symlink() or destination.is_symlink():
+        raise ResolutionError("capability evidence destination must not use symlinks")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_gate_evidence(
+    root: Path,
+    *,
+    tool: str,
+    capability: str,
+    requirement_results: dict[str, str],
+    observations: dict[str, Any],
+    source_sha: str | None = None,
+    observed_at_epoch: float | None = None,
+) -> Path:
+    """Write resolver-compatible evidence from a validated gate execution."""
+    registry = _load(root / "config/contracts/tool-capabilities.yaml")
+    composed = _load(root / "config/contracts/composed-capabilities.yaml")
+    validate_registry(registry, composed)
+    exact_sha = source_sha or _head(root)
+    if not SHA.fullmatch(exact_sha):
+        raise ResolutionError("source SHA must be an exact full SHA")
+    _assert_commit_bound(root, exact_sha, registry)
+    declaration = registry.get("tools", {}).get(tool, {}).get("capabilities", {}).get(capability)
+    if not isinstance(declaration, dict):
+        raise ResolutionError(f"unknown capability evidence producer: {tool}.{capability}")
+    expected_requirements = _requirement_names(declaration["requires"])
+    if set(requirement_results) != expected_requirements:
+        raise ResolutionError("capability evidence requirements do not match the registry")
+    if any(value not in {"PASS", "FAIL"} for value in requirement_results.values()):
+        raise ResolutionError("capability evidence requirement results must be PASS or FAIL")
+    producer: dict[str, Any] = {
+        "kind": "CapabilityGateEvidence",
+        "tool": tool,
+        "capability": capability,
+        "source_sha": exact_sha,
+        "toolchain_digest": toolchain_digest(root),
+        "gate": "PASS" if all(value == "PASS" for value in requirement_results.values()) else "FAIL",
+        "gate_id": declaration["gate"],
+        "requirements": dict(sorted(requirement_results.items())),
+        "observations": observations,
+    }
+    freshness = registry["evidence_freshness"]
+    if expected_requirements & set(freshness["dynamic_requirements"]):
+        if isinstance(observed_at_epoch, bool):
+            raise ResolutionError("dynamic capability observation time is invalid")
+        observed = time.time() if observed_at_epoch is None else float(observed_at_epoch)
+        if not math.isfinite(observed):
+            raise ResolutionError("dynamic capability observation time is invalid")
+        producer[freshness["observed_at_field"]] = observed
+
+    for relative in (
+        Path(".context"),
+        Path(".context/evidence"),
+        Path(".context/evidence/artifacts"),
+        Path(".context/evidence/capabilities"),
+    ):
+        if (root / relative).is_symlink():
+            raise ResolutionError("capability evidence directories must not use symlinks")
+    artifact_relative = Path(".context/evidence/artifacts") / f"{tool}-{capability}.json"
+    artifact = root / artifact_relative
+    _atomic_json(artifact, producer)
+    record: dict[str, Any] = {
+        "id": f"{tool}-{capability}",
+        "tool": tool,
+        "capability": capability,
+        "artifact_digest": "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "artifact_path": artifact_relative.as_posix(),
+    }
+    record["evidence_digest"] = "sha256:" + hashlib.sha256(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    index = root / ".context/evidence/capabilities" / f"{tool}-{capability}.json"
+    _atomic_json(index, record)
+    return index

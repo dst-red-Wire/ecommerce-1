@@ -12,6 +12,7 @@ RESOLVER = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(RESOLVER)
 SHA = "b" * 40
+NOW_EPOCH = 1_800_000_000.0
 
 
 class CapabilityResolverTests(unittest.TestCase):
@@ -66,6 +67,7 @@ class CapabilityResolverTests(unittest.TestCase):
             "gate_id": f"{tool}-{capability}",
             "requirements": {name: "PASS" for name in requirements},
             "observations": observations,
+            "observed_at_epoch": NOW_EPOCH,
         }
         artifact.write_text(json.dumps(producer, sort_keys=True) + "\n")
         artifact_digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -82,7 +84,9 @@ class CapabilityResolverTests(unittest.TestCase):
     def resolve_records(self, records):
         path = self.root / "evidence.json"
         path.write_text(json.dumps({"evidence": records}))
-        return RESOLVER.resolve(self.root, evidence_path=path, source_sha=SHA)
+        return RESOLVER.resolve(
+            self.root, evidence_path=path, source_sha=SHA, now_epoch=NOW_EPOCH
+        )
 
     def mutate_producer(self, record, **changes):
         artifact = self.root / record["artifact_path"]
@@ -143,6 +147,52 @@ class CapabilityResolverTests(unittest.TestCase):
         result = self.resolve_records([self.evidence("fleet", "convergence", requirements)])
         self.assertEqual("verified", result["tools"]["fleet"]["capabilities"]["convergence"]["status"])
 
+    def test_dynamic_capability_requires_fresh_observation(self):
+        record = self.evidence(
+            "fleet", "convergence", self.requirements("fleet", "convergence")
+        )
+        self.mutate_producer(record, observed_at_epoch=NOW_EPOCH - 86401)
+        result = self.resolve_records([record])
+        self.assertEqual(
+            "configured", result["tools"]["fleet"]["capabilities"]["convergence"]["status"]
+        )
+        self.assertIn(
+            "dynamic_evidence_stale_or_future", result["stale_evidence"][0]["reasons"]
+        )
+        with self.assertRaisesRegex(RESOLVER.ResolutionError, "resolution time"):
+            RESOLVER.resolve(self.root, source_sha=SHA, now_epoch=True)
+
+    def test_qce_gate_produces_resolver_compatible_evidence(self):
+        index = RESOLVER.write_gate_evidence(
+            self.root,
+            tool="qce",
+            capability="verification",
+            requirement_results={"referenced_runtime_evidence": "PASS"},
+            observations={"traceability_validated": True},
+            source_sha=SHA,
+            observed_at_epoch=NOW_EPOCH,
+        )
+        self.assertTrue(index.is_file())
+        result = RESOLVER.resolve(
+            self.root,
+            evidence_path=index.parent,
+            source_sha=SHA,
+            now_epoch=NOW_EPOCH,
+        )
+        self.assertEqual(
+            "proven", result["tools"]["qce"]["capabilities"]["verification"]["status"]
+        )
+        with self.assertRaisesRegex(RESOLVER.ResolutionError, "observation time"):
+            RESOLVER.write_gate_evidence(
+                self.root,
+                tool="qce",
+                capability="verification",
+                requirement_results={"referenced_runtime_evidence": "PASS"},
+                observations={},
+                source_sha=SHA,
+                observed_at_epoch=True,
+            )
+
     def test_foreign_sha_fails_closed(self):
         record = self.evidence("cosign", "integrity", self.requirements("cosign", "integrity"), signature_verified=True)
         self.mutate_producer(record, source_sha="a" * 40)
@@ -174,8 +224,8 @@ class CapabilityResolverTests(unittest.TestCase):
         self.assertEqual("not_proven", result["composed_capabilities"]["supply_chain_integrity"]["status"])
 
     def test_deterministic_for_identical_inputs(self):
-        first = RESOLVER.resolve(self.root, source_sha=SHA)
-        second = RESOLVER.resolve(self.root, source_sha=SHA)
+        first = RESOLVER.resolve(self.root, source_sha=SHA, now_epoch=NOW_EPOCH)
+        second = RESOLVER.resolve(self.root, source_sha=SHA, now_epoch=NOW_EPOCH)
         self.assertEqual(first, second)
 
 

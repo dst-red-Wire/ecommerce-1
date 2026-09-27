@@ -1157,11 +1157,21 @@ def qualification_execution_policy() -> dict:
         profiles = policy.get("qualification_profiles")
         if not isinstance(context, dict) or not isinstance(context.get("environments"), dict):
             raise RuntimeError("qualification execution policy must declare execution environments")
+        wsl2_only_tags = context.get("wsl2_only_reconcile_tags")
+        if (
+            not isinstance(wsl2_only_tags, list)
+            or not wsl2_only_tags
+            or any(not isinstance(tag, str) or not tag for tag in wsl2_only_tags)
+            or len(wsl2_only_tags) != len(set(wsl2_only_tags))
+        ):
+            raise RuntimeError("qualification execution policy must declare unique WSL2-only reconcile tags")
         if not isinstance(profiles, dict) or set(profiles) != {"static", "developer-wsl2", "runtime", "full"}:
             raise RuntimeError("qualification execution policy must declare the canonical qualification profiles")
         for profile_name, profile in profiles.items():
             if not isinstance(profile, dict) or not isinstance(profile.get("allowed_environments"), list):
                 raise RuntimeError(f"qualification profile {profile_name} is invalid")
+            if not isinstance(profile.get("merge_authoritative"), bool):
+                raise RuntimeError(f"qualification profile {profile_name} must declare merge authority")
             if set(profile["allowed_environments"]) - set(context["environments"]):
                 raise RuntimeError(f"qualification profile {profile_name} references an unknown environment")
             dispositions = profile.get("runtime_capabilities", {})
@@ -1169,6 +1179,11 @@ def qualification_execution_policy() -> dict:
                 raise RuntimeError(f"qualification profile {profile_name} references an unknown capability")
             if set(dispositions.values()) - {"out_of_scope", "required_when_affected"}:
                 raise RuntimeError(f"qualification profile {profile_name} has an unknown capability disposition")
+        authoritative_profiles = {
+            name for name, profile in profiles.items() if profile["merge_authoritative"]
+        }
+        if authoritative_profiles != {"full"}:
+            raise RuntimeError("only the full qualification profile may be merge-authoritative")
         for gate_name, gate in gates.items():
             if not isinstance(gate, dict):
                 continue
@@ -3404,11 +3419,15 @@ def reconcile(tags: str, target_repo_root: str = "") -> int:
     selected = ",".join(part.strip() for part in tags.split(",") if part.strip())
     if not selected:
         return fail("reconcile requires at least one Ansible tag")
-    if "docker" in selected.split(","):
+    selected_tags = set(selected.split(","))
+    wsl2_only_tags = set(
+        qualification_execution_policy()["execution_context"]["wsl2_only_reconcile_tags"]
+    )
+    if selected_tags & wsl2_only_tags:
         detected = _runtime_api().detect_execution_environment()
         if detected.name != "wsl2_developer":
             return fail(
-                "BLOCKED_RUNTIME: docker reconciliation requires "
+                "BLOCKED_RUNTIME: selected reconciliation includes WSL2-only tasks "
                 "execution_environment=wsl2_developer "
                 f"detected={detected.name} no mutation performed",
                 2,
@@ -3686,11 +3705,14 @@ def service_check(service: str) -> int:
 
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        run(
-            ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
-            cwd=module,
-            env=env,
-        )
+        if os.environ.get("ECOMMERCE_EXECUTION_PROFILE") == "static":
+            print(f"OUT_OF_SCOPE {service} integration tests require testcontainers")
+        else:
+            run(
+                ["go", "test", "-race", "-tags=integration", "./internal/infrastructure/postgres", "-count=1"],
+                cwd=module,
+                env=env,
+            )
     print(f"PASS {service} service checks completed")
     return 0
 
@@ -4286,6 +4308,21 @@ def worktree_tree_sha() -> str:
     return tree_sha
 
 
+def _merge_authoritative_verification(evidence: dict) -> bool:
+    verification = evidence.get("verification")
+    if not isinstance(verification, dict):
+        return False
+    profile_name = verification.get("execution_profile")
+    profiles = qualification_execution_policy().get("qualification_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, dict) or profile.get("merge_authoritative") is not True:
+        return False
+    if "runtime_scope" not in verification:
+        return False
+    runtime_scope = verification["runtime_scope"]
+    return runtime_scope == []
+
+
 def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
     path = CONTEXT / "evidence" / "worktree.json"
     if not path.is_file():
@@ -4310,6 +4347,7 @@ def _load_promotable_worktree_evidence(base_ref: str) -> dict | None:
         or evidence.get("head_tree_sha") != current_tree
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or evidence.get("verification", {}).get("tree_stable") is not True
         or evidence.get("changed_paths") != changed_paths(base_ref, "WORKTREE")
         or not _complete_gate_inventory(evidence, base_ref, "WORKTREE")
@@ -4339,6 +4377,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
         or source.get("head_tree_sha") != source_tree
         or source.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(source)
+        or not _merge_authoritative_verification(source)
         or not _complete_gate_inventory(source, base_ref, "WORKTREE")
     ):
         return None
@@ -4370,6 +4409,7 @@ def _promote_worktree_evidence(base_ref: str, head: str, source: dict) -> Path |
             "gates": records,
             "metrics": evidence_metrics(records),
             "verification": {
+                **copy.deepcopy(source.get("verification", {})),
                 "mode": "promoted-worktree",
                 "source_head_sha": source_head,
                 "source_tree_sha": source_tree,
@@ -5117,7 +5157,7 @@ def _execute_with_runtime(
             "ECOMMERCE_EXECUTION_ENVIRONMENT": detected.name,
         }
     )
-    if not requests and excluded:
+    if not requests:
         runtime_env["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
         return callback(runtime_env)
     if detected.name not in profile["allowed_environments"]:
@@ -6330,9 +6370,33 @@ def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bo
 
 
 def qce_check_command() -> int:
-    lock, roadmap, qualification = _modern_engineering_api()._qce_contracts(ROOT)
-    _modern_engineering_api().validate_qce_traceability(lock, roadmap, qualification, ROOT)
-    _modern_engineering_api().qce_status(ROOT)
+    modern = _modern_engineering_api()
+    lock, roadmap, qualification = modern._qce_contracts(ROOT)
+    modern.validate_qce_traceability(lock, roadmap, qualification, ROOT)
+    payload = modern.qce_status(ROOT)
+    status_path = modern.write_qce_status(ROOT, payload)
+    import capability_resolver
+
+    try:
+        evidence_path = capability_resolver.write_gate_evidence(
+            ROOT,
+            tool="qce",
+            capability="verification",
+            requirement_results={"referenced_runtime_evidence": "PASS"},
+            observations={
+                "traceability_validated": True,
+                "qce_status_path": status_path.relative_to(ROOT).as_posix(),
+                "qce_status_digest": "sha256:" + hashlib.sha256(status_path.read_bytes()).hexdigest(),
+            },
+        )
+    except capability_resolver.ResolutionError as exc:
+        if "resolver inputs differ from the claimed exact commit" not in str(exc):
+            raise
+        print("SKIP QCE capability evidence requires committed resolver inputs")
+    else:
+        payload = modern.qce_status(ROOT)
+        modern.write_qce_status(ROOT, payload)
+        print(f"EVIDENCE {evidence_path.relative_to(ROOT)}")
     print("PASS QCE traceability derives exactly nine sectors from architecture.lock.yaml")
     return 0
 

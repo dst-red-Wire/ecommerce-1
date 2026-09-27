@@ -13,6 +13,7 @@ principles:
   dynamic_state_must_be_fresh: true
 
 execution_context:
+  wsl2_only_reconcile_tags: [docker, workstation]
   detection:
     owner: scripts/runtime_orchestration.py
     side_effects: forbidden
@@ -51,6 +52,7 @@ execution_context:
 qualification_profiles:
   static:
     purpose: portable-non-mutating-global-and-affected-qualification
+    merge_authoritative: false
     allowed_environments: [linux_container, wsl2_developer, native_linux]
     mutation_classes: [none]
     affected_only: true
@@ -73,6 +75,7 @@ qualification_profiles:
       production-context: out_of_scope
   developer-wsl2:
     purpose: governed-local-developer-runtime-qualification
+    merge_authoritative: false
     allowed_environments: [wsl2_developer]
     mutation_classes: [none, local-ephemeral, local-virtualization]
     affected_only: true
@@ -82,6 +85,7 @@ qualification_profiles:
       testcontainers: required_when_affected
   runtime:
     purpose: gate-driven-runtime-qualification
+    merge_authoritative: false
     allowed_environments: [wsl2_developer]
     mutation_classes: [none, local-ephemeral, local-virtualization]
     affected_only: true
@@ -91,6 +95,7 @@ qualification_profiles:
       testcontainers: required_when_affected
   full:
     purpose: merge-authoritative-static-and-runtime-qualification
+    merge_authoritative: true
     allowed_environments: [wsl2_developer]
     mutation_classes: [none, local-ephemeral, local-virtualization, external-governed]
     affected_only: true

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -28,6 +28,35 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def test_workstation_aggregate_tag_is_blocked_outside_wsl_before_mutation(self):
+        detected = types.SimpleNamespace(name="linux_container")
+        with (
+            mock.patch.object(MOD, "toolchain_closure", return_value=0),
+            mock.patch.object(
+                MOD,
+                "qualification_execution_policy",
+                return_value={
+                    "execution_context": {
+                        "wsl2_only_reconcile_tags": ["docker", "workstation"]
+                    }
+                },
+            ),
+            mock.patch.object(
+                MOD,
+                "_runtime_api",
+                return_value=types.SimpleNamespace(
+                    detect_execution_environment=lambda: detected
+                ),
+            ),
+            mock.patch.object(
+                MOD, "require", side_effect=AssertionError("Ansible must not start")
+            ),
+            redirect_stderr(io.StringIO()) as output,
+        ):
+            self.assertEqual(2, MOD.reconcile("workstation,bootstrap"))
+        self.assertIn("BLOCKED_RUNTIME", output.getvalue())
+        self.assertIn("no mutation performed", output.getvalue())
+
     def test_static_profile_excludes_runtime_without_constructing_executor(self):
         requests = [types.SimpleNamespace(name="testcontainers")]
         api = types.SimpleNamespace(
@@ -84,6 +113,47 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual("BLOCKED_RUNTIME", records[0]["runtime_status"])
         self.assertIn("no mutation performed", records[0]["reason"])
 
+    def test_static_only_full_plan_runs_outside_wsl_without_runtime_executor(self):
+        callback = mock.Mock(return_value=0)
+        api = types.SimpleNamespace(
+            detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(
+                name="linux_container"
+            ),
+            RuntimeExecutor=mock.Mock(
+                side_effect=AssertionError("runtime executor must not run")
+            ),
+        )
+        contract = {
+            "runtime_orchestration": {},
+            "qualification_profiles": {
+                "full": {
+                    "allowed_environments": ["wsl2_developer"],
+                    "runtime_capabilities": {},
+                }
+            },
+        }
+        with (
+            mock.patch.object(MOD, "_runtime_api", return_value=api),
+            mock.patch.object(MOD, "_runtime_requests", return_value=[]),
+            mock.patch.object(MOD, "_runtime_source", return_value=("worktree", "a" * 40)),
+            mock.patch.object(MOD, "qualification_execution_policy", return_value=contract),
+        ):
+            self.assertEqual(
+                0,
+                MOD._execute_with_runtime(
+                    [{"gate": "frontend:storefront"}],
+                    callback,
+                    workflow="verify-change",
+                    head="WORKTREE",
+                    environment={},
+                    execution_profile="full",
+                ),
+            )
+        callback.assert_called_once()
+        self.assertEqual(
+            "1", callback.call_args.args[0]["ECOMMERCE_RUNTIME_ORCHESTRATED"]
+        )
+
     def test_runtime_restore_failures_always_add_a_failed_evidence_record(self):
         class FakeExecutor:
             def __init__(self, *_args, **_kwargs):
@@ -106,7 +176,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
                 with (
                     mock.patch.object(MOD, "_runtime_api", return_value=api),
-                    mock.patch.object(MOD, "_runtime_requests", return_value=[]),
+                    mock.patch.object(
+                        MOD,
+                        "_runtime_requests",
+                        return_value=[types.SimpleNamespace(name="docker-runtime")],
+                    ),
                     mock.patch.object(
                         MOD, "_runtime_source", return_value=("worktree", "a" * 40)
                     ),
@@ -287,6 +361,18 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             policy["execution"]["ci_max_workers_env"],
         )
         self.assertIs(True, policy["execution"]["ci_max_workers_required"])
+        self.assertEqual(
+            ["docker", "workstation"],
+            policy["execution_context"]["wsl2_only_reconcile_tags"],
+        )
+        self.assertEqual(
+            {"full"},
+            {
+                name
+                for name, profile in policy["qualification_profiles"].items()
+                if profile["merge_authoritative"]
+            },
+        )
 
     def test_qualification_workflows_are_centralized(self):
         policy = MOD.qualification_execution_policy()

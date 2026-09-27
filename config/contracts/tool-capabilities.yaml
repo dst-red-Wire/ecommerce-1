@@ -24,6 +24,13 @@ non_capability_tools:
 - shfmt
 - yq
 policy_ref: config/contracts/execution-properties-policy.yaml
+evidence_freshness:
+  dynamic_requirements:
+  - observed_state
+  - runtime_evidence
+  - referenced_runtime_evidence
+  max_age_seconds: 86400
+  observed_at_field: observed_at_epoch
 relationships:
 - implements
 - enforces
