@@ -73,6 +73,16 @@ qualification_profiles:
       harbor-readiness: out_of_scope
       tekton-readiness: out_of_scope
       production-context: out_of_scope
+  tekton:
+    purpose: container-safe-ci-gates
+    merge_authoritative: false
+    allowed_environments: [linux_container]
+    mutation_classes: [none]
+    affected_only: true
+    runtime_capabilities:
+      ansible-runtime: required_when_affected
+      opentofu-runtime: required_when_affected
+      testcontainers: out_of_scope
   developer-wsl2:
     purpose: governed-local-developer-runtime-qualification
     merge_authoritative: false

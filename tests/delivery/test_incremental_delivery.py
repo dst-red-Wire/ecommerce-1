@@ -20,6 +20,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
     PARENT = "2" * 40
     HEAD = "3" * 40
     PARENT_TREE = "4" * 40
+    HEAD_TREE = "5" * 40
 
     def parent_evidence(self):
         return {
@@ -31,6 +32,7 @@ class IncrementalDeliveryTests(unittest.TestCase):
             "created_at_epoch": time.time(),
             "status": "PASS",
             "exact_commit_evidence": True,
+            "verification": {"execution_profile": "full", "runtime_scope": []},
             "gates": [
                 {"gate": "frontend:storefront", "status": "PASS"},
                 {"gate": "platform:terraform", "status": "PASS"},
@@ -49,6 +51,8 @@ class IncrementalDeliveryTests(unittest.TestCase):
             return self.BASE + "\n"
         if args == ("rev-parse", f"{self.PARENT}^{{tree}}"):
             return self.PARENT_TREE + "\n"
+        if args == ("rev-parse", f"{self.HEAD}^{{tree}}"):
+            return self.HEAD_TREE + "\n"
         if args == ("status", "--porcelain", "--untracked-files=all"):
             return ""
         raise AssertionError(f"unexpected git call: {args}")
@@ -319,6 +323,55 @@ class IncrementalDeliveryTests(unittest.TestCase):
                 parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
         self.assertIsNone(parent)
         self.assertIsNone(data)
+
+    def test_static_parent_evidence_is_not_reused(self):
+        evidence = self.parent_evidence()
+        evidence["verification"]["execution_profile"] = "static"
+        with tempfile.TemporaryDirectory() as tmp:
+            context = Path(tmp)
+            (context / "evidence").mkdir()
+            (context / "evidence" / f"{self.PARENT}.json").write_text(
+                json.dumps(evidence), encoding="utf-8"
+            )
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+            ):
+                parent, data = REPOCTL._incremental_parent_evidence("origin/main", "feature-head")
+        self.assertIsNone(parent)
+        self.assertIsNone(data)
+
+    def test_static_exact_evidence_is_not_accepted_for_delivery(self):
+        evidence = self.parent_evidence()
+        evidence.update({
+            "head_sha": self.HEAD,
+            "head_tree_sha": self.HEAD_TREE,
+            "changed_paths": [],
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            context = Path(tmp)
+            (context / "evidence").mkdir()
+            (context / "evidence" / f"{self.HEAD}.json").write_text(
+                json.dumps(evidence), encoding="utf-8"
+            )
+            with (
+                mock.patch.object(REPOCTL, "CONTEXT", context),
+                mock.patch.object(REPOCTL, "git", side_effect=self.fake_git),
+                mock.patch.object(REPOCTL, "changed_paths", return_value=[]),
+                mock.patch.object(REPOCTL, "qualification_identity", return_value="test-identity"),
+                mock.patch.object(REPOCTL, "_complete_gate_inventory", return_value=True),
+            ):
+                self.assertEqual(
+                    context / "evidence" / f"{self.HEAD}.json",
+                    REPOCTL._valid_exact_evidence("origin/main", "feature-head"),
+                )
+                evidence["verification"]["execution_profile"] = "static"
+                (context / "evidence" / f"{self.HEAD}.json").write_text(
+                    json.dumps(evidence), encoding="utf-8"
+                )
+                self.assertIsNone(REPOCTL._valid_exact_evidence("origin/main", "feature-head"))
 
     def test_worktree_never_reuses_commit_evidence(self):
         parent, data = REPOCTL._incremental_parent_evidence("origin/main", "WORKTREE")

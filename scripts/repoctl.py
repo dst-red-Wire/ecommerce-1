@@ -1165,7 +1165,7 @@ def qualification_execution_policy() -> dict:
             or len(wsl2_only_tags) != len(set(wsl2_only_tags))
         ):
             raise RuntimeError("qualification execution policy must declare unique WSL2-only reconcile tags")
-        if not isinstance(profiles, dict) or set(profiles) != {"static", "developer-wsl2", "runtime", "full"}:
+        if not isinstance(profiles, dict) or set(profiles) != {"static", "tekton", "developer-wsl2", "runtime", "full"}:
             raise RuntimeError("qualification execution policy must declare the canonical qualification profiles")
         for profile_name, profile in profiles.items():
             if not isinstance(profile, dict) or not isinstance(profile.get("allowed_environments"), list):
@@ -1184,6 +1184,15 @@ def qualification_execution_policy() -> dict:
         }
         if authoritative_profiles != {"full"}:
             raise RuntimeError("only the full qualification profile may be merge-authoritative")
+        tekton_profile = profiles["tekton"]
+        if (
+            tekton_profile.get("allowed_environments") != ["linux_container"]
+            or tekton_profile.get("mutation_classes") != ["none"]
+            or tekton_profile.get("runtime_capabilities", {}).get("testcontainers") != "out_of_scope"
+            or tekton_profile.get("runtime_capabilities", {}).get("ansible-runtime") != "required_when_affected"
+            or tekton_profile.get("runtime_capabilities", {}).get("opentofu-runtime") != "required_when_affected"
+        ):
+            raise RuntimeError("Tekton qualification profile must preserve container-safe runtime boundaries")
         for gate_name, gate in gates.items():
             if not isinstance(gate, dict):
                 continue
@@ -3705,7 +3714,7 @@ def service_check(service: str) -> int:
 
     run(["go", "test", "-race", "./..."], cwd=module, env=env)
     if (module / "internal" / "infrastructure" / "postgres").is_dir():
-        if os.environ.get("ECOMMERCE_EXECUTION_PROFILE") == "static":
+        if os.environ.get("ECOMMERCE_EXECUTION_PROFILE") in {"static", "tekton"}:
             print(f"OUT_OF_SCOPE {service} integration tests require testcontainers")
         else:
             run(
@@ -4626,6 +4635,7 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
         or evidence.get("changed_paths") != changed_paths(base_ref, head)
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or not _complete_gate_inventory(evidence, base_ref, head)
     ):
         return None
@@ -4839,6 +4849,7 @@ def _incremental_parent_evidence(base: str, head: str) -> tuple[str | None, dict
         or evidence.get("head_tree_sha") != git("rev-parse", f"{parent_sha}^{{tree}}").strip()
         or evidence.get("qualification_identity") != qualification_identity()
         or not _fresh_evidence(evidence)
+        or not _merge_authoritative_verification(evidence)
         or not _complete_gate_inventory(evidence, base, parent_sha)
     ):
         return None, None
@@ -5172,6 +5183,24 @@ def _execute_with_runtime(
                 "reason": f"profile {execution_profile} requires runtime capabilities unavailable in {detected.name}; no mutation performed",
             })
         return 2
+    if execution_profile == "tekton":
+        planned = runtime.RuntimePlanner(policy["runtime_orchestration"]).resolve(requests)
+        disallowed = sorted({
+            item.spec.name for item in planned
+            if item.spec.mutation_class not in profile["mutation_classes"]
+        })
+        if disallowed:
+            if records is not None:
+                records.append({
+                    "gate": "runtime-orchestration",
+                    "status": "FAIL",
+                    "runtime_status": "BLOCKED_RUNTIME",
+                    "exit_code": 2,
+                    "duration_seconds": 0.0,
+                    "execution": "fresh",
+                    "reason": f"Tekton container cannot mutate runtime capabilities {disallowed}; no mutation performed",
+                })
+            return 2
     executor = runtime.RuntimeExecutor(
         ROOT,
         qualification_execution_policy()["runtime_orchestration"],
@@ -5214,6 +5243,7 @@ def _execute_direct_gate_with_runtime(
     *,
     head: str = "WORKTREE",
     authoritative: bool = False,
+    execution_profile: str = "full",
 ) -> int:
     policy = _resolved_gate_policy(gate)
     records: list[dict] = []
@@ -5241,6 +5271,7 @@ def _execute_direct_gate_with_runtime(
         environment=env,
         authoritative=authoritative,
         records=records,
+        execution_profile=execution_profile,
     )
 
 
@@ -8048,7 +8079,7 @@ def main() -> int:
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
-    v.add_argument("--profile", choices=("static", "developer-wsl2", "runtime", "full"), default="full")
+    v.add_argument("--profile", choices=("static", "tekton", "developer-wsl2", "runtime", "full"), default="full")
     gl = sub.add_parser("global-check")
     gl.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -8402,6 +8433,7 @@ def main() -> int:
                     ],
                     head=args.head,
                     authoritative=True,
+                    execution_profile="tekton",
                 )
             return ci_global(args.gate, args.base, args.head, args.record_dir)
         if args.cmd == "ci-component":
@@ -8425,6 +8457,7 @@ def main() -> int:
                     ],
                     head=args.head,
                     authoritative=True,
+                    execution_profile="tekton",
                 )
             return ci_component(args.component, args.base, args.head, args.record_dir)
         if args.cmd == "ci-finalize":

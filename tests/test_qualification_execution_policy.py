@@ -113,6 +113,82 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual("BLOCKED_RUNTIME", records[0]["runtime_status"])
         self.assertIn("no mutation performed", records[0]["reason"])
 
+    def test_tekton_container_executes_read_only_runtime_capability(self):
+        runtime = MOD._runtime_api()
+        policy = MOD.qualification_execution_policy()
+        callback = mock.Mock(return_value=0)
+        requests = [runtime.CapabilityRequest("ansible-runtime")]
+
+        class FakeExecutor:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def execute(self, _requests, execute, **kwargs):
+                environment = dict(kwargs["base_environment"])
+                environment["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
+                return types.SimpleNamespace(
+                    status="PASS", exit_code=execute(environment), evidence_path=None
+                )
+
+        api = types.SimpleNamespace(
+            detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(name="linux_container"),
+            RuntimePlanner=runtime.RuntimePlanner,
+            RuntimeExecutor=FakeExecutor,
+            BuiltinCapabilityDriver=lambda _environment: object(),
+        )
+        with (
+            mock.patch.object(MOD, "_runtime_api", return_value=api),
+            mock.patch.object(MOD, "_runtime_requests", return_value=requests),
+            mock.patch.object(MOD, "_runtime_source", return_value=("exact-sha", "a" * 40)),
+            mock.patch.object(MOD, "qualification_execution_policy", return_value=policy),
+        ):
+            self.assertEqual(0, MOD._execute_with_runtime(
+                [{"gate": "platform:ansible"}], callback, workflow="gate:platform:ansible",
+                head="a" * 40, environment={}, execution_profile="tekton", authoritative=True,
+            ))
+        callback.assert_called_once()
+        self.assertEqual("tekton", callback.call_args.args[0]["ECOMMERCE_EXECUTION_PROFILE"])
+
+    def test_tekton_container_blocks_mutable_capability_closure(self):
+        runtime = MOD._runtime_api()
+        policy = MOD.qualification_execution_policy()
+        requests = [runtime.CapabilityRequest("docker-runtime")]
+        api = types.SimpleNamespace(
+            detect_execution_environment=lambda **_kwargs: types.SimpleNamespace(name="linux_container"),
+            RuntimePlanner=runtime.RuntimePlanner,
+            RuntimeExecutor=mock.Mock(side_effect=AssertionError("host mutation must not start")),
+        )
+        records = []
+        callback = mock.Mock()
+        with (
+            mock.patch.object(MOD, "_runtime_api", return_value=api),
+            mock.patch.object(MOD, "_runtime_requests", return_value=requests),
+            mock.patch.object(MOD, "_runtime_source", return_value=("exact-sha", "a" * 40)),
+            mock.patch.object(MOD, "qualification_execution_policy", return_value=policy),
+        ):
+            self.assertEqual(2, MOD._execute_with_runtime(
+                [{"gate": "service:product"}], callback, workflow="gate:service:product",
+                head="a" * 40, environment={}, execution_profile="tekton", records=records,
+            ))
+        callback.assert_not_called()
+        self.assertEqual("BLOCKED_RUNTIME", records[0]["runtime_status"])
+        self.assertIn("docker-runtime", records[0]["reason"])
+
+    def test_tekton_gate_entrypoints_select_container_profile(self):
+        for action, selector in (("ci-global", "--gate"), ("ci-component", "--component")):
+            with self.subTest(action=action):
+                with (
+                    mock.patch.object(
+                        sys, "argv",
+                        ["repoctl.py", action, selector, "platform:ansible", "--base", "origin/main",
+                         "--head", "a" * 40, "--record-dir", ".context/tekton/test"],
+                    ),
+                    mock.patch("native_workspace.workspace_error", return_value=None),
+                    mock.patch.object(MOD, "_execute_direct_gate_with_runtime", return_value=0) as execute,
+                ):
+                    self.assertEqual(0, MOD.main())
+                    self.assertEqual("tekton", execute.call_args.kwargs["execution_profile"])
+
     def test_static_only_full_plan_runs_outside_wsl_without_runtime_executor(self):
         callback = mock.Mock(return_value=0)
         api = types.SimpleNamespace(
@@ -364,6 +440,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(
             ["docker", "workstation"],
             policy["execution_context"]["wsl2_only_reconcile_tags"],
+        )
+        self.assertEqual(
+            ["linux_container"],
+            policy["qualification_profiles"]["tekton"]["allowed_environments"],
         )
         self.assertEqual(
             {"full"},
