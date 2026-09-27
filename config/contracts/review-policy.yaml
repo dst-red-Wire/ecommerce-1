@@ -146,15 +146,27 @@ repository_delivery:
       binding: required
       prior_sha_evidence: historical-only
       head_change: restart-at-qualification
+      in_flight_transition_on_head_change: abandon-and-restart
       refetch_before_qualification: required
       refetch_before_merge: required
     chatgpt_handoff:
       trigger: event-handoff
+      state: CHATGPT_REVIEW_REQUIRED
       event: CHATGPT_REVIEW_REQUIRED
+      review_kinds: [CODE, SECURITY]
       helper: scripts/pr_monitor.py
+      consumer: external-automatic
+      invocation_binding: exact-pr-and-head-sha
+      rerun_after_valid_marker: required
       verdict_authority: ChatGPT-only
       controller_may_emit_verdict: false
       code_before_security: required
+      security_requires_code_marker:
+        provider: ChatGPT
+        kind: code
+        status: PASS
+        blocking_findings: 0
+        exact_head_sha: required
     owner_boundary:
       authority_source: architecture.lock.yaml#repository_governance.owner_authorization
       scope: pr-<number>
@@ -162,12 +174,16 @@ repository_delivery:
       latest_scope_authorization_wins: true
       revocation: /owner-authorization revoke scope=<scope> sha=<exact-head-sha>
       automatic_generation: forbidden
+      unique_human_interruption: true
+      automatic_rerun_after_authorization: required
     merge_delegation:
+      state: MERGE_READY
       command: finish-pr
       direct_merge: forbidden
       exact_head_match: required
     post_merge_cleanup:
       command: branch-cleanup
+      automatic_after_merge: required
       separate_result: required
       merge_success_may_not_mask_cleanup_failure: true
 

@@ -7520,16 +7520,29 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                     "binding": "required",
                     "prior_sha_evidence": "historical-only",
                     "head_change": "restart-at-qualification",
+                    "in_flight_transition_on_head_change": "abandon-and-restart",
                     "refetch_before_qualification": "required",
                     "refetch_before_merge": "required",
                 },
                 "chatgpt_handoff": {
                     "trigger": "event-handoff",
+                    "state": "CHATGPT_REVIEW_REQUIRED",
                     "event": "CHATGPT_REVIEW_REQUIRED",
+                    "review_kinds": ["CODE", "SECURITY"],
                     "helper": "scripts/pr_monitor.py",
+                    "consumer": "external-automatic",
+                    "invocation_binding": "exact-pr-and-head-sha",
+                    "rerun_after_valid_marker": "required",
                     "verdict_authority": "ChatGPT-only",
                     "controller_may_emit_verdict": False,
                     "code_before_security": "required",
+                    "security_requires_code_marker": {
+                        "provider": "ChatGPT",
+                        "kind": "code",
+                        "status": "PASS",
+                        "blocking_findings": 0,
+                        "exact_head_sha": "required",
+                    },
                 },
                 "owner_boundary": {
                     "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
@@ -7538,14 +7551,18 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                     "latest_scope_authorization_wins": True,
                     "revocation": "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>",
                     "automatic_generation": "forbidden",
+                    "unique_human_interruption": True,
+                    "automatic_rerun_after_authorization": "required",
                 },
                 "merge_delegation": {
+                    "state": "MERGE_READY",
                     "command": "finish-pr",
                     "direct_merge": "forbidden",
                     "exact_head_match": "required",
                 },
                 "post_merge_cleanup": {
                     "command": "branch-cleanup",
+                    "automatic_after_merge": "required",
                     "separate_result": "required",
                     "merge_success_may_not_mask_cleanup_failure": True,
                 },
@@ -8149,11 +8166,11 @@ def derive_pr_loop_state(
     if qualification.get("status") != "PASS":
         return "QUALIFICATION_REQUIRED", "QUALIFICATION"
     if code_review.get("status") == "MISSING":
-        return "CODE_REQUIRED", "CHATGPT_CODE_REVIEW"
+        return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"
     if not _review_result_is_pass(code_review):
         return "CODE_FAILED", "FIX_CODE_FINDINGS"
     if security_review.get("status") == "MISSING":
-        return "SECURITY_REQUIRED", "CHATGPT_SECURITY_REVIEW"
+        return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
     if not _review_result_is_pass(security_review):
         return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
     if owner_authorization.get("status") != "PASS":
@@ -8926,6 +8943,7 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "head_branch": "",
         "base": "",
         "state": "GITHUB_UNAVAILABLE",
+        "review_kind": "",
         "draft": False,
         "qualification": {"status": "UNKNOWN", "source": "none"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
@@ -9083,8 +9101,8 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
     review_request = result.get("review_request")
     if isinstance(review_request, dict):
         print(
-            f"CHATGPT_REVIEW_REQUIRED kind={review_request['kind']} "
-            f"pr={review_request['pr']} sha={review_request['head_sha']}"
+            f"CHATGPT_REVIEW_REQUIRED review_kind={review_request['review_kind']} "
+            f"pr={review_request['pr']} head_sha={review_request['head_sha']}"
         )
     next_action = str(result.get("next_action") or "NONE")
     if next_action == "OWNER_AUTHORIZATION":
@@ -9339,9 +9357,8 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
 
     if state in {
         "QUALIFICATION_REQUIRED",
-        "CODE_REQUIRED",
+        "CHATGPT_REVIEW_REQUIRED",
         "CODE_FAILED",
-        "SECURITY_REQUIRED",
         "SECURITY_FAILED",
         "OWNER_AUTH_REQUIRED",
     }:
@@ -9349,16 +9366,35 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["next_action"] = next_action
         result["review_trigger"] = (
             "scripts/pr_monitor.py:event-handoff"
-            if state in {"CODE_REQUIRED", "SECURITY_REQUIRED"}
+            if state == "CHATGPT_REVIEW_REQUIRED"
             else "none"
         )
-        if state in {"CODE_REQUIRED", "SECURITY_REQUIRED"}:
+        if state == "CHATGPT_REVIEW_REQUIRED":
+            review_kind = (
+                "CODE"
+                if next_action == "CHATGPT_CODE_REVIEW"
+                else "SECURITY"
+            )
+            marker_kind = review_kind.lower()
+            result["review_kind"] = review_kind
             result["review_request"] = {
                 "event": "CHATGPT_REVIEW_REQUIRED",
+                "state": "CHATGPT_REVIEW_REQUIRED",
                 "provider": "ChatGPT",
-                "kind": "code" if state == "CODE_REQUIRED" else "security",
+                "review_kind": review_kind,
                 "pr": result["pr"],
                 "head_sha": result["head_sha"],
+                "expected_marker": {
+                    "provider": "ChatGPT",
+                    "kind": marker_kind,
+                    "head_sha": result["head_sha"],
+                    "status": "PASS",
+                    "blocking_findings": 0,
+                },
+                "rerun": {
+                    "command": f"make pr-loop PR={result['pr']}",
+                    "after_valid_marker": True,
+                },
                 "verdict_authority": False,
             }
         _emit_pr_loop_result(result, json_output=json_output)

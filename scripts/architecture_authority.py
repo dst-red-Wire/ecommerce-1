@@ -1504,15 +1504,36 @@ def validate(root):
                 "post-merge-cleanup",
             ]
             or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
+            or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_head_change")
+            != "abandon-and-restart"
             or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
             or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("state") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("review_kinds") != ["CODE", "SECURITY"]
+            or pr_loop.get("chatgpt_handoff", {}).get("consumer") != "external-automatic"
+            or pr_loop.get("chatgpt_handoff", {}).get("invocation_binding")
+            != "exact-pr-and-head-sha"
+            or pr_loop.get("chatgpt_handoff", {}).get("rerun_after_valid_marker") != "required"
             or pr_loop.get("chatgpt_handoff", {}).get("controller_may_emit_verdict") is not False
+            or pr_loop.get("chatgpt_handoff", {}).get("security_requires_code_marker")
+            != {
+                "provider": "ChatGPT",
+                "kind": "code",
+                "status": "PASS",
+                "blocking_findings": 0,
+                "exact_head_sha": "required",
+            }
             or pr_loop.get("owner_boundary", {}).get("automatic_generation") != "forbidden"
+            or pr_loop.get("owner_boundary", {}).get("unique_human_interruption") is not True
+            or pr_loop.get("owner_boundary", {}).get("automatic_rerun_after_authorization")
+            != "required"
             or pr_loop.get("owner_boundary", {}).get("revocation")
             != "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>"
+            or pr_loop.get("merge_delegation", {}).get("state") != "MERGE_READY"
             or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
             or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
             or pr_loop.get("post_merge_cleanup", {}).get("command") != "branch-cleanup"
+            or pr_loop.get("post_merge_cleanup", {}).get("automatic_after_merge") != "required"
             or pr_loop.get("post_merge_cleanup", {}).get("separate_result") != "required"
         ):
             errors.append(

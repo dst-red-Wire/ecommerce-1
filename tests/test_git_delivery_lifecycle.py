@@ -22,8 +22,19 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
         self.assertEqual("forbidden", policy["pr_loop"]["state_persistence"])
-        self.assertEqual("ChatGPT-only", policy["pr_loop"]["chatgpt_handoff"]["verdict_authority"])
+        handoff = policy["pr_loop"]["chatgpt_handoff"]
+        self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
+        self.assertEqual(["CODE", "SECURITY"], handoff["review_kinds"])
+        self.assertEqual("exact-pr-and-head-sha", handoff["invocation_binding"])
+        self.assertEqual("required", handoff["rerun_after_valid_marker"])
         self.assertEqual("forbidden", policy["pr_loop"]["owner_boundary"]["automatic_generation"])
+        self.assertTrue(policy["pr_loop"]["owner_boundary"]["unique_human_interruption"])
+        self.assertEqual(
+            "required",
+            policy["pr_loop"]["owner_boundary"]["automatic_rerun_after_authorization"],
+        )
+        self.assertEqual("MERGE_READY", policy["pr_loop"]["merge_delegation"]["state"])
         self.assertEqual("finish-pr", policy["pr_loop"]["merge_delegation"]["command"])
         self.assertEqual("branch-cleanup", policy["pr_loop"]["post_merge_cleanup"]["command"])
         self.assertEqual("merge", policy["merge"]["method"])

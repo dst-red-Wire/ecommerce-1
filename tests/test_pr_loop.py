@@ -70,9 +70,15 @@ class PRLoopStateTests(unittest.TestCase):
         cases = (
             ({"qualification": "MISSING"}, ("QUALIFICATION_REQUIRED", "QUALIFICATION")),
             ({"qualification": "FAIL"}, ("QUALIFICATION_FAILED", "FIX_QUALIFICATION")),
-            ({"code": "MISSING"}, ("CODE_REQUIRED", "CHATGPT_CODE_REVIEW")),
+            (
+                {"code": "MISSING"},
+                ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            ),
             ({"code": "BLOCKED"}, ("CODE_FAILED", "FIX_CODE_FINDINGS")),
-            ({"security": "MISSING"}, ("SECURITY_REQUIRED", "CHATGPT_SECURITY_REVIEW")),
+            (
+                {"security": "MISSING"},
+                ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"),
+            ),
             ({"security": "BLOCKED"}, ("SECURITY_FAILED", "FIX_SECURITY_FINDINGS")),
             ({"owner": "MISSING"}, ("OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION")),
         )
@@ -82,11 +88,11 @@ class PRLoopStateTests(unittest.TestCase):
 
     def test_security_and_owner_cannot_replace_code(self):
         self.assertEqual(
-            ("CODE_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
             self.state(code="MISSING", security="PASS", owner="PASS"),
         )
         self.assertEqual(
-            ("SECURITY_REQUIRED", "CHATGPT_SECURITY_REVIEW"),
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"),
             self.state(code="PASS", security="MISSING", owner="PASS"),
         )
 
@@ -333,7 +339,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "_pr_loop_checkout_errors", return_value=[]),
         )
 
-    def test_dry_run_is_read_only_and_reports_code_required(self):
+    def test_dry_run_is_read_only_and_emits_exact_code_handoff(self):
         patches = self.common()
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
@@ -346,10 +352,62 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(REPOCTL, "run") as run:
             rc, payload = self.run_json(dry_run=True)
         self.assertEqual(0, rc)
-        self.assertEqual("CODE_REQUIRED", payload["state"])
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
+        self.assertEqual("CODE", payload["review_kind"])
         self.assertEqual("CHATGPT_CODE_REVIEW", payload["next_action"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["review_request"]["event"])
-        self.assertEqual("code", payload["review_request"]["kind"])
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["review_request"]["state"])
+        self.assertEqual("CODE", payload["review_request"]["review_kind"])
+        self.assertEqual(161, payload["review_request"]["pr"])
+        self.assertEqual(self.SHA_A, payload["review_request"]["head_sha"])
+        self.assertEqual(
+            {
+                "provider": "ChatGPT",
+                "kind": "code",
+                "head_sha": self.SHA_A,
+                "status": "PASS",
+                "blocking_findings": 0,
+            },
+            payload["review_request"]["expected_marker"],
+        )
+        run.assert_not_called()
+
+    def test_security_handoff_is_emitted_only_after_exact_sha_code_pass(self):
+        patches = self.common()
+        authorities = (
+            {
+                "code": {
+                    "provider": "ChatGPT",
+                    "status": "PASS",
+                    "blocking_findings": 0,
+                    "head_sha": self.SHA_A,
+                },
+                "security": {"status": "MISSING", "head_sha": self.SHA_A},
+            },
+            {
+                "status": "MISSING",
+                "command": (
+                    "/owner-authorization approve scope=pr-161 "
+                    f"sha={self.SHA_A}"
+                ),
+            },
+        )
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_qualification",
+            return_value={"status": "PASS", "source": "reused"},
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence", return_value=authorities
+        ), mock.patch.object(REPOCTL, "run") as run:
+            rc, payload = self.run_json(dry_run=True)
+        self.assertEqual(0, rc)
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
+        self.assertEqual("SECURITY", payload["review_kind"])
+        self.assertEqual("CHATGPT_SECURITY_REVIEW", payload["next_action"])
+        self.assertEqual("security", payload["review_request"]["expected_marker"]["kind"])
+        self.assertEqual(self.SHA_A, payload["review_request"]["head_sha"])
         run.assert_not_called()
 
     def test_valid_exact_sha_qualification_is_reused_without_rerun(self):
@@ -405,7 +463,8 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(REPOCTL, "run", return_value=self.completed()) as run:
             rc, payload = self.run_json(dry_run=False)
         self.assertEqual(0, rc)
-        self.assertEqual("CODE_REQUIRED", payload["state"])
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
+        self.assertEqual("CODE", payload["review_kind"])
         self.assertEqual("executed", payload["qualification"]["source"])
         commands = [call.args[0] for call in run.call_args_list]
         self.assertEqual(
