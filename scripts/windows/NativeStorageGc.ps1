@@ -130,11 +130,39 @@ function Get-NativeGcBytes {
     return [int64]$drive.AvailableFreeSpace
 }
 
+function Test-NativeCurrentArtifactSuccessful {
+    param([string]$LabRoot)
+    $current = Join-Path $LabRoot 'artifacts\current'
+    try {
+        foreach ($path in @($LabRoot, (Join-Path $LabRoot 'artifacts'), $current)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Container) -or
+                ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+        }
+        if ($null -ne (Get-ChildItem -LiteralPath $current -Force -Recurse | Where-Object {
+            $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+        } | Select-Object -First 1)) { return $false }
+        $generation = Read-JsonFile (Join-Path $current 'storage-generation.json')
+        $manifest = Read-JsonFile (Join-Path $current 'manifest.json')
+        if ($generation.schema -ne 1 -or $generation.owner -ne 'ecommerce-1/native-vtx' -or
+            $generation.kind -ne 'artifacts' -or $generation.generation -ne 'current' -or
+            $generation.status -ne 'successful' -or $generation.source_sha -notmatch '^[0-9a-f]{40}$' -or
+            $manifest.schema -ne 1 -or $manifest.source_sha -ne $generation.source_sha -or
+            $manifest.box_filename -ne 'rocky-10.2-rke2-virtualbox.box' -or
+            $manifest.box_sha256 -notmatch '^[0-9a-f]{64}$') { return $false }
+        $box = Join-Path $current $manifest.box_filename
+        return (Get-Item -LiteralPath $box).Length -eq $manifest.box_size_bytes -and
+            (Get-FileSha256 -Path $box) -eq $manifest.box_sha256 -and
+            (Get-FileSha256 -Path (Join-Path $current 'packer.log')) -eq $manifest.packer_log_sha256
+    }
+    catch { return $false }
+}
+
 function Select-NativeStorageRetention {
-    param([array]$Eligible)
+    param([array]$Eligible, [bool]$CurrentSuccessful = $false)
     $remaining = @($Eligible)
     $protected = @()
     foreach ($status in @('successful','failed')) {
+        if ($status -eq 'successful' -and $CurrentSuccessful) { continue }
         $retained = @($remaining | Where-Object status -eq $status |
             Sort-Object completed_at, path -Descending | Select-Object -First 1)
         foreach ($item in $retained) {
@@ -184,7 +212,7 @@ function Invoke-NativeStorageGc {
             }
             $eligible += $generation
         }
-        $retention = Select-NativeStorageRetention -Eligible $eligible
+        $retention = Select-NativeStorageRetention -Eligible $eligible -CurrentSuccessful (Test-NativeCurrentArtifactSuccessful -LabRoot $root)
         $evidence.protected += $retention.protected
         $eligible = @($retention.eligible)
         foreach ($item in @($eligible | Sort-Object completed_at, path)) {

@@ -33,6 +33,13 @@ try {
     [void](New-Item -ItemType Directory -Path $foreign)
     $current = Join-Path $base 'artifacts/current'
     [void](New-Item -ItemType Directory -Path $current)
+    Copy-Item -LiteralPath (Join-Path $paths[3] $boxName) -Destination $current
+    Copy-Item -LiteralPath (Join-Path $paths[3] 'packer.log') -Destination $current
+    Copy-Item -LiteralPath (Join-Path $paths[3] 'manifest.json') -Destination $current
+    $currentGeneration = Read-JsonFile (Join-Path $paths[3] 'storage-generation.json')
+    $currentGeneration.generation = 'current'
+    Write-Utf8Json -Path (Join-Path $current 'storage-generation.json') -InputObject $currentGeneration
+    Assert-Equal (Test-NativeCurrentArtifactSuccessful -LabRoot $base) $true 'valid current generation'
     Assert-Equal (Test-NativeStorageGenerationOwned -LabRoot $base -Path $foreign) $false 'foreign ownership'
     Assert-Equal (Test-NativeStorageGenerationOwned -LabRoot $base -Path $current) $false 'current ownership'
     Assert-Equal (Test-NativeStorageGenerationOwned -LabRoot $base -Path $env:TEMP) $false 'outside ownership'
@@ -81,6 +88,11 @@ try {
     Assert-Equal ($retention.protected -contains 'success-new') $true 'last successful retention'
     Assert-Equal ($retention.protected -contains 'failed-new') $true 'last failed retention'
     Assert-Equal $retention.eligible.Count 2 'older generations eligible'
+    $withCurrent = Select-NativeStorageRetention -Eligible @(
+        [pscustomobject]@{path='success-old';status='successful';completed_at='2026-01-01T00:00:00Z'},
+        [pscustomobject]@{path='success-new';status='successful';completed_at='2026-01-02T00:00:00Z'}
+    ) -CurrentSuccessful $true
+    Assert-Equal $withCurrent.protected.Count 0 'current already satisfies success retention'
     function Get-Item {
         param([string]$LiteralPath, [switch]$Force)
         if ($LiteralPath -eq $paths[3]) {

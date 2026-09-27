@@ -530,7 +530,8 @@ and retained Packer logs are checked against their manifest hashes. Unknown
 directories and reparse points are rejected. It protects `current`, the box
 selected for reuse, prepared and recovery references, and refuses mutation
 while a native task or VirtualBox VM is registered. The newest successful and
-newest failed generation are retained; failed material remains available for
+newest failed generation are retained. A verified successful `artifacts/current`
+already satisfies success retention; failed material remains available for
 investigation. Candidates are removed oldest first and collection stops as
 soon as the target is reached.
 
