@@ -9914,12 +9914,10 @@ def _pr_loop_post_merge(
         result["blockers"].append("main cannot fast-forward to origin/main")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    cleanup = run(
-        _controller_command("branch-cleanup"),
-        check=False,
-        capture=json_output,
-    )
-    if cleanup.returncode:
+    # This function is already executing from the exact-base repoctl module. Keep
+    # post-merge cleanup in-process so the target's switch to main does not create
+    # a fresh trusted context that is still bound to the former PR-head checkout.
+    if branch_cleanup(dry_run=False, fetch_remote=False):
         result["cleanup_result"] = "FAIL"
         result["blockers"].append("canonical branch-cleanup failed")
         _emit_pr_loop_result(result, json_output=json_output)

@@ -1152,13 +1152,10 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 return "main\n"
             return ""
 
-        def run(command, **_kwargs):
-            if "branch-cleanup" in command:
-                return self.completed(1)
-            return self.completed(0)
-
         with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
-            REPOCTL, "run", side_effect=run
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=1
         ):
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
@@ -1189,6 +1186,8 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
         with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
             REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=0
         ):
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
@@ -1284,8 +1283,13 @@ class PRLoopSourceContractTests(unittest.TestCase):
 
     def test_pr_loop_delegates_merge_and_never_calls_github_merge_directly(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        post_merge = source[
+            source.index("def _pr_loop_post_merge(") : source.index("def pr_loop(")
+        ]
         loop = source[source.index("def pr_loop(") : source.index("def precommit(")]
         self.assertIn('_controller_command("finish-pr"', loop)
+        self.assertIn("branch_cleanup(dry_run=False, fetch_remote=False)", post_merge)
+        self.assertNotIn('_controller_command("branch-cleanup"', post_merge)
         self.assertNotIn('"pr", "merge"', loop)
 
 
