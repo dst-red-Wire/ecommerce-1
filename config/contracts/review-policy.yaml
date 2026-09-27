@@ -140,8 +140,40 @@ repository_delivery:
       delete_when:
         - head-is-ancestor-of-default-branch
         - merged-pr-head-matches-current-branch-head
+        - closed-pr-proven-absorbed-by-merged-pr
       merged_pr_base_must_match_default: true
       github_merge_proof: exact-head-sha
+      absorbed_pr_proof:
+        required: true
+        fail_closed: true
+        source: github-absorbing-pr-body
+        marker: pull-request-absorption-proof:v1
+        schema_version: 1
+        kind: PullRequestAbsorptionProof
+        active_status: ABSORBED
+        superseded_status: SUPERSEDED
+        proof_method: qualified-integration-exact-sha
+        proof_id: sha256-canonical-binding
+        repository_binding: exact-name-with-owner
+        temporal_fields_authoritative: false
+        required_fields:
+          - proof_id
+          - schema_version
+          - kind
+          - source_repository
+          - source_pr
+          - source_head_sha
+          - source_branch
+          - source_base
+          - absorbing_repository
+          - absorbing_pr
+          - absorbing_head_sha
+          - proof_method
+          - status
+        merge_method_checks:
+          merge:
+            merge_commit_ancestor_of_default: true
+            absorbing_head_tree_equals_merge_commit_tree: true
       preserve:
         - default-branch
         - master
@@ -149,6 +181,11 @@ repository_delivery:
         - active-worktree
         - branch-with-unabsorbed-head
         - branch-advanced-after-merged-pr
+        - branch-advanced-after-absorption
+        - missing-absorption-proof
+        - ambiguous-absorption
+        - stale-or-invalid-absorption-proof
+        - github-evidence-unavailable
       github_cli_optional_for_ancestor_cleanup: true
       remote_delete_requires_exact_lease: true
       local_delete_requires_compare_and_delete: true

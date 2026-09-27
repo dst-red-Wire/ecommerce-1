@@ -129,9 +129,12 @@ Use `make branch-cleanup` for repository branch hygiene. `make git-sync` invokes
 A local or `origin` branch may be deleted only when the central `repository_delivery.cleanup` policy proves one of these conditions:
 
 - the branch HEAD is already an ancestor of `origin/main`; or
-- a GitHub PR into `main` is merged and its recorded head SHA exactly equals the branch's current HEAD.
+- a GitHub PR into `main` is merged and its recorded head SHA exactly equals the branch's current HEAD; or
+- its GitHub PR was closed without merge, but an exact machine-readable absorption proof binds that source PR and source HEAD to one authoritative absorbing PR HEAD, and GitHub plus Git prove that the absorbing PR was subsequently merged into the current `origin/main` lineage.
 
-Never delete the default branch, `master`, the current branch, or any branch checked out by an active worktree. If a branch has advanced after its merged PR, preserve it. Missing GitHub CLI/API evidence disables only the merged-PR criterion; ancestry-based cleanup may still proceed. Use `make branch-cleanup DRY_RUN=1` to inspect the exact deletion plan without mutating refs.
+`CLOSED != ABSORBED`, `MERGED != ABSORPTION_PROOF`, and `SIMILAR_DIFF != ABSORPTION_PROOF`: closed alone is never sufficient. The absorption proof must use the central `pull-request-absorption-proof:v1` schema in the absorbing PR body, bind both repositories and exact 40-character SHA values, and have one active destination. Contradictory active proofs are ambiguous and fail closed; supersession must explicitly identify the deterministic proof ID and is never inferred from recency.
+
+Never delete the default branch, `master`, the current branch, or any branch checked out by an active worktree. If a branch has advanced after its merged PR or its absorption proof, preserve it. Missing or malformed GitHub CLI/API evidence disables the GitHub-dependent criteria; ancestry-based cleanup may still proceed independently. Use `make branch-cleanup DRY_RUN=1` to inspect the exact deletion plan and proof chain without mutating refs.
 <!-- BEGIN ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->
 ## Ansible-first developer automation
 

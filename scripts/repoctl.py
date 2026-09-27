@@ -6229,23 +6229,287 @@ def _git_is_ancestor(head_sha: str, base_ref: str) -> bool:
     ).returncode == 0
 
 
-def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
+def _canonical_absorption_proof_id(proof: dict) -> str:
+    identity = {
+        "absorbing_head_sha": proof.get("absorbing_head_sha"),
+        "absorbing_pr": proof.get("absorbing_pr"),
+        "absorbing_repository": proof.get("absorbing_repository"),
+        "kind": proof.get("kind"),
+        "proof_method": proof.get("proof_method"),
+        "schema_version": proof.get("schema_version"),
+        "source_base": proof.get("source_base"),
+        "source_branch": proof.get("source_branch"),
+        "source_head_sha": proof.get("source_head_sha"),
+        "source_pr": proof.get("source_pr"),
+        "source_repository": proof.get("source_repository"),
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _parse_absorption_proofs(body: object, contract: dict) -> list[dict]:
+    if not isinstance(body, str) or not body:
+        return []
+    marker = str(contract["marker"])
+    pattern = re.compile(rf"<!--\s*{re.escape(marker)}\s*(\{{.*?\}})\s*-->", re.DOTALL)
+    proofs: list[dict] = []
+    for match in pattern.finditer(body):
+        try:
+            candidate = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict):
+            proofs.append(candidate)
+    return proofs
+
+
+def _absorption_proof_shape_reason(proof: dict, contract: dict) -> str:
+    required_fields = set(contract["required_fields"])
+    if not required_fields.issubset(proof):
+        return "malformed-absorption-proof"
+    if proof.get("schema_version") != contract["schema_version"]:
+        return "malformed-absorption-proof"
+    if proof.get("kind") != contract["kind"]:
+        return "malformed-absorption-proof"
+    if proof.get("status") not in {contract["active_status"], contract["superseded_status"]}:
+        return "malformed-absorption-proof"
+    if proof.get("proof_method") != contract["proof_method"]:
+        return "forged-absorption-proof"
+    for field in ("source_pr", "absorbing_pr"):
+        value = proof.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return "malformed-pr-number"
+    for field in ("source_head_sha", "absorbing_head_sha"):
+        if not isinstance(proof.get(field), str) or not re.fullmatch(r"[0-9a-f]{40}", proof[field]):
+            return "malformed-sha"
+    for field in ("source_repository", "absorbing_repository"):
+        if not isinstance(proof.get(field), str) or not re.fullmatch(
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", proof[field]
+        ):
+            return "repository-mismatch"
+    for field in ("source_branch", "source_base"):
+        if not isinstance(proof.get(field), str) or not proof[field].strip():
+            return "malformed-absorption-proof"
+    if proof.get("proof_id") != _canonical_absorption_proof_id(proof):
+        return "forged-absorption-proof"
+    return ""
+
+
+def _pull_side(pull: dict, side: str) -> tuple[str, str, str]:
+    value = pull.get(side) or {}
+    if not isinstance(value, dict):
+        return "", "", ""
+    repository = value.get("repo") or {}
+    repository_name = repository.get("full_name") if isinstance(repository, dict) else ""
+    return str(value.get("ref") or ""), str(value.get("sha") or ""), str(repository_name or "")
+
+
+def _pull_state(pull: dict) -> str:
+    if pull.get("merged_at"):
+        return "MERGED"
+    return str(pull.get("state") or "").upper()
+
+
+def _git_tree_sha(commit_sha: str) -> str:
+    result = run(["git", "rev-parse", "--verify", f"{commit_sha}^{{tree}}"], check=False, capture=True)
+    value = (result.stdout or "").strip()
+    return value if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", value) else ""
+
+
+def _unavailable_github_cleanup_evidence() -> dict:
+    return {
+        "available": False,
+        "merged_pr_heads": {},
+        "absorbed_pr_heads": {},
+        "absorption_source_heads": {},
+        "diagnostics": {},
+    }
+
+
+def _evaluate_github_cleanup_evidence(
+    pulls: list[dict],
+    *,
+    repository: str,
+    default_branch: str,
+    base_ref: str,
+    merge_method: str,
+    proof_contract: dict,
+) -> dict:
+    merged_pr_heads: dict[str, set[str]] = {}
+    absorbed_pr_heads: dict[str, dict[str, dict]] = {}
+    absorption_source_heads: dict[str, set[str]] = {}
+    diagnostics: dict[str, str] = {}
+    pulls_by_number: dict[int, dict] = {}
+
+    for pull in pulls:
+        if not isinstance(pull, dict):
+            continue
+        number = pull.get("number")
+        if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+            pulls_by_number[number] = pull
+        head_branch, head_sha, head_repository = _pull_side(pull, "head")
+        base_branch, _base_sha, base_repository = _pull_side(pull, "base")
+        if (
+            head_repository != repository
+            or base_repository != repository
+            or base_branch != default_branch
+            or not head_branch
+            or not re.fullmatch(r"[0-9a-f]{40}", head_sha)
+        ):
+            continue
+        state = _pull_state(pull)
+        if state == "MERGED":
+            merged_pr_heads.setdefault(head_branch, set()).add(head_sha)
+            diagnostics.setdefault(head_branch, "source-pr-was-merged")
+        elif state == "OPEN":
+            diagnostics.setdefault(head_branch, "source-pr-still-open")
+        elif state == "CLOSED":
+            diagnostics.setdefault(head_branch, "missing-absorption-proof")
+
+    active_by_id: dict[str, dict] = {}
+    superseded_ids: set[str] = set()
+    invalid_branches: dict[str, str] = {}
+    for containing_pull in pulls:
+        if not isinstance(containing_pull, dict):
+            continue
+        containing_number = containing_pull.get("number")
+        for proof in _parse_absorption_proofs(containing_pull.get("body"), proof_contract):
+            branch = proof.get("source_branch")
+            reason = _absorption_proof_shape_reason(proof, proof_contract)
+            if reason:
+                if isinstance(branch, str) and branch:
+                    diagnostics[branch] = reason
+                    invalid_branches[branch] = reason
+                continue
+            if proof["absorbing_pr"] != containing_number or proof["absorbing_repository"] != repository:
+                diagnostics[proof["source_branch"]] = "forged-absorption-proof"
+                invalid_branches[proof["source_branch"]] = "forged-absorption-proof"
+                continue
+            proof_id = proof["proof_id"]
+            if proof["status"] == proof_contract["superseded_status"]:
+                superseded_ids.add(proof_id)
+            else:
+                active_by_id[proof_id] = proof
+
+    active_proofs = [proof for proof_id, proof in active_by_id.items() if proof_id not in superseded_ids]
+    grouped: dict[tuple[str, int], list[dict]] = {}
+    for proof in active_proofs:
+        key = (proof["source_repository"], proof["source_pr"])
+        grouped.setdefault(key, []).append(proof)
+        absorption_source_heads.setdefault(proof["source_branch"], set()).add(proof["source_head_sha"])
+
+    merge_checks = proof_contract.get("merge_method_checks", {}).get(merge_method)
+    for proofs in grouped.values():
+        source_branches = {proof["source_branch"] for proof in proofs}
+        if len(proofs) != 1:
+            for branch in source_branches:
+                diagnostics[branch] = "ambiguous-absorption"
+            continue
+        proof = proofs[0]
+        source_head = proof["source_head_sha"]
+        source_branch = proof["source_branch"]
+        if source_branch in invalid_branches:
+            diagnostics[source_branch] = invalid_branches[source_branch]
+            continue
+        source = pulls_by_number.get(proof["source_pr"])
+        absorbing = pulls_by_number.get(proof["absorbing_pr"])
+        reason = ""
+        if proof["source_repository"] != repository:
+            reason = "source-repository-mismatch"
+        elif not source:
+            reason = "source-pr-not-found"
+        else:
+            source_ref, source_sha, source_repository = _pull_side(source, "head")
+            source_base, _source_base_sha, source_base_repository = _pull_side(source, "base")
+            source_state = _pull_state(source)
+            if source_repository != repository or source_base_repository != repository:
+                reason = "source-repository-mismatch"
+            elif source_state == "OPEN":
+                reason = "source-pr-still-open"
+            elif source_state == "MERGED" or source.get("merge_commit_sha"):
+                reason = "source-pr-was-merged"
+            elif source_state != "CLOSED":
+                reason = "source-pr-not-closed"
+            elif source_base != default_branch or proof["source_base"] != default_branch:
+                reason = "source-pr-base-mismatch"
+            elif source_sha != source_head or source_sha != proof["source_head_sha"]:
+                reason = "source-head-sha-mismatch"
+            elif source_ref != source_branch:
+                reason = "source-branch-mismatch"
+
+        if not reason:
+            if proof["absorbing_repository"] != repository:
+                reason = "absorbing-repository-mismatch"
+            elif not absorbing:
+                reason = "absorbing-pr-not-found"
+            else:
+                absorbing_ref, absorbing_sha, absorbing_repository = _pull_side(absorbing, "head")
+                absorbing_base, _absorbing_base_sha, absorbing_base_repository = _pull_side(absorbing, "base")
+                merge_commit = str(absorbing.get("merge_commit_sha") or "")
+                if absorbing_repository != repository or absorbing_base_repository != repository:
+                    reason = "absorbing-repository-mismatch"
+                elif _pull_state(absorbing) != "MERGED" or not absorbing.get("merged_at"):
+                    reason = "absorbing-pr-not-merged"
+                elif absorbing_base != default_branch:
+                    reason = "absorbing-pr-base-mismatch"
+                elif absorbing_sha != proof["absorbing_head_sha"]:
+                    reason = "absorbing-head-sha-mismatch"
+                elif not re.fullmatch(r"[0-9a-f]{40}", merge_commit):
+                    reason = "merge-commit-missing"
+                elif not isinstance(merge_checks, dict):
+                    reason = "unsupported-merge-method"
+                elif merge_checks.get("merge_commit_ancestor_of_default") is True and not _git_is_ancestor(
+                    merge_commit, base_ref
+                ):
+                    reason = "merge-commit-absent-from-default"
+                elif merge_checks.get("absorbing_head_tree_equals_merge_commit_tree") is True and (
+                    not _git_tree_sha(absorbing_sha)
+                    or _git_tree_sha(absorbing_sha) != _git_tree_sha(merge_commit)
+                ):
+                    reason = "absorbing-merge-tree-mismatch"
+                else:
+                    absorbed_pr_heads.setdefault(source_branch, {})[source_head] = {
+                        "criterion": "closed-pr-proven-absorbed-by-merged-pr",
+                        "source_pr": proof["source_pr"],
+                        "source_head": source_head,
+                        "absorbing_pr": proof["absorbing_pr"],
+                        "absorbing_head": absorbing_sha,
+                        "absorbing_branch": absorbing_ref,
+                        "merge_commit": merge_commit,
+                        "proof_id": proof["proof_id"],
+                        "proof_method": proof["proof_method"],
+                        "default_branch": default_branch,
+                    }
+        diagnostics[source_branch] = reason or "closed-pr-proven-absorbed-by-merged-pr"
+
+    return {
+        "available": True,
+        "merged_pr_heads": merged_pr_heads,
+        "absorbed_pr_heads": absorbed_pr_heads,
+        "absorption_source_heads": absorption_source_heads,
+        "diagnostics": diagnostics,
+    }
+
+
+def _github_cleanup_evidence(
+    default_branch: str, base_ref: str, merge_method: str, proof_contract: dict
+) -> dict:
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
-        print("INFO branch-cleanup: GitHub CLI unavailable; using ancestry proof only")
-        return {}
+        print("INFO branch-cleanup: GitHub CLI unavailable; GitHub criteria unavailable")
+        return _unavailable_github_cleanup_evidence()
 
     repository = run([gh, "repo", "view", "--json", "nameWithOwner"], check=False, capture=True)
     if repository.returncode:
-        print("ADVISORY branch-cleanup: cannot resolve GitHub repository; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: cannot resolve GitHub repository; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
     try:
         name_with_owner = str(json.loads(repository.stdout or "{}").get("nameWithOwner") or "")
     except json.JSONDecodeError:
         name_with_owner = ""
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
-        print("ADVISORY branch-cleanup: invalid GitHub repository identity; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: invalid GitHub repository identity; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
 
     response = run(
         [
@@ -6257,7 +6521,7 @@ def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
             "--slurp",
             f"repos/{name_with_owner}/pulls",
             "-f",
-            "state=closed",
+            "state=all",
             "-f",
             f"base={default_branch}",
             "-f",
@@ -6270,36 +6534,29 @@ def _merged_pr_exact_heads(default_branch: str) -> dict[str, set[str]]:
         detail = (response.stderr or response.stdout or "").strip()
         suffix = f": {detail}" if detail else ""
         print(
-            "ADVISORY branch-cleanup: merged PR history unavailable; using ancestry proof only"
+            "ADVISORY branch-cleanup: PR history unavailable; GitHub criteria unavailable"
             + suffix,
             file=sys.stderr,
         )
-        return {}
+        return _unavailable_github_cleanup_evidence()
     try:
         pages = json.loads(response.stdout or "[]")
     except json.JSONDecodeError:
-        print("ADVISORY branch-cleanup: malformed merged PR history; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: malformed PR history; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-        print("ADVISORY branch-cleanup: invalid paginated PR payload; using ancestry proof only", file=sys.stderr)
-        return {}
+        print("ADVISORY branch-cleanup: invalid paginated PR payload; GitHub criteria unavailable", file=sys.stderr)
+        return _unavailable_github_cleanup_evidence()
 
-    merged: dict[str, set[str]] = {}
-    for page in pages:
-        for pull in page:
-            if not isinstance(pull, dict) or not pull.get("merged_at"):
-                continue
-            base = pull.get("base") or {}
-            head = pull.get("head") or {}
-            if not isinstance(base, dict) or not isinstance(head, dict):
-                continue
-            if str(base.get("ref") or "") != default_branch:
-                continue
-            branch_name = str(head.get("ref") or "")
-            head_sha = str(head.get("sha") or "")
-            if branch_name and re.fullmatch(r"[0-9a-f]{40}", head_sha):
-                merged.setdefault(branch_name, set()).add(head_sha)
-    return merged
+    pulls = [pull for page in pages for pull in page]
+    return _evaluate_github_cleanup_evidence(
+        pulls,
+        repository=name_with_owner,
+        default_branch=default_branch,
+        base_ref=base_ref,
+        merge_method=merge_method,
+        proof_contract=proof_contract,
+    )
 
 
 def _plan_branch_cleanup(
@@ -6310,7 +6567,7 @@ def _plan_branch_cleanup(
     default_branch: str,
     active_worktrees: set[str],
     ancestor_heads: dict[str, bool],
-    merged_pr_heads: dict[str, set[str]],
+    github_evidence: dict,
 ) -> list[dict]:
     actions: list[dict] = []
     protected = {default_branch, "master"}
@@ -6328,7 +6585,9 @@ def _plan_branch_cleanup(
             for scope, refs in (("remote", remote_refs), ("local", local_refs))
             if refs.get(branch)
         ]
-        exact_merged_heads = merged_pr_heads.get(branch, set())
+        exact_merged_heads = github_evidence.get("merged_pr_heads", {}).get(branch, set())
+        absorbed_heads = github_evidence.get("absorbed_pr_heads", {}).get(branch, {})
+        absorption_source_heads = github_evidence.get("absorption_source_heads", {}).get(branch, set())
 
         if branch_guard:
             branch_keep_reason = branch_guard
@@ -6336,14 +6595,23 @@ def _plan_branch_cleanup(
             unsafe_heads = [
                 head_sha
                 for _scope, head_sha in scoped_heads
-                if ancestor_heads.get(head_sha) is not True and head_sha not in exact_merged_heads
+                if (
+                    ancestor_heads.get(head_sha) is not True
+                    and head_sha not in exact_merged_heads
+                    and head_sha not in absorbed_heads
+                )
             ]
             if unsafe_heads:
-                branch_keep_reason = (
-                    "branch-advanced-after-merged-pr"
-                    if exact_merged_heads
-                    else "branch-with-unabsorbed-head"
-                )
+                if exact_merged_heads:
+                    branch_keep_reason = "branch-advanced-after-merged-pr"
+                elif absorption_source_heads:
+                    branch_keep_reason = "branch-advanced-after-absorption"
+                elif github_evidence.get("available") is not True:
+                    branch_keep_reason = "github-evidence-unavailable"
+                else:
+                    branch_keep_reason = github_evidence.get("diagnostics", {}).get(
+                        branch, "branch-with-unabsorbed-head"
+                    )
             else:
                 branch_keep_reason = ""
 
@@ -6352,8 +6620,13 @@ def _plan_branch_cleanup(
                 action, reason = "keep", branch_keep_reason
             elif ancestor_heads.get(head_sha) is True:
                 action, reason = "delete", "head-is-ancestor-of-default-branch"
-            else:
+                evidence = {}
+            elif head_sha in exact_merged_heads:
                 action, reason = "delete", "merged-pr-head-matches-current-branch-head"
+                evidence = {}
+            else:
+                action, reason = "delete", "closed-pr-proven-absorbed-by-merged-pr"
+                evidence = absorbed_heads[head_sha]
             actions.append(
                 {
                     "branch": branch,
@@ -6361,6 +6634,7 @@ def _plan_branch_cleanup(
                     "head_sha": head_sha,
                     "action": action,
                     "reason": reason,
+                    "evidence": evidence if not branch_keep_reason else {},
                 }
             )
     return actions
@@ -6416,7 +6690,12 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
     local_refs = _branch_ref_map("refs/heads")
     remote_refs = _branch_ref_map("refs/remotes/origin", remote="origin")
     active_worktrees = _active_worktree_branches()
-    merged_pr_heads = _merged_pr_exact_heads(default_branch)
+    github_evidence = _github_cleanup_evidence(
+        default_branch,
+        base_ref,
+        str(policy["merge"]["method"]),
+        cleanup["absorbed_pr_proof"],
+    )
     unique_heads = set(local_refs.values()) | set(remote_refs.values())
     ancestor_heads = {sha: _git_is_ancestor(sha, base_ref) for sha in unique_heads}
     plan = _plan_branch_cleanup(
@@ -6426,7 +6705,7 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         default_branch=default_branch,
         active_worktrees=active_worktrees,
         ancestor_heads=ancestor_heads,
-        merged_pr_heads=merged_pr_heads,
+        github_evidence=github_evidence,
     )
 
     failures: list[str] = []
@@ -6437,11 +6716,21 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
         scope = str(item["scope"])
         if item["action"] != "delete":
             if dry_run and item["reason"] not in {"protected-branch", "current-branch"}:
-                print(f"KEEP {scope:6} {branch} | {item['reason']}")
+                print(f"PRESERVE {scope:6} {branch} | {item['reason']}")
             continue
 
         label = "WOULD_DELETE" if dry_run else "DELETE"
         print(f"{label} {scope:6} {branch} | {item['reason']} | {str(item['head_sha'])[:12]}")
+        evidence = item.get("evidence") or {}
+        if evidence:
+            print(f"  criterion={evidence['criterion']}")
+            print(f"  source_pr={evidence['source_pr']}")
+            print(f"  source_head={evidence['source_head']}")
+            print(f"  absorbing_pr={evidence['absorbing_pr']}")
+            print(f"  absorbing_head={evidence['absorbing_head']}")
+            print(f"  merge_commit={evidence['merge_commit']}")
+            print(f"  default_branch={evidence['default_branch']}")
+            print(f"  proof_id={evidence['proof_id']}")
         if dry_run:
             continue
 
@@ -6959,9 +7248,45 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         "delete_when": [
             "head-is-ancestor-of-default-branch",
             "merged-pr-head-matches-current-branch-head",
+            "closed-pr-proven-absorbed-by-merged-pr",
         ],
         "merged_pr_base_must_match_default": True,
         "github_merge_proof": "exact-head-sha",
+        "absorbed_pr_proof": {
+            "required": True,
+            "fail_closed": True,
+            "source": "github-absorbing-pr-body",
+            "marker": "pull-request-absorption-proof:v1",
+            "schema_version": 1,
+            "kind": "PullRequestAbsorptionProof",
+            "active_status": "ABSORBED",
+            "superseded_status": "SUPERSEDED",
+            "proof_method": "qualified-integration-exact-sha",
+            "proof_id": "sha256-canonical-binding",
+            "repository_binding": "exact-name-with-owner",
+            "temporal_fields_authoritative": False,
+            "required_fields": [
+                "proof_id",
+                "schema_version",
+                "kind",
+                "source_repository",
+                "source_pr",
+                "source_head_sha",
+                "source_branch",
+                "source_base",
+                "absorbing_repository",
+                "absorbing_pr",
+                "absorbing_head_sha",
+                "proof_method",
+                "status",
+            ],
+            "merge_method_checks": {
+                "merge": {
+                    "merge_commit_ancestor_of_default": True,
+                    "absorbing_head_tree_equals_merge_commit_tree": True,
+                }
+            },
+        },
         "preserve": [
             "default-branch",
             "master",
@@ -6969,6 +7294,11 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
             "active-worktree",
             "branch-with-unabsorbed-head",
             "branch-advanced-after-merged-pr",
+            "branch-advanced-after-absorption",
+            "missing-absorption-proof",
+            "ambiguous-absorption",
+            "stale-or-invalid-absorption-proof",
+            "github-evidence-unavailable",
         ],
         "github_cli_optional_for_ancestor_cleanup": True,
         "remote_delete_requires_exact_lease": True,
