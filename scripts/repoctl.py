@@ -10576,23 +10576,18 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
-    from canonical_workspace import check as check_canonical_workspace
+    from canonical_workspace import check as check_canonical_workspace, command_allowed
 
     workspace_result = check_canonical_workspace()
     if workspace_result["status"] != "PASS":
         return fail("canonical-workspace " + workspace_result["reason"], 1)
-    publication_commands = {
-        "bundle-deliver",
-        "deliver",
-        "finish-pr",
-        "publish",
-        "publish-change",
-    }
-    if args.cmd in publication_commands and not workspace_result["publication_allowed"]:
+    if not command_allowed(args.cmd, workspace_result["execution_scope"], set(sub.choices)):
         return fail(
-            f"canonical-workspace publication forbidden in {workspace_result['execution_scope']} scope",
+            f"canonical-workspace command {args.cmd} forbidden in {workspace_result['execution_scope']} scope",
             1,
         )
+    if workspace_result["execution_scope"] == "ci" and args.cmd == "frontend" and args.action != "check":
+        return fail("canonical-workspace frontend action forbidden in ci scope", 1)
     from native_workspace import workspace_error
 
     workspace_failure = workspace_error(ROOT)

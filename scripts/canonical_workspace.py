@@ -70,6 +70,36 @@ def _validated_remotes(
     return {"fetch": fetch, "push": push}
 
 
+def command_allowed(
+    command: str, scope: str, registered_commands: set[str],
+    script_root: Path | None = None,
+) -> bool:
+    """Authorize a parsed repoctl command using the trusted controller's lock."""
+    source = script_root or Path(__file__).resolve().parents[1]
+    try:
+        policy = yaml.safe_load(
+            (source / "architecture.lock.yaml").read_text(encoding="utf-8")
+        )["repository_governance"]["canonical_workspace"]
+        allowlist = policy["command_allowlist"]
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        return False
+    if not isinstance(allowlist, dict) or set(allowlist) != {"local", "ci", "isolated-delivery"}:
+        return False
+    if not registered_commands or command not in registered_commands:
+        return False
+    for commands in allowlist.values():
+        if (
+            not isinstance(commands, list)
+            or not commands
+            or any(not isinstance(item, str) or item not in registered_commands for item in commands)
+            or len(commands) != len(set(commands))
+        ):
+            return False
+    if set(allowlist["local"]) != registered_commands:
+        return False
+    return command in allowlist.get(scope, ())
+
+
 def check(
     script_root: Path | None = None,
     cwd: Path | None = None,

@@ -90,6 +90,7 @@ V5_SECTION_KEYS = {
             "execution_scope_environment",
             "noncanonical_execution_scopes",
             "publication_scopes",
+            "command_allowlist",
             "fail_closed",
             "required_before",
             "evidence",

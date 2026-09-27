@@ -198,6 +198,26 @@ class CanonicalWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(policy["publication_scopes"], ["local", "isolated-delivery"])
 
+    def test_command_allowlist_is_explicit_and_fail_closed_by_scope(self):
+        policy = yaml.safe_load(
+            (ROOT / "architecture.lock.yaml").read_text(encoding="utf-8")
+        )["repository_governance"]["canonical_workspace"]
+        commands = set(policy["command_allowlist"]["local"])
+        self.assertTrue(workspace.command_allowed("api-generate", "local", commands))
+        self.assertTrue(workspace.command_allowed("ci-global", "ci", commands))
+        self.assertTrue(workspace.command_allowed("deliver", "isolated-delivery", commands))
+        for scope, command in (
+            ("ci", "api-generate"),
+            ("ci", "git-sync"),
+            ("ci", "finish-pr"),
+            ("isolated-delivery", "git-sync"),
+            ("isolated-delivery", "finish-pr"),
+            ("unexpected", "workspace-check"),
+        ):
+            with self.subTest(scope=scope, command=command):
+                self.assertFalse(workspace.command_allowed(command, scope, commands))
+        self.assertFalse(workspace.command_allowed("new-command", "local", commands | {"new-command"}))
+
 
 if __name__ == "__main__":
     unittest.main()

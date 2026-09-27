@@ -276,6 +276,18 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             self.assertEqual(1, MOD.main())
         deliver.assert_not_called()
 
+    def test_ci_scope_rejects_frontend_generation_before_dispatch(self):
+        with (
+            mock.patch.object(sys, "argv", ["repoctl.py", "frontend", "generate", "all"]),
+            mock.patch(
+                "canonical_workspace.check",
+                return_value={"status": "PASS", "execution_scope": "ci"},
+            ),
+            mock.patch.object(MOD, "frontend") as frontend,
+        ):
+            self.assertEqual(1, MOD.main())
+        frontend.assert_not_called()
+
     def test_runtime_restore_failures_always_add_a_failed_evidence_record(self):
         class FakeExecutor:
             def __init__(self, *_args, **_kwargs):
