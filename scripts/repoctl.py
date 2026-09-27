@@ -7339,7 +7339,15 @@ def _validate_commit_provenance_policy(policy: object) -> dict:
 def _validate_repository_delivery_policy(policy: dict) -> dict:
     if not isinstance(policy, dict):
         raise RuntimeError("review-policy repository_delivery must be a mapping")
-    required_sections = {"commit_provenance", "publish", "pull_request", "merge", "cleanup", "post_merge"}
+    required_sections = {
+        "commit_provenance",
+        "publish",
+        "pull_request",
+        "pr_loop",
+        "merge",
+        "cleanup",
+        "post_merge",
+    }
     missing = sorted(required_sections - set(policy))
     if missing:
         raise RuntimeError(f"review-policy repository_delivery missing sections: {missing}")
@@ -7352,6 +7360,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
     publish_policy = policy["publish"]
     pull_request_policy = policy["pull_request"]
+    pr_loop_policy = policy["pr_loop"]
     merge_policy = policy["merge"]
     cleanup_policy = policy["cleanup"]
     post_merge_policy = policy["post_merge"]
@@ -7436,6 +7445,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
     for section_name, section in (
         ("publish", publish_policy),
         ("pull_request", pull_request_policy),
+        ("pr_loop", pr_loop_policy),
         ("merge", merge_policy),
         ("cleanup", cleanup_policy),
         ("post_merge", post_merge_policy),
@@ -7481,6 +7491,66 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                 "direct_default_branch_write": "forbidden",
             },
             "post-merge roadmap reconciliation contract must remain exact",
+        ),
+        (
+            pr_loop_policy
+            == {
+                "schema_version": 1,
+                "controller": "scripts/repoctl.py",
+                "command": "pr-loop",
+                "state_persistence": "forbidden",
+                "state_sources": [
+                    "github-current-pull-request",
+                    "github-current-exact-head-sha",
+                    "exact-sha-qualification-evidence",
+                    "chatgpt-exact-sha-review-comments",
+                    "owner-authorization-comment",
+                    "github-merge-and-protection-state",
+                    "finish-pr-and-branch-cleanup-contracts",
+                ],
+                "transition_order": [
+                    "qualification",
+                    "chatgpt-code",
+                    "chatgpt-security",
+                    "owner-authorization",
+                    "finish-pr",
+                    "post-merge-cleanup",
+                ],
+                "exact_sha": {
+                    "binding": "required",
+                    "prior_sha_evidence": "historical-only",
+                    "head_change": "restart-at-qualification",
+                    "refetch_before_qualification": "required",
+                    "refetch_before_merge": "required",
+                },
+                "chatgpt_handoff": {
+                    "trigger": "event-handoff",
+                    "event": "CHATGPT_REVIEW_REQUIRED",
+                    "helper": "scripts/pr_monitor.py",
+                    "verdict_authority": "ChatGPT-only",
+                    "controller_may_emit_verdict": False,
+                    "code_before_security": "required",
+                },
+                "owner_boundary": {
+                    "authority_source": "architecture.lock.yaml#repository_governance.owner_authorization",
+                    "scope": "pr-<number>",
+                    "source": "github-pr-comment-by-repository-owner",
+                    "latest_scope_authorization_wins": True,
+                    "revocation": "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>",
+                    "automatic_generation": "forbidden",
+                },
+                "merge_delegation": {
+                    "command": "finish-pr",
+                    "direct_merge": "forbidden",
+                    "exact_head_match": "required",
+                },
+                "post_merge_cleanup": {
+                    "command": "branch-cleanup",
+                    "separate_result": "required",
+                    "merge_success_may_not_mask_cleanup_failure": True,
+                },
+            },
+            "pr-loop state derivation and authority boundaries must remain exact",
         ),
     )
     for valid, message in required_invariants:
@@ -7583,6 +7653,7 @@ def commit_provenance_check(
     *,
     include_local_identity: bool = False,
     policy: dict | None = None,
+    quiet: bool = False,
 ) -> int:
     provenance = policy or commit_provenance_policy()
     identity_policy = provenance["identity"]
@@ -7605,19 +7676,21 @@ def commit_provenance_check(
             if error:
                 failures.append(("WORKTREE", error))
     if failures:
-        for sha, error in failures:
-            print(f"FAIL commit provenance {sha}: {error}", file=sys.stderr)
+        if not quiet:
+            for sha, error in failures:
+                print(f"FAIL commit provenance {sha}: {error}", file=sys.stderr)
         return 1
-    for record in records:
-        print(f"PASS commit provenance {record['sha']}")
-    if include_local_identity:
-        print("PASS commit provenance WORKTREE")
-    if not records and not include_local_identity:
-        print(f"PASS commit provenance {base_sha}..{head_sha}: no introduced commits")
+    if not quiet:
+        for record in records:
+            print(f"PASS commit provenance {record['sha']}")
+        if include_local_identity:
+            print("PASS commit provenance WORKTREE")
+        if not records and not include_local_identity:
+            print(f"PASS commit provenance {base_sha}..{head_sha}: no introduced commits")
     return 0
 
 
-def remote_commit_provenance_check(gh: str, base: str, head: str) -> int:
+def remote_commit_provenance_check(gh: str, base: str, head: str, *, quiet: bool = False) -> int:
     provenance = commit_provenance_policy()
     remote_policy = provenance["remote_verification"]
     _base_sha, _head_sha, records = _commit_identity_records(base, head)
@@ -7646,7 +7719,8 @@ def remote_commit_provenance_check(gh: str, base: str, head: str) -> int:
         reason = str(verification.get("reason") or "missing")
         if verification.get("verified") is not True or reason not in accepted_reasons:
             return fail(f"remote commit provenance: {sha} is not verified reason={reason}")
-        print(f"PASS remote commit provenance {sha}: verified reason={reason}")
+        if not quiet:
+            print(f"PASS remote commit provenance {sha}: verified reason={reason}")
     return 0
 
 
@@ -7692,33 +7766,44 @@ def _chatgpt_review_payloads(body: str) -> list[dict]:
     return payloads
 
 
-def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bool, str]:
-    review_policy = pull_request_review_policy()
-    ai = review_policy["ai_reviewer"]
-    evidence_contract = ai["evidence"]
-    completed: dict[str, dict | None] = {
-        kind: None for kind in evidence_contract["required_kinds"]
-    }
+_CHATGPT_REVIEW_KEYS = {
+    "provider",
+    "kind",
+    "head_sha",
+    "status",
+    "blocking_findings",
+}
+_OWNER_AUTHORIZATION_RE = re.compile(
+    r"^/owner-authorization (?P<action>approve|revoke) "
+    r"scope=(?P<scope>[A-Za-z0-9][A-Za-z0-9._:/-]*) "
+    r"sha=(?P<sha>[0-9a-f]{40})$",
+    re.MULTILINE,
+)
 
-    owner_response = run(
+
+def _github_repository_identity(gh: str) -> tuple[str, str]:
+    response = run(
         [gh, "repo", "view", "--json", "owner,nameWithOwner"],
         check=False,
         capture=True,
     )
-    if owner_response.returncode:
-        detail = (owner_response.stderr or owner_response.stdout or "").strip()
-        return False, detail or "unable to resolve repository owner"
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        raise RuntimeError(detail or "unable to resolve GitHub repository identity")
     try:
-        owner_payload = json.loads(owner_response.stdout or "{}")
-    except json.JSONDecodeError:
-        return False, "invalid GitHub repository owner JSON"
-    owner_login = str((owner_payload.get("owner") or {}).get("login") or "")
-    name_with_owner = str(owner_payload.get("nameWithOwner") or "")
+        payload = json.loads(response.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("invalid GitHub repository identity JSON") from exc
+    owner_login = str((payload.get("owner") or {}).get("login") or "")
+    name_with_owner = str(payload.get("nameWithOwner") or "")
     if not owner_login:
-        return False, "repository owner login is missing"
+        raise RuntimeError("repository owner login is missing")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name_with_owner):
-        return False, "repository nameWithOwner is missing or invalid"
+        raise RuntimeError("repository nameWithOwner is missing or invalid")
+    return owner_login, name_with_owner
 
+
+def _github_pr_comments(gh: str, name_with_owner: str, pr_number: int) -> list[dict]:
     response = run(
         [
             gh,
@@ -7732,64 +7817,357 @@ def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bo
     )
     if response.returncode:
         detail = (response.stderr or response.stdout or "").strip()
-        return False, detail or "unable to read complete PR comment history"
-
+        raise RuntimeError(detail or "unable to read complete PR comment history")
     try:
         pages = json.loads(response.stdout or "[]")
-    except json.JSONDecodeError:
-        return False, "invalid GitHub PR comments JSON"
-
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("invalid GitHub PR comments JSON") from exc
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
-        return False, "GitHub PR paginated comments payload is invalid"
-    comments = [comment for page in pages for comment in page]
+        raise RuntimeError("GitHub PR paginated comments payload is invalid")
+    comments = [comment for page in pages for comment in page if isinstance(comment, dict)]
     comments.sort(
         key=lambda comment: (
-            str(comment.get("created_at") or "") if isinstance(comment, dict) else "",
-            int(comment.get("id") or 0)
-            if isinstance(comment, dict) and str(comment.get("id") or "").isdigit()
-            else 0,
+            str(comment.get("updated_at") or comment.get("created_at") or ""),
+            int(comment.get("id") or 0) if str(comment.get("id") or "").isdigit() else 0,
         )
     )
+    return comments
 
+
+def _comment_author_login(comment: dict) -> str:
+    author = comment.get("user") or comment.get("author") or {}
+    return str(author.get("login") or "") if isinstance(author, dict) else ""
+
+
+def _chatgpt_review_evidence(
+    comments: list[dict], owner_login: str, head_sha: str
+) -> dict[str, dict]:
+    evidence_contract = pull_request_review_policy()["ai_reviewer"]["evidence"]
+    completed: dict[str, dict | None] = {
+        kind: None for kind in evidence_contract["required_kinds"]
+    }
     for comment in comments:
-        if not isinstance(comment, dict):
-            continue
-        author = comment.get("user") or comment.get("author") or {}
-        if not isinstance(author, dict) or str(author.get("login") or "") != owner_login:
+        if _comment_author_login(comment) != owner_login:
             continue
         for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
             kind = str(proof.get("kind") or "")
             if (
-                proof.get("provider") != "ChatGPT"
+                set(proof) != _CHATGPT_REVIEW_KEYS
+                or proof.get("provider") != "ChatGPT"
                 or proof.get("head_sha") != head_sha
-                or kind not in evidence_contract["required_kinds"]
+                or kind not in completed
+                or not isinstance(proof.get("status"), str)
+                or not proof.get("status")
             ):
                 continue
-            # GitHub issue comments are returned oldest-to-newest. A later
-            # exact-SHA ChatGPT verdict supersedes an earlier verdict of the same kind
-            # after findings are corrected and re-reviewed.
-            completed[kind] = proof
+            completed[kind] = {
+                **proof,
+                "comment_id": comment.get("id"),
+                "source": "github-pr-comment",
+            }
+    result: dict[str, dict] = {}
+    for kind, proof in completed.items():
+        result[kind] = proof or {
+            "status": "MISSING",
+            "head_sha": head_sha,
+            "source": "github-pr-comment",
+        }
+    return result
 
-    missing = [kind for kind in evidence_contract["required_kinds"] if completed[kind] is None]
-    if missing:
-        return False, "missing ChatGPT exact-SHA review proof: " + ", ".join(missing)
 
-    required_status = evidence_contract["required_status"]
-    for kind in evidence_contract["required_kinds"]:
-        proof = completed[kind]
-        assert proof is not None
-        blockers = proof.get("blocking_findings")
+def _owner_authorization_evidence(
+    comments: list[dict], owner_login: str, pr_number: int, head_sha: str
+) -> dict:
+    scope = f"pr-{pr_number}"
+    latest: dict | None = None
+    for comment in comments:
+        if _comment_author_login(comment) != owner_login:
+            continue
+        for match in _OWNER_AUTHORIZATION_RE.finditer(str(comment.get("body") or "")):
+            if match.group("scope") != scope:
+                continue
+            latest = {
+                "command": match.group(0),
+                "action": match.group("action"),
+                "sha": match.group("sha"),
+                "comment_id": comment.get("id"),
+            }
+    expected_command = f"/owner-authorization approve scope={scope} sha={head_sha}"
+    if latest is None:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+        }
+    if latest["sha"] != head_sha:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "latest owner authorization for scope belongs to another SHA",
+            "superseded_comment_id": latest["comment_id"],
+        }
+    if latest["action"] == "revoke":
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "owner authorization was explicitly revoked",
+            "revocation_comment_id": latest["comment_id"],
+        }
+    import architecture_authority
+
+    errors = architecture_authority.owner_authorization_errors(
+        latest["command"],
+        expected_scope=scope,
+        head_sha=head_sha,
+        decision_authority="repository-owner",
+        recording_agent="ChatGPT",
+        explicit_owner_instruction=True,
+    )
+    if errors:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "; ".join(errors),
+        }
+    return {
+        "status": "PASS",
+        "scope": scope,
+        "head_sha": head_sha,
+        "command": latest["command"],
+        "comment_id": latest["comment_id"],
+        "source": "github-pr-comment",
+    }
+
+
+def pull_request_authority_evidence(
+    gh: str, pr_number: int, head_sha: str
+) -> tuple[dict[str, dict], dict]:
+    owner_login, name_with_owner = _github_repository_identity(gh)
+    comments = _github_pr_comments(gh, name_with_owner, pr_number)
+    return (
+        _chatgpt_review_evidence(comments, owner_login, head_sha),
+        _owner_authorization_evidence(comments, owner_login, pr_number, head_sha),
+    )
+
+
+def chatgpt_review_readiness(gh: str, pr_number: int, head_sha: str) -> tuple[bool, str]:
+    try:
+        reviews, _authorization = pull_request_authority_evidence(gh, pr_number, head_sha)
+    except RuntimeError as exc:
+        return False, str(exc)
+    for kind in pull_request_review_policy()["ai_reviewer"]["evidence"]["required_kinds"]:
+        proof = reviews[kind]
+        if proof.get("status") == "MISSING":
+            return False, f"missing ChatGPT exact-SHA review proof: {kind}"
         if (
-            proof.get("status") != required_status
-            or type(blockers) is not int
-            or blockers != 0
+            proof.get("status") != "PASS"
+            or type(proof.get("blocking_findings")) is not int
+            or proof.get("blocking_findings") != 0
         ):
             return False, (
                 f"ChatGPT {kind} review is not PASS for exact head {head_sha}: "
-                f"status={proof.get('status')!r} blocking_findings={blockers!r}"
+                f"status={proof.get('status')!r} "
+                f"blocking_findings={proof.get('blocking_findings')!r}"
             )
-
     return True, "ChatGPT CODE and SECURITY reviews PASS for exact head"
+
+
+def _github_pr_snapshot(gh: str, name_with_owner: str, pr_number: int) -> dict:
+    response = run(
+        [gh, "api", f"repos/{name_with_owner}/pulls/{pr_number}"],
+        check=False,
+        capture=True,
+    )
+    if response.returncode:
+        detail = (response.stderr or response.stdout or "").strip()
+        raise RuntimeError(detail or f"unable to read pull request #{pr_number}")
+    try:
+        payload = json.loads(response.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid GitHub pull request JSON for #{pr_number}") from exc
+    head = payload.get("head") or {}
+    base = payload.get("base") or {}
+    head_repo = head.get("repo") or {}
+    head_sha = str(head.get("sha") or "")
+    base_sha = str(base.get("sha") or "")
+    merged = bool(payload.get("merged_at"))
+    return {
+        "number": int(payload.get("number") or pr_number),
+        "state": "MERGED" if merged else str(payload.get("state") or "").upper(),
+        "draft": bool(payload.get("draft")),
+        "head_sha": head_sha,
+        "head_branch": str(head.get("ref") or ""),
+        "head_repository": str(head_repo.get("full_name") or ""),
+        "base": str(base.get("ref") or ""),
+        "base_sha": base_sha,
+        "merged": merged,
+        "merged_at": payload.get("merged_at"),
+        "merge_commit_sha": str(payload.get("merge_commit_sha") or ""),
+        "url": str(payload.get("html_url") or ""),
+    }
+
+
+_REVIEW_THREADS_QUERY = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved}}}}}"""
+
+
+def _github_unresolved_review_threads(gh: str, name_with_owner: str, pr_number: int) -> int:
+    owner, name = name_with_owner.split("/", 1)
+    cursor = ""
+    unresolved = 0
+    while True:
+        command = [
+            gh,
+            "api",
+            "graphql",
+            "-f",
+            f"query={_REVIEW_THREADS_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={pr_number}",
+        ]
+        if cursor:
+            command.extend(["-f", f"cursor={cursor}"])
+        response = run(command, check=False, capture=True)
+        if response.returncode:
+            detail = (response.stderr or response.stdout or "").strip()
+            raise RuntimeError(detail or "unable to read GitHub review conversations")
+        try:
+            payload = json.loads(response.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("invalid GitHub review conversations JSON") from exc
+        if payload.get("errors"):
+            raise RuntimeError(f"GitHub review conversations query failed: {payload['errors']}")
+        repository = (payload.get("data") or {}).get("repository") or {}
+        pull_request = repository.get("pullRequest") if isinstance(repository, dict) else None
+        if not isinstance(pull_request, dict):
+            raise RuntimeError(f"GitHub pull request #{pr_number} is unavailable")
+        connection = pull_request.get("reviewThreads") or {}
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise RuntimeError("GitHub review conversations payload is incomplete")
+        unresolved += sum(
+            1 for node in nodes if isinstance(node, dict) and node.get("isResolved") is not True
+        )
+        if not page_info.get("hasNextPage"):
+            return unresolved
+        cursor = str(page_info.get("endCursor") or "")
+        if not cursor:
+            raise RuntimeError("GitHub review conversations pagination omitted endCursor")
+
+
+def _github_branch_protection_status(gh: str, base_name: str) -> tuple[bool, str]:
+    protection = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
+        check=False,
+        capture=True,
+    )
+    if protection.returncode == 0:
+        return True, "branch protection configured"
+    active_rules = run(
+        [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
+        check=False,
+        capture=True,
+    )
+    if active_rules.returncode == 0 and (active_rules.stdout or "").strip():
+        try:
+            rules_payload = json.loads(active_rules.stdout or "[]")
+        except json.JSONDecodeError:
+            rules_payload = None
+        if isinstance(rules_payload, list) and bool(rules_payload):
+            return True, "branch ruleset configured"
+    detail = (
+        active_rules.stderr
+        or active_rules.stdout
+        or protection.stderr
+        or protection.stdout
+        or ""
+    ).strip()
+    return False, detail or f"cannot prove branch protection/ruleset for {base_name}"
+
+
+def _github_required_checks_status(gh: str, pr_number: int) -> tuple[bool, str]:
+    checks = run([gh, "pr", "checks", str(pr_number), "--required"], check=False, capture=True)
+    if checks.returncode == 0:
+        return True, "required checks PASS"
+    detail = "\n".join(
+        filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()])
+    )
+    if "no checks reported" in detail.lower():
+        return True, "no required checks configured"
+    return False, detail or f"required checks are not PASS for PR #{pr_number}"
+
+
+def _review_result_is_pass(result: dict) -> bool:
+    blockers = result.get("blocking_findings")
+    return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
+
+
+_PR_LOOP_MERGE_REQUIREMENTS = {
+    "current_main_lineage",
+    "unresolved_blocking_findings",
+    "required_conversations",
+    "branch_protection",
+    "required_checks",
+    "commit_provenance",
+}
+
+
+def derive_pr_loop_state(
+    pr: dict,
+    qualification: dict,
+    code_review: dict,
+    security_review: dict,
+    owner_authorization: dict,
+    merge_requirements: dict | None = None,
+) -> tuple[str, str]:
+    """Pure fail-closed derivation; no value returned here is persisted as authority."""
+    if pr.get("merged") or pr.get("state") == "MERGED":
+        return "MERGED", "POST_MERGE_CLEANUP"
+    if pr.get("state") != "OPEN":
+        return "BLOCKED", "NONE"
+    if pr.get("draft"):
+        return "BLOCKED", "MARK_READY_FOR_REVIEW"
+    if pr.get("base") != "main":
+        return "BLOCKED", "RETARGET_MAIN"
+    if qualification.get("status") == "FAIL":
+        return "QUALIFICATION_FAILED", "FIX_QUALIFICATION"
+    if qualification.get("status") != "PASS":
+        return "QUALIFICATION_REQUIRED", "QUALIFICATION"
+    if code_review.get("status") == "MISSING":
+        return "CODE_REQUIRED", "CHATGPT_CODE_REVIEW"
+    if not _review_result_is_pass(code_review):
+        return "CODE_FAILED", "FIX_CODE_FINDINGS"
+    if security_review.get("status") == "MISSING":
+        return "SECURITY_REQUIRED", "CHATGPT_SECURITY_REVIEW"
+    if not _review_result_is_pass(security_review):
+        return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
+    if owner_authorization.get("status") != "PASS":
+        return "OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"
+    if merge_requirements is None:
+        return "BLOCKED", "REVALIDATE_MERGE_REQUIREMENTS"
+    failed = sorted(
+        name
+        for name in _PR_LOOP_MERGE_REQUIREMENTS
+        if merge_requirements.get(name) is not True
+    )
+    if failed:
+        return "BLOCKED", "RESOLVE_" + failed[0].upper()
+    return "MERGE_READY", "FINISH_PR"
 
 
 def _remote_ref_sha(ref: str) -> str:
@@ -8374,41 +8752,91 @@ def finish_pr(base: str) -> int:
         return fail(f"finish-pr ChatGPT CODE/SECURITY review gate not satisfied: {review_reason}")
     print(f"PASS finish-pr: {review_reason}")
 
-    protection = run(
-        [gh, "api", f"repos/{{owner}}/{{repo}}/branches/{base_name}/protection"],
-        check=False,
-        capture=True,
-    )
-    if protection.returncode:
-        active_rules = run(
-            [gh, "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base_name}"],
-            check=False,
-            capture=True,
-        )
-        if active_rules.returncode or not (active_rules.stdout or "").strip():
-            detail = (
-                active_rules.stderr
-                or active_rules.stdout
-                or protection.stderr
-                or protection.stdout
-                or ""
-            ).strip()
-            return fail(
-                f"finish-pr cannot prove branch protection/ruleset for {base_name}: "
-                f"{detail or 'GitHub API rejected protection queries'}"
-            )
+    try:
+        reviews, owner_authorization = pull_request_authority_evidence(gh, number, head)
+        _owner_login, name_with_owner = _github_repository_identity(gh)
+    except RuntimeError as exc:
+        return fail(f"finish-pr cannot read PR authorities: {exc}")
+    for kind in ("code", "security"):
+        if not _review_result_is_pass(reviews[kind]):
+            return fail(f"finish-pr {kind} authority changed during revalidation")
 
-    checks = run([gh, "pr", "checks", str(number), "--required"], check=False, capture=True)
-    if checks.returncode:
-        detail = "\n".join(filter(None, [(checks.stdout or "").strip(), (checks.stderr or "").strip()]))
-        if "no checks reported" not in detail.lower():
-            if detail:
-                print(detail, file=sys.stderr)
-            return fail(f"finish-pr required checks are not PASS for PR #{number}")
+    if owner_authorization.get("status") != "PASS":
+        return fail(
+            "finish-pr owner authorization missing for exact head; required command: "
+            + str(owner_authorization.get("command") or "")
+        )
+    print(f"PASS finish-pr: owner authorization exact scope/SHA for PR #{number}")
+
+    try:
+        unresolved_threads = _github_unresolved_review_threads(gh, name_with_owner, number)
+    except RuntimeError as exc:
+        return fail(f"finish-pr cannot prove review conversations resolved: {exc}")
+    if unresolved_threads:
+        return fail(
+            f"finish-pr requires all review conversations resolved; unresolved={unresolved_threads}"
+        )
+
+    # The helpers below retain the canonical GitHub `/protection`,
+    # `/rules/branches/`, and `gh pr checks --required` fail-closed behavior,
+    # including the explicit `no checks reported` exception.
+    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
+    if not protection_ok:
+        return fail(f"finish-pr {protection_reason}")
+
+    checks_ok, checks_reason = _github_required_checks_status(gh, number)
+    if not checks_ok:
+        return fail(f"finish-pr {checks_reason}")
+    if checks_reason == "no required checks configured":
         print(
             f"INFO finish-pr: no required GitHub checks configured for PR #{number}; "
             "exact PASS evidence and branch protection remain mandatory"
         )
+
+    fresh_pr = json.loads(
+        output(
+            [
+                gh,
+                "pr",
+                "view",
+                str(number),
+                "--json",
+                "state,isDraft,headRefOid,baseRefName",
+            ]
+        )
+        or "{}"
+    )
+    if (
+        fresh_pr.get("state") != "OPEN"
+        or fresh_pr.get("isDraft") is True
+        or fresh_pr.get("headRefOid") != head
+        or fresh_pr.get("baseRefName") != base_name
+    ):
+        return fail("finish-pr PR state/head/base changed during final revalidation")
+    try:
+        fresh_reviews, fresh_owner_authorization = pull_request_authority_evidence(
+            gh, number, head
+        )
+        fresh_unresolved_threads = _github_unresolved_review_threads(
+            gh, name_with_owner, number
+        )
+    except RuntimeError as exc:
+        return fail(f"finish-pr final authority revalidation failed: {exc}")
+    if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
+        return fail("finish-pr ChatGPT review authority changed during final revalidation")
+    if fresh_owner_authorization.get("status") != "PASS":
+        return fail("finish-pr owner authorization changed during final revalidation")
+    if fresh_unresolved_threads:
+        return fail(
+            "finish-pr review conversations changed during final revalidation; "
+            f"unresolved={fresh_unresolved_threads}"
+        )
+    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
+    if not protection_ok:
+        return fail(f"finish-pr final revalidation: {protection_reason}")
+    checks_ok, checks_reason = _github_required_checks_status(gh, number)
+    if not checks_ok:
+        return fail(f"finish-pr final revalidation: {checks_reason}")
 
     merge_method = str(policy["merge"]["method"])
     merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
@@ -8488,6 +8916,559 @@ def finish_pr(base: str) -> int:
         f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
     )
     return 0
+
+
+def _pr_loop_empty_result(pr_number: int) -> dict:
+    return {
+        "schema_version": 1,
+        "pr": pr_number,
+        "head_sha": "",
+        "head_branch": "",
+        "base": "",
+        "state": "GITHUB_UNAVAILABLE",
+        "draft": False,
+        "qualification": {"status": "UNKNOWN", "source": "none"},
+        "code_review": {"status": "UNKNOWN", "head_sha": ""},
+        "security_review": {"status": "UNKNOWN", "head_sha": ""},
+        "owner_authorization": {"status": "UNKNOWN"},
+        "merge_ready": False,
+        "next_action": "RETRY",
+        "merge_result": "NOT_ATTEMPTED",
+        "cleanup_result": "NOT_ATTEMPTED",
+        "merge_commit_sha": "",
+        "blockers": [],
+    }
+
+
+def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
+    evidence = _valid_exact_evidence(base_ref, head_sha)
+    audit = _valid_performance_audit(base_ref, head_sha) if evidence is not None else None
+    if evidence is None or audit is None:
+        return {
+            "status": "MISSING",
+            "source": "none",
+            "head_sha": head_sha,
+        }
+    return {
+        "status": "PASS",
+        "source": "reused",
+        "head_sha": head_sha,
+        "evidence": str(evidence.relative_to(ROOT)),
+        "performance_audit": str(audit.relative_to(ROOT)),
+    }
+
+
+def _pr_loop_open_pr_errors(pr: dict, name_with_owner: str) -> list[str]:
+    errors: list[str] = []
+    if pr.get("state") != "OPEN":
+        errors.append(f"PR state must be OPEN, got {pr.get('state')!r}")
+    if pr.get("draft"):
+        errors.append("draft PR is not eligible")
+    if pr.get("base") != "main":
+        errors.append(f"PR base must be main, got {pr.get('base')!r}")
+    if pr.get("head_repository") != name_with_owner:
+        errors.append(
+            f"PR head repository must be {name_with_owner}, got {pr.get('head_repository')!r}"
+        )
+    if re.fullmatch(r"[0-9a-f]{40}", str(pr.get("head_sha") or "")) is None:
+        errors.append("PR head SHA must be a full lowercase 40-character SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", str(pr.get("base_sha") or "")) is None:
+        errors.append("PR base SHA must be a full lowercase 40-character SHA")
+    if not str(pr.get("head_branch") or ""):
+        errors.append("PR head branch is missing")
+    return errors
+
+
+def _pr_loop_checkout_errors(pr: dict) -> list[str]:
+    errors: list[str] = []
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        errors.append("current implementation worktree must be clean")
+    current_head = git("rev-parse", "HEAD").strip()
+    if current_head != pr["head_sha"]:
+        errors.append(
+            f"checked-out HEAD {current_head} does not match PR head {pr['head_sha']}"
+        )
+    current_branch = git("branch", "--show-current").strip()
+    if current_branch != pr["head_branch"]:
+        errors.append(
+            f"checked-out branch {current_branch!r} does not match PR branch {pr['head_branch']!r}"
+        )
+    return errors
+
+
+def _pr_loop_merge_requirements(
+    gh: str,
+    name_with_owner: str,
+    pr: dict,
+    code_review: dict,
+    security_review: dict,
+) -> tuple[dict[str, bool], list[str]]:
+    requirements: dict[str, bool] = {
+        "unresolved_blocking_findings": (
+            _review_result_is_pass(code_review) and _review_result_is_pass(security_review)
+        ),
+    }
+    details: list[str] = []
+    current_main = _remote_ref_sha("origin/main")
+    base_lineage = bool(
+        current_main == pr["base_sha"]
+        and run(
+            ["git", "merge-base", "--is-ancestor", current_main, pr["head_sha"]],
+            check=False,
+            capture=True,
+        ).returncode
+        == 0
+    )
+    requirements["current_main_lineage"] = base_lineage
+    if not base_lineage:
+        details.append("PR head is not based on the current exact origin/main")
+    try:
+        unresolved = _github_unresolved_review_threads(gh, name_with_owner, pr["number"])
+    except RuntimeError as exc:
+        unresolved = -1
+        details.append(str(exc))
+    requirements["required_conversations"] = unresolved == 0
+    if unresolved > 0:
+        details.append(f"unresolved review conversations={unresolved}")
+
+    protection_ok, protection_reason = _github_branch_protection_status(gh, pr["base"])
+    requirements["branch_protection"] = protection_ok
+    if not protection_ok:
+        details.append(protection_reason)
+
+    checks_ok, checks_reason = _github_required_checks_status(gh, pr["number"])
+    requirements["required_checks"] = checks_ok
+    if not checks_ok:
+        details.append(checks_reason)
+
+    local_provenance = (
+        commit_provenance_check(pr["base_sha"], pr["head_sha"], quiet=True) == 0
+    )
+    remote_provenance = (
+        remote_commit_provenance_check(
+            gh, pr["base_sha"], pr["head_sha"], quiet=True
+        )
+        == 0
+    )
+    requirements["commit_provenance"] = local_provenance and remote_provenance
+    if not requirements["commit_provenance"]:
+        details.append("commit provenance is invalid or unavailable")
+    return requirements, details
+
+
+def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result, sort_keys=True))
+        return
+    print(f"PR #{result['pr']}")
+    print(f"HEAD {result.get('head_sha') or 'unknown'}")
+    print()
+    qualification = result["qualification"]
+    qualification_label = qualification.get("status", "UNKNOWN")
+    if qualification.get("source") in {"reused", "executed"}:
+        qualification_label += f" ({qualification['source']})"
+    print(f"qualification   {qualification_label}")
+    print(f"CODE            {result['code_review'].get('status', 'UNKNOWN')}")
+    print(f"SECURITY        {result['security_review'].get('status', 'UNKNOWN')}")
+    print(f"OWNER AUTH      {result['owner_authorization'].get('status', 'UNKNOWN')}")
+    print()
+    print(f"STATE {result['state']}")
+    if result.get("merge_result") != "NOT_ATTEMPTED":
+        print(f"MERGE_RESULT {result['merge_result']}")
+    if result.get("cleanup_result") != "NOT_ATTEMPTED":
+        print(f"CLEANUP_RESULT {result['cleanup_result']}")
+    if result.get("blockers"):
+        for blocker in result["blockers"]:
+            print(f"BLOCKER {blocker}")
+    review_request = result.get("review_request")
+    if isinstance(review_request, dict):
+        print(
+            f"CHATGPT_REVIEW_REQUIRED kind={review_request['kind']} "
+            f"pr={review_request['pr']} sha={review_request['head_sha']}"
+        )
+    next_action = str(result.get("next_action") or "NONE")
+    if next_action == "OWNER_AUTHORIZATION":
+        print()
+        print(str(result["owner_authorization"].get("command") or ""))
+    elif next_action != "NONE":
+        print()
+        print(f"NEXT_ACTION={next_action}")
+        print(f"PR={result['pr']}")
+        if result.get("head_sha"):
+            print(f"SHA={result['head_sha']}")
+
+
+def _pr_loop_post_merge(
+    gh: str,
+    name_with_owner: str,
+    snapshot: dict,
+    result: dict,
+    *,
+    dry_run: bool,
+    json_output: bool,
+) -> int:
+    del gh, name_with_owner
+    result["state"] = "POST_MERGE_CLEANUP"
+    result["next_action"] = "POST_MERGE_CLEANUP"
+    result["merge_commit_sha"] = snapshot.get("merge_commit_sha", "")
+    if result["merge_result"] == "NOT_ATTEMPTED":
+        result["merge_result"] = "PASS" if snapshot.get("merged") else "NOT_ATTEMPTED"
+    merge_commit = str(snapshot.get("merge_commit_sha") or "")
+    if re.fullmatch(r"[0-9a-f]{40}", merge_commit) is None:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("GitHub merged PR has no valid merge commit SHA")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if dry_run:
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("post-merge cleanup requires a clean worktree")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
+    if fetch.returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("post-merge fetch failed")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if run(
+        ["git", "merge-base", "--is-ancestor", merge_commit, "origin/main"],
+        check=False,
+        capture=True,
+    ).returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("merge commit is not contained in current origin/main")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if git("branch", "--show-current").strip() != "main":
+        switch = run(["git", "switch", "main"], check=False, capture=json_output)
+        if switch.returncode:
+            result["cleanup_result"] = "FAIL"
+            result["blockers"].append("cannot switch to main for post-merge cleanup")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+    fast_forward = run(
+        ["git", "merge", "--ff-only", "origin/main"],
+        check=False,
+        capture=json_output,
+    )
+    if fast_forward.returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("main cannot fast-forward to origin/main")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    cleanup = run(
+        _controller_command("branch-cleanup"),
+        check=False,
+        capture=json_output,
+    )
+    if cleanup.returncode:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append("canonical branch-cleanup failed")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["cleanup_result"] = "PASS"
+    result["state"] = "DONE"
+    result["next_action"] = "NONE"
+    _emit_pr_loop_result(result, json_output=json_output)
+    return 0
+
+
+def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False) -> int:
+    """Derive current PR delivery state and execute only its next authorized transition."""
+    result = _pr_loop_empty_result(pr_number)
+    if pr_number < 1:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "USE_VALID_PR_NUMBER"
+        result["blockers"].append("PR number must be a positive integer")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        result["blockers"].append("GitHub CLI missing")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    try:
+        policy = repository_delivery_policy()
+        if policy["pr_loop"]["state_persistence"] != "forbidden":
+            raise RuntimeError("pr-loop state persistence must remain forbidden")
+        owner_login, name_with_owner = _github_repository_identity(gh)
+        del owner_login
+        if not dry_run:
+            fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
+            if fetch.returncode:
+                raise RuntimeError("git fetch origin --prune failed")
+        initial = _github_pr_snapshot(gh, name_with_owner, pr_number)
+    except RuntimeError as exc:
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    result.update(
+        {
+            "pr": initial["number"],
+            "head_sha": initial["head_sha"],
+            "head_branch": initial["head_branch"],
+            "base": initial["base"],
+            "draft": initial["draft"],
+            "merge_commit_sha": initial["merge_commit_sha"],
+        }
+    )
+    initial_head_sha = initial["head_sha"]
+    result["initial_head_sha"] = initial_head_sha
+
+    if initial.get("merged"):
+        return _pr_loop_post_merge(
+            gh,
+            name_with_owner,
+            initial,
+            result,
+            dry_run=dry_run,
+            json_output=json_output,
+        )
+
+    eligibility_errors = _pr_loop_open_pr_errors(initial, name_with_owner)
+    if eligibility_errors:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FIX_PR_ELIGIBILITY"
+        result["blockers"].extend(eligibility_errors)
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    checkout_errors = _pr_loop_checkout_errors(initial)
+    if checkout_errors:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "CHECKOUT_EXACT_PR_HEAD"
+        result["blockers"].extend(checkout_errors)
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    def refresh_authorities(snapshot: dict) -> None:
+        reviews, authorization = pull_request_authority_evidence(
+            gh, snapshot["number"], snapshot["head_sha"]
+        )
+        result["code_review"] = reviews["code"]
+        result["security_review"] = reviews["security"]
+        result["owner_authorization"] = authorization
+
+    try:
+        result["qualification"] = _pr_loop_qualification(
+            initial["base_sha"], initial_head_sha
+        )
+        refresh_authorities(initial)
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    state, next_action = derive_pr_loop_state(
+        initial,
+        result["qualification"],
+        result["code_review"],
+        result["security_review"],
+        result["owner_authorization"],
+    )
+    if state == "QUALIFICATION_REQUIRED" and not dry_run:
+        try:
+            before_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        if before_qualification["head_sha"] != initial_head_sha:
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["current_head_sha"] = before_qualification["head_sha"]
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        qualification = run(
+            _controller_command(
+                "qualification-proof", "--base", before_qualification["base_sha"]
+            ),
+            check=False,
+            capture=json_output,
+        )
+        if qualification.returncode:
+            result["qualification"] = {
+                "status": "FAIL",
+                "source": "executed",
+                "head_sha": initial_head_sha,
+            }
+            result["state"] = "QUALIFICATION_FAILED"
+            result["next_action"] = "FIX_QUALIFICATION"
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"] = _pr_loop_qualification(
+            before_qualification["base_sha"], initial_head_sha
+        )
+        if result["qualification"]["status"] != "PASS":
+            result["state"] = "QUALIFICATION_FAILED"
+            result["next_action"] = "FIX_QUALIFICATION"
+            result["blockers"].append("qualification command did not produce valid exact-SHA proof")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"]["source"] = "executed"
+        try:
+            after_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+            if after_qualification["head_sha"] != initial_head_sha:
+                result["state"] = "HEAD_CHANGED"
+                result["next_action"] = "QUALIFICATION"
+                result["current_head_sha"] = after_qualification["head_sha"]
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
+            refresh_authorities(after_qualification)
+            initial = after_qualification
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        state, next_action = derive_pr_loop_state(
+            initial,
+            result["qualification"],
+            result["code_review"],
+            result["security_review"],
+            result["owner_authorization"],
+        )
+
+    if state in {
+        "QUALIFICATION_REQUIRED",
+        "CODE_REQUIRED",
+        "CODE_FAILED",
+        "SECURITY_REQUIRED",
+        "SECURITY_FAILED",
+        "OWNER_AUTH_REQUIRED",
+    }:
+        result["state"] = state
+        result["next_action"] = next_action
+        result["review_trigger"] = (
+            "scripts/pr_monitor.py:event-handoff"
+            if state in {"CODE_REQUIRED", "SECURITY_REQUIRED"}
+            else "none"
+        )
+        if state in {"CODE_REQUIRED", "SECURITY_REQUIRED"}:
+            result["review_request"] = {
+                "event": "CHATGPT_REVIEW_REQUIRED",
+                "provider": "ChatGPT",
+                "kind": "code" if state == "CODE_REQUIRED" else "security",
+                "pr": result["pr"],
+                "head_sha": result["head_sha"],
+                "verdict_authority": False,
+            }
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0 if state.endswith("_REQUIRED") else 1
+
+    if dry_run and result["owner_authorization"].get("status") == "PASS":
+        try:
+            merge_requirements, details = _pr_loop_merge_requirements(
+                gh,
+                name_with_owner,
+                initial,
+                result["code_review"],
+                result["security_review"],
+            )
+        except RuntimeError as exc:
+            merge_requirements, details = {}, [str(exc)]
+        result["merge_requirements"] = merge_requirements
+        result["blockers"].extend(details)
+        state, next_action = derive_pr_loop_state(
+            initial,
+            result["qualification"],
+            result["code_review"],
+            result["security_review"],
+            result["owner_authorization"],
+            merge_requirements,
+        )
+        result["state"] = state
+        result["next_action"] = next_action
+        result["merge_ready"] = state == "MERGE_READY"
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0 if state == "MERGE_READY" else 1
+
+    try:
+        before_merge = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        if before_merge["head_sha"] != initial_head_sha:
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["current_head_sha"] = before_merge["head_sha"]
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["qualification"] = _pr_loop_qualification(
+            before_merge["base_sha"], initial_head_sha
+        )
+        refresh_authorities(before_merge)
+        merge_requirements, details = _pr_loop_merge_requirements(
+            gh,
+            name_with_owner,
+            before_merge,
+            result["code_review"],
+            result["security_review"],
+        )
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["merge_requirements"] = merge_requirements
+    result["blockers"].extend(details)
+    state, next_action = derive_pr_loop_state(
+        before_merge,
+        result["qualification"],
+        result["code_review"],
+        result["security_review"],
+        result["owner_authorization"],
+        merge_requirements,
+    )
+    result["state"] = state
+    result["next_action"] = next_action
+    result["merge_ready"] = state == "MERGE_READY"
+    if state != "MERGE_READY":
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    finish = run(
+        _controller_command("finish-pr", "--base", "main"),
+        check=False,
+        capture=json_output,
+    )
+    if finish.returncode:
+        result["merge_result"] = "FAIL"
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FIX_FINISH_PR"
+        result["blockers"].append("canonical finish-pr failed")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["merge_result"] = "PASS"
+    try:
+        merged = _github_pr_snapshot(gh, name_with_owner, pr_number)
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY_POST_MERGE"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if not merged.get("merged") or merged.get("head_sha") != initial_head_sha:
+        result["merge_result"] = "FAIL"
+        result["state"] = "BLOCKED"
+        result["next_action"] = "VERIFY_MERGE"
+        result["blockers"].append("GitHub merge state does not bind the initial exact head")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    return _pr_loop_post_merge(
+        gh,
+        name_with_owner,
+        merged,
+        result,
+        dry_run=False,
+        json_output=json_output,
+    )
 
 
 def precommit() -> int:
@@ -8693,6 +9674,10 @@ def main() -> int:
     dlv.add_argument("--base", default=os.environ.get("BASE", "main"))
     dlv.add_argument("--title", default=os.environ.get("TITLE", ""))
     dlv.add_argument("--message", default=os.environ.get("MSG", ""))
+    loop = sub.add_parser("pr-loop")
+    loop.add_argument("--pr", required=True, type=int)
+    loop.add_argument("--dry-run", action="store_true")
+    loop.add_argument("--json", action="store_true")
     fin = sub.add_parser("finish-pr")
     fin.add_argument("--base", default=os.environ.get("BASE", "main"))
     bdlv = sub.add_parser("bundle-deliver")
@@ -8963,6 +9948,8 @@ def main() -> int:
             return publish(args.base, args.message)
         if args.cmd == "deliver":
             return deliver(args.base, args.title, args.message)
+        if args.cmd == "pr-loop":
+            return pr_loop(args.pr, dry_run=args.dry_run, json_output=args.json)
         if args.cmd == "finish-pr":
             return finish_pr(args.base)
         if args.cmd == "bundle-deliver":

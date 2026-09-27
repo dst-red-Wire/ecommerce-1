@@ -6,6 +6,16 @@ This repository applies `.agents/skills/chatgpt-exact-sha-review/SKILL.md` throu
 
 Reduce repeated ChatGPT CODE/SECURITY analysis without weakening exact-SHA review or qualification. The controller itself never invokes a model. It decides whether an AI review is justified and keeps ephemeral state under `.context/review-budget/`.
 
+## Central delivery loop
+
+Run `make pr-loop PR=<number>` after a PR is published. The command derives its state from the current GitHub PR, current exact head SHA, merge-authoritative qualification evidence, owner-authored ChatGPT markers, exact owner authorization, and current merge controls. It performs only the next authorized transition and does not persist a second delivery state.
+
+Valid qualification and review proofs for the current SHA are reused. A head change makes every qualification, CODE, SECURITY, and owner-authorization proof for the earlier SHA historical and restarts at qualification. Missing CODE or SECURITY emits the existing bounded ChatGPT event handoff; the controller never creates a ChatGPT verdict. Missing owner authorization stops with the exact command the repository owner must explicitly approve.
+
+After all exact-SHA authorities pass, `pr-loop` re-reads GitHub, checks unresolved conversations, branch protection, required checks, and commit provenance, then delegates merge exclusively to `finish-pr`. Post-merge synchronization and canonical `branch-cleanup` are reported separately so cleanup failure cannot be hidden by a successful merge.
+
+Use `make pr-loop PR=<number> DRY_RUN=1` for a read-only state/next-action report, or `python3 scripts/repoctl.py pr-loop --pr <number> --json` for the versioned machine result.
+
 ## The 10 enforced rules
 
 1. Polling is deterministic; elapsed time alone never triggers AI.

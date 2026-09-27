@@ -122,6 +122,55 @@ repository_delivery:
     draft_merge: forbidden
     record_after_merge: retained-by-forge
 
+  pr_loop:
+    schema_version: 1
+    controller: scripts/repoctl.py
+    command: pr-loop
+    state_persistence: forbidden
+    state_sources:
+      - github-current-pull-request
+      - github-current-exact-head-sha
+      - exact-sha-qualification-evidence
+      - chatgpt-exact-sha-review-comments
+      - owner-authorization-comment
+      - github-merge-and-protection-state
+      - finish-pr-and-branch-cleanup-contracts
+    transition_order:
+      - qualification
+      - chatgpt-code
+      - chatgpt-security
+      - owner-authorization
+      - finish-pr
+      - post-merge-cleanup
+    exact_sha:
+      binding: required
+      prior_sha_evidence: historical-only
+      head_change: restart-at-qualification
+      refetch_before_qualification: required
+      refetch_before_merge: required
+    chatgpt_handoff:
+      trigger: event-handoff
+      event: CHATGPT_REVIEW_REQUIRED
+      helper: scripts/pr_monitor.py
+      verdict_authority: ChatGPT-only
+      controller_may_emit_verdict: false
+      code_before_security: required
+    owner_boundary:
+      authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+      scope: pr-<number>
+      source: github-pr-comment-by-repository-owner
+      latest_scope_authorization_wins: true
+      revocation: /owner-authorization revoke scope=<scope> sha=<exact-head-sha>
+      automatic_generation: forbidden
+    merge_delegation:
+      command: finish-pr
+      direct_merge: forbidden
+      exact_head_match: required
+    post_merge_cleanup:
+      command: branch-cleanup
+      separate_result: required
+      merge_success_may_not_mask_cleanup_failure: true
+
   merge:
     method: merge
     match_head_commit: required

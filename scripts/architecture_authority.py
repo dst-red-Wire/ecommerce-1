@@ -1489,6 +1489,36 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        pr_loop = review_policy.get("repository_delivery", {}).get("pr_loop", {})
+        if (
+            pr_loop.get("schema_version") != 1
+            or pr_loop.get("controller") != "scripts/repoctl.py"
+            or pr_loop.get("state_persistence") != "forbidden"
+            or pr_loop.get("transition_order")
+            != [
+                "qualification",
+                "chatgpt-code",
+                "chatgpt-security",
+                "owner-authorization",
+                "finish-pr",
+                "post-merge-cleanup",
+            ]
+            or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
+            or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
+            or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("controller_may_emit_verdict") is not False
+            or pr_loop.get("owner_boundary", {}).get("automatic_generation") != "forbidden"
+            or pr_loop.get("owner_boundary", {}).get("revocation")
+            != "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>"
+            or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
+            or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
+            or pr_loop.get("post_merge_cleanup", {}).get("command") != "branch-cleanup"
+            or pr_loop.get("post_merge_cleanup", {}).get("separate_result") != "required"
+        ):
+            errors.append(
+                "review policy must define the stateless exact-SHA pr-loop and preserve authority boundaries"
+            )
+
         active_review_automation = {
             "Makefile": ("CODEX_COMMAND", "--codex-command"),
             "scripts/pr_monitor.py": (

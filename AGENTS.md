@@ -122,6 +122,8 @@ ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
 
 Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
 
+Use `make pr-loop PR=<number>` after publication to derive and perform only the next authorized exact-SHA delivery transition. The loop reuses valid exact-SHA qualification and ChatGPT review evidence, treats evidence from an older SHA as historical, emits the existing bounded ChatGPT handoff without fabricating CODE or SECURITY verdicts, and stops at the explicit repository-owner authorization boundary. After an exact `scope=pr-<number>` authorization is present, it revalidates the same SHA, delegates the merge to `finish-pr`, and reports canonical `branch-cleanup` separately. Use `DRY_RUN=1` to inspect `CURRENT_STATE`, `NEXT_ACTION`, and valid evidence without qualification, comments, merge, or deletion.
+
 ## Automatic stale-branch cleanup
 
 Use `make branch-cleanup` for repository branch hygiene. `make git-sync` invokes the same cleanup automatically after fetch/prune and fast-forward, and `finish-pr` performs a final sweep after a successful merge.

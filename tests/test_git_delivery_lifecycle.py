@@ -21,6 +21,11 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("forbidden", policy["publish"]["force_push"])
         self.assertEqual("exact", policy["pull_request"]["head_sha_binding"])
         self.assertEqual("retained-by-forge", policy["pull_request"]["record_after_merge"])
+        self.assertEqual("forbidden", policy["pr_loop"]["state_persistence"])
+        self.assertEqual("ChatGPT-only", policy["pr_loop"]["chatgpt_handoff"]["verdict_authority"])
+        self.assertEqual("forbidden", policy["pr_loop"]["owner_boundary"]["automatic_generation"])
+        self.assertEqual("finish-pr", policy["pr_loop"]["merge_delegation"]["command"])
+        self.assertEqual("branch-cleanup", policy["pr_loop"]["post_merge_cleanup"]["command"])
         self.assertEqual("merge", policy["merge"]["method"])
         self.assertEqual("required", policy["merge"]["match_head_commit"])
         self.assertEqual("required", policy["merge"]["branch_protection"])
@@ -79,6 +84,15 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         ):
             self.assertNotIn(marker, source)
         self.assertIn("no checks reported", source)
+        self.assertIn("owner_authorization", source)
+        self.assertIn("_github_unresolved_review_threads", source)
+
+    def test_pr_loop_policy_drift_is_rejected(self):
+        policy = repoctl.repository_delivery_policy()
+        mutated = copy.deepcopy(policy)
+        mutated["pr_loop"]["merge_delegation"]["direct_merge"] = "allowed"
+        with self.assertRaisesRegex(RuntimeError, "pr-loop"):
+            repoctl._validate_repository_delivery_policy(mutated)
 
     def test_makefile_exposes_centralized_commands(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
