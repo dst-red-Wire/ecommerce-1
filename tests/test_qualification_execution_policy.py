@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -175,14 +176,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIn("docker-runtime", records[0]["reason"])
 
     def test_tekton_gate_entrypoints_select_container_profile(self):
-        current_head = MOD.git("rev-parse", "HEAD").strip()
         for action, selector in (("ci-global", "--gate"), ("ci-component", "--component")):
             with self.subTest(action=action):
                 with (
+                    mock.patch.dict(os.environ, {"ECOMMERCE_RUNTIME_ORCHESTRATED": ""}),
                     mock.patch.object(
                         sys, "argv",
-                        ["repoctl.py", action, selector, "governance", "--base", "origin/main",
-                         "--head", current_head, "--record-dir", ".context/tekton/test"],
+                        ["repoctl.py", action, selector, "platform:ansible", "--base", "origin/main",
+                         "--head", "a" * 40, "--record-dir", ".context/tekton/test"],
                     ),
                     mock.patch("native_workspace.workspace_error", return_value=None),
                     mock.patch.object(MOD, "_execute_direct_gate_with_runtime", return_value=0) as execute,
