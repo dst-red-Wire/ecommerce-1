@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import contextvars
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -37,6 +39,8 @@ import qualification_cache
 
 _MODERN_ENGINEERING = None
 _CVE_POLICY = None
+_PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=None)
+_PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
 
 
 def _modern_engineering_api():
@@ -1015,6 +1019,9 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    # A JSON pr-loop owns stdout exclusively; child diagnostics must not escape there.
+    diagnostic_capture = not capture and _PR_LOOP_JSON_STDOUT.get() is not None
+    capture = capture or diagnostic_capture
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -1023,6 +1030,11 @@ def run(
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
     )
+    if diagnostic_capture:
+        if p.stdout:
+            print(p.stdout, end="", file=sys.stderr)
+        if p.stderr:
+            print(p.stderr, end="", file=sys.stderr)
     if check and p.returncode:
         detail = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(detail or f"command failed ({p.returncode}): {' '.join(cmd)}")
@@ -9260,7 +9272,9 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
     return path
 
 
-def finish_pr(base: str) -> int:
+def finish_pr(base: str, *, json_output: bool = False) -> int:
+    if json_output:
+        return _finish_pr_json(base)
     try:
         _require_trusted_pr_execution()
     except RuntimeError as exc:
@@ -9554,7 +9568,62 @@ def finish_pr(base: str) -> int:
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
         f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
     )
-    return 0
+    return 1 if cleanup_rc else 0
+
+
+def _finish_pr_json(base: str) -> int:
+    result = _pr_loop_empty_result(0)
+    result.update({"state": "BLOCKED", "next_action": "VERIFY_MERGE_STATE", "base": base})
+    destination = sys.stdout
+    stdout_token = _PR_LOOP_JSON_STDOUT.set(destination)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            gh = shutil.which("gh") or shutil.which("gh.exe")
+            number = 0
+            expected_head = ""
+            try:
+                expected_head = git("rev-parse", "HEAD").strip()
+                result["head_sha"] = expected_head
+                if gh:
+                    before = json.loads(output([gh, "pr", "view", "--json", "number,headRefOid"]))
+                    if before.get("headRefOid") == expected_head:
+                        number = int(before["number"])
+                        result["pr"] = number
+            except (OSError, RuntimeError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                result["blockers"].append(f"cannot identify exact PR before finish-pr: {exc}")
+            try:
+                finish_rc = finish_pr(base)
+            except Exception as exc:
+                finish_rc = 1
+                result["blockers"].append(f"finish-pr raised: {exc}")
+            if gh and number:
+                try:
+                    after = json.loads(
+                        output([gh, "pr", "view", str(number), "--json", "state,mergedAt,headRefOid,mergeCommit"])
+                    )
+                    if (
+                        after.get("state") == "MERGED"
+                        and after.get("mergedAt")
+                        and after.get("headRefOid") == expected_head
+                    ):
+                        result["merge_result"] = "PASS"
+                        result["state"] = "MERGED"
+                        merge_commit = after.get("mergeCommit") or {}
+                        result["merge_commit_sha"] = str(merge_commit.get("oid") or "")
+                        result["cleanup_result"] = "PASS" if finish_rc == 0 else "FAIL"
+                        result["next_action"] = "NONE" if finish_rc == 0 else "POST_MERGE_CLEANUP"
+                    else:
+                        result["merge_result"] = "FAIL" if finish_rc else "UNKNOWN"
+                        result["blockers"].append("GitHub does not confirm a merge at the exact initial head")
+                except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    result["merge_result"] = "UNKNOWN"
+                    result["blockers"].append(f"cannot verify exact GitHub merge state: {exc}")
+            elif finish_rc:
+                result["merge_result"] = "UNKNOWN"
+            _emit_pr_loop_result(result, json_output=True)
+            return 0 if finish_rc == 0 and result["merge_result"] == "PASS" else 1
+    finally:
+        _PR_LOOP_JSON_STDOUT.reset(stdout_token)
 
 
 def _pr_loop_empty_result(pr_number: int) -> dict:
@@ -9588,6 +9657,7 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "next_action": "RETRY",
         "merge_result": "NOT_ATTEMPTED",
         "cleanup_result": "NOT_ATTEMPTED",
+        "output_contract": "PASS",
         "merge_commit_sha": "",
         "blockers": [],
     }
@@ -9809,7 +9879,26 @@ def _pr_loop_merge_requirements(
 
 def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
     if json_output:
-        print(json.dumps(result, sort_keys=True))
+        result["output_contract"] = "PASS"
+        try:
+            document = json.dumps(result, sort_keys=True, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as exc:
+            # Reporting failure must not erase an already-confirmed GitHub merge.
+            document = json.dumps(
+                {
+                    "schema_version": 2,
+                    "pr": result.get("pr"),
+                    "head_sha": str(result.get("head_sha") or ""),
+                    "merge_commit_sha": str(result.get("merge_commit_sha") or ""),
+                    "state": "MERGED" if result.get("merge_result") == "PASS" else "BLOCKED",
+                    "merge_result": result.get("merge_result", "UNKNOWN"),
+                    "cleanup_result": result.get("cleanup_result", "NOT_ATTEMPTED"),
+                    "output_contract": "FAIL",
+                    "blockers": [f"JSON result serialization failed: {exc}"],
+                },
+                sort_keys=True,
+            )
+        print(document, file=_PR_LOOP_JSON_STDOUT.get() or sys.stdout)
         return
     print(f"PR #{result['pr']}")
     print(f"HEAD {result.get('head_sha') or 'unknown'}")
@@ -9864,7 +9953,7 @@ def _pr_loop_post_merge(
     json_output: bool,
 ) -> int:
     del gh, name_with_owner
-    result["state"] = "POST_MERGE_CLEANUP"
+    result["state"] = "MERGED"
     result["next_action"] = "POST_MERGE_CLEANUP"
     result["merge_commit_sha"] = snapshot.get("merge_commit_sha", "")
     if result["merge_result"] == "NOT_ATTEMPTED":
@@ -9918,7 +10007,14 @@ def _pr_loop_post_merge(
     # This function is already executing from the exact-base repoctl module. Keep
     # post-merge cleanup in-process so the target's switch to main does not create
     # a fresh trusted context that is still bound to the former PR-head checkout.
-    if branch_cleanup(dry_run=False, fetch_remote=False):
+    try:
+        cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        result["cleanup_result"] = "FAIL"
+        result["blockers"].append(f"canonical branch-cleanup raised: {exc}")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if cleanup_rc:
         result["cleanup_result"] = "FAIL"
         result["blockers"].append("canonical branch-cleanup failed")
         _emit_pr_loop_result(result, json_output=json_output)
@@ -9931,8 +10027,36 @@ def _pr_loop_post_merge(
 
 
 def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False) -> int:
+    if not json_output:
+        return _pr_loop_impl(pr_number, dry_run=dry_run, json_output=False)
+    # Preserve the caller's stdout for the one JSON result. All ordinary Python
+    # output is diagnostic, and run() captures child-process output in this scope.
+    destination = sys.stdout
+    stdout_token = _PR_LOOP_JSON_STDOUT.set(destination)
+    result_token = _PR_LOOP_ACTIVE_RESULT.set(None)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                return _pr_loop_impl(pr_number, dry_run=dry_run, json_output=True)
+            except Exception as exc:
+                result = _PR_LOOP_ACTIVE_RESULT.get() or _pr_loop_empty_result(pr_number)
+                merged = result.get("merge_result") == "PASS"
+                result["state"] = "MERGED" if merged else "BLOCKED"
+                result["next_action"] = "POST_MERGE_CLEANUP" if merged else "RETRY"
+                if merged:
+                    result["cleanup_result"] = "FAIL"
+                result["blockers"].append(f"pr-loop transition failed: {exc}")
+                _emit_pr_loop_result(result, json_output=True)
+                return 1
+    finally:
+        _PR_LOOP_ACTIVE_RESULT.reset(result_token)
+        _PR_LOOP_JSON_STDOUT.reset(stdout_token)
+
+
+def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
     """Derive current PR delivery state and execute only its next authorized transition."""
     result = _pr_loop_empty_result(pr_number)
+    _PR_LOOP_ACTIVE_RESULT.set(result)
     if pr_number < 1:
         result["state"] = "BLOCKED"
         result["next_action"] = "USE_VALID_PR_NUMBER"
@@ -10279,7 +10403,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         return 1
 
     finish = run(
-        _controller_command("finish-pr", "--base", "main"),
+        _controller_command("finish-pr", "--base", "main", "--json"),
         check=False,
         capture=json_output,
     )
@@ -10535,6 +10659,7 @@ def main() -> int:
     loop.add_argument("--json", action="store_true")
     fin = sub.add_parser("finish-pr")
     fin.add_argument("--base", default=os.environ.get("BASE", "main"))
+    fin.add_argument("--json", action="store_true")
     bdlv = sub.add_parser("bundle-deliver")
     bdlv.add_argument("--bundle", required=True)
     bdlv.add_argument("--expected-head", required=True)
@@ -10576,13 +10701,21 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
+
+    def cli_failure(message: str, code: int = 1) -> int:
+        if args.cmd in {"pr-loop", "finish-pr"} and args.json:
+            result = _pr_loop_empty_result(args.pr if args.cmd == "pr-loop" else 0)
+            result.update({"state": "BLOCKED", "next_action": "FIX_WORKSPACE", "blockers": [message]})
+            _emit_pr_loop_result(result, json_output=True)
+        return fail(message, code)
+
     from canonical_workspace import check as check_canonical_workspace, command_allowed
 
     workspace_result = check_canonical_workspace()
     if workspace_result["status"] != "PASS":
-        return fail("canonical-workspace " + workspace_result["reason"], 1)
+        return cli_failure("canonical-workspace " + workspace_result["reason"], 1)
     if not command_allowed(args.cmd, workspace_result["execution_scope"], set(sub.choices)):
-        return fail(
+        return cli_failure(
             f"canonical-workspace command {args.cmd} forbidden in {workspace_result['execution_scope']} scope",
             1,
         )
@@ -10592,7 +10725,7 @@ def main() -> int:
 
     workspace_failure = workspace_error(ROOT)
     if workspace_failure:
-        return fail(workspace_failure)
+        return cli_failure(workspace_failure)
     if args.cmd == "workspace-check":
         print("PASS canonical-workspace")
         return 0
@@ -10821,7 +10954,7 @@ def main() -> int:
         if args.cmd == "pr-loop":
             return pr_loop(args.pr, dry_run=args.dry_run, json_output=args.json)
         if args.cmd == "finish-pr":
-            return finish_pr(args.base)
+            return finish_pr(args.base, json_output=args.json)
         if args.cmd == "bundle-deliver":
             return isolated_bundle_deliver(
                 ROOT, Path(__file__).resolve(), args.bundle, args.expected_head, args.title, args.base, sys.executable
@@ -10889,10 +11022,12 @@ def main() -> int:
         if args.cmd == "prepush":
             return prepush()
     except MissingRunnerPrerequisite as exc:
+        if args.cmd in {"pr-loop", "finish-pr"} and args.json:
+            return cli_failure(str(exc), 1)
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 1
     except (RuntimeError, TypeError, KeyError, ValueError, json.JSONDecodeError) as exc:
-        return fail(str(exc), 1)
+        return cli_failure(str(exc), 1)
     return 2
 
 

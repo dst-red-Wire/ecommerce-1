@@ -742,7 +742,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             rc = REPOCTL.pr_loop(161, json_output=True, **kwargs)
-        return rc, json.loads(stream.getvalue().strip().splitlines()[-1])
+        return rc, json.loads(stream.getvalue())
 
     def common(self):
         return (
@@ -1175,9 +1175,92 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 )
         payload = json.loads(stream.getvalue().strip().splitlines()[-1])
         self.assertEqual(1, rc)
-        self.assertEqual("POST_MERGE_CLEANUP", payload["state"])
+        self.assertEqual("MERGED", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("FAIL", payload["cleanup_result"])
+
+    def test_already_merged_noisy_cleanup_emits_only_one_json_document(self):
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        def noisy_cleanup(**_kwargs):
+            print("PRESERVE local protected | current-branch")
+            print("DELETE remote stale | merged")
+            print("PASS branch-cleanup candidates=1 deleted=1 kept=1 failures=0")
+            raise RuntimeError("cleanup reporting failed")
+
+        patches = self.common()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=merged
+        ), mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(REPOCTL, "branch_cleanup", side_effect=noisy_cleanup):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL.pr_loop(161, json_output=True)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("PRESERVE", stderr.getvalue())
+        self.assertIn("DELETE", stderr.getvalue())
+        self.assertIn("PASS branch-cleanup", stderr.getvalue())
+
+    def test_finish_pr_json_preserves_confirmed_merge_after_reporting_failure(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {
+            "state": "MERGED",
+            "mergedAt": "2026-09-27T10:00:00Z",
+            "headRefOid": self.SHA_A,
+            "mergeCommit": {"oid": "d" * 40},
+        }
+
+        def noisy_finish(_base):
+            print("DELETE remote stale | merged")
+            print("PASS branch-cleanup candidates=1 deleted=1 kept=0 failures=0")
+            return 1
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), mock.patch.object(
+            REPOCTL, "git", return_value=self.SHA_A + "\n"
+        ), mock.patch.object(
+            REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
+        ), mock.patch.object(REPOCTL, "finish_pr", side_effect=noisy_finish):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("DELETE", stderr.getvalue())
+        self.assertIn("PASS branch-cleanup", stderr.getvalue())
+
+    def test_json_serialization_fallback_keeps_merge_verdict(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({"state": "MERGED", "merge_result": "PASS", "cleanup_result": "FAIL"})
+        result["unexpected"] = object()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            REPOCTL._emit_pr_loop_result(result, json_output=True)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["output_contract"])
 
     def test_cleanup_success_reaches_done(self):
         result = REPOCTL._pr_loop_empty_result(161)
@@ -1249,6 +1332,23 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_json_cli_preflight_failure_still_emits_one_document(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            REPOCTL.sys, "argv", ["repoctl.py", "pr-loop", "--pr", "162", "--json"]
+        ), mock.patch(
+            "canonical_workspace.check", return_value={"status": "FAIL", "reason": "test workspace"}
+        ):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL.main()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("BLOCKED", payload["state"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("test workspace", payload["blockers"][0])
+
     def test_direct_pr_loop_requires_the_exact_base_wrapper(self):
         with (
             mock.patch.dict(REPOCTL.os.environ, {}, clear=True),
@@ -1291,6 +1391,7 @@ class PRLoopSourceContractTests(unittest.TestCase):
         self.assertIn('sub.add_parser("pr-loop")', source)
         self.assertIn('loop.add_argument("--json"', source)
         self.assertIn('loop.add_argument("--dry-run"', source)
+        self.assertIn('fin.add_argument("--json"', source)
 
     def test_pr_loop_delegates_merge_and_never_calls_github_merge_directly(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
